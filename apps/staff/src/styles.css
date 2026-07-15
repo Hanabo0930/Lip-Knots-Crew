@@ -30,6 +30,10 @@ h1,h2,h3 { margin-top: 0; }
 .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
 .job .date { color:#c97f98; font-weight:900; font-size:13px; }
 .job p { color:#77665f; line-height:1.55; }
+.shift-job { border-left:7px solid var(--job-accent,#c97f98); position:relative; cursor:pointer; transition:transform .16s ease,box-shadow .16s ease; }
+.shift-job:hover,.shift-job.selected { transform:translateY(-2px); box-shadow:0 16px 38px rgba(95,75,68,.13); }
+.job-kind { display:inline-flex; max-width:100%; padding:5px 9px; margin:6px 0 10px; border-radius:999px; background:color-mix(in srgb,var(--job-accent,#c97f98) 16%,white); color:var(--job-accent,#9d4c68); font-size:12px; font-weight:900; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.prep-chip { display:inline-flex; width:max-content; max-width:100%; padding:6px 10px; margin:0 0 13px; border-radius:999px; background:#eef7f1; color:#317a54; font-size:12px; font-weight:900; }
 .actions { display:flex; gap:8px; margin-top:14px; }
 .actions button { flex:1; }
 .message { margin:0 0 14px; padding:12px 14px; background:#e9f6ef; color:#38761d; border-radius:13px; font-weight:700; }
@@ -72,6 +76,29 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .task-card.overdue { background:#fdeceb; border-color:#efc1bd; }
 .netprint-row { display:flex; justify-content:space-between; align-items:center; gap:12px; border:1px solid #eadfe2; border-radius:14px; padding:12px; margin-bottom:8px; }
 .submission-actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.sales-floor-button { background:#4f91c7; }
+.report-button { background:#d18449; }
+.shift-detail { border-top:6px solid var(--job-accent,#c97f98); }
+.shift-detail-heading,.prep-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:14px; }
+.shift-detail-heading h2,.prep-heading h3 { margin-bottom:5px; }
+.shift-detail-heading p,.prep-heading p { margin:0 0 14px; color:#806f68; }
+.route-panel { margin:8px 0 20px; padding:15px; border-radius:17px; background:#f5f8ff; border:1px solid #dce7f5; }
+.route-panel>strong { display:block; margin-bottom:10px; }
+.route-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.route-actions a { display:inline-flex; align-items:center; min-height:42px; padding:10px 13px; border-radius:12px; background:white; color:#35658c; border:1px solid #cbdcec; font-weight:900; text-decoration:none; }
+.empty.compact { padding:10px 0; }
+.submission-panel.sales_floor { border-top:7px solid #4f91c7; }
+.submission-panel.report { border-top:7px solid #d18449; }
+.submission-identity { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:13px 15px; margin-bottom:18px; border-radius:15px; }
+.submission-identity span { font-size:18px; font-weight:900; }
+.submission-identity strong { font-size:12px; text-align:right; }
+.submission-identity.sales_floor { background:#eaf4fc; color:#356f9e; }
+.submission-identity.report { background:#fff1e5; color:#9d5b27; }
+.submission-confirmation { display:flex; align-items:flex-start; gap:10px; margin:16px 0; padding:14px; border:2px solid #e3d8d1; border-radius:15px; background:#fffdf9; font-size:13px; }
+.submission-confirmation.sales_floor { border-color:#9fc5e3; background:#f3f9fe; }
+.submission-confirmation.report { border-color:#e5b98f; background:#fff8f1; }
+.submission-confirmation input { width:22px; height:22px; margin:0; flex:0 0 auto; accent-color:#c97f98; }
+.submission-confirmation span { line-height:1.5; }
 .upload-box { border:2px dashed #e1c7d0; background:#fff7fa; border-radius:16px; padding:18px; margin:14px 0; }
 .upload-box small { display:block; color:#806f68; margin-top:8px; }
 .contact-button { width:100%; margin-bottom:10px; }
@@ -79,7 +106,7 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .bottom-nav button { border-radius:0; background:white; color:#806f68; padding:10px 4px; font-size:11px; }
 .bottom-nav button span { display:block; font-size:19px; margin-bottom:2px; }
 .bottom-nav button.active { color:#c97f98; background:#fff5f8; }
-@media(max-width:650px){ .submission-actions{grid-template-columns:1fr;} .netprint-row{align-items:stretch;flex-direction:column;} }
+@media(max-width:650px){ .submission-actions{grid-template-columns:1fr;} .netprint-row{align-items:stretch;flex-direction:column;} .shift-detail-heading,.prep-heading{flex-direction:column;} .route-actions a{width:100%;} }
 
 .resubmission-guide { border:2px solid #efd2a8; background:#fff8e8; border-radius:17px; padding:14px; margin:12px 0; }
 .resubmission-guide p { margin:5px 0; color:#6f5b53; }

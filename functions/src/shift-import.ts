@@ -429,6 +429,7 @@ async function writeJobsAndLocks(
       entryTime: job.entryTime,
       workTime: job.workTime,
       subcontractorName: job.subcontractorName,
+      materialStatus: job.materialStatus,
       assignedStaffName: job.assignedStaffName || FieldValue.delete(),
       rawStaffName: job.rawStaffName,
       assignedStaffId: resolvedStaffId ?? FieldValue.delete(),

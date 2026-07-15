@@ -25,6 +25,7 @@
 - menuName
 - storeName
 - workTime
+- materialStatus
 - basePay
 - allowances[]
 - status: open | assigned | stopped | cancelled | completed

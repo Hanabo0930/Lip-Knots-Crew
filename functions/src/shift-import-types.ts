@@ -74,6 +74,7 @@ export type ParsedShiftJob = {
   entryTime: string;
   workTime: string;
   subcontractorName: string;
+  materialStatus: string;
   assignedStaffName: string;
   rawStaffName: string;
   status: "open" | "assigned" | "stopped" | "cancelled" | "draft";

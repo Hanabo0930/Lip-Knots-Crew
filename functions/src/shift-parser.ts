@@ -56,6 +56,7 @@ export function parseShiftSheet(
     const workTime = cellText(row, config.columns.workTime);
     const entryTime = cellText(row, config.columns.entryTime);
     const subcontractorName = cellText(row, config.columns.subcontractorName);
+    const materialStatus = cellText(row, config.columns.materialStatus);
 
     const markerCancelled =
       CANCELLATION_MARKER.test(rawStaffName) ||
@@ -138,6 +139,7 @@ export function parseShiftSheet(
       entryTime,
       workTime,
       subcontractorName,
+      materialStatus,
       assignedStaffName,
       rawStaffName,
       status,

@@ -1,0 +1,19 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+2,Build,管理画面本番ビルド,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+3,Build,Functions本番ビルド,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+4,Evidence,証跡コア34件・対応キュー差分監視48件,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+5,Evidence,同期パッケージ15件,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+6,Security,権限・企業分離・担当競合・保存安全性30件,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+7,Acceptance,本番9項目・3回受入52件,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+8,Rollback,既知正常bundle14件・rollback53件,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+9,Demo,ワンクリック配信16件,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+10,Regression,コア回帰テスト43本,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+11,Security,high・critical依存脆弱性0件,○,合格,V42_TEST_EXECUTION.txt,自動検証,2026-07-14
+12,Input,production-setup.jsonの実値入力,○,未実施,Git管理対象外,,
+13,Deploy,実Firebase productionデプロイ,○,未実施,deployment-result.json,,
+14,Acceptance,実9項目を5分間隔で3回合格,○,未実施,acceptance-ledger.json,,
+15,Evidence,実証跡JSONの管理画面同期,○,未実施,admin-sync-package.json,,
+16,Alert,実アラートの担当開始・競合拒否・自動解決,○,未実施,productionReleaseEvidence/alerts,,
+17,Rollback,失敗時の別承認rollback・復旧受入,○,未実施,rollback-result.json,,
+18,Cutover,T−60〜T＋24h・切戻し判定,○,未実施,productionCutoverRuns,,

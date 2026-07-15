@@ -1,0 +1,9 @@
+﻿環境,プラン,月額Price ID,年額Price ID,通貨,有効
+test,free,,,JPY,
+test,light,,,JPY,
+test,standard,,,JPY,
+test,pro,,,JPY,
+production,free,,,JPY,
+production,light,,,JPY,
+production,standard,,,JPY,
+production,pro,,,JPY,

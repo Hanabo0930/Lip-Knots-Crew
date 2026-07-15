@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v15-tests.json",
+  "compilerOptions": {
+    "outDir": "test-gas-patch-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/gas-patch-core.ts",
+    "test/gas-patch-core.test.ts"
+  ]
+}

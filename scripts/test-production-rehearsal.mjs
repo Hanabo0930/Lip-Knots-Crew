@@ -1,0 +1,7 @@
+import { buildProductionRehearsalCommands } from "./production-rehearsal-core.mjs";
+const base={releaseId:"v3.4.0",sourceEnvironment:"staging",sourceProjectId:"lkc-staging",restoreProjectId:"lkc-restore-drill",backupBucket:"gs://lkc-rehearsal",maxRtoMinutes:60,maxRpoMinutes:5};
+const equal=(a,b,m)=>{if(a!==b)throw new Error(m);};const rejects=(patch)=>{try{buildProductionRehearsalCommands({...base,...patch});return false;}catch{return true;}};
+const plan=buildProductionRehearsalCommands(base);
+equal(plan.steps.length,9,"step count");equal(plan.steps[1].key,"firestore_export","firestore step");equal(plan.restoreProjectId,"lkc-restore-drill","restore project");equal(plan.fingerprint,buildProductionRehearsalCommands({...base}).fingerprint,"deterministic fingerprint");
+equal(rejects({sourceEnvironment:"production"}),true,"production source accepted");equal(rejects({restoreProjectId:"lkc-staging"}),true,"same project accepted");equal(rejects({restoreProjectId:"lkc-temp"}),true,"unmarked restore project accepted");equal(rejects({backupBucket:"https://bucket"}),true,"invalid bucket accepted");equal(rejects({releaseId:""}),true,"empty release accepted");equal(rejects({maxRtoMinutes:4}),true,"short RTO accepted");equal(rejects({maxRpoMinutes:61}),true,"large RPO accepted");equal(plan.steps.some(step=>step.command.includes("--project lkc-restore-drill")),true,"restore isolation command missing");
+console.log("production rehearsal automation tests passed (12 cases)");

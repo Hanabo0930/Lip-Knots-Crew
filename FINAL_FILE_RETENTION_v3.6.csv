@@ -1,0 +1,13 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v3.6 実監視生成・デプロイ診断ZIP,KEEP_CURRENT,/アプリ化,,実環境引渡しと次回開発の基点
+v0.1〜v3.5 ZIP,ARCHIVE,旧バージョン,,復旧・比較
+productionMetricBuckets,KEEP_EVIDENCE,Firestore保持,監査規程に従う,企業別の5分計測根拠
+productionMetricExports,KEEP_EVIDENCE,Firestore保持,監査規程に従う,13指標生成・成否・入力値
+productionTelemetryConfigs,KEEP_CONFIG,Firestore保持,設定更新後も監査規程に従う,Project・Metric type・生成・取込状態
+productionTelemetryRuns,KEEP_EVIDENCE,Firestore保持,監査規程に従う,5分窓・企業分離・失敗証拠
+productionSloObservations・productionSloHourBuckets,KEEP_EVIDENCE,Firestore保持,監査規程に従う,SLO原観測と30日集計
+productionIncidents・productionIncidentEvents,KEEP_EVIDENCE,Firestore保持,,SEV・対応・復旧・解決の監査
+config/production-deploy.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Project設定をZIPに含めない
+Application Default Credentials,PLATFORM_MANAGED,Google Cloud IAM,権限廃止まで,ZIPへ鍵JSONを保存しない
+秘密鍵・認証鍵JSON,DO_NOT_STORE,Secret ManagerまたはGoogle管理,規程に従う,漏えい防止
+node_modules・test-*-lib,DELETE_CANDIDATE,ZIP対象外,即時可,再生成可能

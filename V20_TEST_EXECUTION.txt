@@ -1,0 +1,42 @@
+test:release-gate: 0
+STDOUT:
+
+> @lkc/functions@2.0.0 test:release-gate
+> rm -rf test-release-gate-lib && tsc -p tsconfig.release-gate-test.json && node test-release-gate-lib/test/release-gate-core.test.js
+
+release gate core tests passed
+
+STDERR:
+
+
+test:environment-config: 0
+STDOUT:
+
+> @lkc/functions@2.0.0 test:environment-config
+> rm -rf test-environment-config-lib && tsc -p tsconfig.environment-config-test.json && node test-environment-config-lib/test/environment-config-core.test.js
+
+environment config core tests passed
+
+STDERR:
+
+
+test:final-retention: 0
+STDOUT:
+
+> @lkc/functions@2.0.0 test:final-retention
+> rm -rf test-final-retention-lib && tsc -p tsconfig.final-retention-test.json && node test-final-retention-lib/test/final-retention-core.test.js
+
+final retention core tests passed
+
+STDERR:
+
+
+test:v19-core: 0
+STDOUT:
+
+> @lkc/functions@2.0.0 test:v19-core
+> rm -rf test-v19-core-lib && tsc -p tsconfig.v19-core-test.json && node test-v19-core-lib/test/v19-core.test.js
+
+v1.9 core tests passed
+
+STDERR:

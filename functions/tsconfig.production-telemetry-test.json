@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": {
+    "outDir": "test-production-telemetry-lib",
+    "rootDir": ".",
+    "noEmit": false,
+    "types": ["node"]
+  },
+  "include": [
+    "src/production-telemetry-core.ts",
+    "test/production-telemetry-core.test.ts"
+  ]
+}

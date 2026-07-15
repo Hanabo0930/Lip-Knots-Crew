@@ -1,0 +1,25 @@
+Lip Knots Crew v4.5 TEST EXECUTION
+Date: 2026-07-15 JST
+Command: npm run verify
+Result: PASS (exit 0)
+
+Dependency restore: PASS (663 packages)
+Staff/Admin/Functions build: PASS
+Bundle size gate: PASS
+Demo preview: PASS (16 cases)
+Production setup: PASS (27 cases / 10 files)
+Production deploy readiness: PASS (16 cases)
+Production deploy orchestration: PASS (39 cases)
+Production acceptance: PASS (52 cases)
+Known-good bundle: PASS (14 cases)
+Production rollback: PASS (53 cases)
+Production evidence sync: PASS (15 cases)
+SLA weekly comparison and operations: PASS (99 cases)
+Production evidence security: PASS (67 cases)
+Core regression: PASS (43 test targets)
+Dependency audit: moderate 9 / high 0 / critical 0
+
+Required production functions: 14
+Production plan fingerprint: e8e70fd20778a5b68d7d295afa081adbec0e9c389009d096bebe3aa6dded397e
+Known-good release: v4.4.0
+Runtime note: verification Node 24.14.0; production runtime Node 22 required.

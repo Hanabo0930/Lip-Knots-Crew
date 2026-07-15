@@ -1,0 +1,18 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V36_TEST_EXECUTION.txt,自動検証,2026-07-14
+2,Build,管理画面本番ビルド,○,合格,V36_TEST_EXECUTION.txt,自動検証,2026-07-14
+3,Build,Functions本番ビルド,○,合格,V36_TEST_EXECUTION.txt,自動検証,2026-07-14
+4,Test,コア回帰テスト41本,○,合格,V36_TEST_EXECUTION.txt,自動検証,2026-07-14
+5,Metric,実測13指標生成コア21件,○,合格,V36_TEST_EXECUTION.txt,自動検証,2026-07-14
+6,Runtime,本番運用自動診断18件,○,合格,V36_TEST_EXECUTION.txt,自動検証,2026-07-14
+7,Deploy,デプロイ前診断15件,○,合格,V36_TEST_EXECUTION.txt,自動検証,2026-07-14
+8,Demo,ワンクリック配信16件,○,合格,V36_TEST_EXECUTION.txt,自動検証,2026-07-14
+9,Security,high・critical依存脆弱性0件,○,合格,V36_TEST_EXECUTION.txt,自動検証,2026-07-14
+10,Environment,Node 22・production Project実値,○,未実施,production-deploy.json,,
+11,IAM,Monitoring Viewer・Metric Writer最小権限,○,未実施,IAM evidence,,
+12,Isolation,13指標のcompany_id企業分離,○,未実施,productionTelemetryConfigs.verifiedAt,,
+13,Generate,5分実測生成・重複なし,○,未実施,productionMetricExports,,
+14,Ingest,5分自動取込・鮮度10分以内,○,未実施,productionTelemetryRuns,,
+15,Readiness,管理画面12/12 READY,○,未実施,readiness fingerprint,,
+16,Rollout,30〜50名・全3wave・最終観察完了,○,未実施,実staging待ち,,
+17,Cutover,T−60〜T＋24h・切戻し判定,○,未実施,productionCutoverRuns,,

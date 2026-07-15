@@ -1,0 +1,20 @@
+test:gas-patch: 0
+STDOUT:
+
+> @lkc/functions@1.5.0 test:gas-patch
+> rm -rf test-gas-patch-lib && tsc -p tsconfig.gas-patch-test.json && node test-gas-patch-lib/test/gas-patch-core.test.js
+
+gas patch core tests passed
+
+STDERR:
+
+
+test:gas-regression: 0
+STDOUT:
+
+> @lkc/functions@1.5.0 test:gas-regression
+> rm -rf test-gas-regression-lib && tsc -p tsconfig.gas-regression-test.json && node test-gas-regression-lib/test/gas-regression-core.test.js
+
+gas regression core tests passed
+
+STDERR:

@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import { expectedMatches, validateMutation, valuesEquivalent, columnToNumber } from "../src/sheet-write-core";
+const mapping={columns:{staffName:"B",temperature:"G"},operations:{"job.assign":{values:["staffName"]},"precontact.submit":{values:["temperature"]}}};
+assert.deepEqual(validateMutation(mapping,"job.assign",{staffName:"山田花子"}),[]);
+assert.equal(validateMutation(mapping,"job.assign",{temperature:"36.2"}).length,1);
+assert.equal(expectedMatches("",{mode:"blank"}),true);
+assert.equal(expectedMatches("山田花子",{mode:"exact",value:"山田 花子"}),true);
+assert.equal(valuesEquivalent(" 9：30 ","9:30"),true);
+assert.equal(columnToNumber("BB"),54);
+console.log("safe sheet write core tests passed");

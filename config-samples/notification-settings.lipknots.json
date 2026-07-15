@@ -1,0 +1,23 @@
+{
+  "enabled": false,
+  "preContactThreeDaysHour": 9,
+  "importantAnnouncementHour": 9,
+  "printReminderDays": 3,
+  "quietStartHour": 22,
+  "quietEndHour": 7,
+  "staffNotifications": {
+    "preContact": true,
+    "netPrint": true,
+    "submission": true,
+    "cancellation": true,
+    "importantAnnouncements": true
+  },
+  "adminNotifications": {
+    "application": true,
+    "preContactLate": true,
+    "submissionOverdue": true,
+    "resubmission": true,
+    "uploadError": true
+  },
+  "configVersion": "0.5"
+}

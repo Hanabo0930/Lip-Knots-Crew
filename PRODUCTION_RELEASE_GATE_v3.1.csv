@@ -1,0 +1,26 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V31_TEST_EXECUTION.txt,自動検証,2026-07-14
+2,Build,管理画面本番ビルド,○,合格,V31_TEST_EXECUTION.txt,自動検証,2026-07-14
+3,Build,Functions本番ビルド,○,合格,V31_TEST_EXECUTION.txt,自動検証,2026-07-14
+4,Safety,staging関連53ケース,○,合格,V31_TEST_EXECUTION.txt,自動検証,2026-07-14
+5,Rehearsal,隔離リハーサル手順生成12ケース,○,合格,V31_TEST_EXECUTION.txt,自動検証,2026-07-14
+6,Rehearsal,復元・移行・切戻し判定20ケース,○,合格,V31_TEST_EXECUTION.txt,自動検証,2026-07-14
+7,Gate,本番公開ゲート17ケース,○,合格,V31_TEST_EXECUTION.txt,自動検証,2026-07-14
+8,Test,コア回帰テスト35本,○,合格,V31_TEST_EXECUTION.txt,自動検証,2026-07-14
+9,Security,high・critical依存脆弱性0件,○,合格,V31_TEST_EXECUTION.txt,自動検証,2026-07-14
+10,Rollout,30〜50名・全3wave・最終観察完了,○,未実施,実staging待ち,,
+11,Backup,Firestore・Storage・Authバックアップ完了,○,未実施,隔離演習待ち,,
+12,Restore,隔離Projectへの復元成功,○,未実施,隔離演習待ち,,
+13,Validation,件数・SHA-256完全一致,○,未実施,隔離演習待ち,,
+14,Security,標本差異・権限probe・smoke失敗0件,○,未実施,隔離演習待ち,,
+15,Migration,移行dry-run件数一致・差異0件,○,未実施,隔離演習待ち,,
+16,Rollback,RTO60分以内・RPO5分以内・smoke失敗0件,○,未実施,隔離演習待ち,,
+17,Evidence,演習証跡7件以上とfingerprint固定,○,未実施,隔離演習待ち,,
+18,GAS,GAS重大・高リスク0件,○,未実施,実GAS全コード待ち,,
+19,Legal,法務・社内規程確認,○,未実施,,,
+20,Secrets,本番Secret設定,○,未実施,,,
+21,Monitoring,本番Cloud Monitoring・通知設定,○,未実施,,,
+22,Domain,独自ドメイン・TLS確認,○,未実施,,,
+23,Approval,提出者とは別の指定社長アカウント承認,○,未実施,,,
+24,Enablement,社長承認者とは別の管理者によるproduction最終実行,○,未実施,,,
+

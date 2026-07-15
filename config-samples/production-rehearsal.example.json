@@ -1,0 +1,9 @@
+{
+  "releaseId": "v3.4.0-rc1",
+  "sourceEnvironment": "staging",
+  "sourceProjectId": "YOUR_STAGING_PROJECT",
+  "restoreProjectId": "YOUR_RESTORE_DRILL_PROJECT",
+  "backupBucket": "gs://your-rehearsal-bucket",
+  "maxRtoMinutes": 60,
+  "maxRpoMinutes": 5
+}

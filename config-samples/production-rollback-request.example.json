@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "knownGoodReleaseId": "v5.1.0",
+  "bundleRelativePath": "rollback-sources/v5.1.0",
+  "hostingStaffSource": "lip-knots-staff@PREVIOUS_VERSION_ID",
+  "hostingAdminSource": "lip-knots-admin@PREVIOUS_VERSION_ID"
+}

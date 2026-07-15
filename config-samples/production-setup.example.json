@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "firebase": {
+    "developmentProjectId": "YOUR_DEV_PROJECT",
+    "stagingProjectId": "YOUR_STAGING_PROJECT",
+    "productionProjectId": "YOUR_PRODUCTION_PROJECT",
+    "productionStaffHostingSite": "YOUR_PRODUCTION_STAFF_HOSTING_SITE",
+    "productionAdminHostingSite": "YOUR_PRODUCTION_ADMIN_HOSTING_SITE",
+    "webApiKey": "YOUR_PRODUCTION_WEB_API_KEY",
+    "authDomain": "YOUR_PRODUCTION_PROJECT.firebaseapp.com",
+    "storageBucket": "YOUR_PRODUCTION_PROJECT.firebasestorage.app",
+    "messagingSenderId": "YOUR_PRODUCTION_MESSAGING_SENDER_ID",
+    "staffAppId": "YOUR_PRODUCTION_STAFF_APP_ID",
+    "adminAppId": "YOUR_PRODUCTION_ADMIN_APP_ID",
+    "vapidKey": "YOUR_PRODUCTION_PUBLIC_VAPID_KEY",
+    "functionsRegion": "asia-northeast1"
+  },
+  "application": {
+    "staffAppUrl": "https://YOUR_PRODUCTION_STAFF_HOSTING_SITE.web.app",
+    "adminAppUrl": "https://YOUR_PRODUCTION_ADMIN_HOSTING_SITE.web.app",
+    "spreadsheetId": "YOUR_VERIFIED_PRODUCTION_SPREADSHEET_ID",
+    "backupBucket": "YOUR_PRODUCTION_BACKUP_BUCKET",
+    "defaultCompanyId": "lipknots-production",
+    "adminEmails": ["info@lipknots.com"],
+    "executiveApproverEmails": ["info@lipknots.com"],
+    "mailFrom": "info@lipknots.com",
+    "approvalPackageKeyId": "production-signing-v1"
+  },
+  "telemetry": {
+    "projectId": "YOUR_PRODUCTION_PROJECT",
+    "metricPrefix": "custom.googleapis.com/lip_knots",
+    "tenantLabel": "company_id"
+  }
+}

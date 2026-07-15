@@ -1,0 +1,11 @@
+{
+  "environment": "production",
+  "firebaseProjectId": "YOUR_PRODUCTION_PROJECT",
+  "appBaseUrl": "https://app.example.com",
+  "spreadsheetId": "YOUR_PRODUCTION_SPREADSHEET_ID",
+  "stripeMode": "live",
+  "emailMode": "live",
+  "pushMode": "live",
+  "backupBucket": "YOUR_PRODUCTION_BACKUP_BUCKET",
+  "errorReportingEnabled": true
+}

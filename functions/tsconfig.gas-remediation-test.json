@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v14-tests.json",
+  "compilerOptions": {
+    "outDir": "test-gas-remediation-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/gas-remediation-core.ts",
+    "test/gas-remediation-core.test.ts"
+  ]
+}

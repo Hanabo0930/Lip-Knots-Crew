@@ -1,0 +1,12 @@
+No,Category,Check,Status,Result,Evidence,Owner,Date
+1,Build,スタッフPWA本番ビルド,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15
+2,Build,管理画面本番ビルド,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15
+3,Build,Functions本番ビルド,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15
+4,Workflow,経営レポート既読・代理・督促・履歴203件,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15
+5,Security,権限・企業分離・UID非公開145件,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15
+6,Deploy,承認付き本番デプロイ,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15
+7,Acceptance,本番・復旧受入,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15
+8,Rollback,既知正常bundle・rollback,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15
+9,Demo,ワンクリック配信16件,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15
+10,Regression,全コア回帰,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15
+11,Security,high・critical依存脆弱性0件,○,合格,V53_TEST_EXECUTION.txt,自動検証,2026-07-15

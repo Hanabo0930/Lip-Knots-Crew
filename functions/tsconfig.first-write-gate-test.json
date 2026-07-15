@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v13-tests.json",
+  "compilerOptions": {
+    "outDir": "test-first-write-gate-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/first-write-gate-core.ts",
+    "test/first-write-gate-core.test.ts"
+  ]
+}

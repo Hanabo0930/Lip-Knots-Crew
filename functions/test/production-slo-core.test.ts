@@ -1,0 +1,57 @@
+import { decideProductionIncidentTransition, defaultProductionSloPolicy, emptyProductionSloWindow, evaluateProductionSlo, ProductionSloInput, ProductionSloWindow } from "../src/production-slo-core";
+
+function equal(actual: unknown, expected: unknown, message: string) { if (actual !== expected) throw new Error(`${message}: ${String(actual)} !== ${String(expected)}`); }
+const now=Date.UTC(2026,6,14,9,0,0);
+const policy=defaultProductionSloPolicy();
+const healthyWindow=(windowMinutes:ProductionSloWindow["windowMinutes"]):ProductionSloWindow=>({...emptyProductionSloWindow(windowMinutes),authenticationAttempts:1000,callableRequests:2000,sheetWriteAttempts:500,notificationAttempts:500,p95LatencyMaxMs:800,queueOldestAgeMaxMinutes:2});
+const base:ProductionSloInput={nowMs:now,lastObservedAtMs:now-5*60_000,policy,windows:[healthyWindow(60),healthyWindow(360),healthyWindow(1440),healthyWindow(43200)]};
+const replace=(minutes:ProductionSloWindow["windowMinutes"],values:Partial<ProductionSloWindow>):ProductionSloInput=>({...base,windows:base.windows.map(window=>window.windowMinutes===minutes?{...window,...values}:window)});
+
+equal(evaluateProductionSlo(base).health,"healthy","healthy SLO was blocked");
+equal(evaluateProductionSlo(base).severity,null,"healthy SLO created severity");
+equal(evaluateProductionSlo(base).windowResults.length,4,"four rolling windows missing");
+equal(evaluateProductionSlo(base).errorBudgetConsumedPercent,0,"empty error budget was consumed");
+equal(evaluateProductionSlo({...base,lastObservedAtMs:now-16*60_000}).severity,"SEV3","stale warning was missed");
+equal(evaluateProductionSlo({...base,lastObservedAtMs:now-31*60_000}).severity,"SEV2","critical staleness was missed");
+equal(evaluateProductionSlo({...base,lastObservedAtMs:null}).severity,"SEV2","missing observation was allowed");
+equal(evaluateProductionSlo(replace(1440,{criticalOutageCount:1})).severity,"SEV1","critical outage was not SEV1");
+equal(evaluateProductionSlo(replace(1440,{dataMismatchCount:1})).severity,"SEV1","data mismatch was not SEV1");
+equal(evaluateProductionSlo(replace(60,{authenticationFailures:58})).severity,"SEV1","1h fast burn was missed");
+equal(evaluateProductionSlo(replace(360,{authenticationFailures:25})).severity,"SEV2","6h burn was missed");
+equal(evaluateProductionSlo(replace(1440,{authenticationFailures:13})).severity,"SEV2","24h burn was missed");
+equal(evaluateProductionSlo(replace(60,{authenticationAttempts:50,authenticationFailures:50,callableRequests:0,sheetWriteAttempts:0,notificationAttempts:0})).severity,null,"small sample triggered fast burn");
+equal(evaluateProductionSlo(replace(43200,{authenticationAttempts:2000,authenticationFailures:4})).severity,"SEV3","80 percent budget alert was missed");
+equal(evaluateProductionSlo(replace(43200,{authenticationAttempts:2000,authenticationFailures:5})).severity,"SEV2","exhausted budget was missed");
+equal(evaluateProductionSlo(replace(1440,{authenticationFailures:6})).failedSignals.some(signal=>signal.key==="auth_success"),true,"auth SLO breach was missed");
+equal(evaluateProductionSlo(replace(1440,{callableFailures:11})).failedSignals.some(signal=>signal.key==="callable_success"),true,"callable SLO breach was missed");
+equal(evaluateProductionSlo(replace(1440,{sheetWriteFailures:6})).failedSignals.some(signal=>signal.key==="sheet_success"),true,"sheet SLO breach was missed");
+equal(evaluateProductionSlo(replace(1440,{sheetWriteFailures:30})).severity,"SEV2","severe sheet failure was not SEV2");
+equal(evaluateProductionSlo(replace(1440,{notificationFailures:11})).failedSignals.some(signal=>signal.key==="notification_success"),true,"notification SLO breach was missed");
+equal(evaluateProductionSlo(replace(1440,{notificationFailures:60})).severity,"SEV2","severe notification failure was not SEV2");
+equal(evaluateProductionSlo(replace(1440,{p95LatencyMaxMs:2500})).severity,"SEV3","latency warning was missed");
+equal(evaluateProductionSlo(replace(1440,{p95LatencyMaxMs:6000})).severity,"SEV2","severe latency was not SEV2");
+equal(evaluateProductionSlo(replace(1440,{queueOldestAgeMaxMinutes:16})).severity,"SEV3","queue warning was missed");
+equal(evaluateProductionSlo(replace(1440,{queueOldestAgeMaxMinutes:61})).severity,"SEV2","severe queue age was not SEV2");
+equal(evaluateProductionSlo(replace(1440,{monitoringProbeFailures:1})).severity,"SEV3","probe failure warning was missed");
+equal(evaluateProductionSlo(replace(1440,{monitoringProbeFailures:3})).severity,"SEV2","probe failures were not SEV2");
+equal(evaluateProductionSlo(replace(1440,{criticalOutageCount:1,p95LatencyMaxMs:6000})).incidentKind,"critical_outage","highest severity did not select incident kind");
+equal(evaluateProductionSlo(replace(1440,{p95LatencyMaxMs:2500})).health,"at_risk","SEV3 did not produce at-risk health");
+equal(evaluateProductionSlo(replace(1440,{p95LatencyMaxMs:6000})).health,"incident","SEV2 did not produce incident health");
+equal(evaluateProductionSlo(base).fingerprint,evaluateProductionSlo(base).fingerprint,"SLO fingerprint was not deterministic");
+equal(evaluateProductionSlo(base).fingerprint,evaluateProductionSlo({...base,nowMs:now+60_000,lastObservedAtMs:now-4*60_000}).fingerprint,"fresh wall clock changed fingerprint");
+equal(evaluateProductionSlo(replace(1440,{p95LatencyMaxMs:2500})).alertFingerprint,evaluateProductionSlo(replace(1440,{p95LatencyMaxMs:3000})).alertFingerprint,"same alert state changed notification fingerprint");
+equal(evaluateProductionSlo(replace(1440,{p95LatencyMaxMs:2500})).fingerprint===evaluateProductionSlo(replace(1440,{p95LatencyMaxMs:3000})).fingerprint,false,"audit fingerprint ignored metric change");
+let rejected=false;try{evaluateProductionSlo(replace(60,{authenticationFailures:1001}));}catch{rejected=true;}equal(rejected,true,"failures above attempts passed");
+rejected=false;try{evaluateProductionSlo({...base,policy:{...policy,availabilityTargetPercent:100}});}catch{rejected=true;}equal(rejected,true,"invalid availability target passed");
+rejected=false;try{evaluateProductionSlo({...base,lastObservedAtMs:now+3*60_000});}catch{rejected=true;}equal(rejected,true,"future observation passed");
+const healthy=evaluateProductionSlo(base);const sev3=evaluateProductionSlo(replace(1440,{p95LatencyMaxMs:2500}));const sev2=evaluateProductionSlo(replace(1440,{p95LatencyMaxMs:6000}));
+equal(decideProductionIncidentTransition(healthy,null,3).action,"none","healthy state opened incident");
+equal(decideProductionIncidentTransition(sev3,null,3).action,"open","breach did not open incident");
+equal(decideProductionIncidentTransition(sev3,{status:"open",currentSeverity:"SEV3",highestSeverity:"SEV3",recoveryHealthyRuns:0},3).action,"update","same severity did not update incident");
+equal(decideProductionIncidentTransition(sev2,{status:"acknowledged",currentSeverity:"SEV3",highestSeverity:"SEV3",recoveryHealthyRuns:0},3).action,"escalate","higher severity did not escalate incident");
+equal(decideProductionIncidentTransition(sev2,{status:"acknowledged",currentSeverity:"SEV3",highestSeverity:"SEV3",recoveryHealthyRuns:0},3).nextStatus,"acknowledged","escalation lost acknowledgement");
+equal(decideProductionIncidentTransition(healthy,{status:"open",currentSeverity:"SEV2",highestSeverity:"SEV1",recoveryHealthyRuns:0},3).action,"healthy_observation","first healthy run skipped recovery monitoring");
+equal(decideProductionIncidentTransition(healthy,{status:"monitoring_recovery",currentSeverity:"SEV2",highestSeverity:"SEV1",recoveryHealthyRuns:2},3).action,"recovery_pending","third healthy run did not require resolution");
+equal(decideProductionIncidentTransition(sev3,{status:"monitoring_recovery",currentSeverity:"SEV2",highestSeverity:"SEV1",recoveryHealthyRuns:2},3).recoveryHealthyRuns,0,"new breach did not reset recovery streak");
+
+console.log("production SLO and incident policy tests passed (45 cases)");

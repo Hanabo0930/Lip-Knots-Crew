@@ -1,0 +1,25 @@
+test:release-artifact: 0
+
+> @lkc/functions@1.6.0 test:release-artifact
+> rm -rf test-release-artifact-lib && tsc -p tsconfig.release-artifact-test.json && node test-release-artifact-lib/test/release-artifact-core.test.js
+
+release artifact core tests passed
+
+
+
+test:pilot-rollout: 0
+
+> @lkc/functions@1.6.0 test:pilot-rollout
+> rm -rf test-pilot-rollout-lib && tsc -p tsconfig.pilot-rollout-test.json && node test-pilot-rollout-lib/test/pilot-rollout-core.test.js
+
+pilot rollout core tests passed
+
+
+
+test:recovery: 0
+
+> @lkc/functions@1.6.0 test:recovery
+> rm -rf test-recovery-lib && tsc -p tsconfig.recovery-test.json && node test-recovery-lib/test/recovery-core.test.js
+
+recovery core tests passed
+

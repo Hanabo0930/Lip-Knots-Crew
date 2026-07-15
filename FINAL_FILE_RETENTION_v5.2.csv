@@ -1,0 +1,16 @@
+No,区分,対象,保持,理由
+1,Source,functions/src/production-evidence-monitor-core.ts,○,経営レポート配信判定・7指標・PDF用レポート生成
+2,Source,functions/src/production-evidence.ts,○,自動配信・分析アラート確認／担当固定
+3,Source,apps/admin/src/ProductionAcceptanceRollbackConsole.tsx,○,配信状況・確認・担当・PDF／MD／CSV画面
+4,Source,apps/admin/src/styles.css,○,指揮盤・操作状態・レスポンシブ表示
+5,Security,firestore.rules,○,企業分離・ワークフロー直接書込拒否
+6,Dependency,package-lock.json,○,Firestore・Storage実依存とクリーン復元
+7,Test,functions/test/production-evidence-monitor-core.test.ts,○,189ケース
+8,Test,scripts/test-production-evidence-security.mjs,○,138ケース
+9,Docs,docs/PRODUCTION_EXECUTIVE_AUTO_DELIVERY_ALERT_WORKFLOW_V52.md,○,本番運用手順
+10,Evidence,V52_TEST_EXECUTION.txt,○,検証結果
+11,Evidence,PRODUCTION_RELEASE_GATE_v5.2.csv,○,公開ゲート
+12,Evidence,FILE_CHECKSUMS_SHA256_v5.2.csv,○,配布完全性
+13,Runtime,node_modules,×,再生成可能・ZIP除外
+14,Secrets,config・.env.production・Service Account JSON,×,秘密値・実値のZIP混入防止
+15,Runtime,release-evidence・rollback-sources,×,本番証跡・既知正常bundleのZIP混入防止

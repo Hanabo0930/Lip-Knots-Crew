@@ -1,0 +1,14 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v2.9 30～50名段階配布ZIP,KEEP_CURRENT,01_現行最新版,,実3wave検証と次回開発の基点
+本番デプロイ版ZIP,KEEP_CURRENT,01_現行最新版,,実稼働版
+v0.1～v2.8 ZIP,ARCHIVE,02_旧バージョン,,復旧・比較
+release checkpoint・Go/No-Go・pilot監視証跡,KEEP_EVIDENCE,05_監査・移行,,改ざん検知・配布・監視の証拠
+パイロット結果・gate fingerprint・二者承認証跡,KEEP_EVIDENCE,05_監査・移行,,30～50名移行判断の証拠
+3wave計画・配布batch・中断・監視run・alert,KEEP_EVIDENCE,05_監査・移行,,段階配布と停止判断の証拠
+GAS監査・回帰・パイロット結果,KEEP_EVIDENCE,05_監査・移行,,公開承認の証拠
+実staging設定・秘密バックアップ,LOCAL_SECRET_ONLY,通常Drive保存禁止,利用終了後,秘密値・実URLを含む
+rollback復元フォルダ,DELETE_CANDIDATE,99_削除候補,rollback確認後,checkpointから再生成可能
+展開済み重複フォルダ,DELETE_CANDIDATE,99_削除候補,本番・復元確認後,ZIPから再生成可能
+node_modules,DELETE_CANDIDATE,99_削除候補,即時可,npm ciで再生成
+test-*-lib,DELETE_CANDIDATE,99_削除候補,即時可,テスト生成物
+秘密鍵・トークン入りファイル,DELETE_CANDIDATE,99_削除候補,即時,通常Driveへ保存禁止

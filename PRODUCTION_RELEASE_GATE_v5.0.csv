@@ -1,0 +1,17 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+2,Build,管理画面本番ビルド,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+3,Build,Functions本番ビルド,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+4,Analytics,8週承認遅延・再割当効果・担当負荷分析161件,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+5,Security,権限・分析公開・企業分離119件,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+6,Deploy,承認付き本番デプロイ39件,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+7,Acceptance,本番9項目・3回受入52件,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+8,Rollback,既知正常bundle14件・rollback53件,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+9,Demo,ワンクリック配信16件,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+10,Regression,全コア回帰,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+11,Security,high・critical依存脆弱性0件,○,合格,V50_TEST_EXECUTION.txt,自動検証,2026-07-15
+12,Deploy,実Firebase productionデプロイ,○,未実施,deployment-result.json,,
+13,Analytics,実データ8週の担当負荷ヒートマップ確認,○,未実施,productionReleaseEvidence/weeklyReports,,
+14,Analytics,実承認時間・期限内承認率の確認,○,未実施,productionReleaseEvidence/weeklyReports,,
+15,Reassignment,実再割当後の承認成功率・緊急移管確認,○,未実施,productionReleaseEvidence/events,,
+16,Rollback,失敗時の別承認rollback・復旧受入,○,未実施,rollback-result.json,,

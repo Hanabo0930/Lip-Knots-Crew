@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "v5.6.0",
+  "projectId": "lip-knots-production",
+  "rollbackSourceRoot": "rollback-sources",
+  "maxApprovalMinutes": 15,
+  "hostingSites": {
+    "staff": "lip-knots-staff",
+    "admin": "lip-knots-admin"
+  },
+  "urls": {
+    "staffAppUrl": "https://lip-knots-staff.web.app",
+    "adminAppUrl": "https://lip-knots-admin.web.app"
+  }
+}

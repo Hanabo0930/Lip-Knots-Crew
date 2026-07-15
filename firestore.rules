@@ -1,0 +1,514 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function role() {
+      return signedIn() ? request.auth.token.role : null;
+    }
+    function companyId() {
+      return signedIn() ? request.auth.token.companyId : null;
+    }
+    function staffId() {
+      return signedIn() ? request.auth.token.staffId : null;
+    }
+    function sameCompany(resourceCompanyId) {
+      return signedIn() && companyId() == resourceCompanyId;
+    }
+    function isAdmin() {
+      return role() == 'admin';
+    }
+    function isStaff() {
+      return role() == 'staff';
+    }
+    function activeIdentity() {
+      return !exists(/databases/$(database)/documents/authIdentities/$(request.auth.uid)) ||
+        get(/databases/$(database)/documents/authIdentities/$(request.auth.uid)).data.active == true;
+    }
+    function activeStaff() {
+      return isStaff() &&
+        exists(/databases/$(database)/documents/staffProfiles/$(staffId())) &&
+        get(/databases/$(database)/documents/staffProfiles/$(staffId())).data.active == true &&
+        activeIdentity();
+    }
+    function emergencyUnlocked() {
+      return !signedIn() ||
+        !exists(/databases/$(database)/documents/productionControls/$(companyId())) ||
+        get(/databases/$(database)/documents/productionControls/$(companyId())).data.emergencyLock != true;
+    }
+
+    match /companies/{company}/public/{document=**} {
+      allow read: if signedIn() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /staffProfiles/{profileId} {
+      allow read: if signedIn() &&
+        sameCompany(resource.data.companyId) &&
+        (isAdmin() || (activeStaff() && staffId() == profileId));
+      allow write: if false;
+    }
+
+    match /jobs/{jobId} {
+      allow read: if signedIn() &&
+        sameCompany(resource.data.companyId) &&
+        (
+          isAdmin() ||
+          (activeStaff() && (
+            resource.data.status == 'open' ||
+            resource.data.assignedStaffId == staffId()
+          ))
+        );
+      allow write: if false;
+    }
+
+    match /tasks/{taskId} {
+      allow read: if signedIn() &&
+        sameCompany(resource.data.companyId) &&
+        (isAdmin() || (activeStaff() && resource.data.staffId == staffId()));
+      allow write: if false;
+    }
+
+    match /submissions/{submissionId} {
+      allow read: if signedIn() &&
+        sameCompany(resource.data.companyId) &&
+        (isAdmin() || (activeStaff() && resource.data.staffId == staffId()));
+      allow write: if false;
+
+      match /files/{fileId} {
+        allow read: if signedIn() &&
+          sameCompany(resource.data.companyId) &&
+          (isAdmin() || (activeStaff() && resource.data.staffId == staffId()));
+        allow write: if false;
+      }
+    }
+
+    match /announcements/{announcementId} {
+      allow read: if signedIn() &&
+        sameCompany(resource.data.companyId) &&
+        (
+          isAdmin() ||
+          (activeStaff() && (
+            resource.data.targetAll == true ||
+            staffId() in resource.data.targetStaffIds
+          ))
+        );
+      allow write: if false;
+    }
+
+    match /deviceTokens/{uid}/tokens/{tokenId} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create, update, delete: if signedIn() && request.auth.uid == uid && emergencyUnlocked();
+    }
+
+
+    match /sheetImportConfigs/{configId} {
+      allow read: if signedIn() && isAdmin() && companyId() == configId;
+      allow write: if false;
+    }
+
+    match /sheetImportRuns/{runId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+
+    match /staffImportConfigs/{configId} {
+      allow read: if signedIn() && isAdmin() && companyId() == configId;
+      allow write: if false;
+    }
+
+    match /staffImportRuns/{runId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+
+    match /deviceSessions/{sessionId} {
+      allow read: if signedIn() && (
+        (isAdmin() && sameCompany(resource.data.companyId)) ||
+        (activeStaff() && resource.data.staffId == staffId())
+      );
+      allow write: if false;
+    }
+
+    match /loginInviteBatches/{batchId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /loginInviteDeliveries/{deliveryId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+
+    match /notificationSettings/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /announcementReceipts/{receiptId} {
+      allow read: if signedIn() && (
+        isAdmin() || (activeStaff() && resource.data.staffId == staffId())
+      );
+      allow write: if false;
+    }
+
+
+    match /resubmissionRequests/{requestId} {
+      allow read: if signedIn() && sameCompany(resource.data.companyId) &&
+        (isAdmin() || (activeStaff() && resource.data.staffId == staffId()));
+      allow write: if false;
+    }
+
+
+    match /sheetSyncQueue/{queueId} { allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId); allow write: if false; }
+    match /filePreviewTokens/{tokenId} { allow read, write: if false; }
+
+    match /expenseReviews/{jobId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+
+match /companyFeatureSettings/{company} {
+  allow read: if signedIn() && isAdmin() && companyId() == company;
+  allow write: if false;
+}
+
+match /jobGroups/{groupId} {
+  allow read: if signedIn() && isAdmin() &&
+    sameCompany(resource.data.companyId);
+  allow write: if false;
+}
+
+match /exportLogs/{exportId} {
+  allow read: if signedIn() && isAdmin() &&
+    sameCompany(resource.data.companyId);
+  allow write: if false;
+}
+
+
+match /sheetRowCreateQueue/{queueId} {
+  allow read: if signedIn() && isAdmin() &&
+    sameCompany(resource.data.companyId);
+  allow write: if false;
+}
+
+match /sheetRowManualInterventions/{interventionId} {
+  allow read: if signedIn() && isAdmin() &&
+    sameCompany(resource.data.companyId);
+  allow write: if false;
+}
+
+
+match /setupWizardInspections/{inspectionId} {
+  allow read: if signedIn() && isAdmin() &&
+    sameCompany(resource.data.companyId);
+  allow write: if false;
+}
+
+match /setupWizardDrafts/{company} {
+  allow read: if signedIn() && isAdmin() && companyId() == company;
+  allow write: if false;
+}
+
+match /monthSheetCreationRuns/{runId} {
+  allow read: if signedIn() && isAdmin() &&
+    sameCompany(resource.data.companyId);
+  allow write: if false;
+}
+
+match /monthSheetManualInterventions/{interventionId} {
+  allow read: if signedIn() && isAdmin() &&
+    sameCompany(resource.data.companyId);
+  allow write: if false;
+}
+
+
+    match /gasAuditRuns/{auditId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+    match /firstWriteGateRuns/{runId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+    match /firstWriteAuthorizations/{authorizationId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+
+    match /gasRemediations/{remediationId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /gasAuditComparisons/{comparisonId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+
+    match /gasPatchPlans/{planId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /gasRegressionRuns/{runId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /pilotRolloutControls/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /pilotRollouts/{rolloutId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /pilotHealthRuns/{runId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /pilotAlerts/{alertId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /pilotExpansionReviews/{reviewId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /pilotExpansionApprovals/{approvalId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /stagedRolloutControls/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /stagedRollouts/{rolloutId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /stagedRolloutWaves/{waveId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /stagedRolloutHealthRuns/{runId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /stagedRolloutAlerts/{alertId} {
+      allow read: if signedIn() && isAdmin() &&
+        sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionReleaseReviews/{reviewId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionReleaseAuthorizations/{authorizationId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionControls/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /productionReleaseEvidence/{evidenceId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+
+      match /events/{eventId} {
+        allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+        allow write: if false;
+      }
+
+      match /alerts/{alertId} {
+        allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+        allow write: if false;
+      }
+
+      match /reviews/{reviewId} {
+        allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+        allow write: if false;
+      }
+
+      match /responsibilityAlerts/{alertKey} {
+        allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+        allow write: if false;
+      }
+
+      match /weeklyReports/{weekKey} {
+        allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+        allow write: if false;
+
+        match /recipients/{recipientId} {
+          allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+          allow write: if false;
+        }
+
+      }
+
+      match /executiveReports/{weekKey} {
+        allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+        allow write: if false;
+
+        match /recipients/{recipientId} {
+          allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+          allow write: if false;
+        }
+
+        match /decisionTasks/{taskId} {
+          allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+          allow write: if false;
+        }
+      }
+    }
+
+    match /productionEvidenceControls/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /productionEmergencyEvents/{eventId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionRehearsalRuns/{rehearsalId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionRehearsalControls/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /productionRehearsalCertifications/{certificationId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionApprovalPackageExports/{packageId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionApprovalPackages/{packageId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionCutoverRuns/{runId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionCutoverControls/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /productionCutoverObservations/{observationId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionSloPolicies/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /productionSloSnapshots/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /productionSloControls/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /productionSloObservations/{observationId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionSloHourBuckets/{bucketId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionIncidents/{incidentId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionIncidentEvents/{eventId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionTelemetryConfigs/{company} {
+      allow read: if signedIn() && isAdmin() && companyId() == company;
+      allow write: if false;
+    }
+
+    match /productionTelemetryRuns/{runId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionMetricBuckets/{bucketId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /productionMetricExports/{runId} {
+      allow read: if signedIn() && isAdmin() && sameCompany(resource.data.companyId);
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

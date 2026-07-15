@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": {
+    "outDir": "test-recovery-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/recovery-core.ts",
+    "test/recovery-core.test.ts"
+  ]
+}

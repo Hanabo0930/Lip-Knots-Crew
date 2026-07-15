@@ -1,0 +1,20 @@
+test:gas-audit: 0
+STDOUT:
+
+> @lkc/functions@1.3.0 test:gas-audit
+> rm -rf test-gas-audit-lib && tsc -p tsconfig.gas-audit-test.json && node test-gas-audit-lib/test/gas-audit-core.test.js
+
+gas audit core tests passed
+
+STDERR:
+
+
+test:first-write-gate: 0
+STDOUT:
+
+> @lkc/functions@1.3.0 test:first-write-gate
+> rm -rf test-first-write-gate-lib && tsc -p tsconfig.first-write-gate-test.json && node test-first-write-gate-lib/test/first-write-gate-core.test.js
+
+first write gate core tests passed
+
+STDERR:

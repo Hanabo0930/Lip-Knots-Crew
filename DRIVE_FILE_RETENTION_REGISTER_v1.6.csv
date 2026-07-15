@@ -1,0 +1,14 @@
+﻿ファイル名,版,種類,現行,監査証拠,秘密情報,判断,保存先,削除可能日,理由
+Lip Knots Crew v0.1～v0.7 ZIP,v0.1～v0.7,source_zip,,,,ARCHIVE,02_旧バージョン,,
+Lip Knots Crew v0.8 ZIP,v0.8,source_zip,,,,ARCHIVE,02_旧バージョン,,
+Lip Knots Crew v0.9 ZIP,v0.9,source_zip,,,,ARCHIVE,02_旧バージョン,,
+Lip Knots Crew v1.0 ZIP,v1.0,source_zip,,,,ARCHIVE,02_旧バージョン,,
+Lip Knots Crew v1.1 ZIP,v1.1,source_zip,,,,ARCHIVE,02_旧バージョン,,
+Lip Knots Crew v1.2 ZIP,v1.2,source_zip,,,,ARCHIVE,02_旧バージョン,,
+Lip Knots Crew v1.3 ZIP,v1.3,source_zip,,,,ARCHIVE,02_旧バージョン,,
+Lip Knots Crew v1.4 ZIP,v1.4,source_zip,,,,ARCHIVE,02_旧バージョン,,
+Lip Knots Crew v1.5 ZIP,v1.5,source_zip,,,,ARCHIVE,02_旧バージョン,,
+Lip Knots Crew v1.6 ZIP,v1.6,source_zip,○,,,KEEP_CURRENT,01_現行最新版,,
+GAS監査レポート,最終,test_evidence,,○,,KEEP_EVIDENCE,05_監査・移行,,
+回帰テスト証拠,最終,test_evidence,,○,,KEEP_EVIDENCE,05_監査・移行,,
+秘密鍵・トークン入りファイル,,secret,,,○,DELETE_CANDIDATE,99_削除候補,即時,通常Driveに保存しない

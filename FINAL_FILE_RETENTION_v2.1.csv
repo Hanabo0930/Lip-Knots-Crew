@@ -1,0 +1,10 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v2.1実ビルド検証済みZIP,KEEP_CURRENT,01_現行最新版,,次回開発と実環境検証の基点
+本番デプロイ版ZIP,KEEP_CURRENT,01_現行最新版,,実稼働版
+v0.1～v2.0 ZIP,ARCHIVE,02_旧バージョン,,復旧・比較
+GAS監査・回帰・パイロット証拠,KEEP_EVIDENCE,05_監査・移行,,監査証跡
+展開済み重複フォルダ,DELETE_CANDIDATE,99_削除候補,本番・復元確認後,ZIPから再生成可能
+node_modules,DELETE_CANDIDATE,99_削除候補,即時可,npm ciで再生成
+dist / buildの重複,DELETE_CANDIDATE,99_削除候補,本番・復元確認後,再ビルド可能
+test-*-lib,DELETE_CANDIDATE,99_削除候補,即時可,テスト生成物
+秘密鍵・トークン入りファイル,DELETE_CANDIDATE,99_削除候補,即時,通常Driveへ保存禁止

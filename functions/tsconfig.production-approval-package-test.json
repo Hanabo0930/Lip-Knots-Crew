@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": { "outDir": "test-production-approval-package-lib", "rootDir": ".", "types": ["node"] },
+  "include": [
+    "src/production-release-core.ts",
+    "src/production-approval-package-core.ts",
+    "test/production-approval-package-core.test.ts"
+  ]
+}

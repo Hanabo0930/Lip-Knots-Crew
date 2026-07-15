@@ -1,0 +1,12 @@
+{
+  "spreadsheetId": "YOUR_SHIFT_SPREADSHEET_ID",
+  "idColumn": "ZZ",
+  "columns": {
+    "staffName": "B",
+    "temperature": "G",
+    "arrivalTime": "H",
+    "cancelled": "BC",
+    "cancellationReason": "BD"
+  },
+  "note": "列挿入前のサンプルです。安全監査後に確定してください。"
+}

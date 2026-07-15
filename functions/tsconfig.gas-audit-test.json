@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v13-tests.json",
+  "compilerOptions": {
+    "outDir": "test-gas-audit-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/gas-audit-core.ts",
+    "test/gas-audit-core.test.ts"
+  ]
+}

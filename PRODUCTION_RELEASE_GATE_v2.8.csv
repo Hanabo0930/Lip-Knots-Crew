@@ -1,0 +1,23 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V28_TEST_EXECUTION.txt,自動検証,2026-07-14
+2,Build,管理画面本番ビルド,○,合格,V28_TEST_EXECUTION.txt,自動検証,2026-07-14
+3,Build,Functions本番ビルド,○,合格,V28_TEST_EXECUTION.txt,自動検証,2026-07-14
+4,Performance,PWAバンドル容量検査,○,合格,V28_TEST_EXECUTION.txt,自動検証,2026-07-14
+5,Safety,staging関連53ケース,○,合格,V28_TEST_EXECUTION.txt,自動検証,2026-07-14
+6,Pilot,配布・監視判定コア10件,○,合格,V28_TEST_EXECUTION.txt,自動検証,2026-07-14
+7,Expansion,移行承認ゲート13件,○,合格,V28_TEST_EXECUTION.txt,自動検証,2026-07-14
+8,Test,コア回帰テスト32本,○,合格,V28_TEST_EXECUTION.txt,自動検証,2026-07-14
+9,Security,high・critical依存脆弱性0件,○,合格,V28_TEST_EXECUTION.txt,自動検証,2026-07-14
+10,Staging,実値checkpoint・デプロイ・Go判定,○,未実施,実Firebase設定待ち,,
+11,Pilot,実スタッフ3～5名への配布成功,○,未実施,実staging待ち,,
+12,Monitoring,5分監視・PAUSE・復旧Push実疎通,○,未実施,実staging待ち,,
+13,Regression,請求・給与差額0円,○,未実施,検証スプシ待ち,,
+14,Regression,PDF・メール差異0件,○,未実施,検証スプシ待ち,,
+15,Expansion,結果提出者とは別の管理者による承認,○,未実施,実パイロット待ち,,
+16,Expansion,承認後も自動配布されないこと,○,未実施,実パイロット待ち,,
+17,Expansion,30～50名段階配布・停止制御,○,未実施,次版実装待ち,,
+18,GAS,GAS重大・高リスク0件,○,未実施,実GAS全コード待ち,,
+19,Backup,復元試験成功,○,未実施,,,
+20,Monitoring,本番Cloud Monitoring設定,○,未実施,,,
+21,Migration,本番データ移行,○,未実施,,,
+22,Approval,社長の公開承認,○,未実施,,,

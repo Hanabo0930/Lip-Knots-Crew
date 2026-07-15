@@ -1,0 +1,14 @@
+No,区分,対象,保持,理由
+1,Source,functions/src/production-evidence-monitor-core.ts,○,8週承認遅延・再割当効果・担当負荷分析ロジック
+2,Source,functions/src/production-evidence.ts,○,週次証跡同期・分析結果の安全な公開
+3,Source,apps/admin/src/ProductionAcceptanceRollbackConsole.tsx,○,承認運用分析・担当負荷ヒートマップ画面
+4,Security,firestore.rules,○,企業分離・サブコレクション直接書込拒否
+5,Test,functions/test/production-evidence-monitor-core.test.ts,○,161ケース
+6,Test,scripts/test-production-evidence-security.mjs,○,119ケース
+7,Docs,docs/PRODUCTION_RESPONSIBILITY_ANALYTICS_V50.md,○,本番分析運用手順
+8,Evidence,V50_TEST_EXECUTION.txt,○,検証結果
+9,Evidence,PRODUCTION_RELEASE_GATE_v5.0.csv,○,公開ゲート
+10,Evidence,FILE_CHECKSUMS_SHA256_v5.0.csv,○,配布完全性
+11,Runtime,node_modules,×,再生成可能・ZIP除外
+12,Secrets,config・.env.production・Service Account JSON,×,秘密値・実値のZIP混入防止
+13,Runtime,release-evidence・rollback-sources,×,本番証跡・既知正常bundleのZIP混入防止

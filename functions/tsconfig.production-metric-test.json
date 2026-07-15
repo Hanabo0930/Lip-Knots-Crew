@@ -1,0 +1,5 @@
+{
+  "extends":"./tsconfig.v16-tests.json",
+  "compilerOptions":{"outDir":"test-production-metric-lib","rootDir":".","noEmit":false,"types":["node"]},
+  "include":["src/production-telemetry-core.ts","src/production-metric-core.ts","test/production-metric-core.test.ts"]
+}

@@ -1,0 +1,12 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v3.8 承認付き本番デプロイ指揮盤ZIP,KEEP_CURRENT,/アプリ化,,実環境移行と次回開発の基点
+v0.1〜v3.7 ZIP,ARCHIVE,旧バージョン,,復旧・比較
+config/production-setup.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Project・運用設定
+config/production-deploy.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Project・deploy scope・URL
+config/production-deploy-approval.json,DO_NOT_PACKAGE,承認証跡保管先,監査規程に従う,承認者・期限・変更票・復旧元
+release-evidence/production,DO_NOT_PACKAGE,改ざん防止証跡保管先,監査規程に従う,計画・結果・rollback plan
+config/production-telemetry.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Project・13 Metric type
+apps/*/.env.production・functions/.env.production,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Firebase接続・承認allowlist
+.production-setup-backups,KEEP_LOCAL,暗号化ローカル保管,正常稼働確定後に規程で削除,置換前設定の復旧
+秘密鍵・Service Account JSON・Access Token,DO_NOT_STORE,Secret ManagerまたはGoogle管理,規程に従う,承認・証跡JSONへの混入禁止
+node_modules・test-*-lib,DELETE_CANDIDATE,ZIP対象外,即時可,再生成可能

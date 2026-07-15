@@ -1,0 +1,13 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v3.3 本番切替指揮盤ZIP,KEEP_CURRENT,01_現行最新版,,実環境引渡しと次回開発の基点
+v0.1〜v3.2 ZIP,ARCHIVE,02_旧バージョン,,復旧・比較
+署名付き承認JSON,KEEP_EVIDENCE,05_監査・移行,,公開判断と対象Projectの証拠
+productionApprovalPackageExports・productionApprovalPackages,KEEP_EVIDENCE,Firestore保持,,発行・受理・使用状態の監査
+productionCutoverRuns・productionCutoverControls,KEEP_EVIDENCE,Firestore保持,,当日判断・状態遷移・完了の監査
+productionCutoverObservations,KEEP_EVIDENCE,Firestore保持,,本番観測値・証跡・自動判定の監査
+productionReleaseAuthorizations・productionEmergencyEvents・auditLogs,KEEP_EVIDENCE,Firestore保持,,有効化・切戻し・職務分離の証拠
+Ed25519公開鍵,KEEP_CONFIG,production Secret Manager,鍵更新まで,署名検証
+Ed25519秘密鍵,LOCAL_SECRET_ONLY,staging Secret Manager・隔離鍵保管,鍵更新後に規程どおり,署名権限
+秘密鍵を含む生成ファイル,DELETE_CANDIDATE,通常Drive保存禁止,Secret登録・隔離保管後,漏えい防止
+リハーサルplan・metrics・gate fingerprint,KEEP_EVIDENCE,05_監査・移行,,復元・移行・切戻し判断の証拠
+node_modules・test-*-lib,DELETE_CANDIDATE,99_削除候補,即時可,再生成可能

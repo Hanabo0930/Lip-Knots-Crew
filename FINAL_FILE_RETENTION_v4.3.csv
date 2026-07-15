@@ -1,0 +1,11 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v4.3 本番SLAエスカレーション引継ぎ指揮盤ZIP,KEEP_CURRENT,/アプリ化,,実環境移行と次回開発の基点
+v0.1〜v4.2 ZIP,ARCHIVE,旧バージョン,,復旧・比較
+config/production-setup.json・production-*.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Project・管理者allowlist
+release-evidence/production,DO_NOT_PACKAGE,改ざん防止証跡保管先,監査規程に従う,デプロイ・受入・rollback・復旧
+productionReleaseEvidence/alerts,KEEP_SERVER,Firestore企業分離領域,監査規程に従う,SLA・LEVEL・担当・引継ぎ・解決履歴
+productionReleaseEvidence/events,KEEP_SERVER,Firestore企業分離領域,監査規程に従う,昇格・通知・引継ぎ・受領監査
+rollback-sources,DO_NOT_PACKAGE,改ざん防止保管先,後継正常版固定後に規程で更新,既知正常版とSHA manifest
+apps/*/.env.production・functions/.env.production,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Firebase接続・ADMIN_EMAILS
+秘密鍵・Service Account JSON・Access Token,DO_NOT_STORE,Secret ManagerまたはGoogle管理,規程に従う,混入禁止
+node_modules・test-*-lib,DELETE_CANDIDATE,ZIP対象外,即時可,再生成可能

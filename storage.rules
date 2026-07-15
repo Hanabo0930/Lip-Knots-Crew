@@ -1,0 +1,28 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function validType() {
+      return request.resource.contentType.matches('image/.*') ||
+             request.resource.contentType == 'application/pdf';
+    }
+    function validSize() {
+      return request.resource.size <= 50 * 1024 * 1024;
+    }
+
+    match /staging/{companyId}/{uid}/{submissionId}/{fileId}/{fileName} {
+      allow create: if signedIn() &&
+        request.auth.uid == uid &&
+        request.auth.token.companyId == companyId &&
+        validType() &&
+        validSize();
+      allow read, update, delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

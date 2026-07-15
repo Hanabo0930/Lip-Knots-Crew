@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": {
+    "outDir": "test-staged-rollout-lib",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": [
+    "src/staged-rollout-core.ts",
+    "test/staged-rollout-core.test.ts"
+  ]
+}

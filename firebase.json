@@ -1,0 +1,59 @@
+{
+  "functions": {
+    "source": "functions",
+    "runtime": "nodejs22",
+    "predeploy": [
+      "npm run build -w @lkc/functions"
+    ]
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "hosting": [
+    {
+      "target": "staff",
+      "public": "apps/staff/dist",
+      "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+      "headers": [{
+        "source": "**",
+        "headers": [
+          {"key": "X-Content-Type-Options", "value": "nosniff"},
+          {"key": "X-Frame-Options", "value": "DENY"},
+          {"key": "Referrer-Policy", "value": "no-referrer"},
+          {"key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()"},
+          {"key": "Strict-Transport-Security", "value": "max-age=31536000; includeSubDomains"}
+        ]
+      }],
+      "rewrites": [{"source": "**", "destination": "/index.html"}]
+    },
+    {
+      "target": "admin",
+      "public": "apps/admin/dist",
+      "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+      "headers": [{
+        "source": "**",
+        "headers": [
+          {"key": "X-Content-Type-Options", "value": "nosniff"},
+          {"key": "X-Frame-Options", "value": "DENY"},
+          {"key": "Referrer-Policy", "value": "no-referrer"},
+          {"key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()"},
+          {"key": "Strict-Transport-Security", "value": "max-age=31536000; includeSubDomains"}
+        ]
+      }],
+      "rewrites": [{"source": "**", "destination": "/index.html"}]
+    }
+  ],
+  "emulators": {
+    "auth": {"port": 9099},
+    "functions": {"port": 5001},
+    "firestore": {"port": 8080},
+    "storage": {"port": 9199},
+    "hosting": {"port": 5000},
+    "ui": {"enabled": true, "port": 4000},
+    "singleProjectMode": true
+  }
+}

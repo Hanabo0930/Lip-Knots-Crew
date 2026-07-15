@@ -1,0 +1,5 @@
+category,path,retention,note
+current_release,Lip_Knots_Crew_未達原因改善再実行統制盤_v5.6.zip,keep,/アプリ化の現行版
+source,GitHub Hanabo0930/Lip-Knots-Crew main,keep,履歴付き正本
+secrets,.env.production and service account JSON,never,ZIPとGitの両方へ保存禁止
+generated,node_modules config release-evidence rollback-sources,exclude,再生成または運用証跡

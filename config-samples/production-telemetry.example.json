@@ -1,0 +1,19 @@
+{
+  "projectId": "lip-knots-production",
+  "enabled": false,
+  "metrics": {
+    "authenticationAttempts": "custom.googleapis.com/lip_knots/authentication_attempts",
+    "authenticationFailures": "custom.googleapis.com/lip_knots/authentication_failures",
+    "callableRequests": "custom.googleapis.com/lip_knots/callable_requests",
+    "callableFailures": "custom.googleapis.com/lip_knots/callable_failures",
+    "sheetWriteAttempts": "custom.googleapis.com/lip_knots/sheet_write_attempts",
+    "sheetWriteFailures": "custom.googleapis.com/lip_knots/sheet_write_failures",
+    "notificationAttempts": "custom.googleapis.com/lip_knots/notification_attempts",
+    "notificationFailures": "custom.googleapis.com/lip_knots/notification_failures",
+    "p95LatencyMs": "custom.googleapis.com/lip_knots/p95_latency_ms",
+    "queueOldestAgeMinutes": "custom.googleapis.com/lip_knots/queue_oldest_age_minutes",
+    "dataMismatchCount": "custom.googleapis.com/lip_knots/data_mismatch_count",
+    "criticalOutageCount": "custom.googleapis.com/lip_knots/critical_outage_count",
+    "monitoringProbeFailures": "custom.googleapis.com/lip_knots/monitoring_probe_failures"
+  }
+}

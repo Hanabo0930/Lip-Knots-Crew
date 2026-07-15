@@ -1,0 +1,21 @@
+{
+  "projects": {
+    "development": "YOUR_DEV_PROJECT",
+    "staging": "YOUR_STAGING_PROJECT",
+    "production": "YOUR_PRODUCTION_PROJECT"
+  },
+  "targets": {
+    "YOUR_STAGING_PROJECT": {
+      "hosting": {
+        "staff": ["YOUR_STAGING_STAFF_HOSTING_SITE"],
+        "admin": ["YOUR_STAGING_ADMIN_HOSTING_SITE"]
+      }
+    },
+    "YOUR_PRODUCTION_PROJECT": {
+      "hosting": {
+        "staff": ["YOUR_PRODUCTION_STAFF_HOSTING_SITE"],
+        "admin": ["YOUR_PRODUCTION_ADMIN_HOSTING_SITE"]
+      }
+    }
+  }
+}

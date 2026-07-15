@@ -1,0 +1,11 @@
+{
+  "environment": "staging",
+  "firebaseProjectId": "YOUR_STAGING_PROJECT",
+  "appBaseUrl": "https://staging.example.com",
+  "spreadsheetId": "YOUR_VERIFIED_COPY_SPREADSHEET_ID",
+  "stripeMode": "test",
+  "emailMode": "capture",
+  "pushMode": "test",
+  "backupBucket": "YOUR_STAGING_BACKUP_BUCKET",
+  "errorReportingEnabled": true
+}

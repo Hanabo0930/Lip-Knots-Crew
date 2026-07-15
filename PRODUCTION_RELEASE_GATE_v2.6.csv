@@ -1,0 +1,22 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V26_TEST_EXECUTION.txt,自動検証,2026-07-14
+2,Build,管理画面本番ビルド,○,合格,V26_TEST_EXECUTION.txt,自動検証,2026-07-14
+3,Build,Functions本番ビルド,○,合格,V26_TEST_EXECUTION.txt,自動検証,2026-07-14
+4,Performance,PWAバンドル容量検査,○,合格,V26_TEST_EXECUTION.txt,自動検証,2026-07-14
+5,Safety,staging危険設定拒否テスト5件,○,合格,V26_TEST_EXECUTION.txt,自動検証,2026-07-14
+6,Automation,staging自動構築テスト13件,○,合格,V26_TEST_EXECUTION.txt,自動検証,2026-07-14
+7,Deployment,デプロイ事前診断拒否テスト6件,○,合格,V26_TEST_EXECUTION.txt,自動検証,2026-07-14
+8,Evidence,checkpoint・rollback・smoke証跡テスト15件,○,合格,V26_TEST_EXECUTION.txt,自動検証,2026-07-14
+9,Smoke,Go/No-Go判定テスト14件・remote検査6項目,○,合格,V26_TEST_EXECUTION.txt,自動検証,2026-07-14
+10,Test,コア回帰テスト31本,○,合格,V26_TEST_EXECUTION.txt,自動検証,2026-07-14
+11,Security,重大セキュリティ指摘0件,○,一部合格,high・critical依存脆弱性0件／実環境監査待ち,,
+12,Staging,実値によるcheckpoint・デプロイ・結果記録,○,未実施,実Firebase設定待ち,,
+13,Staging,実URL remote smoke・Go判定,○,未実施,実Firebaseデプロイ待ち,,
+14,GAS,GAS重大・高リスク0件,○,未実施,実GAS全コード待ち,,
+15,Regression,請求・給与差額0円,○,未実施,検証スプシ待ち,,
+16,Regression,PDF・メール差異0件,○,未実施,検証スプシ待ち,,
+17,Pilot,3～5名パイロット完了,○,未実施,,,
+18,Backup,復元試験成功,○,未実施,,,
+19,Monitoring,監視・通知確認,○,未実施,,,
+20,Migration,本番データ移行,○,未実施,,,
+21,Approval,社長の公開承認,○,未実施,,,

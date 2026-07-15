@@ -1,0 +1,188 @@
+{
+  "enabled": false,
+  "spreadsheetId": "YOUR_SHIFT_SPREADSHEET_ID",
+  "idColumn": "ZZ",
+  "allowVerifiedFallbackRow": false,
+  "identityColumns": {
+    "workDate": "A",
+    "clientName": "J",
+    "storeName": "K",
+    "workTime": "O"
+  },
+  "valueInputOption": "USER_ENTERED",
+  "maxAttempts": 5,
+  "columns": {
+    "staffName": "B",
+    "temperature": "G",
+    "arrivalTime": "H",
+    "cancelled": "BC",
+    "cancellationReason": "BD",
+    "netPrint1": "T",
+    "netPrint2": "U",
+    "netPrint3": "V",
+    "salesFloorSubmitted": "BE",
+    "reportSubmitted": "BF",
+    "transportation": "AK",
+    "purchase8": "AL",
+    "purchase10": "AM",
+    "netPrintCost": "AO",
+    "postageCost": "AP",
+    "cancellationReasonCategory": "BG",
+    "cancellationFinancialTreatment": "BH",
+    "clientName": "J",
+    "storeName": "K",
+    "makerName": "L",
+    "menuName": "M",
+    "entryTime": "N",
+    "workTime": "O",
+    "subcontractorName": "P",
+    "invoiceBase": "S",
+    "invoiceBusinessAllowance": "T",
+    "invoiceRemoteAllowance": "U",
+    "invoiceUrgentAllowance": "V",
+    "invoiceOutsideAllowance": "W",
+    "invoiceBusyAllowance": "X",
+    "invoiceMedicalCheck": "Y",
+    "invoiceOther": "Z",
+    "staffBasePay": "AB",
+    "staffBusinessAllowance": "AC",
+    "staffRemoteAllowance": "AD",
+    "staffUrgentAllowance": "AE",
+    "staffOutsideAllowance": "AF",
+    "staffBusyAllowance": "AG",
+    "staffMedicalCheck": "AH",
+    "staffOther": "AI",
+    "workDate": "A",
+    "caseId": "ZZ"
+  },
+  "operations": {
+    "job.assign": {
+      "values": [
+        "staffName"
+      ]
+    },
+    "precontact.submit": {
+      "values": [
+        "temperature",
+        "arrivalTime"
+      ]
+    },
+    "job.cancel": {
+      "values": [
+        "cancelled",
+        "cancellationReason"
+      ]
+    },
+    "netprint.update": {
+      "values": [
+        "netPrint1",
+        "netPrint2",
+        "netPrint3"
+      ],
+      "styles": [
+        "netPrint1",
+        "netPrint2",
+        "netPrint3"
+      ]
+    },
+    "netprint.printed": {
+      "values": [],
+      "styles": [
+        "netPrint1",
+        "netPrint2",
+        "netPrint3"
+      ]
+    },
+    "submission.sales_floor": {
+      "values": [
+        "salesFloorSubmitted"
+      ]
+    },
+    "submission.report": {
+      "values": [
+        "reportSubmitted"
+      ]
+    },
+    "expense.review": {
+      "values": [
+        "transportation",
+        "purchase8",
+        "purchase10",
+        "netPrintCost",
+        "postageCost"
+      ]
+    },
+    "job.cancel.v2": {
+      "values": [
+        "cancelled",
+        "cancellationReason",
+        "cancellationReasonCategory",
+        "cancellationFinancialTreatment"
+      ]
+    },
+    "job.restore": {
+      "values": [
+        "cancelled",
+        "cancellationReason",
+        "cancellationReasonCategory",
+        "cancellationFinancialTreatment"
+      ]
+    },
+    "job.admin_edit": {
+      "values": [
+        "staffName",
+        "clientName",
+        "storeName",
+        "makerName",
+        "menuName",
+        "entryTime",
+        "workTime",
+        "subcontractorName",
+        "invoiceBase",
+        "invoiceBusinessAllowance",
+        "invoiceRemoteAllowance",
+        "invoiceUrgentAllowance",
+        "invoiceOutsideAllowance",
+        "invoiceBusyAllowance",
+        "invoiceMedicalCheck",
+        "invoiceOther",
+        "staffBasePay",
+        "staffBusinessAllowance",
+        "staffRemoteAllowance",
+        "staffUrgentAllowance",
+        "staffOutsideAllowance",
+        "staffBusyAllowance",
+        "staffMedicalCheck",
+        "staffOther"
+      ]
+    }
+  },
+  "note": "安全監査・GAS修正・検証コピーの突合が終わるまでenabledをtrueにしないでください。v0.9ではキャンセル区分・金銭処理列をBG/BHの追加候補として定義しています。 v1.0では管理画面編集用の入力列を追加しました。列挿入後は列記号を監査結果に合わせて必ず更新してください。 v1.1では月別タブへの新規行追加を追加しました。 rowCreation.enabledは検証コピーで数式・入力規則・条件付き書式を確認するまでfalseのままにしてください。 v1.2では前月タブ複製による新月作成を追加。 verifiedSpreadsheetIdには検証コピーのIDだけを設定し、 実スプシは本番移行承認まで空欄のままにしてください。",
+  "rowCreation": {
+    "enabled": false,
+    "headerRow": 1,
+    "dataStartRow": 2,
+    "maxRows": 10000,
+    "rowEndColumn": "ZZ",
+    "formulaColumns": [
+      "AA",
+      "AJ",
+      "AR",
+      "BB"
+    ],
+    "requiredValidationColumns": [],
+    "copyFormat": true,
+    "copyFormula": true,
+    "copyDataValidation": true,
+    "cloneConditionalFormatting": true,
+    "rollbackOnVerificationFailure": true
+  },
+  "monthCreation": {
+    "enabled": false,
+    "verifiedSpreadsheetId": "",
+    "maxRows": 10000,
+    "preserveFormatting": true,
+    "preserveProtectedRanges": true,
+    "rollbackOnVerificationFailure": true
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "appEnvironment": "production",
+  "projectId": "lip-knots-production",
+  "expectedNodeMajor": 22,
+  "deployScope": [
+    "functions",
+    "firestore",
+    "storage",
+    "hosting:staff",
+    "hosting:admin"
+  ],
+  "staffAppUrl": "https://lip-knots-staff.web.app",
+  "adminAppUrl": "https://lip-knots-admin.web.app",
+  "requiredIamRoles": [
+    "roles/monitoring.viewer",
+    "roles/monitoring.metricWriter"
+  ],
+  "telemetry": {
+    "metricCount": 13,
+    "tenantLabel": "company_id",
+    "publisherMinuteOffset": 1,
+    "collectorMinuteOffset": 3
+  }
+}

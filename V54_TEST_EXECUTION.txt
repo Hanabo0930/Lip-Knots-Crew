@@ -1,0 +1,23 @@
+Lip Knots Crew v5.4 test execution
+Date: 2026-07-15 JST
+Environment: Node 24.14.0 verification / Node 22 production target
+
+PASS npm run verify (exit 0)
+PASS staff, admin, functions production builds
+PASS bundle size: staff entry 20.1KB / max 219.8KB / 13 chunks
+PASS bundle size: admin entry 149.9KB / max 219.0KB / 14 chunks
+PASS decision control lazy chunk 88.85KB
+PASS one-click demo preview 16 cases
+PASS production setup 27 cases / 10 files
+PASS production deploy readiness 16 cases
+PASS production deploy orchestration 39 cases
+PASS production acceptance 52 cases
+PASS known-good rollback bundle 14 cases
+PASS production rollback command 53 cases
+PASS production evidence core 34 cases
+PASS production evidence decision/SLA monitor 218 cases
+PASS production evidence sync 15 cases
+PASS production evidence permission/security 160 cases
+PASS all core regression suites
+PASS npm audit high/critical: 0
+NOTICE npm audit moderate: 12, upstream Firebase dependency, no fix available

@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v20-tests.json",
+  "compilerOptions": {
+    "outDir": "test-final-retention-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/final-retention-core.ts",
+    "test/final-retention-core.test.ts"
+  ]
+}

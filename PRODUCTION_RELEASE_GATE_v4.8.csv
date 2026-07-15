@@ -1,0 +1,17 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+2,Build,管理画面本番ビルド,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+3,Build,Functions本番ビルド,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+4,SLA,SLA・期限超過予測・自動割当・責任者承認135件,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+5,Security,権限・責任者本人承認・企業分離105件,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+6,Deploy,承認付き本番デプロイ39件,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+7,Acceptance,本番9項目・3回受入52件,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+8,Rollback,既知正常bundle14件・rollback53件,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+9,Demo,ワンクリック配信16件,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+10,Regression,全コア回帰,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+11,Security,high・critical依存脆弱性0件,○,合格,V48_TEST_EXECUTION.txt,自動検証,2026-07-15
+12,Deploy,実Firebase productionデプロイ,○,未実施,deployment-result.json,,
+13,Assignment,実配信先への責任者自動割当,○,未実施,productionReleaseEvidence/weeklyReports,,
+14,Approval,実責任者本人による引受承認,○,未実施,productionReleaseEvidence/events,,
+15,Prediction,実データでの期限超過予測,○,未実施,productionReleaseEvidence/weeklyReports,,
+16,Rollback,失敗時の別承認rollback・復旧受入,○,未実施,rollback-result.json,,

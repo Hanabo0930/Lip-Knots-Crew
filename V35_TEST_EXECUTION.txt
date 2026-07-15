@@ -1,0 +1,35 @@
+Lip Knots Crew v3.5 verification evidence
+Executed: 2026-07-14 Asia/Tokyo
+
+Fresh dependency install
+- npm ci --ignore-scripts --no-audit --no-fund: PASS (663 packages)
+- package target: Node 22
+- verification runner: Node 24.14.0 (engine warning only)
+
+npm run verify: PASS
+- staff production PWA build: PASS
+- admin production PWA build: PASS
+- Functions TypeScript build: PASS
+- bundle size gate: PASS
+  - staff entry 20.1KB / largest 219.8KB / 13 chunks
+  - admin entry 138.3KB / largest 219.0KB / 13 chunks
+- one-click localhost demo: PASS (16 cases, launcher/staff/admin HTTP 200)
+- staging preflight: PASS (5 rejection cases)
+- staging setup automation: PASS (13 cases)
+- deployment readiness: PASS (6 rejection cases)
+- checkpoint and rollback: PASS (15 cases)
+- staging smoke: PASS (14 cases, 6 remote checks)
+- production rehearsal automation: PASS (12 cases)
+- production SLO and incident policy: PASS (45 cases)
+- Cloud Monitoring telemetry ingestion: PASS (21 cases)
+- Functions core regression suites: PASS (39 suites)
+- npm audit --omit=dev --audit-level=high: PASS
+  - high: 0
+  - critical: 0
+  - moderate: 12 (transitive uuid advisory, no fix available)
+
+External operations not performed
+- Firebase production deploy
+- Cloud Monitoring API/IAM/13 custom metric provisioning
+- real 5-minute ingestion and incident notification drill
+- staging to production signed approval and cutover

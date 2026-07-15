@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": {
+    "outDir": "test-pilot-rollout-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/pilot-rollout-core.ts",
+    "test/pilot-rollout-core.test.ts"
+  ]
+}

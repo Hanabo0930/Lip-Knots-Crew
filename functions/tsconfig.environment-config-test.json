@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v20-tests.json",
+  "compilerOptions": {
+    "outDir": "test-environment-config-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/environment-config-core.ts",
+    "test/environment-config-core.test.ts"
+  ]
+}

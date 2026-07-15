@@ -1,0 +1,15 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v3.0 本番公開安全制御ZIP,KEEP_CURRENT,01_現行最新版,,本番公開リハーサルと次回開発の基点
+v0.1〜v2.9 ZIP,ARCHIVE,02_旧バージョン,,復旧・比較
+公開審査・gate fingerprint・社長承認証跡,KEEP_EVIDENCE,05_監査・移行,,公開判断と二者実行の証拠
+本番有効化authorization・generation,KEEP_EVIDENCE,05_監査・移行,,本番開始時点の証拠
+全体停止イベント・理由・監査ログ,KEEP_EVIDENCE,05_監査・移行,,事故対応と復旧判断の証拠
+3wave計画・配布batch・監視run・alert,KEEP_EVIDENCE,05_監査・移行,,公開ゲートの入力証拠
+バックアップ・復元演習・GAS監査・smoke,KEEP_EVIDENCE,05_監査・移行,,必須条件の証拠
+実環境設定・秘密バックアップ,LOCAL_SECRET_ONLY,通常Drive保存禁止,利用終了後,秘密値・実URLを含む
+rollback復元フォルダ,DELETE_CANDIDATE,99_削除候補,rollback確認後,checkpointから再生成可能
+展開済み重複フォルダ,DELETE_CANDIDATE,99_削除候補,本番・復元確認後,ZIPから再生成可能
+node_modules,DELETE_CANDIDATE,99_削除候補,即時可,npm ciで再生成
+test-*-lib,DELETE_CANDIDATE,99_削除候補,即時可,テスト生成物
+秘密鍵・トークン入りファイル,DELETE_CANDIDATE,99_削除候補,即時,通常Driveへ保存禁止
+

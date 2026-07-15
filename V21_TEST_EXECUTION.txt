@@ -1,0 +1,21 @@
+Lip Knots Crew v2.1 verification
+Date: 2026-07-13 JST
+
+PASS npm ci (663 packages)
+PASS staff PWA production build
+PASS admin production build
+PASS Cloud Functions TypeScript build
+PASS 31 core regression tests
+PASS npm audit threshold: high (0 high / 0 critical)
+
+Known warning:
+- 9 moderate findings in transitive uuid dependencies.
+- No direct use of the affected UUID buffer-input API in this application.
+- Do not apply npm audit fix --force because it proposes a breaking Firebase Admin downgrade.
+
+External verification still required:
+- staging Firebase deployment
+- actual GAS and spreadsheet regression
+- 3-5 person pilot
+- backup restore
+- production monitoring, secrets, DNS and approval

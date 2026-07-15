@@ -1,0 +1,57 @@
+Lip Knots Crew v3.4 verification
+Date: 2026-07-14 JST
+Runner: Node 24.14.0 / deployment target: Node 22
+
+PASS npm ci from package-lock (663 packages)
+PASS staff PWA production build
+PASS admin production build
+PASS Cloud Functions TypeScript build
+PASS bundle size gate
+  staff entry 20.1KiB / largest 219.8KiB / 13 chunks
+  admin entry 126.1KiB / largest 219.0KiB / 13 chunks
+PASS staging unsafe configuration self-test (5 rejection cases)
+PASS staging setup automation tests (13 cases / 6 generated files)
+PASS deployment readiness self-test (6 rejection cases)
+PASS release checkpoint, rollback and smoke evidence tests (15 cases)
+PASS staging smoke and Go/No-Go tests (14 cases / 6 remote checks)
+PASS pilot rollout and monitoring core tests (10 cases)
+PASS pilot expansion approval gate tests (13 cases)
+PASS staged 30-50 rollout gate tests (16 cases)
+PASS production release approval gate tests (17 cases)
+PASS isolated production rehearsal command generation tests (12 cases)
+PASS restore, migration and rollback rehearsal gate tests (20 cases)
+PASS Ed25519 signed approval package tests (21 cases)
+PASS production cutover command center tests (42 cases)
+PASS production SLO and incident policy tests (45 cases)
+PASS 38 core regression tests
+PASS secret scan (test fixture only)
+PASS JSON validation
+PASS npm audit threshold: high (0 high / 0 critical)
+
+Production SLO and incident coverage:
+- 1h, 6h, 24h and 30d rolling windows
+- 99.9 percent availability error budget
+- 14.4x, 6x and 3x burn-rate thresholds
+- auth, callable, sheet and notification success objectives
+- latency, queue, mismatch, outage, probe and stale-monitoring signals
+- SEV1, SEV2 and SEV3 selection
+- stable alert fingerprint and raw audit fingerprint
+- incident open, update, escalation and acknowledgement
+- new-observation-only recovery streak and recovery pending
+- guarded resolution with cause, recovery, prevention and evidence
+
+Known warning:
+- Verification runner is Node 24.14.0; deployment and CI target Node 22.
+- vite-plugin-pwa 1.3.0 emits its own inlineDynamicImports deprecation warning.
+- 8 moderate findings remain from a transitive uuid advisory; no forced Firebase Admin breaking update applied.
+
+External verification still required:
+- real staging v3.4 deployment and live Go decision
+- real 3-5 person distribution and 30-50 person 3-wave rollout
+- actual GAS and spreadsheet regression
+- isolated restore, migration dry-run and rollback RTO/RPO measurement
+- Ed25519 key generation and separated Secret Manager registration
+- actual signed approval, T plus/minus five-minute enablement and T+24h completion
+- real Cloud Monitoring values and SLO calculation comparison
+- SEV1-3 creation, dedupe, escalation, Push and acknowledgement drill
+- three new healthy observations and evidence-backed incident resolution

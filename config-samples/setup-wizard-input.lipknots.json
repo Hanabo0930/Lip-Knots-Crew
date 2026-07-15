@@ -1,0 +1,13 @@
+{
+  "shiftSpreadsheet": "https://docs.google.com/spreadsheets/d/YOUR_SHIFT_SPREADSHEET_ID/edit",
+  "staffSpreadsheet": "https://docs.google.com/spreadsheets/d/YOUR_STAFF_SPREADSHEET_ID/edit",
+  "shiftSampleSheet": "2026.7",
+  "staffActiveSheets": [
+    "マスタ",
+    "東北"
+  ],
+  "staffExcludedSheets": [
+    "抹消"
+  ],
+  "preferredIdColumn": "ZZ"
+}

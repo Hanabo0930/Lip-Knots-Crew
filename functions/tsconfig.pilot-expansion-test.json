@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": {
+    "outDir": "test-pilot-expansion-lib",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": [
+    "src/pilot-expansion-core.ts",
+    "test/pilot-expansion-core.test.ts"
+  ]
+}

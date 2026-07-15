@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "v5.6.0",
+  "projectId": "lip-knots-production",
+  "requiredPasses": 3,
+  "minimumSpacingMinutes": 5,
+  "acceptanceDeadlineMinutes": 30,
+  "requiredFunctions": [
+    "loginGateway",
+    "driveFilePreview",
+    "getProductionControlStatus",
+    "getProductionDeploymentReadiness",
+    "getProductionSloDashboard",
+    "getProductionTelemetryStatus",
+    "getProductionReleaseEvidenceStatus",
+    "importProductionReleaseEvidence",
+    "acknowledgeProductionEvidenceAlert",
+    "startProductionEvidenceAlertResponse",
+    "handoffProductionEvidenceAlertResponse",
+    "saveProductionEvidenceAfterActionReview",
+    "acknowledgeProductionEvidenceWeeklyReport",
+    "acknowledgeProductionEvidenceWeeklyReportAsProxy",
+    "acknowledgeProductionEvidenceExecutiveReport",
+    "acknowledgeProductionEvidenceExecutiveReportAsProxy",
+    "approveProductionEvidenceWeeklyReportResponsibility",
+    "updateProductionEvidenceResponsibilityAlert",
+    "updateProductionEvidenceExecutiveDecisionTask",
+    "recordProductionEvidenceExecutiveDecisionOutcome",
+    "createProductionEvidenceExecutiveDecisionRecoveryPlan",
+    "monitorProductionReleaseEvidence",
+    "runProductionEvidenceOperationsDigest"
+  ],
+  "hostingSites": {
+    "staff": "lip-knots-staff",
+    "admin": "lip-knots-admin"
+  },
+  "urls": {
+    "staffAppUrl": "https://lip-knots-staff.web.app",
+    "adminAppUrl": "https://lip-knots-admin.web.app",
+    "loginGatewayUrl": "https://asia-northeast1-lip-knots-production.cloudfunctions.net/loginGateway",
+    "driveFilePreviewUrl": "https://asia-northeast1-lip-knots-production.cloudfunctions.net/driveFilePreview"
+  }
+}

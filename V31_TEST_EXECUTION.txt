@@ -1,0 +1,43 @@
+Lip Knots Crew v3.1 verification
+Date: 2026-07-14 JST
+Runner: Node 24.14.0 / deployment target: Node 22
+
+PASS npm ci from package-lock
+PASS staff PWA production build
+PASS admin production build
+PASS Cloud Functions TypeScript build
+PASS bundle size gate
+  staff entry 20.1KiB / largest 219.8KiB / 13 chunks
+  admin entry 102.8KiB / largest 219.0KiB / 13 chunks
+PASS staging unsafe configuration self-test (5 rejection cases)
+PASS staging setup automation tests (13 cases / 6 generated files)
+PASS deployment readiness self-test (6 rejection cases)
+PASS release checkpoint, rollback and smoke evidence tests (15 cases)
+PASS staging smoke and Go/No-Go tests (14 cases / 6 remote checks)
+PASS pilot rollout and monitoring core tests (10 cases)
+PASS pilot expansion approval gate tests (13 cases)
+PASS staged 30-50 rollout gate tests (16 cases)
+PASS production release approval gate tests (17 cases)
+PASS isolated production rehearsal command generation tests (12 cases)
+PASS restore, migration and rollback rehearsal gate tests (20 cases)
+PASS 35 core regression tests
+PASS secret scan (test fixture only)
+PASS JSON validation
+PASS npm audit threshold: high (0 high / 0 critical)
+
+Known warning:
+- Verification runner is Node 24.14.0; deployment and CI target Node 22.
+- vite-plugin-pwa 1.3.0 emits its own inlineDynamicImports deprecation warning.
+- 8 moderate findings remain from a transitive uuid advisory; no forced Firebase Admin breaking update applied.
+
+External verification still required:
+- real staging v3.1 deployment and live Go decision
+- real 3-5 person distribution, Push and five-minute monitoring
+- actual outcome evidence and approval by a second administrator
+- real 30-50 person 3-wave rollout, interruption and 24-hour observation
+- actual GAS and spreadsheet regression
+- isolated Firebase project and drill bucket creation with minimum IAM
+- actual Firestore, Storage and Auth backup restore with count and SHA-256 evidence
+- actual migration dry-run and rollback RTO/RPO measurement
+- executive approval and production enablement by a separate administrator
+- global kill switch scope and recovery release rehearsal

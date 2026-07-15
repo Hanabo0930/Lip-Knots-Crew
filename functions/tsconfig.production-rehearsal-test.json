@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": { "outDir": "test-production-rehearsal-lib", "rootDir": ".", "types": ["node"] },
+  "include": ["src/production-rehearsal-core.ts", "test/production-rehearsal-core.test.ts"]
+}

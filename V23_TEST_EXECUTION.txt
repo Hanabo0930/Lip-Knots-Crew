@@ -1,0 +1,26 @@
+Lip Knots Crew v2.3 verification
+Date: 2026-07-13 JST
+Runner: Node 24.14.0 / deployment target: Node 22
+
+PASS staff PWA production build
+PASS admin production build
+PASS Cloud Functions TypeScript build
+PASS bundle size gate
+  staff entry 20.1KiB / largest 219.8KiB / 13 chunks
+  admin entry 69.7KiB / largest 219.0KiB / 13 chunks
+PASS staging example configuration gate
+PASS staging unsafe configuration self-test (5 rejection cases)
+PASS 31 core regression tests
+PASS npm audit threshold: high (0 high / 0 critical)
+
+Known warning:
+- vite-plugin-pwa 1.3.0 emits its own inlineDynamicImports deprecation warning.
+- Application bundles use the current output.codeSplitting API.
+- 9 moderate findings remain in transitive uuid dependencies; no forced Firebase Admin major update applied.
+
+External verification still required:
+- real staging Firebase values and deployment
+- actual GAS and spreadsheet regression
+- 3-5 person pilot
+- backup restore
+- production monitoring, secrets, DNS and approval

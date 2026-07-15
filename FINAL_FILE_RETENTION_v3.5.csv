@@ -1,0 +1,10 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v3.5 監視自動取込・ワンクリックデモZIP,KEEP_CURRENT,/アプリ化,,実環境引渡しと次回開発の基点
+v0.1〜v3.4 ZIP,ARCHIVE,旧バージョン,,復旧・比較
+productionTelemetryConfigs,KEEP_CONFIG,Firestore保持,設定更新後も監査規程に従う,Project・Metric type・接続状態
+productionTelemetryRuns,KEEP_EVIDENCE,Firestore保持,監査規程に従う,5分窓・重複防止・失敗証跡
+productionSloObservations・productionSloHourBuckets,KEEP_EVIDENCE,Firestore保持,監査規程に従う,SLO原観測と30日集計
+productionIncidents・productionIncidentEvents,KEEP_EVIDENCE,Firestore保持,,SEV・対応・復旧・解決の監査
+Application Default Credentials,PLATFORM_MANAGED,Google Cloud IAM,権限廃止まで,ZIPへ鍵JSONを保存しない
+秘密鍵・認証鍵JSON,DO_NOT_STORE,Secret ManagerまたはGoogle管理,規程に従う,漏えい防止
+node_modules・test-*-lib,DELETE_CANDIDATE,ZIP対象外,即時可,再生成可能

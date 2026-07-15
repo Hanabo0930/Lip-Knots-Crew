@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "firebase": {
+    "developmentProjectId": "YOUR_DEV_PROJECT",
+    "stagingProjectId": "YOUR_STAGING_PROJECT",
+    "productionProjectId": "YOUR_PRODUCTION_PROJECT",
+    "stagingStaffHostingSite": "YOUR_STAGING_STAFF_HOSTING_SITE",
+    "stagingAdminHostingSite": "YOUR_STAGING_ADMIN_HOSTING_SITE",
+    "productionStaffHostingSite": "YOUR_PRODUCTION_STAFF_HOSTING_SITE",
+    "productionAdminHostingSite": "YOUR_PRODUCTION_ADMIN_HOSTING_SITE",
+    "webApiKey": "YOUR_STAGING_WEB_API_KEY",
+    "authDomain": "YOUR_STAGING_PROJECT.firebaseapp.com",
+    "storageBucket": "YOUR_STAGING_PROJECT.firebasestorage.app",
+    "messagingSenderId": "YOUR_STAGING_MESSAGING_SENDER_ID",
+    "staffAppId": "YOUR_STAGING_STAFF_APP_ID",
+    "adminAppId": "YOUR_STAGING_ADMIN_APP_ID",
+    "vapidKey": "YOUR_STAGING_PUBLIC_VAPID_KEY",
+    "functionsRegion": "asia-northeast1"
+  },
+  "application": {
+    "appBaseUrl": "https://YOUR_STAGING_STAFF_HOSTING_SITE.web.app",
+    "staffAppUrl": "https://YOUR_STAGING_STAFF_HOSTING_SITE.web.app",
+    "adminAppUrl": "https://YOUR_STAGING_ADMIN_HOSTING_SITE.web.app",
+    "spreadsheetId": "YOUR_VERIFIED_COPY_SPREADSHEET_ID",
+    "backupBucket": "YOUR_STAGING_BACKUP_BUCKET",
+    "defaultCompanyId": "lipknots-staging",
+    "adminEmails": ["info@lipknots.com"],
+    "mailFrom": "staging@lipknots.com"
+  }
+}

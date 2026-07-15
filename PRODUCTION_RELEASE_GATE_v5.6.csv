@@ -1,0 +1,8 @@
+gate,status,evidence
+functions_build,PASS,TypeScript production build
+admin_build,PASS,Vite PWA production build
+outcome_recovery_core,PASS,246 cases
+permission_security,PASS,191 cases
+required_functions,PASS,23
+github_ci,READY,Node 22 npm run verify
+production_deploy,NOT_RUN,manual approval required

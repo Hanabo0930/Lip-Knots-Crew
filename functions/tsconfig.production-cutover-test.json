@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": { "outDir": "test-production-cutover-lib", "rootDir": ".", "types": ["node"] },
+  "include": ["src/production-cutover-core.ts", "test/production-cutover-core.test.ts"]
+}

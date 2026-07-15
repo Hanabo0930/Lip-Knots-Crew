@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": {
+    "outDir": "test-release-artifact-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/release-artifact-core.ts",
+    "test/release-artifact-core.test.ts"
+  ]
+}

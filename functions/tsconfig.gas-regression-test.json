@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v15-tests.json",
+  "compilerOptions": {
+    "outDir": "test-gas-regression-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/gas-regression-core.ts",
+    "test/gas-regression-core.test.ts"
+  ]
+}

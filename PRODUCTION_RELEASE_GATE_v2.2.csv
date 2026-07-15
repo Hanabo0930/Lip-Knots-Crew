@@ -1,0 +1,15 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V22_TEST_EXECUTION.txt,自動検証,2026-07-13
+2,Build,管理画面本番ビルド,○,合格,V22_TEST_EXECUTION.txt,自動検証,2026-07-13
+3,Build,Functions本番ビルド,○,合格,V22_TEST_EXECUTION.txt,自動検証,2026-07-13
+4,Performance,PWAバンドル容量検査,○,合格,V22_TEST_EXECUTION.txt,自動検証,2026-07-13
+5,Test,コア回帰テスト31本,○,合格,V22_TEST_EXECUTION.txt,自動検証,2026-07-13
+6,Security,重大セキュリティ指摘0件,○,一部合格,high・critical依存脆弱性0件／実環境監査待ち,,
+7,GAS,GAS重大・高リスク0件,○,未実施,実GAS全コード待ち,,
+8,Regression,請求・給与差額0円,○,未実施,検証スプシ待ち,,
+9,Regression,PDF・メール差異0件,○,未実施,検証スプシ待ち,,
+10,Pilot,3～5名パイロット完了,○,未実施,,,
+11,Backup,復元試験成功,○,未実施,,,
+12,Monitoring,監視・通知確認,○,未実施,,,
+13,Migration,本番データ移行,○,未実施,,,
+14,Approval,社長の公開承認,○,未実施,,,

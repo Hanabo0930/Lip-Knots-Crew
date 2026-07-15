@@ -1,0 +1,25 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V30_TEST_EXECUTION.txt,自動検証,2026-07-14
+2,Build,管理画面本番ビルド,○,合格,V30_TEST_EXECUTION.txt,自動検証,2026-07-14
+3,Build,Functions本番ビルド,○,合格,V30_TEST_EXECUTION.txt,自動検証,2026-07-14
+4,Safety,staging関連53ケース,○,合格,V30_TEST_EXECUTION.txt,自動検証,2026-07-14
+5,Gate,本番公開ゲート17ケース,○,合格,V30_TEST_EXECUTION.txt,自動検証,2026-07-14
+6,Test,コア回帰テスト34本,○,合格,V30_TEST_EXECUTION.txt,自動検証,2026-07-14
+7,Security,high・critical依存脆弱性0件,○,合格,V30_TEST_EXECUTION.txt,自動検証,2026-07-14
+8,Rollout,30〜50名・全3wave・最終観察完了,○,未実施,実staging待ち,,
+9,Monitoring,重大アラート・監視失敗・招待失敗0件,○,未実施,実staging待ち,,
+10,Backup,本番前バックアップ完了,○,未実施,,, 
+11,Restore,復元演習成功,○,未実施,,, 
+12,GAS,GAS重大・高リスク0件,○,未実施,実GAS全コード待ち,,
+13,Smoke,実staging smoke GO,○,未実施,実Firebase待ち,,
+14,Legal,法務・社内規程確認,○,未実施,,, 
+15,Secrets,本番Secret設定,○,未実施,,, 
+16,Monitoring,本番Cloud Monitoring・通知設定,○,未実施,,, 
+17,Domain,独自ドメイン・TLS確認,○,未実施,,, 
+18,Migration,データ移行計画確認,○,未実施,,, 
+19,Rollback,切戻し計画確認,○,未実施,,, 
+20,Evidence,公開証跡5件以上とfingerprint保存,○,未実施,,, 
+21,Approval,提出者とは別の指定社長アカウント承認,○,未実施,,, 
+22,Enablement,社長承認者とは別の管理者によるproduction最終実行,○,未実施,,, 
+23,Emergency,全体停止・解除不能ロックの権限制御確認,○,未実施,実productionリハーサル待ち,,
+

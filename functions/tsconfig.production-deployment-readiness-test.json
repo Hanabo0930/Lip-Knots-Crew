@@ -1,0 +1,5 @@
+{
+  "extends":"./tsconfig.v16-tests.json",
+  "compilerOptions":{"outDir":"test-production-deployment-readiness-lib","rootDir":".","noEmit":false,"types":["node"]},
+  "include":["src/production-deployment-readiness-core.ts","test/production-deployment-readiness-core.test.ts"]
+}

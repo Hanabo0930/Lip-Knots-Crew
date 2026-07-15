@@ -1,0 +1,13 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v3.1 本番移行復元演習ZIP,KEEP_CURRENT,01_現行最新版,,実隔離演習と次回開発の基点
+v0.1〜v3.0 ZIP,ARCHIVE,02_旧バージョン,,復旧・比較
+リハーサルplan・metrics・gate fingerprint,KEEP_EVIDENCE,05_監査・移行,,復元・移行・切戻し判断の証拠
+Firestore export・Storage manifest・Auth export,KEEP_EVIDENCE,隔離保管bucket,社内規程に従う,復元元証拠
+元・復元件数・snapshot SHA-256,KEEP_EVIDENCE,05_監査・移行,,完全性検証の証拠
+権限probe・smoke・移行dry-run結果,KEEP_EVIDENCE,05_監査・移行,,安全検証の証拠
+切戻しRTO・RPO・切戻し後smoke,KEEP_EVIDENCE,05_監査・移行,,復旧能力の証拠
+公開審査・社長承認・本番有効化,KEEP_EVIDENCE,05_監査・移行,,公開判断の証拠
+実環境設定・秘密バックアップ,LOCAL_SECRET_ONLY,通常Drive保存禁止,利用終了後,秘密値を含む
+隔離復元Project,DELETE_AFTER_REVIEW,99_削除候補,証跡確認後,本番データ残存防止
+node_modules・test-*-lib,DELETE_CANDIDATE,99_削除候補,即時可,再生成可能
+秘密鍵・トークン入りファイル,DELETE_CANDIDATE,99_削除候補,即時,通常Driveへ保存禁止

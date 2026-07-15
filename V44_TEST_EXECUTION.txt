@@ -1,0 +1,24 @@
+Lip Knots Crew v4.4 verification evidence
+Date: 2026-07-14 Asia/Tokyo
+
+PASS package version 4.4.0
+PASS staff PWA production build
+PASS admin PWA production build
+PASS functions TypeScript build
+PASS bundle-size gate
+PASS one-click preview 16 cases
+PASS production setup 27 cases / 10 files
+PASS production deploy readiness 16 cases
+PASS production deploy orchestration 39 cases
+PASS production acceptance 52 cases
+PASS known-good rollback bundle 14 cases
+PASS production rollback 53 cases
+PASS production evidence core 34 cases
+PASS SLA performance and weekly report core 81 cases
+PASS production evidence sync 15 cases
+PASS production evidence permissions and review safety 52 cases
+PASS staging, checkpoint, smoke and rehearsal regression
+PASS full core regression suite
+PASS dependency audit high/critical 0
+
+Production deployment, real push delivery and real multi-admin review remain intentionally unexecuted.

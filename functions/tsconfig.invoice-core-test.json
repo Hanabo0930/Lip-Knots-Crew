@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v18-tests.json",
+  "compilerOptions": {
+    "outDir": "test-invoice-core-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/invoice-core.ts",
+    "test/invoice-core.test.ts"
+  ]
+}

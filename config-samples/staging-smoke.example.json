@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "environment": "staging",
+  "staffBaseUrl": "https://YOUR_STAGING_STAFF_HOSTING_SITE.web.app",
+  "adminBaseUrl": "https://YOUR_STAGING_ADMIN_HOSTING_SITE.web.app",
+  "forbiddenHosts": [
+    "YOUR_PRODUCTION_STAFF_HOSTING_SITE.web.app",
+    "YOUR_PRODUCTION_ADMIN_HOSTING_SITE.web.app"
+  ],
+  "requestTimeoutMs": 10000,
+  "retries": 2,
+  "staffHtmlMarkers": ["<div id=\"root\"></div>"],
+  "adminHtmlMarkers": ["<div id=\"root\"></div>"],
+  "staffManifestName": "Lip Knots Crew",
+  "adminManifestName": "Lip Knots Crew Admin",
+  "serviceWorkerMarker": "self"
+}

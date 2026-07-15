@@ -1,0 +1,14 @@
+No,Category,Path,Keep,Reason
+1,App,apps/staff,○,スタッフPWA
+2,App,apps/admin,○,管理PWA
+3,Backend,functions,○,Functions
+4,Rules,firestore.rules,○,権限制御
+5,Rules,firestore.indexes.json,○,索引
+6,Config,config-samples,○,安全な設定例
+7,Docs,README.md,○,入口
+8,Docs,README_アプリを見る.md,○,デモ起動
+9,Docs,docs/PRODUCTION_EXECUTIVE_READ_REMINDER_HISTORY_WORKFLOW_V53.md,○,本番運用
+10,Evidence,V53_TEST_EXECUTION.txt,○,検証結果
+11,Evidence,PRODUCTION_RELEASE_GATE_v5.3.csv,○,公開ゲート
+12,Evidence,FILE_CHECKSUMS_SHA256_v5.3.csv,○,配布完全性
+13,Secret,node_modules・config・.env.production・service-account,×,ZIP保存禁止

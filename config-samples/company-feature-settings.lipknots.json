@@ -1,0 +1,9 @@
+{
+  "companyId": "lipknots",
+  "adminJobCreationSourceReady": false,
+  "note": "全機能初期OFF。monthSheetCreationReadyは検証コピーで新月作成と削除試験に合格後のみtrue。",
+  "pilotMode": true,
+  "pilotStaffIds": [],
+  "monthSheetCreationReady": false,
+  "setupWizardDraftOnly": true
+}

@@ -1,0 +1,13 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v3.9 本番受入ロールバック指揮盤ZIP,KEEP_CURRENT,/アプリ化,,実環境移行と次回開発の基点
+v0.1〜v3.8 ZIP,ARCHIVE,旧バージョン,,復旧・比較
+config/production-setup.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Project・運用設定
+config/production-deploy.json・production-acceptance.json・production-rollback.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Project・URL・復旧設定
+config/production-deploy-approval.json・production-rollback-approval.json,DO_NOT_PACKAGE,承認証跡保管先,監査規程に従う,承認者・期限・変更票・確認事項
+config/production-rollback-request.json,DO_NOT_PACKAGE,インシデント証跡保管先,監査規程に従う,既知正常版・Hosting復旧元
+release-evidence/production,DO_NOT_PACKAGE,改ざん防止証跡保管先,監査規程に従う,計画・受入・trigger・rollback・復旧受入
+rollback-sources,DO_NOT_PACKAGE,改ざん防止保管先,後継正常版固定後に規程で更新,既知正常Rules・FunctionsとSHA manifest
+apps/*/.env.production・functions/.env.production,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Firebase接続・承認allowlist
+.production-setup-backups,KEEP_LOCAL,暗号化ローカル保管,正常稼働確定後に規程で削除,置換前設定の復旧
+秘密鍵・Service Account JSON・Access Token,DO_NOT_STORE,Secret ManagerまたはGoogle管理,規程に従う,設定・承認・証跡への混入禁止
+node_modules・test-*-lib,DELETE_CANDIDATE,ZIP対象外,即時可,再生成可能

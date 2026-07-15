@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": { "noEmit": false, "outDir": "test-production-evidence-lib", "rootDir": ".", "types": ["node"] },
+  "include": ["src/production-evidence-core.ts", "test/production-evidence-core.test.ts"]
+}

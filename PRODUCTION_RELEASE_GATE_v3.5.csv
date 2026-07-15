@@ -1,0 +1,16 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V35_TEST_EXECUTION.txt,自動検証,2026-07-14
+2,Build,管理画面本番ビルド,○,合格,V35_TEST_EXECUTION.txt,自動検証,2026-07-14
+3,Build,Functions本番ビルド,○,合格,V35_TEST_EXECUTION.txt,自動検証,2026-07-14
+4,Demo,ワンクリック配信16ケース,○,合格,V35_TEST_EXECUTION.txt,自動検証,2026-07-14
+5,Telemetry,監視取込コア21ケース,○,合格,V35_TEST_EXECUTION.txt,自動検証,2026-07-14
+6,SLO,本番SLO・インシデント判定45ケース,○,合格,V35_TEST_EXECUTION.txt,自動検証,2026-07-14
+7,Test,コア回帰テスト39本,○,合格,V35_TEST_EXECUTION.txt,自動検証,2026-07-14
+8,Security,high・critical依存脆弱性0件,○,合格,V35_TEST_EXECUTION.txt,自動検証,2026-07-14
+9,Rollout,30〜50名・全3wave・最終観察完了,○,未実施,実staging待ち,,
+10,Monitoring,Cloud Monitoring API・IAM・13 Metric type,○,未実施,productionTelemetryConfigs,,
+11,Probe,13指標接続テスト合格,○,未実施,productionTelemetryConfigs.verifiedAt,,
+12,Ingest,5分自動取込・重複なし・欠落拒否,○,未実施,productionTelemetryRuns,,
+13,Budget,30日可用性・エラーバジェット計算一致,○,未実施,productionSloSnapshots,,
+14,Incident,SEV1〜3自動起票・重複統合・夜間Push,○,未実施,productionIncidents,,
+15,Recovery,正常3回・原因・復旧・再発防止・証跡固定,○,未実施,productionIncidentEvents,,

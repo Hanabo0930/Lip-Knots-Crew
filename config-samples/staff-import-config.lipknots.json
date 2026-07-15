@@ -1,0 +1,34 @@
+{
+  "companyId": "lipknots",
+  "enabled": false,
+  "scheduleEnabled": false,
+  "spreadsheetId": "YOUR_STAFF_SPREADSHEET_ID",
+  "spreadsheetLabel": "Lip Knots スタッフ管理",
+  "activeSheets": [
+    "マスタ",
+    "東北"
+  ],
+  "excludedSheets": [
+    "抹消"
+  ],
+  "sheetAreas": {
+    "マスタ": "首都圏・北関東",
+    "東北": "東北"
+  },
+  "headerRow": null,
+  "dataStartRow": null,
+  "maxRowsPerSheet": 5000,
+  "readRangeEndColumn": "T",
+  "maxSheetsPerRun": 10,
+  "markMissingInactive": false,
+  "revokeRemovedEmailSessions": true,
+  "configVersion": "0.3",
+  "columns": {
+    "displayName": "B",
+    "homePrefecture": "G",
+    "nearestStation": "P",
+    "birthDate": "Q",
+    "email": "S",
+    "phone": "T"
+  }
+}

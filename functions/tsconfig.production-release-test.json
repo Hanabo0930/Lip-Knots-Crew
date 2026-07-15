@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": {
+    "outDir": "test-production-release-lib",
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": [
+    "src/production-release-core.ts",
+    "test/production-release-core.test.ts"
+  ]
+}

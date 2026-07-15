@@ -1,0 +1,35 @@
+Lip Knots Crew v3.8 verification evidence
+Date: 2026-07-14 Asia/Tokyo
+Command: npm run verify
+Result: PASS (exit 0)
+
+npm ci: PASS, 663 packages
+staff production build: PASS
+admin production build: PASS
+functions production build: PASS
+bundle size gate: PASS
+one-click demo: PASS, 16 cases
+production setup wizard: PASS, 25 cases / 8 generated files
+production deploy readiness: PASS, 16 cases
+production deploy orchestration: PASS, 39 cases
+staging preflight: PASS, 5 rejection cases
+staging automation: PASS, 13 cases
+checkpoint and rollback: PASS, 15 cases
+staging smoke: PASS, 14 cases / 6 remote checks
+production rehearsal automation: PASS, 12 cases
+production telemetry tenant isolation: PASS, 21 cases
+production metric generation: PASS, 21 cases
+production runtime readiness: PASS, 18 cases
+all core regression suites: PASS, 41 suites
+npm audit high/critical: PASS, 0
+npm audit moderate: 8 (transitive uuid advisory; forced fix is breaking)
+
+Staff entry: 20.1 KiB / largest chunk: 219.8 KiB / 13 JavaScript chunks
+Admin entry: 149.8 KiB / largest chunk: 219.0 KiB / 13 JavaScript chunks
+
+Validation runtime: Node 24.14.0
+Required production/CI runtime: Node 22
+External Firebase deploy: NOT EXECUTED
+Production setup with real values: NOT EXECUTED
+Production approval with real approver: NOT EXECUTED
+Secrets or credential JSON included: NO

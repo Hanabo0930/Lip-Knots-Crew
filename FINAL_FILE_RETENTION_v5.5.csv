@@ -1,0 +1,14 @@
+No,Category,Path,Keep,Reason
+1,App,apps/staff,○,スタッフPWA
+2,App,apps/admin,○,管理PWA・成果ROI統制
+3,Backend,functions,○,Functions・成果自動採点
+4,Rules,firestore.rules,○,企業分離・直接書込拒否
+5,Rules,firestore.indexes.json,○,索引
+6,Config,config-samples,○,安全な設定例
+7,Docs,README.md,○,入口
+8,Docs,README_アプリを見る.md,○,デモ起動
+9,Docs,docs/PRODUCTION_EXECUTIVE_OUTCOME_ROI_CONTROL_V55.md,○,本番運用
+10,Evidence,V55_TEST_EXECUTION.txt,○,検証結果
+11,Evidence,PRODUCTION_RELEASE_GATE_v5.5.csv,○,公開ゲート
+12,Evidence,FILE_CHECKSUMS_SHA256_v5.5.csv,○,配布完全性
+13,Secret,node_modules・config・.env.production・service-account,×,ZIP保存禁止

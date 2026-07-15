@@ -1,0 +1,8 @@
+﻿コード,機能,初期費用,月額,標準日数,依存
+contracts,契約書管理,120000,12000,2,staff
+inventory,資材・在庫,150000,15000,2,jobs
+shipping,発送管理,120000,12000,2,"inventory,jobs"
+billing,請求管理,120000,15000,2,jobs
+payroll,給与・支払,180000,18000,3,"staff,jobs"
+esign,電子契約連携,100000,8000,2,contracts
+line,LINE連携,100000,10000,2,staff

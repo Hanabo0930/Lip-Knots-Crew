@@ -1,0 +1,13 @@
+﻿ID,区分,テスト,期待結果,必須証拠,状態,実結果,備考
+billing-total,請求,請求合計が旧版と一致,差額0円,旧版CSV・新版CSV,,,
+billing-tax,請求,税区分が一致,差異0件,比較表,,,
+payroll-total,給与,給与支給額が一致,差額0円,旧版給与・新版給与,,,
+payroll-staff,給与,支払対象が一致,差異0人,対象者一覧,,,
+invoice-pdf,PDF,請求書PDFが一致,差異0件,旧PDF・新PDF,,,
+payroll-pdf,PDF,給与明細PDFが一致,差異0件,旧PDF・新PDF,,,
+mail-recipient,メール,送信対象が一致,差異0件,送信対象CSV,,,
+mail-duplicate,メール,二重送信なし,1キー1回,送信台帳,,,
+sheet-formula,スプシ,数式維持,差異0セル,数式比較CSV,,,
+sheet-validation,スプシ,入力規則維持,差異0セル,入力規則比較,,,
+sheet-format,スプシ,書式・保護維持,差異0件,書式比較,,,
+trigger-test,トリガー,検証環境で本番処理なし,本番送信0件,トリガー一覧,,,

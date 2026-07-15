@@ -1,0 +1,14 @@
+No,区分,対象,保持,理由
+1,Source,functions/src/production-evidence-monitor-core.ts,○,既読・再通知・昇格の決定ロジック
+2,Source,functions/src/production-evidence.ts,○,本人拘束・自動運用・安全保存・通知
+3,Source,apps/admin/src/ProductionAcceptanceRollbackConsole.tsx,○,管理画面本体
+4,Security,firestore.rules,○,企業分離・サブコレクション直接書込拒否
+5,Test,functions/test/production-evidence-monitor-core.test.ts,○,114ケース
+6,Test,scripts/test-production-evidence-security.mjs,○,84ケース
+7,Docs,docs/PRODUCTION_SLA_RECIPIENT_READ_ESCALATION_V46.md,○,本番運用手順
+8,Evidence,V46_TEST_EXECUTION.txt,○,検証結果
+9,Evidence,PRODUCTION_RELEASE_GATE_v4.6.csv,○,公開ゲート
+10,Evidence,FILE_CHECKSUMS_SHA256_v4.6.csv,○,配布完全性
+11,Runtime,node_modules,×,再生成可能・ZIP除外
+12,Secrets,config・.env.production・Service Account JSON,×,秘密値・実値のZIP混入防止
+13,Runtime,release-evidence・rollback-sources,×,本番証跡・既知正常bundleのZIP混入防止

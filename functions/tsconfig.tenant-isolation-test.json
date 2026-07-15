@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v17-tests.json",
+  "compilerOptions": {
+    "outDir": "test-tenant-isolation-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/tenant-isolation-core.ts",
+    "test/tenant-isolation-core.test.ts"
+  ]
+}

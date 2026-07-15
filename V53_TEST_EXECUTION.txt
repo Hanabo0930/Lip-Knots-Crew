@@ -1,0 +1,30 @@
+Lip Knots Crew v5.3 test execution
+Executed: 2026-07-15 JST
+Runtime: Node 24.14.0 (deployment target: Node 22)
+
+RESULT: PASS
+
+- npm ci: PASS (663 packages)
+- npm run verify: PASS (exit 0)
+- staff/admin/functions production build: PASS
+- one-click demo preview: PASS (16 cases)
+- production setup: PASS (27 cases)
+- production deploy orchestration: PASS (39 cases)
+- production acceptance: PASS (52 cases)
+- known-good rollback bundle: PASS (14 cases)
+- production rollback command: PASS (53 cases)
+- production evidence sync: PASS (15 cases)
+- production evidence permission/security: PASS (145 cases)
+- production evidence monitor: PASS (203 cases)
+- staging preflight/automation/checkpoint/smoke: PASS
+- production rehearsal preview/tests: PASS
+- dependency audit: high 0, critical 0
+
+Bundle:
+- staff entry 20.1 KiB / largest 219.8 KiB / 13 chunks
+- admin entry 149.9 KiB / largest 219.0 KiB / 14 chunks
+- executive delivery/read console lazy chunk 76.6 KiB
+
+Notes:
+- 12 moderate advisories remain in upstream Firebase dependency paths; no fix is currently provided by npm audit.
+- Live Firebase production deploy, live push delivery, and live production acceptance were not executed.

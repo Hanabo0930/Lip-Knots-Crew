@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v18-tests.json",
+  "compilerOptions": {
+    "outDir": "test-billing-core-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/billing-core.ts",
+    "test/billing-core.test.ts"
+  ]
+}

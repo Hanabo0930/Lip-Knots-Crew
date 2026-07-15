@@ -1,0 +1,20 @@
+test:gas-secret-scan: 0
+STDOUT:
+
+> @lkc/functions@1.4.0 test:gas-secret-scan
+> rm -rf test-gas-secret-scan-lib && tsc -p tsconfig.gas-secret-scan-test.json && node test-gas-secret-scan-lib/test/gas-secret-scan-core.test.js
+
+gas secret scan core tests passed
+
+STDERR:
+
+
+test:gas-remediation: 0
+STDOUT:
+
+> @lkc/functions@1.4.0 test:gas-remediation
+> rm -rf test-gas-remediation-lib && tsc -p tsconfig.gas-remediation-test.json && node test-gas-remediation-lib/test/gas-remediation-core.test.js
+
+gas remediation core tests passed
+
+STDERR:

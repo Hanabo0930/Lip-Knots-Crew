@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.v16-tests.json",
+  "compilerOptions": {
+    "outDir": "test-production-slo-lib",
+    "rootDir": ".",
+    "noEmit": false,
+    "types": ["node"]
+  },
+  "include": [
+    "src/production-slo-core.ts",
+    "test/production-slo-core.test.ts"
+  ]
+}

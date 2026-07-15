@@ -1,0 +1,20 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V34_TEST_EXECUTION.txt,自動検証,2026-07-14
+2,Build,管理画面本番ビルド,○,合格,V34_TEST_EXECUTION.txt,自動検証,2026-07-14
+3,Build,Functions本番ビルド,○,合格,V34_TEST_EXECUTION.txt,自動検証,2026-07-14
+4,Safety,staging関連53ケース,○,合格,V34_TEST_EXECUTION.txt,自動検証,2026-07-14
+5,Rehearsal,隔離リハーサル手順生成12ケース,○,合格,V34_TEST_EXECUTION.txt,自動検証,2026-07-14
+6,Cutover,本番切替指揮盤判定42ケース,○,合格,V34_TEST_EXECUTION.txt,自動検証,2026-07-14
+7,SLO,本番SLO・インシデント判定45ケース,○,合格,V34_TEST_EXECUTION.txt,自動検証,2026-07-14
+8,Test,コア回帰テスト38本,○,合格,V34_TEST_EXECUTION.txt,自動検証,2026-07-14
+9,Security,high・critical依存脆弱性0件,○,合格,V34_TEST_EXECUTION.txt,自動検証,2026-07-14
+10,Rollout,30〜50名・全3wave・最終観察完了,○,未実施,実staging待ち,,
+11,Restore,隔離復元・移行dry-run・切戻し合格,○,未実施,隔離演習待ち,,
+12,Approval,署名承認・T±5分最終実行・T＋24h完了,○,未実施,productionCutoverRuns,,
+13,Telemetry,Cloud Monitoring実値と証跡2件以上の観測,○,未実施,productionSloObservations,,
+14,Budget,30日可用性・エラーバジェット計算一致,○,未実施,productionSloSnapshots,,
+15,Burn,1h・6h・24hバーンレート検算一致,○,未実施,productionSloSnapshots,,
+16,Incident,SEV1〜3自動起票・重複統合・上昇,○,未実施,productionIncidents,,
+17,Alert,同一異常の通知重複なし・SEV1/2夜間Push,○,未実施,productionIncidentEvents,,
+18,Recovery,新しい正常観測3回・定期監視だけの誤回復なし,○,未実施,productionIncidentEvents,,
+19,Resolution,原因・復旧・再発防止・証跡の解決固定,○,未実施,productionIncidents,,

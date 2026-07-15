@@ -1,0 +1,18 @@
+No,区分,確認項目,必須,結果,証拠,確認者,確認日
+1,Build,スタッフPWA本番ビルド,○,合格,V38_TEST_EXECUTION.txt,自動検証,2026-07-14
+2,Build,管理画面本番ビルド,○,合格,V38_TEST_EXECUTION.txt,自動検証,2026-07-14
+3,Build,Functions本番ビルド,○,合格,V38_TEST_EXECUTION.txt,自動検証,2026-07-14
+4,Setup,本番8ファイル生成ウィザード25件,○,合格,V38_TEST_EXECUTION.txt,自動検証,2026-07-14
+5,Deploy,デプロイ前診断16件,○,合格,V38_TEST_EXECUTION.txt,自動検証,2026-07-14
+6,Deploy,承認・段階実行・失敗停止39件,○,合格,V38_TEST_EXECUTION.txt,自動検証,2026-07-14
+7,Demo,ワンクリック配信16件,○,合格,V38_TEST_EXECUTION.txt,自動検証,2026-07-14
+8,Regression,コア回帰テスト41本,○,合格,V38_TEST_EXECUTION.txt,自動検証,2026-07-14
+9,Security,high・critical依存脆弱性0件,○,合格,V38_TEST_EXECUTION.txt,自動検証,2026-07-14
+10,Input,production-setup.jsonの実値入力,○,未実施,Git管理対象外,,
+11,Approval,実計画指紋・30分承認・5確認,○,未実施,production-deploy-approval.json,,
+12,IAM,Firebase CLI認証・対象Projectアクセス,○,未実施,projects:list evidence,,
+13,Deploy,実Firebase production 3段階デプロイ,○,未実施,deployment-result.json,,
+14,Postcheck,Functions・Hosting・2画面HTTPS確認,○,未実施,deployment-result.json,,
+15,Recovery,rollback責任者・直前source・Rules正常版確認,○,未実施,rollback plan,,
+16,Readiness,管理画面12/12 READY,○,未実施,readiness fingerprint,,
+17,Cutover,T−60〜T＋24h・切戻し判定,○,未実施,productionCutoverRuns,,

@@ -1,0 +1,11 @@
+ファイル・フォルダ,判断,保存先,削除時期,理由
+v3.7 本番セットアップウィザードZIP,KEEP_CURRENT,/アプリ化,,実環境設定と次回開発の基点
+v0.1〜v3.6 ZIP,ARCHIVE,旧バージョン,,復旧・比較
+config/production-setup.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Project・運用設定
+config/production-deploy.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Project・deploy scope
+config/production-telemetry.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Project・13 Metric type
+config/production-bootstrap.json,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,企業・管理者・承認設定
+apps/*/.env.production・functions/.env.production,DO_NOT_PACKAGE,安全な運用保管先,環境破棄時,実Firebase接続設定
+.production-setup-backups,KEEP_LOCAL,暗号化ローカル保管,正常稼働確定後に規程で削除,置換前設定の復旧
+秘密鍵・Service Account JSON・Access Token,DO_NOT_STORE,Secret ManagerまたはGoogle管理,規程に従う,入力JSONへの混入禁止
+node_modules・test-*-lib,DELETE_CANDIDATE,ZIP対象外,即時可,再生成可能

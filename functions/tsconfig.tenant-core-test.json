@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v17-tests.json",
+  "compilerOptions": {
+    "outDir": "test-tenant-core-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/tenant-core.ts",
+    "test/tenant-core.test.ts"
+  ]
+}

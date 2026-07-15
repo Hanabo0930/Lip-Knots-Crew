@@ -1,0 +1,11 @@
+{
+  "environment": "development",
+  "firebaseProjectId": "YOUR_DEV_PROJECT",
+  "appBaseUrl": "http://localhost:5173",
+  "spreadsheetId": null,
+  "stripeMode": "disabled",
+  "emailMode": "disabled",
+  "pushMode": "disabled",
+  "backupBucket": null,
+  "errorReportingEnabled": false
+}

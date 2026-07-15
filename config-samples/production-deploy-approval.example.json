@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "v5.6.0",
+  "projectId": "lip-knots-production",
+  "planFingerprint": "7b886ba65d215e09f74cd5c62ad2973c2e1306bfadac9333c47bacbcd9805c3e",
+  "deployScope": [
+    "firestore",
+    "storage",
+    "functions",
+    "hosting:staff",
+    "hosting:admin"
+  ],
+  "approvedByEmail": "APPROVER_EMAIL",
+  "changeTicketId": "CHANGE-TICKET-ID",
+  "approvedAt": "2026-07-14T09:45:00.000Z",
+  "expiresAt": "2026-07-14T10:15:00.000Z",
+  "previousSourceCheckpointId": "PREVIOUS-SOURCE-CHECKPOINT-ID",
+  "hostingRollbackSource": "PREVIOUS_HOSTING_VERSION_OR_CHANNEL",
+  "acknowledgements": {
+    "backupVerified": false,
+    "previousSourceCheckpointVerified": false,
+    "rulesRollbackLimitationAccepted": false,
+    "emergencyLockOwnerAssigned": false,
+    "hostingRollbackOwnerAssigned": false
+  }
+}

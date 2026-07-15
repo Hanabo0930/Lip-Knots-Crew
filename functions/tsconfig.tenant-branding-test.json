@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.v17-tests.json",
+  "compilerOptions": {
+    "outDir": "test-tenant-branding-lib",
+    "rootDir": "."
+  },
+  "include": [
+    "src/tenant-branding-core.ts",
+    "test/tenant-branding-core.test.ts"
+  ]
+}

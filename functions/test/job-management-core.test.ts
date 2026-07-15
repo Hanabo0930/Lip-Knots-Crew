@@ -11,6 +11,8 @@ const valid = normalizeJobInput({
   workDate: "2026-08-01",
   clientName: "A社",
   storeName: "イオン船橋",
+  storeAddress: " ｃｈｉｂａ県船橋市山手1-1-8 ",
+  storeNearestStation: " 新船橋駅 ",
   makerName: "〇〇食品",
   menuName: "ヨーグルト試食",
   entryTime: "9:45",
@@ -23,6 +25,8 @@ const valid = normalizeJobInput({
 });
 assert.deepEqual(valid.errors, []);
 assert.equal(valid.value.slots, 3);
+assert.equal(valid.value.storeAddress, "chiba県船橋市山手1-1-8");
+assert.equal(valid.value.storeNearestStation, "新船橋駅");
 
 const invalid = normalizeJobInput({
   workDate: "2026/08/01",

@@ -24,6 +24,8 @@ const CreateSchema = z.object({
   workDate: z.string(),
   clientName: z.string(),
   storeName: z.string(),
+  storeAddress: z.string().max(300).default(""),
+  storeNearestStation: z.string().max(120).default(""),
   makerName: z.string(),
   menuName: z.string(),
   entryTime: z.string().default(""),
@@ -55,6 +57,8 @@ const EditSchema = z.object({
   fields: z.object({
     clientName: z.string().max(200).optional(),
     storeName: z.string().max(200).optional(),
+    storeAddress: z.string().max(300).optional(),
+    storeNearestStation: z.string().max(120).optional(),
     makerName: z.string().max(200).optional(),
     menuName: z.string().max(500).optional(),
     entryTime: z.string().max(100).optional(),
@@ -83,6 +87,8 @@ const inputSheetFields: Record<string, string> = {
   workTime: "workTime",
   subcontractorName: "subcontractorName",
 };
+
+const appOnlyJobFields = ["storeAddress", "storeNearestStation"] as const;
 
 export const createAdminJobGroup = onCall(async (request) => {
   const session = requireAdmin(request);
@@ -124,6 +130,8 @@ export const createAdminJobGroup = onCall(async (request) => {
       dateKey: normalized.value.workDate,
       clientName: normalized.value.clientName,
       storeName: normalized.value.storeName,
+      storeAddress: normalized.value.storeAddress,
+      storeNearestStation: normalized.value.storeNearestStation,
       makerName: normalized.value.makerName,
       menuName: normalized.value.menuName,
       entryTime: normalized.value.entryTime,
@@ -208,6 +216,8 @@ export const duplicateAdminJob = onCall(async (request) => {
     workDate: input.workDate ?? String(source.dateKey ?? source.workDate ?? ""),
     clientName: String(source.clientName ?? ""),
     storeName: String(source.storeName ?? ""),
+    storeAddress: String(source.storeAddress ?? ""),
+    storeNearestStation: String(source.storeNearestStation ?? ""),
     makerName: String(source.makerName ?? ""),
     menuName: String(source.menuName ?? ""),
     entryTime: String(source.entryTime ?? ""),
@@ -541,6 +551,12 @@ export const adminEditJobInputs = onCall(async (request) => {
       sheetUpdates[mappingKey] = value;
     }
 
+    for (const field of appOnlyJobFields) {
+      const raw = input.fields[field];
+      if (raw === undefined) continue;
+      update[field] = String(raw).normalize("NFKC").trim();
+    }
+
     if (input.fields.clientChargeInputs) {
       update.clientChargeInputs = moneyClient.values;
       Object.assign(sheetUpdates, moneyClient.values);
@@ -738,7 +754,8 @@ async function requireCompanyJob(
 
 function copyableJobFields(source: FirebaseFirestore.DocumentData) {
   const keys = [
-    "clientName", "storeName", "makerName", "menuName", "entryTime", "workTime",
+    "clientName", "storeName", "storeAddress", "storeNearestStation",
+    "makerName", "menuName", "entryTime", "workTime",
     "subcontractorName", "basePay", "clientChargeInputs", "staffPaymentInputs",
     "financials",
   ];

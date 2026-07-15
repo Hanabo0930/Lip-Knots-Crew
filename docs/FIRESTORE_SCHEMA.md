@@ -24,6 +24,8 @@
 - makerName
 - menuName
 - storeName
+- storeAddress
+- storeNearestStation
 - workTime
 - materialStatus
 - basePay

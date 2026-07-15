@@ -4,6 +4,8 @@ export type AdminJobInput = {
   workDate: string;
   clientName: string;
   storeName: string;
+  storeAddress: string;
+  storeNearestStation: string;
   makerName: string;
   menuName: string;
   entryTime: string;
@@ -18,6 +20,8 @@ export type AdminJobInput = {
 export type EditableJobInputs = {
   clientName?: string;
   storeName?: string;
+  storeAddress?: string;
+  storeNearestStation?: string;
   makerName?: string;
   menuName?: string;
   entryTime?: string;
@@ -57,6 +61,8 @@ export function normalizeJobInput(
   const workDate = normalizeText(raw.workDate);
   const clientName = normalizeText(raw.clientName);
   const storeName = normalizeText(raw.storeName);
+  const storeAddress = normalizeText(raw.storeAddress);
+  const storeNearestStation = normalizeText(raw.storeNearestStation);
   const makerName = normalizeText(raw.makerName);
   const menuName = normalizeText(raw.menuName);
   const entryTime = normalizeText(raw.entryTime);
@@ -72,6 +78,8 @@ export function normalizeJobInput(
   if (!/^\d{4}-\d{2}-\d{2}$/.test(workDate)) errors.push("実施日が正しくありません。");
   if (!clientName) errors.push("クライアント名は必須です。");
   if (!storeName) errors.push("店舗名は必須です。");
+  if (storeAddress.length > 300) errors.push("店舗住所は300文字以内で入力してください。");
+  if (storeNearestStation.length > 120) errors.push("最寄駅は120文字以内で入力してください。");
   if (!makerName) errors.push("メーカー名は必須です。");
   if (!menuName) errors.push("メニュー名は必須です。");
   if (!workTime) errors.push("実施時間は必須です。");
@@ -92,7 +100,7 @@ export function normalizeJobInput(
 
   return {
     value: {
-      workDate, clientName, storeName, makerName, menuName,
+      workDate, clientName, storeName, storeAddress, storeNearestStation, makerName, menuName,
       entryTime, workTime, subcontractorName,
       slots: Number.isInteger(slots) ? slots : 1,
       basePay,

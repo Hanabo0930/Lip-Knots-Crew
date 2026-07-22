@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { assertOwnerOnlyGeneratedFileMode } from "./file-permissions.mjs";
 import {
   renderStagingFiles,
   stagingOutputPaths,
@@ -86,7 +87,7 @@ try {
   for (const path of stagingOutputPaths) {
     const generatedPath = join(temporaryRoot, path);
     assert.ok(existsSync(generatedPath), `${path} was not generated`);
-    assert.equal(statSync(generatedPath).mode & 0o777, 0o600, `${path} mode`);
+    assertOwnerOnlyGeneratedFileMode(statSync(generatedPath), path, assert);
   }
 
   const refusedOverwrite = spawnSync(

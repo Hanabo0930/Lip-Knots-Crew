@@ -1,6 +1,7 @@
 import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
+import { hasUnsafeConfigFilePermissions } from "./file-permissions.mjs";
 import {
   renderStagingFiles,
   stagingOutputPaths,
@@ -34,7 +35,7 @@ if (!existsSync(configPath)) {
   console.error(`設定ファイルがありません: ${relative(root, configPath)}`);
   process.exit(1);
 }
-if (!exampleMode && (statSync(configPath).mode & 0o077) !== 0) {
+if (!exampleMode && hasUnsafeConfigFilePermissions(statSync(configPath))) {
   console.error("設定ファイルの権限が広すぎます。chmod 600を実行してください。");
   process.exit(1);
 }

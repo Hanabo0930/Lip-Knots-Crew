@@ -264,11 +264,24 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
 
     await gcsFile.delete({ ignoreNotFound: true });
   } catch (error) {
-    await fileRef.set({
-      status: "error",
-      errorMessage: error instanceof Error ? error.message : String(error),
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    const failedAt = FieldValue.serverTimestamp();
+
+    await Promise.all([
+      fileRef.set({
+        status: "error",
+        errorMessage,
+        updatedAt: failedAt,
+      }, { merge: true }),
+      db.collection("submissions").doc(submissionId).set({
+        status: "error",
+        errorMessage,
+        failedFileId: fileId,
+        updatedAt: failedAt,
+      }, { merge: true }),
+    ]);
+
     throw error;
   }
 });

@@ -111,7 +111,7 @@ export { getMyTasks } from "./staff-tasks";
 export { updateNetPrintNumbers, markNetPrintPrinted } from "./netprint";
 export { createResubmissionRequest, getMyResubmissionRequests, getAdminResubmissionRequests, completeResubmissionRequest } from "./resubmissions";
 
-export { getSubmissionTimeline, getResubmissionComparison, driveFilePreview } from "./submission-files";
+export { getSubmissionTimeline, getSubmissionProcessingStatus, getResubmissionComparison, driveFilePreview } from "./submission-files";
 
 export {
   getSheetWriteIssues,

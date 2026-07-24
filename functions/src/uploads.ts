@@ -3,8 +3,9 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onObjectFinalized } from "firebase-functions/v2/storage";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { z } from "zod";
-import { google } from "googleapis";
 import { db, storage } from "./firebase";
+import { getWritableDriveClient } from "./google-drive-client";
+import { readCachedFolderId, writeCachedFolderId } from "./drive-folder-cache";
 import { markSubmissionCompleted } from "./submission-status";
 import { markResubmissionReplacementFile, markResubmissionSubmitted } from "./resubmissions";
 import {
@@ -169,10 +170,7 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
       throw new Error("Driveルートフォルダが未設定です。");
     }
 
-    const auth = new google.auth.GoogleAuth({
-      scopes: ["https://www.googleapis.com/auth/drive"],
-    });
-    const drive = google.drive({ version: "v3", auth });
+    const drive = getWritableDriveClient();
     const clientFolder = await ensureFolder(
       drive,
       driveConfig.rootFolderId,
@@ -287,10 +285,13 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
 });
 
 async function ensureFolder(
-  drive: ReturnType<typeof google.drive>,
+  drive: ReturnType<typeof getWritableDriveClient>,
   parentId: string,
   name: string
 ): Promise<string> {
+  const cached = readCachedFolderId(parentId, name);
+  if (cached) return cached;
+
   const escaped = name.replace(/'/g, "\\'");
   const existing = await drive.files.list({
     q: `'${parentId}' in parents and name='${escaped}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
@@ -300,7 +301,10 @@ async function ensureFolder(
     includeItemsFromAllDrives: true,
   });
   const found = existing.data.files?.[0]?.id;
-  if (found) return found;
+  if (found) {
+    writeCachedFolderId(parentId, name, found);
+    return found;
+  }
 
   const created = await drive.files.create({
     requestBody: {
@@ -312,6 +316,7 @@ async function ensureFolder(
     supportsAllDrives: true,
   });
   if (!created.data.id) throw new Error("Driveフォルダ作成に失敗しました。");
+  writeCachedFolderId(parentId, name, created.data.id);
   return created.data.id;
 }
 

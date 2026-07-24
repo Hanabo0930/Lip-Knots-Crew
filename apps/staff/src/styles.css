@@ -113,10 +113,17 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .resubmission-guide>small { display:block; margin-top:10px; color:#a7661b; font-weight:800; }
 .source-preview { margin-top:10px; }
 .source-preview>span { display:block; font-size:12px; font-weight:900; margin-bottom:7px; }
-.source-preview img,.history-preview img { width:100%; max-height:300px; object-fit:contain; background:#f3f1f0; border-radius:12px; }
+.source-preview img,.history-preview img,.preview-image { width:100%; max-height:300px; object-fit:contain; background:#f3f1f0; border-radius:12px; }
 .preview-placeholder,.history-preview { min-height:120px; display:grid; place-items:center; background:#f3eff1; color:#9b7180; border-radius:12px; padding:10px; }
+.preview-frame,.source-preview-frame { position:relative; aspect-ratio:4/3; width:100%; overflow:hidden; border-radius:12px; background:#f3eff1; }
+.preview-skeleton { position:absolute; inset:0; background:linear-gradient(90deg,#f3eff1 0%,#ece4e8 45%,#f3eff1 100%); background-size:200% 100%; animation:preview-shimmer 1.2s ease-in-out infinite; }
+.preview-image.loading { opacity:0; }
+.preview-image.loaded { opacity:1; transition:opacity .18s ease; }
+.preview-error { position:absolute; inset:0; display:grid; place-content:center; gap:8px; padding:12px; text-align:center; }
+.preview-error p { margin:0; color:#806f68; font-size:13px; font-weight:800; }
+@keyframes preview-shimmer { 0%{background-position:200% 0;} 100%{background-position:-200% 0;} }
 .history-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
-.history-grid article { border:1px solid #eadfe2; border-radius:14px; padding:9px; overflow:hidden; }
+.history-grid article { border:1px solid #eadfe2; border-radius:14px; padding:9px; overflow:hidden; display:flex; flex-direction:column; gap:6px; }
 .history-grid strong,.history-grid small { display:block; margin-top:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .history-grid small { color:#806f68; }
 @media(max-width:650px){ .history-grid{grid-template-columns:1fr 1fr;} }

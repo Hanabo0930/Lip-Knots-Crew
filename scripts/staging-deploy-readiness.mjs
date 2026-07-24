@@ -28,6 +28,19 @@ function latestMtime(directory, extensions) {
   return latest;
 }
 
+function hasFunctionsPredeployBuild(predeploy) {
+  if (!Array.isArray(predeploy)) return false;
+  const accepted = new Set([
+    "npm run build -w @lkc/functions",
+    'npm --prefix "$RESOURCE_DIR" run build',
+  ]);
+  return predeploy.some((command) => {
+    if (typeof command !== "string") return false;
+    const normalized = command.trim().replace(/\s+/gu, " ");
+    return accepted.has(normalized);
+  });
+}
+
 function loadModel(errors) {
   const rootPackage = readJson("package.json", errors);
   const staffPackage = readJson("apps/staff/package.json", errors);
@@ -98,7 +111,7 @@ function validateModel(model, { requireBuilds = true } = {}) {
     errors.push("firebase.jsonのFunctions runtimeはnodejs22が必須です。");
   }
   const predeploy = model.firebase.functions?.predeploy ?? [];
-  if (!Array.isArray(predeploy) || !predeploy.some((command) => command.includes("@lkc/functions"))) {
+  if (!hasFunctionsPredeployBuild(predeploy)) {
     errors.push("Functions predeploy buildがありません。");
   }
 
@@ -149,6 +162,7 @@ function selfTest(model) {
     ["version mismatch", (value) => { value.packages.staffPackage.version = "0.0.0"; }, "version"],
     ["missing rules", (value) => { value.requiredFiles[0].exists = false; }, "firestore.rules"],
     ["stale build", (value) => { value.builds[0].sourceLatest = value.builds[0].artifactMtime + 10_000; }, "ソースより古い"],
+    ["missing predeploy", (value) => { value.firebase.functions.predeploy = ["npm run lint"]; }, "Functions predeploy build"],
   ];
   const failures = [];
   for (const [name, mutate, expected] of cases) {

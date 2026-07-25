@@ -77,6 +77,9 @@
     "node": "22"
   },
   "overrides": {
+    "googleapis-common@8.0.2": {
+      "gaxios": "7.3.0"
+    },
     "whatwg-url": "7.1.0"
   },
   "devDependencies": {}

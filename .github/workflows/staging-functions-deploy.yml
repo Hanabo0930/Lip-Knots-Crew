@@ -1,0 +1,139 @@
+name: Staging Functions Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: CI-passing source branch
+        required: true
+        type: string
+        default: cursor/staging-preview-performance-20260724
+      functions:
+        description: Explicit comma-separated allowlisted Functions
+        required: true
+        type: string
+        default: getSubmissionTimeline,getSubmissionProcessingStatus,getResubmissionComparison,driveFilePreview,finalizeStagedUpload
+      confirmation:
+        description: Type DEPLOY_LKC_STAGING_FUNCTIONS
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: lkc-staging-functions-deploy
+  cancel-in-progress: false
+
+env:
+  LKC_PROJECT_ID: lip-knots-crew-staging
+  LKC_REGION: asia-northeast1
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require explicit enable switch
+        env:
+          LKC_DEPLOY_ENABLED: ${{ vars.LKC_STAGING_DEPLOY_ENABLED }}
+        run: |
+          if [[ "$LKC_DEPLOY_ENABLED" != "true" ]]; then
+            echo "Staging deploy remains disabled until Phase A diagnosis and WIF bootstrap are complete."
+            exit 1
+          fi
+      - name: Checkout trusted guardrails
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: guardrails
+      - name: Validate requested scope
+        env:
+          LKC_SOURCE_REF: ${{ inputs.source_ref }}
+          LKC_FUNCTIONS: ${{ inputs.functions }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          node guardrails/scripts/automation/validate-staging-scope.mjs \
+            --mode functions-deploy \
+            --project "$LKC_PROJECT_ID" \
+            --region "$LKC_REGION" \
+            --source-ref "$LKC_SOURCE_REF" \
+            --functions "$LKC_FUNCTIONS" \
+            --confirmation "$LKC_CONFIRMATION"
+      - name: Checkout requested source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref }}
+          path: source
+      - name: Verify application-level authorization in source
+        run: |
+          node guardrails/scripts/automation/check-function-auth-guards.mjs \
+            --repository source \
+            --ref "$(git -C source rev-parse HEAD)" \
+            --require-pass
+      - name: Require successful canonical CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source_sha="$(git -C source rev-parse HEAD)"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&status=completed&per_page=50" \
+            | node -e '
+                let input = "";
+                process.stdin.on("data", (chunk) => input += chunk);
+                process.stdin.on("end", () => {
+                  const document = JSON.parse(input);
+                  const passed = (document.workflow_runs ?? []).some((run) =>
+                    run.name === "Release Candidate Checks" && run.conclusion === "success"
+                  );
+                  if (!passed) {
+                    console.error("CANONICAL_CI=NOT_SUCCESSFUL");
+                    process.exit(1);
+                  }
+                  console.log("CANONICAL_CI=SUCCESS");
+                });
+              '
+
+  deploy:
+    needs: guard
+    environment: lkc-staging-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout trusted guardrails
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          path: guardrails
+      - name: Checkout requested source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref }}
+          path: source
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - name: Install and build Functions
+        working-directory: source
+        run: |
+          npm ci
+          npm run build -w @lkc/functions
+      - name: Authenticate with short-lived staging identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Deploy only the explicit Functions allowlist
+        working-directory: guardrails
+        env:
+          LKC_SOURCE_REF: ${{ inputs.source_ref }}
+          LKC_FUNCTIONS: ${{ inputs.functions }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+          LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
+        run: bash scripts/automation/deploy-staging-functions.sh

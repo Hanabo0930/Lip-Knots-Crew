@@ -1,0 +1,19 @@
+---
+description: Lip Knots Crew staging-only safety rules for local and Cloud Agents
+alwaysApply: true
+---
+
+# Staging-only automation
+
+Follow the repository-root `AGENTS.md` for every task.
+
+- Use a dedicated `cursor/*` or `automation/*` branch.
+- Never push directly to `main` and never auto-merge.
+- Never connect to or deploy production.
+- Do not change IAM, organization policy, Firestore data, Storage data, or secrets.
+- Do not run a broad Functions deploy. Use explicit function names only.
+- Treat `scripts/automation/validate-staging-scope.mjs` as a mandatory fail-closed gate.
+- If a command needs approval outside the documented allowlist, stop and report the exact blocker.
+- Run the smallest relevant tests first; rely on GitHub Actions for the canonical full verification.
+- Return the completion fields required by `AGENTS.md`.
+

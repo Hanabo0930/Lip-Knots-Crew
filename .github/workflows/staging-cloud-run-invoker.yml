@@ -1,0 +1,115 @@
+name: Staging Cloud Run Invoker
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Read-only diagnosis or the two-service apply
+        required: true
+        type: choice
+        options:
+          - diagnose
+          - apply
+        default: diagnose
+      source_ref:
+        description: Branch containing the Functions source to inspect
+        required: true
+        type: string
+        default: cursor/staging-preview-performance-20260724
+      confirmation:
+        description: Apply only — type APPLY_LKC_STAGING_INVOKER
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: lkc-staging-cloud-run-invoker
+  cancel-in-progress: false
+
+env:
+  LKC_PROJECT_ID: lip-knots-crew-staging
+  LKC_REGION: asia-northeast1
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted guardrails
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Validate fixed scope
+        env:
+          LKC_OPERATION: ${{ inputs.operation }}
+          LKC_SOURCE_REF: ${{ inputs.source_ref }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          if [[ "$LKC_OPERATION" == "diagnose" ]]; then
+            node scripts/automation/validate-staging-scope.mjs \
+              --mode invoker-diagnose \
+              --project "$LKC_PROJECT_ID" \
+              --region "$LKC_REGION" \
+              --source-ref "$LKC_SOURCE_REF" \
+              --services "getsubmissiontimeline,getsubmissionprocessingstatus,drivefilepreview"
+          else
+            node scripts/automation/validate-staging-scope.mjs \
+              --mode invoker-apply \
+              --project "$LKC_PROJECT_ID" \
+              --region "$LKC_REGION" \
+              --source-ref "$LKC_SOURCE_REF" \
+              --services "getsubmissionprocessingstatus,drivefilepreview" \
+              --confirmation "$LKC_CONFIRMATION"
+          fi
+      - name: Verify application-level authorization in source
+        env:
+          LKC_SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "refs/heads/${LKC_SOURCE_REF}:refs/remotes/origin/${LKC_SOURCE_REF}"
+          node scripts/automation/check-function-auth-guards.mjs \
+            --ref "refs/remotes/origin/${LKC_SOURCE_REF}" \
+            --require-pass
+
+  diagnose:
+    if: inputs.operation == 'diagnose'
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted guardrails
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Authenticate with short-lived observer identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_OBSERVER_SERVICE_ACCOUNT }}
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Diagnose without changing cloud state
+        env:
+          LKC_SOURCE_REF: ${{ inputs.source_ref }}
+        run: bash scripts/automation/cloud-run-invoker.sh diagnose
+
+  apply:
+    if: inputs.operation == 'apply'
+    needs: guard
+    environment: lkc-staging-iam
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout trusted guardrails
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Authenticate with short-lived deploy identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Apply to exactly two services and verify
+        env:
+          LKC_SOURCE_REF: ${{ inputs.source_ref }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+        run: bash scripts/automation/cloud-run-invoker.sh apply
+

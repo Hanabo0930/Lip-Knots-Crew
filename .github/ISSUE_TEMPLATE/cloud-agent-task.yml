@@ -1,0 +1,50 @@
+name: Cursor Cloud Agent task
+description: Safe staging-only coding task for Lip Knots Crew
+title: "[Cloud Agent] "
+labels:
+  - cloud-agent
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This task is staging-only. `AGENTS.md` and `.cursor/rules/lkc-staging-safety.mdc`
+        are mandatory. Production, IAM, data mutation, direct `main` pushes, and
+        automatic merges are prohibited.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: Describe the user-visible result.
+    validations:
+      required: true
+  - type: textarea
+    id: allowed_scope
+    attributes:
+      label: Allowed scope
+      description: List the files, app, or Functions the agent may change.
+      placeholder: |
+        apps/staff/**
+        functions/src/example.ts
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance checks
+      description: State the exact tests and observable result.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: Staging project only
+          required: true
+        - label: Dedicated branch and draft PR only
+          required: true
+        - label: No production, IAM, secrets, or data mutation
+          required: true
+        - label: No automatic merge
+          required: true
+

@@ -1,0 +1,37 @@
+{
+  "projectId": "lip-knots-crew-staging",
+  "region": "asia-northeast1",
+  "organizationId": "140605582413",
+  "repository": "Hanabo0930/Lip-Knots-Crew",
+  "repositoryId": "1301135145",
+  "repositoryOwnerId": "305317827",
+  "allowedSourceRefs": [
+    "main",
+    "cursor/staging-preview-performance-20260724"
+  ],
+  "allowedFunctions": [
+    "getSubmissionTimeline",
+    "getSubmissionProcessingStatus",
+    "getResubmissionComparison",
+    "driveFilePreview",
+    "finalizeStagedUpload"
+  ],
+  "referenceServices": [
+    "getsubmissiontimeline"
+  ],
+  "invokerDiagnosticServices": [
+    "getsubmissiontimeline",
+    "getsubmissionprocessingstatus",
+    "drivefilepreview"
+  ],
+  "invokerMutableServices": [
+    "getsubmissionprocessingstatus",
+    "drivefilepreview"
+  ],
+  "confirmations": {
+    "invokerApply": "APPLY_LKC_STAGING_INVOKER",
+    "functionsDeploy": "DEPLOY_LKC_STAGING_FUNCTIONS",
+    "wifBootstrap": "BOOTSTRAP_LKC_STAGING_WIF"
+  }
+}
+

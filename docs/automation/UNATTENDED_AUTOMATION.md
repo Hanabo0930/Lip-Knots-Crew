@@ -29,6 +29,9 @@ The target operating model removes local Cursor Run/Accept prompts:
 - `.cursor/rules/lkc-staging-safety.mdc` makes the Cursor rule always active.
 - `scripts/automation/validate-staging-scope.mjs` rejects any project, region,
   service, function, confirmation, or branch outside the allowlist.
+- `scripts/automation/check-deploy-source-integrity.mjs` rejects deployment
+  branches that alter workflows, Firebase configuration, dependency manifests,
+  environment files, agent rules, or automation guards.
 - `.github/workflows/release-candidate.yml` is the one canonical full CI. The
   automation work does not create a duplicate PR verification workflow.
 - `.github/workflows/staging-cloud-run-invoker.yml` separates read-only
@@ -105,4 +108,3 @@ The Automation must:
 Use `.github/ISSUE_TEMPLATE/cloud-agent-task.yml` for every unattended task.
 Local Cursor is no longer part of the normal operating path after one Cloud
 Agent task completes successfully.
-

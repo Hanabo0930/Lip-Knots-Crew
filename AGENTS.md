@@ -37,6 +37,10 @@ The only Functions allowed in the first unattended staging deployment phase are:
 
 Never use `firebase deploy --only functions`. Every Functions deployment must list
 each function explicitly and pass `scripts/automation/validate-staging-scope.mjs`.
+The source branch must also pass
+`scripts/automation/check-deploy-source-integrity.mjs`; workflow files,
+Firebase configuration, dependency manifests, environment files, and automation
+guards cannot be changed by the deployment source branch.
 
 The only Cloud Run services whose Invoker IAM check may be changed are:
 
@@ -70,4 +74,3 @@ Every agent result must state:
 - `CLOUD_RESOURCES_CHANGED`
 - `BLOCKERS`
 - `NEXT_SAFE_ACTION`
-

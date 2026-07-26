@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  web-and-release:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -28,17 +28,94 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Build, regression tests and high-severity audit
-        run: npm run verify
+      - name: Build all deployable artifacts
+        run: npm run build
+      - name: Validate web startup and transfer size
+        run: |
+          npm run test:bundle-size
+          if [[ -f scripts/check-web-boot-bundles.mjs ]]; then
+            node scripts/check-web-boot-bundles.mjs
+          fi
+      - name: Run release orchestration regressions
+        run: |
+          npm run test:preview-demo
+          npm run test:production-setup
+          npm run test:production-deploy-readiness
+          npm run test:production-deploy-orchestration
+          npm run test:production-acceptance
+          npm run test:known-good-rollback-bundle
+          npm run test:production-rollback-command
+          npm run test:production-evidence-sync
+          npm run test:production-evidence-security
+          npm run test:staging-preflight
+          npm run test:staging-automation
+          npm run test:release-checkpoint
+          npm run test:staging-smoke
+          npm run test:production-rehearsal
       - name: Publish verification summary
         if: always()
         run: |
           {
-            echo "## Release Candidate Checks"
+            echo "## Web and release checks"
             echo
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Result: \`${{ job.status }}\`"
             echo "- Production deploy: \`not configured\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  functions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build and test Functions
+        run: |
+          npm run build -w @lkc/functions
+          npm test
+      - name: Publish Functions summary
+        if: always()
+        run: |
+          {
+            echo "## Functions checks"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Result: \`${{ job.status }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Validate automation scope and production dependencies
+        run: |
+          npm run test:automation-safety
+          npm audit --omit=dev --audit-level=high
+      - name: Publish security summary
+        if: always()
+        run: |
+          {
+            echo "## Security checks"
+            echo
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Result: \`${{ job.status }}\`"
+            echo "- Long-lived cloud key: \`not used\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Production deploy is intentionally absent.

@@ -30,6 +30,11 @@ function validateSourceRef(sourceRef) {
   throw new Error(`SOURCE_REF_NOT_ALLOWED:${sourceRef}`);
 }
 
+function validateChannel(channel, prefix) {
+  const pattern = new RegExp(`^${prefix}-[a-z0-9][a-z0-9-]{0,38}$`);
+  if (!pattern.test(channel)) throw new Error(`HOSTING_CHANNEL_REJECTED:${channel}`);
+}
+
 export function validatePlan(plan) {
   const mode = String(plan.mode ?? "ci");
   const project = String(plan.project ?? safetyConfig.projectId);
@@ -76,6 +81,23 @@ export function validatePlan(plan) {
     return { mode, project, region, sourceRef, functions };
   }
 
+  if (mode === "hosting-preview" || mode === "hosting-promote") {
+    if (sourceRef !== "main") throw new Error(`HOSTING_SOURCE_MUST_BE_MAIN:${sourceRef}`);
+    const targets = parseCsv(plan.targets);
+    if (!sameSet(targets, safetyConfig.allowedHostingTargets)) {
+      throw new Error(`HOSTING_TARGETS_NOT_EXACT:${targets.join(",")}`);
+    }
+    const channel = String(plan.channel ?? "");
+    validateChannel(channel, "rc");
+    if (
+      mode === "hosting-promote"
+      && plan.confirmation !== safetyConfig.confirmations.hostingPromote
+    ) {
+      throw new Error("HOSTING_PROMOTION_CONFIRMATION_REJECTED");
+    }
+    return { mode, project, region, sourceRef, targets, channel };
+  }
+
   throw new Error(`MODE_NOT_ALLOWED:${mode}`);
 }
 
@@ -108,6 +130,8 @@ function main() {
     console.log(`GUARD_SOURCE_REF=${plan.sourceRef}`);
     if (plan.services) console.log(`GUARD_SERVICES=${plan.services.join(",")}`);
     if (plan.functions) console.log(`GUARD_FUNCTIONS=${plan.functions.join(",")}`);
+    if (plan.targets) console.log(`GUARD_HOSTING_TARGETS=${plan.targets.join(",")}`);
+    if (plan.channel) console.log(`GUARD_HOSTING_CHANNEL=${plan.channel}`);
   } catch (error) {
     console.error("GUARD_STATUS=FAIL");
     console.error(`GUARD_ERROR=${error instanceof Error ? error.message : String(error)}`);
@@ -118,4 +142,3 @@ function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main();
 }
-

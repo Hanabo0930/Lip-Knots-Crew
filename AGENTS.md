@@ -49,7 +49,27 @@ The only Cloud Run services whose Invoker IAM check may be changed are:
 
 Do not add or remove `allUsers` or `allAuthenticatedUsers` IAM bindings. Do not
 change organization policy, project-wide IAM, Firestore data, Storage data,
-Hosting, Rules, or any resource outside the explicit allowlist.
+Rules, or any resource outside the explicit allowlist.
+
+The only Hosting targets allowed in unattended workflows are:
+
+- `hosting:staff`
+- `hosting:admin`
+
+Hosting automation must use `.github/workflows/staging-hosting-preview.yml` and
+`.github/workflows/staging-hosting-promote.yml`. A successful canonical CI run
+on `main` may create expiring preview channels. Live staging promotion must:
+
+- use the exact versions already validated in preview channels;
+- require `PROMOTE_LKC_STAGING_HOSTING`;
+- pass the protected `lkc-staging-hosting` environment;
+- back up both current live channels before changing either;
+- automatically restore both backups if promotion or post-promotion browser
+  checks fail.
+
+Never deploy Hosting directly from an application branch, rebuild during
+promotion, or deploy Functions, Firestore, Storage, Rules, IAM, or production
+from a Hosting workflow.
 
 ## Stop conditions
 
@@ -59,6 +79,9 @@ Stop without expanding scope when:
 - app-level authentication or authorization checks are missing;
 - the effective Invoker IAM policy cannot be determined;
 - a required GitHub check is not successful;
+- a Hosting promotion does not reference the current CI-passing `main` commit;
+- a Hosting preview cannot recover the current public Firebase client config;
+- the required Hosting backup channels cannot be created;
 - a cloud command fails for a reason not explicitly handled by the workflow;
 - a deploy would require production access, a long-lived key, or a broader IAM role.
 

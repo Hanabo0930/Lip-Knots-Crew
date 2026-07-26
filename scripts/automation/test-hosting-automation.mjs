@@ -18,6 +18,7 @@ import {
   renderClientEnv,
   resolveFirebaseConfigs,
   selectHostingSites,
+  selectApplicationVapidKey,
   validateFirebaseInit,
 } from "./prepare-staging-hosting-config.mjs";
 import {
@@ -73,6 +74,22 @@ const promoteWorkflow = readFileSync(
   resolve(repoRoot, ".github/workflows/staging-hosting-promote.yml"),
   "utf8",
 );
+const previewWorkflow = readFileSync(
+  resolve(repoRoot, ".github/workflows/staging-hosting-preview.yml"),
+  "utf8",
+);
+assert.ok(
+  previewWorkflow.includes(
+    [
+      "  preview:",
+      "    needs: guard",
+      "    environment: lkc-staging-hosting",
+      "    runs-on: ubuntu-latest",
+    ].join("\n"),
+  ),
+  "Hosting preview must use the protected lkc-staging-hosting environment",
+);
+cases += 1;
 assert.match(
   promoteWorkflow,
   /node scripts\/automation\/restore-staging-hosting\.mjs/u,
@@ -218,6 +235,28 @@ assert.equal(distinctFirebaseConfigs.adminConfig.appId, adminWithOwnAppId.appId)
 assert.equal(distinctFirebaseConfigs.adminAppIdSource, "admin-public-config");
 cases += 1;
 assert.deepEqual(findVapidCandidates(`const key="${vapidKey}";`), [vapidKey]);
+cases += 1;
+const sdkVapidKey = `B${"S".repeat(86)}`;
+assert.equal(
+  selectApplicationVapidKey(
+    [sdkVapidKey, vapidKey, sdkVapidKey],
+    [sdkVapidKey],
+  ),
+  vapidKey,
+);
+cases += 1;
+assert.throws(
+  () => selectApplicationVapidKey([sdkVapidKey], [sdkVapidKey]),
+  /VAPID_KEY_NOT_UNIQUELY_RECOVERED:0/u,
+);
+cases += 1;
+assert.throws(
+  () => selectApplicationVapidKey(
+    [vapidKey, `B${"Z".repeat(86)}`, sdkVapidKey],
+    [sdkVapidKey],
+  ),
+  /VAPID_KEY_NOT_UNIQUELY_RECOVERED:2/u,
+);
 cases += 1;
 const env = renderClientEnv(firebaseInit, {
   projectId,

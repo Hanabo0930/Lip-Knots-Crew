@@ -70,6 +70,7 @@ jobs:
 
   preview:
     needs: guard
+    environment: lkc-staging-hosting
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

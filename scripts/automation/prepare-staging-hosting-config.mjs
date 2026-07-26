@@ -187,6 +187,50 @@ export function findVapidCandidates(source) {
   ].filter((candidate) => vapidPattern.test(candidate));
 }
 
+export function selectApplicationVapidKey(discoveredCandidates, sdkCandidates) {
+  const sdkCandidateSet = new Set(
+    [...new Set(sdkCandidates)].filter((candidate) => vapidPattern.test(candidate)),
+  );
+  const applicationCandidates = [...new Set(discoveredCandidates)]
+    .filter((candidate) => vapidPattern.test(candidate))
+    .filter((candidate) => !sdkCandidateSet.has(candidate));
+  if (applicationCandidates.length !== 1) {
+    throw new Error(
+      `VAPID_KEY_NOT_UNIQUELY_RECOVERED:${applicationCandidates.length}`,
+    );
+  }
+  return applicationCandidates[0];
+}
+
+async function loadFirebaseSdkVapidCandidates(sourceRoot) {
+  const candidates = new Set();
+  let inspectedBundles = 0;
+  const bundlePaths = [
+    "firebase-messaging.js",
+    "firebase-messaging-compat.js",
+    "firebase-messaging-sw.js",
+  ];
+
+  for (const bundleName of bundlePaths) {
+    try {
+      const source = await readFile(
+        path.join(sourceRoot, "node_modules", "firebase", bundleName),
+        "utf8",
+      );
+      inspectedBundles += 1;
+      findVapidCandidates(source).forEach((candidate) => candidates.add(candidate));
+    } catch (error) {
+      if (error && typeof error === "object" && error.code === "ENOENT") continue;
+      throw error;
+    }
+  }
+
+  if (inspectedBundles === 0) {
+    throw new Error("FIREBASE_MESSAGING_SDK_BUNDLE_NOT_FOUND");
+  }
+  return [...candidates];
+}
+
 async function fetchText(url, { timeoutMs = 15_000, maxBytes = 2_000_000 } = {}) {
   const response = await fetch(url, {
     redirect: "error",
@@ -224,7 +268,7 @@ function extractJavaScriptUrls(source, baseUrl) {
   return [...new Set(urls)];
 }
 
-async function discoverVapidKey(siteId) {
+async function discoverVapidKey(siteId, sourceRoot) {
   const baseUrl = `https://${siteId}.web.app/`;
   const pending = [baseUrl];
   const visited = new Set();
@@ -243,10 +287,8 @@ async function discoverVapidKey(siteId) {
       .forEach((candidate) => pending.push(candidate));
   }
 
-  if (candidates.size !== 1) {
-    throw new Error(`VAPID_KEY_NOT_UNIQUELY_RECOVERED:${candidates.size}`);
-  }
-  return [...candidates][0];
+  const sdkCandidates = await loadFirebaseSdkVapidCandidates(sourceRoot);
+  return selectApplicationVapidKey([...candidates], sdkCandidates);
 }
 
 export function renderClientEnv(config, { projectId, region, vapidKey }) {
@@ -322,7 +364,7 @@ async function main() {
     adminConfig,
     adminAppIdSource,
   } = resolveFirebaseConfigs(staffDocument, adminDocument, projectId);
-  const vapidKey = suppliedVapidKey || await discoverVapidKey(staffSite);
+  const vapidKey = suppliedVapidKey || await discoverVapidKey(staffSite, sourceRoot);
   if (!vapidPattern.test(vapidKey)) throw new Error("VAPID_KEY_INVALID");
 
   const firebaserc = {

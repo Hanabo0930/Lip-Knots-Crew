@@ -13,7 +13,7 @@
     "release:staging": "npm run build:staging && node scripts/staging-deploy-readiness.mjs",
     "test": "npm run test:release -w @lkc/functions",
     "verify": "npm run test:automation-safety && npm run build && npm run test:bundle-size && npm run test:preview-demo && npm run test:production-setup && npm run test:production-deploy-readiness && npm run test:production-deploy-orchestration && npm run test:production-acceptance && npm run test:known-good-rollback-bundle && npm run test:production-rollback-command && npm run test:production-evidence-sync && npm run test:production-evidence-security && npm run test:staging-preflight && npm run test:staging-automation && npm run test:release-checkpoint && npm run test:staging-smoke && npm run test:production-rehearsal && npm test && npm audit --omit=dev --audit-level=high",
-    "test:automation-safety": "node scripts/automation/test-staging-scope.mjs && node scripts/automation/check-deploy-source-integrity.mjs --self-test",
+    "test:automation-safety": "node scripts/automation/test-staging-scope.mjs && node scripts/automation/check-deploy-source-integrity.mjs --self-test && node scripts/automation/test-hosting-automation.mjs",
     "test:bundle-size": "node scripts/check-bundle-size.mjs",
     "preflight:staging": "node scripts/staging-preflight.mjs",
     "test:staging-preflight": "node scripts/staging-preflight.mjs --examples --self-test",
@@ -82,5 +82,8 @@
     },
     "whatwg-url": "7.1.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "firebase-tools": "15.24.0"
+  }
 }

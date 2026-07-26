@@ -1,0 +1,298 @@
+name: Staging Hosting Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Current CI-passing main SHA; leave blank to use current main
+        required: false
+        type: string
+      confirmation:
+        description: Type PROMOTE_LKC_STAGING_HOSTING
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: lkc-staging-hosting-promote
+  cancel-in-progress: false
+
+env:
+  LKC_PROJECT_ID: lip-knots-crew-staging
+  LKC_REGION: asia-northeast1
+  LKC_TARGETS: staff,admin
+
+jobs:
+  guard:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      channel: ${{ steps.release.outputs.channel }}
+    steps:
+      - name: Require the deliberate live-staging enable switch
+        env:
+          LKC_PROMOTE_ENABLED: ${{ vars.LKC_STAGING_HOSTING_PROMOTE_ENABLED }}
+        run: |
+          if [[ "$LKC_PROMOTE_ENABLED" != "true" ]]; then
+            echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
+            echo "HOSTING_PROMOTION_ERROR=ENABLE_SWITCH_OFF"
+            exit 1
+          fi
+      - name: Checkout current main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Require current main, canonical CI and exact scope
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LKC_REQUESTED_SHA: ${{ inputs.source_sha }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          git fetch --no-tags origin main
+          source_sha="$(git rev-parse origin/main)"
+          if [[ -n "$LKC_REQUESTED_SHA" && "$LKC_REQUESTED_SHA" != "$source_sha" ]]; then
+            echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
+            echo "HOSTING_PROMOTION_ERROR=SOURCE_SHA_NOT_CURRENT_MAIN"
+            exit 1
+          fi
+          if [[ ! "$source_sha" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "HOSTING_PROMOTION_ERROR=SOURCE_SHA_INVALID"
+            exit 1
+          fi
+          canonical_ci="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&status=completed&per_page=50" \
+              --jq '[.workflow_runs[] | select(.name == "Release Candidate Checks" and .conclusion == "success")] | length'
+          )"
+          if [[ "$canonical_ci" -lt 1 ]]; then
+            echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
+            echo "HOSTING_PROMOTION_ERROR=CANONICAL_CI_NOT_SUCCESSFUL"
+            exit 1
+          fi
+          channel="rc-${source_sha:0:12}"
+          node scripts/automation/validate-staging-scope.mjs \
+            --mode hosting-promote \
+            --project "$LKC_PROJECT_ID" \
+            --region "$LKC_REGION" \
+            --source-ref main \
+            --targets "$LKC_TARGETS" \
+            --channel "$channel" \
+            --confirmation "$LKC_CONFIRMATION"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+  promote:
+    needs: guard
+    environment: lkc-staging-hosting
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LKC_SOURCE_SHA: ${{ needs.guard.outputs.source_sha }}
+      LKC_CHANNEL: ${{ needs.guard.outputs.channel }}
+      LKC_ROLLBACK_CHANNEL: rb-${{ github.run_id }}
+    steps:
+      - name: Prepare evidence directory
+        run: |
+          evidence_dir="$RUNNER_TEMP/hosting-promote-evidence"
+          mkdir -p "$evidence_dir"
+          echo "LKC_EVIDENCE_DIR=$evidence_dir" >> "$GITHUB_ENV"
+      - name: Checkout the exact CI-passing main source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.LKC_SOURCE_SHA }}
+          path: source
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - name: Install locked automation dependencies
+        working-directory: source
+        run: npm ci
+      - name: Authenticate with the short-lived staging identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
+      - name: Discover the two allowlisted Hosting sites
+        id: hosting
+        env:
+          LKC_OPTIONAL_STAFF_SITE: ${{ vars.LKC_STAGING_STAFF_HOSTING_SITE }}
+          LKC_OPTIONAL_ADMIN_SITE: ${{ vars.LKC_STAGING_ADMIN_HOSTING_SITE }}
+        run: |
+          (
+            cd source
+            npx firebase hosting:sites:list \
+              --project "$LKC_PROJECT_ID" \
+              --json > "$RUNNER_TEMP/lkc-hosting-sites.json"
+          )
+          node source/scripts/automation/prepare-staging-hosting-config.mjs \
+            --source source \
+            --sites-json "$RUNNER_TEMP/lkc-hosting-sites.json" \
+            --project "$LKC_PROJECT_ID" \
+            --region "$LKC_REGION" \
+            --staff-site "$LKC_OPTIONAL_STAFF_SITE" \
+            --admin-site "$LKC_OPTIONAL_ADMIN_SITE" \
+            --discover-only \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Resolve the exact preview versions
+        id: channel
+        run: |
+          (
+            cd source
+            npx firebase hosting:channel:list \
+              --site "${{ steps.hosting.outputs.staff_site }}" \
+              --project "$LKC_PROJECT_ID" \
+              --json > "$RUNNER_TEMP/lkc-staff-channels.json"
+            npx firebase hosting:channel:list \
+              --site "${{ steps.hosting.outputs.admin_site }}" \
+              --project "$LKC_PROJECT_ID" \
+              --json > "$RUNNER_TEMP/lkc-admin-channels.json"
+          )
+          node source/scripts/automation/resolve-hosting-channel.mjs \
+            --channel "$LKC_CHANNEL" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --staff-channels-json "$RUNNER_TEMP/lkc-staff-channels.json" \
+            --admin-channels-json "$RUNNER_TEMP/lkc-admin-channels.json" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Re-check both preview apps before any live change
+        working-directory: source
+        run: |
+          npx playwright install --with-deps chromium
+          node scripts/automation/hosting-browser-check.mjs \
+            --staff-url "${{ steps.channel.outputs.staff_url }}" \
+            --admin-url "${{ steps.channel.outputs.admin_url }}" \
+            --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
+            --evidence-dir "$LKC_EVIDENCE_DIR/preview"
+      - name: Back up both current live channels
+        id: backup
+        working-directory: source
+        run: |
+          npx firebase hosting:clone \
+            "${{ steps.hosting.outputs.staff_site }}:live" \
+            "${{ steps.hosting.outputs.staff_site }}:$LKC_ROLLBACK_CHANNEL" \
+            --project "$LKC_PROJECT_ID" \
+            --json > "$LKC_EVIDENCE_DIR/staff-backup.json"
+          npx firebase hosting:clone \
+            "${{ steps.hosting.outputs.admin_site }}:live" \
+            "${{ steps.hosting.outputs.admin_site }}:$LKC_ROLLBACK_CHANNEL" \
+            --project "$LKC_PROJECT_ID" \
+            --json > "$LKC_EVIDENCE_DIR/admin-backup.json"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - name: Promote the already-tested versions without rebuilding
+        id: promotion
+        continue-on-error: true
+        working-directory: source
+        run: |
+          npx firebase hosting:clone \
+            "${{ steps.hosting.outputs.staff_site }}:$LKC_CHANNEL" \
+            "${{ steps.hosting.outputs.staff_site }}:live" \
+            --project "$LKC_PROJECT_ID" \
+            --json > "$LKC_EVIDENCE_DIR/staff-promotion.json"
+          npx firebase hosting:clone \
+            "${{ steps.hosting.outputs.admin_site }}:$LKC_CHANNEL" \
+            "${{ steps.hosting.outputs.admin_site }}:live" \
+            --project "$LKC_PROJECT_ID" \
+            --json > "$LKC_EVIDENCE_DIR/admin-promotion.json"
+      - name: Verify both live staging apps after promotion
+        id: live_check
+        if: steps.promotion.outcome == 'success'
+        continue-on-error: true
+        working-directory: source
+        run: |
+          node scripts/automation/hosting-browser-check.mjs \
+            --staff-url "${{ steps.hosting.outputs.staff_live_url }}" \
+            --admin-url "${{ steps.hosting.outputs.admin_live_url }}" \
+            --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
+            --evidence-dir "$LKC_EVIDENCE_DIR/live"
+      - name: Restore both previous live versions on any failure
+        id: rollback
+        if: >-
+          always() &&
+          steps.backup.outputs.ready == 'true' &&
+          (steps.promotion.outcome != 'success' || steps.live_check.outcome != 'success')
+        working-directory: source
+        run: |
+          node scripts/automation/restore-staging-hosting.mjs \
+            --project "$LKC_PROJECT_ID" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --channel "$LKC_ROLLBACK_CHANNEL" \
+            --evidence-dir "$LKC_EVIDENCE_DIR" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Verify both live staging apps after rollback
+        id: rollback_check
+        if: always() && steps.rollback.outputs.attempted == 'true'
+        continue-on-error: true
+        working-directory: source
+        run: |
+          node scripts/automation/hosting-browser-check.mjs \
+            --staff-url "${{ steps.hosting.outputs.staff_live_url }}" \
+            --admin-url "${{ steps.hosting.outputs.admin_live_url }}" \
+            --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
+            --evidence-dir "$LKC_EVIDENCE_DIR/rollback"
+      - name: Remove temporary channels after a successful promotion
+        if: steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success'
+        working-directory: source
+        run: |
+          for site in \
+            "${{ steps.hosting.outputs.staff_site }}" \
+            "${{ steps.hosting.outputs.admin_site }}"; do
+            npx firebase hosting:channel:delete "$LKC_CHANNEL" \
+              --site "$site" \
+              --project "$LKC_PROJECT_ID" \
+              --force
+            npx firebase hosting:channel:delete "$LKC_ROLLBACK_CHANNEL" \
+              --site "$site" \
+              --project "$LKC_PROJECT_ID" \
+              --force
+          done
+      - name: Upload promotion and rollback evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: staging-hosting-promote-${{ env.LKC_SOURCE_SHA }}
+          path: ${{ env.LKC_EVIDENCE_DIR }}
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Publish promotion summary
+        if: always()
+        run: |
+          {
+            echo "## Staging Hosting promotion"
+            echo
+            echo "- Source: \`$LKC_SOURCE_SHA\`"
+            echo "- Preview channel: \`$LKC_CHANNEL\`"
+            echo "- Promotion result: \`${{ steps.promotion.outcome }}\`"
+            echo "- Live browser result: \`${{ steps.live_check.outcome }}\`"
+            echo "- Automatic rollback result: \`${{ steps.rollback.outcome }}\`"
+            echo "- Staff rollback: \`${{ steps.rollback.outputs.staff_status || 'not-attempted' }}\`"
+            echo "- Admin rollback: \`${{ steps.rollback.outputs.admin_status || 'not-attempted' }}\`"
+            echo "- Rollback browser result: \`${{ steps.rollback_check.outcome }}\`"
+            echo "- Functions deployed: \`false\`"
+            echo "- Firestore / Storage / Rules / IAM changed: \`false\`"
+            echo "- Production touched: \`false\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Enforce the final result
+        if: always()
+        run: |
+          if [[ "${{ steps.promotion.outcome }}" != "success" || "${{ steps.live_check.outcome }}" != "success" ]]; then
+            if [[ "${{ steps.rollback.outcome }}" != "success" || "${{ steps.rollback_check.outcome }}" != "success" ]]; then
+              echo "HOSTING_PROMOTION_RESULT=ROLLBACK_FAILED"
+              exit 1
+            fi
+            echo "HOSTING_PROMOTION_RESULT=ROLLED_BACK"
+            exit 1
+          fi
+          echo "HOSTING_PROMOTION_RESULT=SUCCESS"

@@ -38,6 +38,29 @@ assert.deepEqual(
   ["getSubmissionTimeline", "driveFilePreview"],
 );
 
+assert.deepEqual(
+  validatePlan({
+    ...base,
+    sourceRef: "main",
+    mode: "hosting-preview",
+    targets: "staff,admin",
+    channel: "rc-02516b6e28e4",
+  }).targets,
+  ["staff", "admin"],
+);
+
+assert.equal(
+  validatePlan({
+    ...base,
+    sourceRef: "main",
+    mode: "hosting-promote",
+    targets: "admin,staff",
+    channel: "rc-02516b6e28e4",
+    confirmation: safetyConfig.confirmations.hostingPromote,
+  }).mode,
+  "hosting-promote",
+);
+
 const rejectedPlans = [
   { ...base, mode: "ci", project: "lip-knots-crew-production" },
   { ...base, mode: "ci", region: "us-central1" },
@@ -55,11 +78,39 @@ const rejectedPlans = [
     functions: "unknownFunction",
     confirmation: safetyConfig.confirmations.functionsDeploy,
   },
+  {
+    ...base,
+    mode: "hosting-preview",
+    targets: "staff,admin",
+    channel: "rc-02516b6e28e4",
+  },
+  {
+    ...base,
+    sourceRef: "main",
+    mode: "hosting-preview",
+    targets: "staff",
+    channel: "rc-02516b6e28e4",
+  },
+  {
+    ...base,
+    sourceRef: "main",
+    mode: "hosting-promote",
+    targets: "staff,admin",
+    channel: "rc-../../main",
+    confirmation: safetyConfig.confirmations.hostingPromote,
+  },
+  {
+    ...base,
+    sourceRef: "main",
+    mode: "hosting-promote",
+    targets: "staff,admin",
+    channel: "rc-02516b6e28e4",
+    confirmation: "wrong",
+  },
 ];
 
 for (const plan of rejectedPlans) {
   assert.throws(() => validatePlan(plan));
 }
 
-console.log(`staging automation safety tests passed (${4 + rejectedPlans.length} cases)`);
-
+console.log(`staging automation safety tests passed (${6 + rejectedPlans.length} cases)`);

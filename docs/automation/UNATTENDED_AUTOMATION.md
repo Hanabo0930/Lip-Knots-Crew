@@ -20,8 +20,10 @@ The target operating model removes local Cursor Run/Accept prompts:
 | 1. GCP read-only diagnosis | Requires one-time WIF bootstrap | Three Cloud Run services, no mutation |
 | 2. Invoker IAM check fix | Manual workflow + typed confirmation + environment gate | Exactly two staging services |
 | 3. Functions deploy | Disabled by repository variable | Explicit five-function allowlist only |
-| 4. Cursor Automation trigger | Requires one-time Cursor GitHub connection | Issues labeled `cloud-agent` |
-| 5. Stable unattended operation | Enabled after successful staging trials | ChatGPT → GitHub → Cloud Agent → Actions |
+| 4. Hosting preview | Disabled until the Hosting bootstrap switch is enabled | Expiring Staff/Admin preview channels after successful `main` CI |
+| 5. Hosting promotion | Typed confirmation + protected environment | Same tested versions to Staff/Admin live staging with automatic rollback |
+| 6. Cursor Automation trigger | Requires one-time Cursor GitHub connection | Issues labeled `cloud-agent` |
+| 7. Stable unattended operation | Enabled after successful staging trials | ChatGPT → GitHub → Cloud Agent → Actions |
 
 ## Repository controls
 
@@ -38,6 +40,12 @@ The target operating model removes local Cursor Run/Accept prompts:
   diagnosis from the two-service mutation.
 - `.github/workflows/staging-functions-deploy.yml` remains fail-closed until
   `LKC_STAGING_DEPLOY_ENABLED=true` is deliberately added after Phase A passes.
+- `.github/workflows/staging-hosting-preview.yml` builds only Staff/Admin,
+  creates one-day preview channels, and records real-browser screenshots.
+- `.github/workflows/staging-hosting-promote.yml` clones the already-tested
+  preview versions to live staging after approval; it never rebuilds.
+- Both current live Hosting versions are cloned to rollback channels before
+  promotion, and both are restored on any partial promotion or browser failure.
 
 ## One-time GCP bootstrap
 
@@ -48,9 +56,10 @@ Cloud Shell only after this automation PR is merged. It:
 - creates separate observer and deployer service accounts;
 - trusts only this immutable GitHub repository ID and owner ID;
 - trusts only `main`;
-- trusts only the two staging workflow filenames;
+- trusts only the four staging workflow filenames;
 - creates no JSON service-account key;
 - grants a small custom Cloud Run role for Invoker IAM check management;
+- grants Firebase Hosting Admin only to the staging deploy identity;
 - discovers the deployed Functions runtime/build identities before granting
   `iam.serviceAccountUser`.
 
@@ -75,9 +84,28 @@ Create these GitHub environments:
 
 - `lkc-staging-iam`
 - `lkc-staging-deploy`
+- `lkc-staging-hosting`
 
-During the first successful trials, configure both with a required reviewer.
+During the first successful trials, configure all three with a required reviewer.
 Do not add deployment branches other than `main`.
+
+Add these repository Actions variables only after the environment protection and
+WIF bootstrap are complete:
+
+- `LKC_STAGING_HOSTING_PREVIEW_ENABLED=true`
+- `LKC_STAGING_HOSTING_PROMOTE_ENABLED=true`
+
+The workflow discovers the two Hosting sites and recovers Firebase's public web
+configuration from the current staging deployment. Optional overrides exist for
+unusual multi-site projects:
+
+- `LKC_STAGING_STAFF_HOSTING_SITE`
+- `LKC_STAGING_ADMIN_HOSTING_SITE`
+- `LKC_STAGING_VAPID_KEY`
+
+The VAPID value is a public browser key, not a private signing key. The preview
+workflow first attempts to recover it from the current Staff bundle and stops
+safely if it cannot find exactly one value.
 
 ## First execution order
 
@@ -92,6 +120,13 @@ Do not add deployment branches other than `main`.
 5. Test authenticated preview and processing status in the Staff app.
 6. Only then set `LKC_STAGING_DEPLOY_ENABLED=true`.
 7. Run a single allowlisted staging Functions deployment and review the result.
+8. Set `LKC_STAGING_HOSTING_PREVIEW_ENABLED=true`; the next successful `main`
+   CI run creates and checks an expiring Hosting preview automatically.
+9. Review the Staff/Admin screenshots and run `Staging Hosting Promote` with
+   the exact confirmation `PROMOTE_LKC_STAGING_HOSTING`.
+10. Approve the protected `lkc-staging-hosting` environment. The workflow backs
+    up both live sites, promotes the tested versions, re-checks both live apps,
+    and automatically restores both backups on failure.
 
 ## Cursor Cloud Agent setup
 

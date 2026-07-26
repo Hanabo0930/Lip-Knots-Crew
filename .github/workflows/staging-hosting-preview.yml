@@ -1,0 +1,192 @@
+name: Staging Hosting Preview
+
+on:
+  workflow_run:
+    workflows: [Release Candidate Checks]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: lkc-staging-hosting-preview
+  cancel-in-progress: true
+
+env:
+  LKC_PROJECT_ID: lip-knots-crew-staging
+  LKC_REGION: asia-northeast1
+  LKC_TARGETS: staff,admin
+
+jobs:
+  guard:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      channel: ${{ steps.release.outputs.channel }}
+    steps:
+      - name: Require the deliberate preview enable switch
+        env:
+          LKC_PREVIEW_ENABLED: ${{ vars.LKC_STAGING_HOSTING_PREVIEW_ENABLED }}
+        run: |
+          if [[ "$LKC_PREVIEW_ENABLED" != "true" ]]; then
+            echo "HOSTING_PREVIEW_RESULT=STOPPED_SAFELY"
+            echo "HOSTING_PREVIEW_ERROR=ENABLE_SWITCH_OFF"
+            exit 1
+          fi
+      - name: Checkout the CI-passing main commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - name: Require the current main commit and fixed Hosting scope
+        id: release
+        env:
+          LKC_SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          git fetch --no-tags origin main
+          current_main="$(git rev-parse origin/main)"
+          checked_out="$(git rev-parse HEAD)"
+          if [[ "$checked_out" != "$LKC_SOURCE_SHA" || "$current_main" != "$LKC_SOURCE_SHA" ]]; then
+            echo "HOSTING_PREVIEW_RESULT=SUPERSEDED"
+            exit 1
+          fi
+          channel="rc-${LKC_SOURCE_SHA:0:12}"
+          node scripts/automation/validate-staging-scope.mjs \
+            --mode hosting-preview \
+            --project "$LKC_PROJECT_ID" \
+            --region "$LKC_REGION" \
+            --source-ref main \
+            --targets "$LKC_TARGETS" \
+            --channel "$channel"
+          echo "source_sha=$LKC_SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+  preview:
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LKC_CHANNEL: ${{ needs.guard.outputs.channel }}
+      LKC_SOURCE_SHA: ${{ needs.guard.outputs.source_sha }}
+    steps:
+      - name: Prepare evidence directory
+        run: |
+          evidence_dir="$RUNNER_TEMP/hosting-preview-evidence"
+          mkdir -p "$evidence_dir"
+          echo "LKC_EVIDENCE_DIR=$evidence_dir" >> "$GITHUB_ENV"
+      - name: Checkout the exact CI-passing source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.LKC_SOURCE_SHA }}
+          path: source
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - name: Install locked dependencies
+        working-directory: source
+        run: npm ci
+      - name: Authenticate with the short-lived staging identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
+      - name: Discover sites and recover public staging client config
+        id: hosting
+        env:
+          LKC_OPTIONAL_VAPID_KEY: ${{ vars.LKC_STAGING_VAPID_KEY }}
+          LKC_OPTIONAL_STAFF_SITE: ${{ vars.LKC_STAGING_STAFF_HOSTING_SITE }}
+          LKC_OPTIONAL_ADMIN_SITE: ${{ vars.LKC_STAGING_ADMIN_HOSTING_SITE }}
+        run: |
+          (
+            cd source
+            npx firebase hosting:sites:list \
+              --project "$LKC_PROJECT_ID" \
+              --json > "$RUNNER_TEMP/lkc-hosting-sites.json"
+          )
+          node source/scripts/automation/prepare-staging-hosting-config.mjs \
+            --source source \
+            --sites-json "$RUNNER_TEMP/lkc-hosting-sites.json" \
+            --project "$LKC_PROJECT_ID" \
+            --region "$LKC_REGION" \
+            --staff-site "$LKC_OPTIONAL_STAFF_SITE" \
+            --admin-site "$LKC_OPTIONAL_ADMIN_SITE" \
+            --vapid-key "$LKC_OPTIONAL_VAPID_KEY" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Build only Staff and Admin Hosting
+        working-directory: source
+        run: |
+          npm run build:staging -w @lkc/staff
+          npm run build:staging -w @lkc/admin
+          npm run test:bundle-size
+          if [[ -f scripts/check-web-boot-bundles.mjs ]]; then
+            node scripts/check-web-boot-bundles.mjs
+          fi
+      - name: Deploy an expiring preview channel
+        working-directory: source
+        run: |
+          npx firebase hosting:channel:deploy "$LKC_CHANNEL" \
+            --only "$LKC_TARGETS" \
+            --expires 1d \
+            --project "$LKC_PROJECT_ID" \
+            --json > "$LKC_EVIDENCE_DIR/channel-deploy.json"
+          npx firebase hosting:channel:list \
+            --site "${{ steps.hosting.outputs.staff_site }}" \
+            --project "$LKC_PROJECT_ID" \
+            --json > "$RUNNER_TEMP/lkc-staff-channels.json"
+          npx firebase hosting:channel:list \
+            --site "${{ steps.hosting.outputs.admin_site }}" \
+            --project "$LKC_PROJECT_ID" \
+            --json > "$RUNNER_TEMP/lkc-admin-channels.json"
+      - name: Resolve the two preview URLs
+        id: channel
+        run: |
+          node source/scripts/automation/resolve-hosting-channel.mjs \
+            --channel "$LKC_CHANNEL" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --staff-channels-json "$RUNNER_TEMP/lkc-staff-channels.json" \
+            --admin-channels-json "$RUNNER_TEMP/lkc-admin-channels.json" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Install the locked Chromium runtime
+        working-directory: source
+        run: npx playwright install --with-deps chromium
+      - name: Run real-browser startup checks
+        working-directory: source
+        run: |
+          node scripts/automation/hosting-browser-check.mjs \
+            --staff-url "${{ steps.channel.outputs.staff_url }}" \
+            --admin-url "${{ steps.channel.outputs.admin_url }}" \
+            --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
+            --evidence-dir "$LKC_EVIDENCE_DIR"
+      - name: Upload screenshots and machine-readable evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: staging-hosting-preview-${{ env.LKC_SOURCE_SHA }}
+          path: ${{ env.LKC_EVIDENCE_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Publish preview summary
+        if: always()
+        run: |
+          {
+            echo "## Staging Hosting preview"
+            echo
+            echo "- Source: \`$LKC_SOURCE_SHA\`"
+            echo "- Channel: \`$LKC_CHANNEL\`"
+            echo "- Staff: \`${{ steps.channel.outputs.staff_url || 'not-created' }}\`"
+            echo "- Admin: \`${{ steps.channel.outputs.admin_url || 'not-created' }}\`"
+            echo "- Functions deployed: \`false\`"
+            echo "- Firestore / Storage / Rules / IAM changed: \`false\`"
+            echo "- Production touched: \`false\`"
+          } >> "$GITHUB_STEP_SUMMARY"

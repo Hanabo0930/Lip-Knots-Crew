@@ -66,7 +66,7 @@ if ! gcloud iam workload-identity-pools describe "$lkc_pool_id" \
 fi
 
 attribute_mapping="google.subject=assertion.sub,attribute.repository_id=assertion.repository_id,attribute.repository_owner_id=assertion.repository_owner_id,attribute.ref=assertion.ref,attribute.workflow_ref=assertion.workflow_ref"
-attribute_condition="assertion.repository_id=='${lkc_repository_id}' && assertion.repository_owner_id=='${lkc_repository_owner_id}' && assertion.ref=='refs/heads/main' && (assertion.workflow_ref=='${lkc_repository}/.github/workflows/staging-cloud-run-invoker.yml@refs/heads/main' || assertion.workflow_ref=='${lkc_repository}/.github/workflows/staging-functions-deploy.yml@refs/heads/main')"
+attribute_condition="assertion.repository_id=='${lkc_repository_id}' && assertion.repository_owner_id=='${lkc_repository_owner_id}' && assertion.ref=='refs/heads/main' && (assertion.workflow_ref=='${lkc_repository}/.github/workflows/staging-cloud-run-invoker.yml@refs/heads/main' || assertion.workflow_ref=='${lkc_repository}/.github/workflows/staging-functions-deploy.yml@refs/heads/main' || assertion.workflow_ref=='${lkc_repository}/.github/workflows/staging-hosting-preview.yml@refs/heads/main' || assertion.workflow_ref=='${lkc_repository}/.github/workflows/staging-hosting-promote.yml@refs/heads/main')"
 
 if gcloud iam workload-identity-pools providers describe "$lkc_provider_id" \
   --project "$lkc_project" \
@@ -126,6 +126,7 @@ fi
 
 for role_name in \
   roles/cloudfunctions.developer \
+  roles/firebasehosting.admin \
   roles/firebase.viewer \
   roles/serviceusage.serviceUsageConsumer \
   "projects/${lkc_project}/roles/${lkc_custom_role}"; do

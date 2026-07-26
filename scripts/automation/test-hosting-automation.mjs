@@ -16,6 +16,7 @@ import {
   extractSiteIds,
   findVapidCandidates,
   renderClientEnv,
+  resolveFirebaseConfigs,
   selectHostingSites,
   validateFirebaseInit,
 } from "./prepare-staging-hosting-config.mjs";
@@ -175,6 +176,46 @@ assert.throws(
   () => validateFirebaseInit({ ...firebaseInit, projectId: "production-project" }, projectId, "staff"),
   /PROJECT_MISMATCH/u,
 );
+cases += 1;
+const adminWithoutAppId = { ...firebaseInit };
+delete adminWithoutAppId.appId;
+const sharedFirebaseConfigs = resolveFirebaseConfigs(
+  firebaseInit,
+  adminWithoutAppId,
+  projectId,
+);
+assert.equal(sharedFirebaseConfigs.adminConfig.appId, firebaseInit.appId);
+assert.equal(sharedFirebaseConfigs.adminAppIdSource, "staff-same-project");
+cases += 1;
+assert.throws(
+  () => resolveFirebaseConfigs(
+    firebaseInit,
+    { ...adminWithoutAppId, appId: "\n" },
+    projectId,
+  ),
+  /FIREBASE_INIT_INVALID:admin.appId/u,
+);
+cases += 1;
+assert.throws(
+  () => resolveFirebaseConfigs(
+    firebaseInit,
+    { ...adminWithoutAppId, messagingSenderId: "9999999999" },
+    projectId,
+  ),
+  /FIREBASE_INIT_APP_ID_FALLBACK_REJECTED:admin.messagingSenderId/u,
+);
+cases += 1;
+const adminWithOwnAppId = {
+  ...firebaseInit,
+  appId: "1:1234567890:web:admin-app",
+};
+const distinctFirebaseConfigs = resolveFirebaseConfigs(
+  firebaseInit,
+  adminWithOwnAppId,
+  projectId,
+);
+assert.equal(distinctFirebaseConfigs.adminConfig.appId, adminWithOwnAppId.appId);
+assert.equal(distinctFirebaseConfigs.adminAppIdSource, "admin-public-config");
 cases += 1;
 assert.deepEqual(findVapidCandidates(`const key="${vapidKey}";`), [vapidKey]);
 cases += 1;

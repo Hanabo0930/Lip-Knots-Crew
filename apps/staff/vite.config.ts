@@ -8,25 +8,38 @@ export default defineConfig({
     rolldownOptions: {
       output: {
         codeSplitting: {
-          minSize: 20_000,
-          maxSize: 350_000,
+          // Keep each Firebase product intact. Size-based re-splitting can create
+          // circular ESM chunks and crash the app before React mounts.
           groups: [
             {
-              name: "firebase",
-              test: /node_modules[\\/](@firebase|firebase)[\\/]/,
-              priority: 3,
-              maxSize: 300_000,
+              name: "firebase-firestore",
+              test: /node_modules[\\/]@firebase[\\/]firestore[\\/]/,
+              priority: 6,
             },
             {
-              name: "react",
-              test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/,
+              name: "firebase-auth",
+              test: /node_modules[\\/]@firebase[\\/]auth[\\/]/,
+              priority: 5,
+            },
+            {
+              name: "firebase-storage",
+              test: /node_modules[\\/]@firebase[\\/]storage[\\/]/,
+              priority: 4,
+            },
+            {
+              name: "firebase-functions",
+              test: /node_modules[\\/]@firebase[\\/]functions[\\/]/,
+              priority: 3,
+            },
+            {
+              name: "firebase-messaging",
+              test: /node_modules[\\/]@firebase[\\/]messaging[\\/]/,
               priority: 2,
             },
             {
-              name: "vendor",
-              test: /node_modules[\\/]/,
+              name: "firebase-shared",
+              test: /node_modules[\\/]@firebase[\\/]/,
               priority: 1,
-              maxSize: 300_000,
             },
           ],
         },

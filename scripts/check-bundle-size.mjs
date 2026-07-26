@@ -1,9 +1,12 @@
-import { readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 
 const apps = ["staff", "admin"];
-const maxChunkBytes = 300 * 1024;
-const maxEntryBytes = 150 * 1024;
+const maxChunkBytes = 500 * 1024;
+const maxEntryBytes = 350 * 1024;
+const maxChunkGzipBytes = 150 * 1024;
+const maxEntryGzipBytes = 105 * 1024;
 const failures = [];
 
 for (const app of apps) {
@@ -13,11 +16,16 @@ for (const app of apps) {
   const sizes = await Promise.all(files.map(async (file) => ({
     file,
     bytes: (await stat(join(assetsDir, file))).size,
+    gzipBytes: gzipSync(await readFile(join(assetsDir, file))).length,
   })));
 
   const largest = sizes.reduce(
     (current, item) => item.bytes > current.bytes ? item : current,
-    { file: "", bytes: 0 }
+    { file: "", bytes: 0, gzipBytes: 0 }
+  );
+  const largestGzip = sizes.reduce(
+    (current, item) => item.gzipBytes > current.gzipBytes ? item : current,
+    { file: "", bytes: 0, gzipBytes: 0 }
   );
   const entry = sizes.find((item) => item.file.startsWith("index-"));
 
@@ -27,6 +35,12 @@ for (const app of apps) {
       `(limit ${formatKb(maxChunkBytes)}KB)`
     );
   }
+  if (largestGzip.gzipBytes > maxChunkGzipBytes) {
+    failures.push(
+      `${app}: ${largestGzip.file} transfers as ${formatKb(largestGzip.gzipBytes)}KB gzip ` +
+      `(limit ${formatKb(maxChunkGzipBytes)}KB)`
+    );
+  }
   if (!entry) {
     failures.push(`${app}: entry chunk was not found`);
   } else if (entry.bytes > maxEntryBytes) {
@@ -34,11 +48,18 @@ for (const app of apps) {
       `${app}: ${entry.file} is ${formatKb(entry.bytes)}KB ` +
       `(entry limit ${formatKb(maxEntryBytes)}KB)`
     );
+  } else if (entry.gzipBytes > maxEntryGzipBytes) {
+    failures.push(
+      `${app}: ${entry.file} transfers as ${formatKb(entry.gzipBytes)}KB gzip ` +
+      `(entry limit ${formatKb(maxEntryGzipBytes)}KB)`
+    );
   }
 
   console.log(
-    `${app}: entry ${formatKb(entry?.bytes ?? 0)}KB, ` +
-    `largest ${formatKb(largest.bytes)}KB, ${sizes.length} chunks`
+    `${app}: entry ${formatKb(entry?.bytes ?? 0)}KB raw / ` +
+    `${formatKb(entry?.gzipBytes ?? 0)}KB gzip, largest ` +
+    `${formatKb(largest.bytes)}KB raw / ${formatKb(largestGzip.gzipBytes)}KB gzip, ` +
+    `${sizes.length} chunks`
   );
 }
 

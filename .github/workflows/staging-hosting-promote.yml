@@ -224,17 +224,24 @@ jobs:
           (steps.promotion.outcome != 'success' || steps.live_check.outcome != 'success')
         working-directory: source
         run: |
-          npx firebase hosting:clone \
-            "${{ steps.hosting.outputs.staff_site }}:$LKC_ROLLBACK_CHANNEL" \
-            "${{ steps.hosting.outputs.staff_site }}:live" \
+          node scripts/automation/restore-staging-hosting.mjs \
             --project "$LKC_PROJECT_ID" \
-            --json > "$LKC_EVIDENCE_DIR/staff-rollback.json"
-          npx firebase hosting:clone \
-            "${{ steps.hosting.outputs.admin_site }}:$LKC_ROLLBACK_CHANNEL" \
-            "${{ steps.hosting.outputs.admin_site }}:live" \
-            --project "$LKC_PROJECT_ID" \
-            --json > "$LKC_EVIDENCE_DIR/admin-rollback.json"
-          echo "HOSTING_ROLLBACK_RESULT=SUCCESS"
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --channel "$LKC_ROLLBACK_CHANNEL" \
+            --evidence-dir "$LKC_EVIDENCE_DIR" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Verify both live staging apps after rollback
+        id: rollback_check
+        if: always() && steps.rollback.outputs.attempted == 'true'
+        continue-on-error: true
+        working-directory: source
+        run: |
+          node scripts/automation/hosting-browser-check.mjs \
+            --staff-url "${{ steps.hosting.outputs.staff_live_url }}" \
+            --admin-url "${{ steps.hosting.outputs.admin_live_url }}" \
+            --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
+            --evidence-dir "$LKC_EVIDENCE_DIR/rollback"
       - name: Remove temporary channels after a successful promotion
         if: steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success'
         working-directory: source
@@ -270,6 +277,9 @@ jobs:
             echo "- Promotion result: \`${{ steps.promotion.outcome }}\`"
             echo "- Live browser result: \`${{ steps.live_check.outcome }}\`"
             echo "- Automatic rollback result: \`${{ steps.rollback.outcome }}\`"
+            echo "- Staff rollback: \`${{ steps.rollback.outputs.staff_status || 'not-attempted' }}\`"
+            echo "- Admin rollback: \`${{ steps.rollback.outputs.admin_status || 'not-attempted' }}\`"
+            echo "- Rollback browser result: \`${{ steps.rollback_check.outcome }}\`"
             echo "- Functions deployed: \`false\`"
             echo "- Firestore / Storage / Rules / IAM changed: \`false\`"
             echo "- Production touched: \`false\`"
@@ -278,7 +288,11 @@ jobs:
         if: always()
         run: |
           if [[ "${{ steps.promotion.outcome }}" != "success" || "${{ steps.live_check.outcome }}" != "success" ]]; then
-            echo "HOSTING_PROMOTION_RESULT=ROLLED_BACK_OR_STOPPED"
+            if [[ "${{ steps.rollback.outcome }}" != "success" || "${{ steps.rollback_check.outcome }}" != "success" ]]; then
+              echo "HOSTING_PROMOTION_RESULT=ROLLBACK_FAILED"
+              exit 1
+            fi
+            echo "HOSTING_PROMOTION_RESULT=ROLLED_BACK"
             exit 1
           fi
           echo "HOSTING_PROMOTION_RESULT=SUCCESS"

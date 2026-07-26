@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import {
+  mkdtemp,
+  readFile,
+  rm,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import {
+  dirname,
+  join,
+  resolve,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   extractSiteIds,
@@ -17,6 +27,10 @@ import {
   evaluateBrowserResult,
   validateTargetUrl,
 } from "./hosting-browser-check.mjs";
+import {
+  restoreBothSites,
+  validateRestoreOptions,
+} from "./restore-staging-hosting.mjs";
 
 let cases = 0;
 const projectId = "lip-knots-crew-staging";
@@ -52,6 +66,77 @@ for (const [workflowPath, evidenceFolder] of [
     `${workflowPath} must initialize its evidence directory at runtime`,
   );
   cases += 1;
+}
+
+const promoteWorkflow = readFileSync(
+  resolve(repoRoot, ".github/workflows/staging-hosting-promote.yml"),
+  "utf8",
+);
+assert.match(
+  promoteWorkflow,
+  /node scripts\/automation\/restore-staging-hosting\.mjs/u,
+);
+assert.match(
+  promoteWorkflow,
+  /- name: Verify both live staging apps after rollback[\s\S]*?if: always\(\) && steps\.rollback\.outputs\.attempted == 'true'/u,
+);
+cases += 1;
+
+const restoreOptions = {
+  projectId,
+  staffSite,
+  adminSite,
+  rollbackChannel: "rb-30193717024",
+};
+assert.equal(
+  validateRestoreOptions({
+    ...restoreOptions,
+    evidenceDir: resolve(repoRoot, "temporary-evidence"),
+  }).projectId,
+  projectId,
+);
+assert.throws(
+  () => validateRestoreOptions({
+    ...restoreOptions,
+    projectId: "lip-knots-production",
+    evidenceDir: resolve(repoRoot, "temporary-evidence"),
+  }),
+  /PROJECT_NOT_ALLOWED/u,
+);
+cases += 2;
+
+const temporary = await mkdtemp(join(tmpdir(), "lkc-hosting-rollback-test-"));
+try {
+  const calls = [];
+  const result = await restoreBothSites(
+    {
+      ...restoreOptions,
+      evidenceDir: temporary,
+    },
+    {
+      executor: async (request) => {
+        calls.push(request.label);
+        return {
+          code: request.label === "staff" ? 1 : 0,
+          stdout: JSON.stringify({ status: request.label === "staff" ? "error" : "success" }),
+        };
+      },
+    },
+  );
+  assert.equal(result.success, false);
+  assert.deepEqual(calls, ["staff", "admin"]);
+  assert.deepEqual(
+    result.attempts.map(({ label, status }) => ({ label, status })),
+    [
+      { label: "staff", status: "failure" },
+      { label: "admin", status: "success" },
+    ],
+  );
+  assert.match(await readFile(join(temporary, "staff-rollback.json"), "utf8"), /error/u);
+  assert.match(await readFile(join(temporary, "admin-rollback.json"), "utf8"), /success/u);
+  cases += 1;
+} finally {
+  await rm(temporary, { recursive: true, force: true });
 }
 
 const sitesDocument = {

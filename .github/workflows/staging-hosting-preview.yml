@@ -75,10 +75,12 @@ jobs:
     env:
       LKC_CHANNEL: ${{ needs.guard.outputs.channel }}
       LKC_SOURCE_SHA: ${{ needs.guard.outputs.source_sha }}
-      LKC_EVIDENCE_DIR: ${{ runner.temp }}/hosting-preview-evidence
     steps:
       - name: Prepare evidence directory
-        run: mkdir -p "$LKC_EVIDENCE_DIR"
+        run: |
+          evidence_dir="$RUNNER_TEMP/hosting-preview-evidence"
+          mkdir -p "$evidence_dir"
+          echo "LKC_EVIDENCE_DIR=$evidence_dir" >> "$GITHUB_ENV"
       - name: Checkout the exact CI-passing source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

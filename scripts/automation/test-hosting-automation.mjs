@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   extractSiteIds,
   findVapidCandidates,
@@ -21,6 +24,35 @@ const staffSite = projectId;
 const adminSite = "lip-knots-crew-staging-admin";
 const channelId = "rc-02516b6e28e4";
 const vapidKey = `B${"A".repeat(86)}`;
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+
+for (const [workflowPath, evidenceFolder] of [
+  [".github/workflows/staging-hosting-preview.yml", "hosting-preview-evidence"],
+  [".github/workflows/staging-hosting-promote.yml", "hosting-promote-evidence"],
+]) {
+  const workflow = readFileSync(resolve(repoRoot, workflowPath), "utf8");
+  const jobEnvBlocks = workflow.matchAll(/^    env:\n((?:      [^\n]*\n)*)/gmu);
+  for (const [, jobEnv] of jobEnvBlocks) {
+    assert.doesNotMatch(
+      jobEnv,
+      /\$\{\{\s*runner\./u,
+      `${workflowPath} cannot use the runner context in job-level env`,
+    );
+  }
+  assert.ok(
+    workflow.includes(
+      [
+        "      - name: Prepare evidence directory",
+        "        run: |",
+        `          evidence_dir="$RUNNER_TEMP/${evidenceFolder}"`,
+        '          mkdir -p "$evidence_dir"',
+        '          echo "LKC_EVIDENCE_DIR=$evidence_dir" >> "$GITHUB_ENV"',
+      ].join("\n"),
+    ),
+    `${workflowPath} must initialize its evidence directory at runtime`,
+  );
+  cases += 1;
+}
 
 const sitesDocument = {
   status: "success",

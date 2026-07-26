@@ -102,10 +102,22 @@ function assertSafeValue(value, label) {
   return normalized;
 }
 
-export function validateFirebaseInit(document, projectId, label) {
+export function validateFirebaseInit(
+  document,
+  projectId,
+  label,
+  { allowMissingAppId = false } = {},
+) {
   const value = document?.result && typeof document.result === "object"
     ? document.result
     : document;
+  const rawAppId = String(value?.appId ?? "");
+  if (allowMissingAppId && !rawAppId.trim() && /[\r\n\0]/u.test(rawAppId)) {
+    throw new Error(`FIREBASE_INIT_INVALID:${label}.appId`);
+  }
+  const appId = allowMissingAppId && !rawAppId.trim()
+    ? ""
+    : assertSafeValue(rawAppId, `${label}.appId`);
   const config = {
     apiKey: assertSafeValue(value?.apiKey, `${label}.apiKey`),
     authDomain: assertSafeValue(
@@ -118,12 +130,53 @@ export function validateFirebaseInit(document, projectId, label) {
       value?.messagingSenderId,
       `${label}.messagingSenderId`,
     ),
-    appId: assertSafeValue(value?.appId, `${label}.appId`),
+    appId,
   };
   if (config.projectId !== projectId) {
     throw new Error(`FIREBASE_INIT_PROJECT_MISMATCH:${label}`);
   }
   return config;
+}
+
+const sharedFirebaseConfigFields = [
+  "apiKey",
+  "authDomain",
+  "projectId",
+  "storageBucket",
+  "messagingSenderId",
+];
+
+export function resolveFirebaseConfigs(staffDocument, adminDocument, projectId) {
+  const staffConfig = validateFirebaseInit(staffDocument, projectId, "staff");
+  const adminConfig = validateFirebaseInit(
+    adminDocument,
+    projectId,
+    "admin",
+    { allowMissingAppId: true },
+  );
+
+  if (adminConfig.appId) {
+    return {
+      staffConfig,
+      adminConfig,
+      adminAppIdSource: "admin-public-config",
+    };
+  }
+
+  for (const field of sharedFirebaseConfigFields) {
+    if (adminConfig[field] !== staffConfig[field]) {
+      throw new Error(`FIREBASE_INIT_APP_ID_FALLBACK_REJECTED:admin.${field}`);
+    }
+  }
+  if (!staffConfig.appId.startsWith(`1:${staffConfig.messagingSenderId}:web:`)) {
+    throw new Error("FIREBASE_INIT_APP_ID_FALLBACK_REJECTED:staff.appId");
+  }
+
+  return {
+    staffConfig,
+    adminConfig: { ...adminConfig, appId: staffConfig.appId },
+    adminAppIdSource: "staff-same-project",
+  };
 }
 
 export function findVapidCandidates(source) {
@@ -148,15 +201,13 @@ async function fetchText(url, { timeoutMs = 15_000, maxBytes = 2_000_000 } = {})
   return text;
 }
 
-async function loadFirebaseInit(siteId, projectId, label) {
+async function loadFirebaseInit(siteId, label) {
   const text = await fetchText(`https://${siteId}.web.app/__/firebase/init.json`);
-  let document;
   try {
-    document = JSON.parse(text);
+    return JSON.parse(text);
   } catch {
     throw new Error(`FIREBASE_INIT_JSON_INVALID:${label}`);
   }
-  return validateFirebaseInit(document, projectId, label);
 }
 
 function extractJavaScriptUrls(source, baseUrl) {
@@ -262,10 +313,15 @@ async function main() {
     return;
   }
 
-  const [staffConfig, adminConfig] = await Promise.all([
-    loadFirebaseInit(staffSite, projectId, "staff"),
-    loadFirebaseInit(adminSite, projectId, "admin"),
+  const [staffDocument, adminDocument] = await Promise.all([
+    loadFirebaseInit(staffSite, "staff"),
+    loadFirebaseInit(adminSite, "admin"),
   ]);
+  const {
+    staffConfig,
+    adminConfig,
+    adminAppIdSource,
+  } = resolveFirebaseConfigs(staffDocument, adminDocument, projectId);
   const vapidKey = suppliedVapidKey || await discoverVapidKey(staffSite);
   if (!vapidPattern.test(vapidKey)) throw new Error("VAPID_KEY_INVALID");
 
@@ -300,6 +356,7 @@ async function main() {
 
   console.log("STAGING_HOSTING_CONFIG=PASS");
   console.log(`STAGING_HOSTING_SITES=${staffSite},${adminSite}`);
+  console.log(`STAGING_HOSTING_ADMIN_APP_ID_SOURCE=${adminAppIdSource}`);
   console.log("STAGING_HOSTING_CONFIG_VALUES_PRINTED=false");
 }
 

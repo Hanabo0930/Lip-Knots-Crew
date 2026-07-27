@@ -722,8 +722,33 @@ function currentTokyoMonth():string{
 }
 function yen(value:number):string{return `${Math.round(value).toLocaleString("ja-JP")}円`;}
 function percent(value:number|null):string{return value===null?"－":`${(value*100).toFixed(1)}%`;}
+function emptyDashboard(month:string):DashboardData{
+  return {
+    month,
+    counts:{totalRequests:0,effectiveJobs:0,implemented:0,scheduled:0,cancelled:0,open:0,assigned:0,stopped:0,draft:0,executionRate:null,cancellationRate:null},
+    finance:{bookedInvoice:0,bookedPayment:0,bookedGrossProfit:0,bookedGrossMargin:null,implementedInvoice:0,implementedPayment:0,implementedGrossProfit:0},
+    cancellationReasons:[],
+    cancellationTreatments:[],
+    clients:[],
+  };
+}
 function currentPushPermission():NotificationPermission|"unsupported"{
   return typeof Notification==="undefined"?"unsupported":Notification.permission;
+}
+
+type IdleCapableWindow = Window & {
+  requestIdleCallback?: (callback:()=>void,options?:{timeout:number})=>number;
+  cancelIdleCallback?: (handle:number)=>void;
+};
+
+function scheduleWhenIdle(task:()=>void):()=>void{
+  const idleWindow=window as IdleCapableWindow;
+  if(idleWindow.requestIdleCallback){
+    const handle=idleWindow.requestIdleCallback(task,{timeout:1500});
+    return()=>idleWindow.cancelIdleCallback?.(handle);
+  }
+  const handle=window.setTimeout(task,250);
+  return()=>window.clearTimeout(handle);
 }
 
 function demoPreview(label:string,color:string){
@@ -837,7 +862,9 @@ export default function App() {
   const [staffDevices, setStaffDevices] = useState<StaffDevice[]>([]);
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
-  const [selectedAdminJobId, setSelectedAdminJobId] = useState(demoJobs[0]?.id ?? "");
+  const [selectedAdminJobId, setSelectedAdminJobId] = useState(
+    firebaseConfigured ? "" : demoJobs[0]?.id ?? ""
+  );
   const [netPrintNumbers, setNetPrintNumbers] = useState(["", "", ""]);
   const [resubmitType, setResubmitType] = useState<"report" | "sales_floor">("report");
   const [resubmitReasons, setResubmitReasons] = useState<string[]>(["手ブレで文字が読めません"]);
@@ -909,25 +936,67 @@ const [monthBusy, setMonthBusy] = useState(false);
 
   useEffect(() => {
     if (!auth) return;
-    return onAuthStateChanged(auth, async (current) => {
+    let cancelled=false;
+    let cancelDeferredLoads:(()=>void)|null=null;
+    const unsubscribe=onAuthStateChanged(auth, (current) => {
       setUser(current);
-      if (current && functions) {
-        const bootstrap = httpsCallable(functions, "bootstrapSession");
-        await bootstrap();
-        await current.getIdToken(true);
-        const { loadServerPushStatus } = await import("./push");
-        const enabled = await loadServerPushStatus(functions);
-        setPushEnabled(enabled);
-        await Promise.all([loadJobs(), loadStaff(), loadSheetIssues(), loadDashboard(), loadPilotReadiness(), loadPilotRolloutStatus(), loadPilotExpansionReview(), loadStagedRolloutStatus(), loadProductionControlStatus(), loadProductionRehearsalStatus(), loadProductionCutoverStatus(), loadProductionSloDashboard(), loadProductionTelemetryStatus(), loadProductionDeploymentReadiness(), loadProductionReleaseEvidenceStatus(), loadMonthHistory()]);
-      }
+      cancelDeferredLoads?.();
+      cancelDeferredLoads=null;
+      if (!current || !functions) return;
+      const activeFunctions=functions;
+      void (async()=>{
+        try{
+          const bootstrap=httpsCallable(activeFunctions,"bootstrapSession");
+          await bootstrap();
+          await current.getIdToken(true);
+          if(cancelled)return;
+          const primaryResults=await Promise.allSettled([
+            loadJobs(),
+            loadStaff(),
+            loadSheetIssues(),
+            loadDashboard(),
+            loadResubmissions(),
+          ]);
+          const primaryFailure=primaryResults.find((result)=>result.status==="rejected");
+          if(primaryFailure?.status==="rejected"){
+            setMessage(primaryFailure.reason instanceof Error?primaryFailure.reason.message:String(primaryFailure.reason));
+          }
+          if(cancelled)return;
+          cancelDeferredLoads=scheduleWhenIdle(()=>{
+            if(cancelled)return;
+            void Promise.allSettled([
+              import("./push").then(({loadServerPushStatus})=>loadServerPushStatus(activeFunctions)).then(setPushEnabled),
+              loadPilotReadiness(),
+              loadPilotRolloutStatus(),
+              loadPilotExpansionReview(),
+              loadStagedRolloutStatus(),
+              loadProductionControlStatus(),
+              loadProductionRehearsalStatus(),
+              loadProductionCutoverStatus(),
+              loadProductionSloDashboard(),
+              loadProductionTelemetryStatus(),
+              loadProductionDeploymentReadiness(),
+              loadProductionReleaseEvidenceStatus(true),
+              loadMonthHistory(),
+            ]);
+          });
+        }catch(error){
+          if(!cancelled)setMessage(error instanceof Error?error.message:String(error));
+        }
+      })();
     });
+    return()=>{
+      cancelled=true;
+      cancelDeferredLoads?.();
+      unsubscribe();
+    };
   }, []);
 
 
   useEffect(() => {
-    if (!selectedAdminJobId) return;
+    if (!user || !selectedAdminJobId) return;
     void loadSubmissionTimeline();
-  }, [selectedAdminJobId, resubmitType]);
+  }, [user, selectedAdminJobId, resubmitType]);
 
   useEffect(() => {
     if (!user) return;
@@ -1419,14 +1488,16 @@ async function previewRowCreation() {
       limit(100)
     );
     const snap = await getDocs(q);
-    setJobs(snap.docs.map((doc) => {
+    const nextJobs=snap.docs.map((doc) => {
       const data = doc.data() as Record<string, unknown>;
       const rawWorkDate = data.workDate as { toDate?: () => Date } | string | undefined;
       const workDate = typeof rawWorkDate === "object" && rawWorkDate?.toDate
         ? rawWorkDate.toDate().toLocaleDateString("ja-JP", { month: "numeric", day: "numeric", weekday: "short" })
         : String(rawWorkDate ?? data.dateKey ?? "");
       return { id: doc.id, ...data, workDate } as Job;
-    }));
+    });
+    setJobs(nextJobs);
+    setSelectedAdminJobId((current)=>current||nextJobs[0]?.id||"");
   }
 
 
@@ -2924,7 +2995,9 @@ function downloadCsv(filename:string,content:string) {
   }
 
   const unresolved = jobs.filter((job) => job.status === "assigned" && !job.preContact).length;
-  const monthly = dashboard ?? demoDashboard;
+  const monthly = dashboard ?? emptyDashboard(dashboardMonth);
+  const pendingResubmissions=resubmissions.filter((request)=>!["completed","closed","resolved"].includes(request.status)).length;
+  const actionableSheetIssues=sheetIssues.filter((issue)=>!["completed","acknowledged","resolved"].includes(issue.status)).length;
   const cancellationTarget = jobs.find((job) => job.id === cancellationJobId) ?? null;
   const productionBlocked = Boolean(
     productionControl?.control.emergencyLock ||
@@ -3928,15 +4001,15 @@ function downloadCsv(filename:string,content:string) {
       <section className="two">
         <article className="panel">
           <h2>今すぐ確認</h2>
-          <p>報告書 未提出 <strong>2件</strong></p>
-          <p>売場画像 未提出 <strong>1件</strong></p>
-          <p>再提出 確認待ち <strong>1件</strong></p>
+          <p>事前連絡 未確認 <strong>{unresolved}件</strong></p>
+          <p>再提出 確認待ち <strong>{pendingResubmissions}件</strong></p>
+          <p>スプシ書込 要確認 <strong>{actionableSheetIssues}件</strong></p>
         </article>
         <article className="panel">
-          <h2>今日の概算</h2>
-          <p>請求予定 <strong>642,500円</strong></p>
-          <p>支払予定 <strong>442,000円</strong></p>
-          <p>粗利予定 <strong>200,500円</strong></p>
+          <h2>{dashboardMonth}の概算</h2>
+          <p>請求予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedInvoice):"集計待ち"}</strong></p>
+          <p>支払予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedPayment):"集計待ち"}</strong></p>
+          <p>粗利予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedGrossProfit):"集計待ち"}</strong></p>
         </article>
       </section>
     </main>

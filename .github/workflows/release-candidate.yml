@@ -36,6 +36,7 @@ jobs:
           if [[ -f scripts/check-web-boot-bundles.mjs ]]; then
             node scripts/check-web-boot-bundles.mjs
           fi
+          npm run test:admin-startup
       - name: Run release orchestration regressions
         run: |
           npm run test:preview-demo

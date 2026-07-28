@@ -44,6 +44,40 @@ const checks = [
       source.includes("actionableSheetIssues") &&
       source.includes("dashboard.finance.bookedInvoice"),
   },
+  {
+    label: "each auth change invalidates the previous startup run",
+    ok:
+      source.includes("const currentRun=++authRun;") &&
+      source.includes("currentRun===authRun") &&
+      source.includes("authRun+=1;"),
+  },
+  {
+    label: "startup results are pinned to the current Firebase user",
+    ok:
+      source.includes("activeAuth.currentUser?.uid===current?.uid") &&
+      source.includes("if(!isCurrentRun())return;"),
+  },
+  {
+    label: "primary startup loaders receive and enforce the auth guard",
+    ok:
+      ["loadJobs", "loadStaff", "loadSheetIssues", "loadDashboard", "loadResubmissions"].every((name) =>
+        new RegExp(`${name}[(][^)]*isCurrentRun`).test(source)
+      ) &&
+      (source.match(/canApplyAuthResult[(]guard[)]/g) ?? []).length >= 15,
+  },
+  {
+    label: "deferred startup loaders and push status stay in the active auth run",
+    ok:
+      source.includes(".then((enabled)=>{if(isCurrentRun())setPushEnabled(enabled);})") &&
+      [
+        "loadPilotReadiness(isCurrentRun)",
+        "loadProductionControlStatus(isCurrentRun)",
+        "loadProductionSloDashboard(isCurrentRun)",
+        "loadProductionTelemetryStatus(isCurrentRun)",
+        "loadProductionDeploymentReadiness(isCurrentRun)",
+        "loadMonthHistory(isCurrentRun)",
+      ].every((call) => source.includes(call)),
+  },
 ];
 
 const failures = checks.filter((check) => !check.ok);

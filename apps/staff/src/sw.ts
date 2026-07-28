@@ -3,6 +3,8 @@ import { initializeApp } from "firebase/app";
 import { getMessaging, onBackgroundMessage } from "firebase/messaging/sw";
 import { clientsClaim } from "workbox-core";
 import { cleanupOutdatedCaches, precacheAndRoute } from "workbox-precaching";
+import { registerRoute, NavigationRoute } from "workbox-routing";
+import { NetworkFirst } from "workbox-strategies";
 import {
   assertFirebaseConfiguration,
   firebaseConfig,
@@ -13,8 +15,18 @@ declare let self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<unknown> };
 
 precacheAndRoute(self.__WB_MANIFEST);
 cleanupOutdatedCaches();
-self.skipWaiting();
-clientsClaim();
+
+registerRoute(new NavigationRoute(new NetworkFirst({
+  cacheName: "lkc-staff-pages",
+  networkTimeoutSeconds: 10,
+})));
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+    void clientsClaim();
+  }
+});
 
 assertFirebaseConfiguration();
 const app = firebaseConfigured ? initializeApp(firebaseConfig) : null;

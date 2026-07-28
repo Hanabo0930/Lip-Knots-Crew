@@ -54,7 +54,7 @@ export default defineConfig({
       filename: "sw.ts",
       registerType: "autoUpdate",
       includeAssets: ["logo.png"],
-      injectManifest: { globPatterns: ["**/*.{js,css,html,png,svg,ico}"] },
+      injectManifest: { globPatterns: ["**/*.{js,css,png,svg,ico}"] },
       manifest: {
         name: "Lip Knots Crew",
         short_name: "Crew",

@@ -20,6 +20,18 @@ const checks = [
     ok: /primaryResults\s*=\s*await Promise\.allSettled\(\[/.test(source),
   },
   {
+    label: "startup directory comes from bootstrapSession before primary loads",
+    ok:
+      source.includes("const bootstrapResponse=await bootstrap();") &&
+      source.includes("Array.isArray(bootstrapData.jobs)") &&
+      source.includes("Array.isArray(bootstrapData.staff)"),
+  },
+  {
+    label: "primary startup excludes direct jobs and staff loaders",
+    ok:
+      /primaryResults\s*=\s*await Promise\.allSettled\(\[\s*loadSheetIssues\(isCurrentRun\),\s*loadDashboard\(dashboardMonth,isCurrentRun\),\s*loadResubmissions\(isCurrentRun\),\s*\]\)/.test(source),
+  },
+  {
     label: "non-critical startup work is deferred until browser idle",
     ok: source.includes("cancelDeferredLoads=scheduleWhenIdle"),
   },
@@ -68,9 +80,10 @@ const checks = [
   {
     label: "primary startup loaders receive and enforce the auth guard",
     ok:
-      ["loadJobs", "loadStaff", "loadSheetIssues", "loadDashboard", "loadResubmissions"].every((name) =>
+      ["loadSheetIssues", "loadDashboard", "loadResubmissions"].every((name) =>
         new RegExp(`${name}[(][^)]*isCurrentRun`).test(source)
       ) &&
+      source.includes("loadAdminDirectory(guard)") &&
       (source.match(/canApplyAuthResult[(]guard[)]/g) ?? []).length >= 15,
   },
   {

@@ -1,13 +1,96 @@
 import { defineString } from "firebase-functions/params";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { z } from "zod";
 import { auth, db } from "./firebase";
-import { emailHash, normalizeEmail, requireAuth } from "./utils";
+import {
+  companyFromClaims,
+  emailHash,
+  normalizeEmail,
+  requireAdmin,
+  requireAuth,
+} from "./utils";
 
 const adminEmails = defineString("ADMIN_EMAILS", { default: "info@lipknots.com" });
 const defaultCompanyId = defineString("DEFAULT_COMPANY_ID", { default: "lipknots" });
 
+const BootstrapSchema = z.object({
+  refreshDirectory: z.boolean().optional(),
+});
+
+function serializeField(value: unknown): unknown {
+  if (value instanceof Timestamp) {
+    return value.toDate().toISOString();
+  }
+  return value;
+}
+
+function serializeDocument(data: FirebaseFirestore.DocumentData): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    result[key] = serializeField(value);
+  }
+  return result;
+}
+
+function formatWorkDate(raw: FirebaseFirestore.DocumentData): string {
+  const rawWorkDate = raw.workDate;
+  if (rawWorkDate instanceof Timestamp) {
+    return rawWorkDate.toDate().toLocaleDateString("ja-JP", {
+      month: "numeric",
+      day: "numeric",
+      weekday: "short",
+    });
+  }
+  if (typeof rawWorkDate === "string") {
+    return rawWorkDate;
+  }
+  return String(raw.dateKey ?? "");
+}
+
+async function fetchAdminDirectory(companyId: string) {
+  const [jobsSnap, staffSnap] = await Promise.all([
+    db.collection("jobs")
+      .where("companyId", "==", companyId)
+      .orderBy("workDate", "asc")
+      .limit(100)
+      .get(),
+    db.collection("staffProfiles")
+      .where("companyId", "==", companyId)
+      .orderBy("displayName", "asc")
+      .limit(500)
+      .get(),
+  ]);
+
+  const jobs = jobsSnap.docs.map((doc) => {
+    const raw = doc.data();
+    return {
+      id: doc.id,
+      ...serializeDocument(raw),
+      workDate: formatWorkDate(raw),
+    };
+  });
+
+  const staff = staffSnap.docs.map((doc) => ({
+    id: doc.id,
+    ...serializeDocument(doc.data()),
+  }));
+
+  return { jobs, staff };
+}
+
 export const bootstrapSession = onCall(async (request) => {
+  const input = BootstrapSchema.parse(request.data ?? {});
+
+  if (input.refreshDirectory) {
+    const session = requireAdmin(request);
+    const companyId = companyFromClaims(session.token);
+    return {
+      refreshToken: false,
+      ...(await fetchAdminDirectory(companyId)),
+    };
+  }
+
   const session = requireAuth(request);
   const user = await auth.getUser(session.uid);
   const email = normalizeEmail(user.email ?? "");
@@ -33,7 +116,12 @@ export const bootstrapSession = onCall(async (request) => {
       action: "session.bootstrap.admin",
       createdAt: FieldValue.serverTimestamp(),
     });
-    return { role: "admin", companyId: claims.companyId, refreshToken: true };
+    return {
+      role: "admin",
+      companyId: claims.companyId,
+      refreshToken: true,
+      ...(await fetchAdminDirectory(claims.companyId)),
+    };
   }
 
   const indexSnap = await db.collection("emailIndex").doc(emailHash(email)).get();

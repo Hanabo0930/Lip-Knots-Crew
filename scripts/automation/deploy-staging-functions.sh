@@ -48,6 +48,7 @@ echo "DEPLOY_STORAGE=false"
 for function_name in "${function_names[@]}"; do
   service_name=""
   case "$function_name" in
+    bootstrapSession) service_name="bootstrapsession" ;;
     getSubmissionTimeline) service_name="getsubmissiontimeline" ;;
     getSubmissionProcessingStatus) service_name="getsubmissionprocessingstatus" ;;
     getResubmissionComparison) service_name="getresubmissioncomparison" ;;
@@ -107,4 +108,3 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     echo "- Production: \`not touched\`"
   } >> "$GITHUB_STEP_SUMMARY"
 fi
-

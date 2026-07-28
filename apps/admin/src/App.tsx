@@ -945,14 +945,27 @@ const [monthBusy, setMonthBusy] = useState(false);
     if (!activeAuth) return;
     let cancelled=false;
     let authRun=0;
+    let activeUid:string|null=null;
     let cancelDeferredLoads:(()=>void)|null=null;
     const unsubscribe=onAuthStateChanged(activeAuth, (current) => {
       const currentRun=++authRun;
+      const nextUid=current?.uid??null;
       const isCurrentRun=()=>(
         !cancelled &&
         currentRun===authRun &&
         activeAuth.currentUser?.uid===current?.uid
       );
+      if(activeUid!==nextUid){
+        activeUid=nextUid;
+        setJobs([]);
+        setStaff([]);
+        setSheetIssues([]);
+        setResubmissions([]);
+        setDashboard(null);
+        setSelectedAdminJobId("");
+        setPushEnabled(false);
+        setMessage("");
+      }
       setUser(current);
       cancelDeferredLoads?.();
       cancelDeferredLoads=null;

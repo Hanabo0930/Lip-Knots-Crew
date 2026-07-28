@@ -58,6 +58,14 @@ const checks = [
       source.includes("if(!isCurrentRun())return;"),
   },
   {
+    label: "account changes clear auth-scoped data before the next load",
+    ok:
+      source.includes("if(activeUid!==nextUid)") &&
+      ["setJobs([])", "setStaff([])", "setSelectedAdminJobId(\"\")", "setDashboard(null)", "setPushEnabled(false)"].every((call) =>
+        source.includes(call)
+      ),
+  },
+  {
     label: "primary startup loaders receive and enforce the auth guard",
     ok:
       ["loadJobs", "loadStaff", "loadSheetIssues", "loadDashboard", "loadResubmissions"].every((name) =>

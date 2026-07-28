@@ -19,6 +19,12 @@ import { auth, db, firebaseConfigured, functions } from "./firebase";
 import { expectedFirebaseProjectId } from "./firebase-config";
 import type { ProductionEvidenceView } from "./ProductionAcceptanceRollbackConsole";
 
+type AuthRunGuard = () => boolean;
+
+function canApplyAuthResult(guard?:AuthRunGuard):boolean {
+  return guard?.() ?? true;
+}
+
 const ProductionAcceptanceRollbackConsole = lazy(() => import("./ProductionAcceptanceRollbackConsole"));
 const StoreLocationFields = lazy(() => import("./StoreLocationFields"));
 const JobSafeEditPanel = lazy(() => import("./JobSafeEditPanel"));
@@ -722,8 +728,33 @@ function currentTokyoMonth():string{
 }
 function yen(value:number):string{return `${Math.round(value).toLocaleString("ja-JP")}円`;}
 function percent(value:number|null):string{return value===null?"－":`${(value*100).toFixed(1)}%`;}
+function emptyDashboard(month:string):DashboardData{
+  return {
+    month,
+    counts:{totalRequests:0,effectiveJobs:0,implemented:0,scheduled:0,cancelled:0,open:0,assigned:0,stopped:0,draft:0,executionRate:null,cancellationRate:null},
+    finance:{bookedInvoice:0,bookedPayment:0,bookedGrossProfit:0,bookedGrossMargin:null,implementedInvoice:0,implementedPayment:0,implementedGrossProfit:0},
+    cancellationReasons:[],
+    cancellationTreatments:[],
+    clients:[],
+  };
+}
 function currentPushPermission():NotificationPermission|"unsupported"{
   return typeof Notification==="undefined"?"unsupported":Notification.permission;
+}
+
+type IdleCapableWindow = Window & {
+  requestIdleCallback?: (callback:()=>void,options?:{timeout:number})=>number;
+  cancelIdleCallback?: (handle:number)=>void;
+};
+
+function scheduleWhenIdle(task:()=>void):()=>void{
+  const idleWindow=window as IdleCapableWindow;
+  if(idleWindow.requestIdleCallback){
+    const handle=idleWindow.requestIdleCallback(task,{timeout:1500});
+    return()=>idleWindow.cancelIdleCallback?.(handle);
+  }
+  const handle=window.setTimeout(task,250);
+  return()=>window.clearTimeout(handle);
 }
 
 function demoPreview(label:string,color:string){
@@ -837,7 +868,9 @@ export default function App() {
   const [staffDevices, setStaffDevices] = useState<StaffDevice[]>([]);
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
-  const [selectedAdminJobId, setSelectedAdminJobId] = useState(demoJobs[0]?.id ?? "");
+  const [selectedAdminJobId, setSelectedAdminJobId] = useState(
+    firebaseConfigured ? "" : demoJobs[0]?.id ?? ""
+  );
   const [netPrintNumbers, setNetPrintNumbers] = useState(["", "", ""]);
   const [resubmitType, setResubmitType] = useState<"report" | "sales_floor">("report");
   const [resubmitReasons, setResubmitReasons] = useState<string[]>(["手ブレで文字が読めません"]);
@@ -908,26 +941,95 @@ const [monthBusy, setMonthBusy] = useState(false);
 
 
   useEffect(() => {
-    if (!auth) return;
-    return onAuthStateChanged(auth, async (current) => {
-      setUser(current);
-      if (current && functions) {
-        const bootstrap = httpsCallable(functions, "bootstrapSession");
-        await bootstrap();
-        await current.getIdToken(true);
-        const { loadServerPushStatus } = await import("./push");
-        const enabled = await loadServerPushStatus(functions);
-        setPushEnabled(enabled);
-        await Promise.all([loadJobs(), loadStaff(), loadSheetIssues(), loadDashboard(), loadPilotReadiness(), loadPilotRolloutStatus(), loadPilotExpansionReview(), loadStagedRolloutStatus(), loadProductionControlStatus(), loadProductionRehearsalStatus(), loadProductionCutoverStatus(), loadProductionSloDashboard(), loadProductionTelemetryStatus(), loadProductionDeploymentReadiness(), loadProductionReleaseEvidenceStatus(), loadMonthHistory()]);
+    const activeAuth=auth;
+    if (!activeAuth) return;
+    let cancelled=false;
+    let authRun=0;
+    let activeUid:string|null=null;
+    let cancelDeferredLoads:(()=>void)|null=null;
+    const unsubscribe=onAuthStateChanged(activeAuth, (current) => {
+      const currentRun=++authRun;
+      const nextUid=current?.uid??null;
+      const isCurrentRun=()=>(
+        !cancelled &&
+        currentRun===authRun &&
+        activeAuth.currentUser?.uid===current?.uid
+      );
+      if(activeUid!==nextUid){
+        activeUid=nextUid;
+        setJobs([]);
+        setStaff([]);
+        setSheetIssues([]);
+        setResubmissions([]);
+        setDashboard(null);
+        setSelectedAdminJobId("");
+        setPushEnabled(false);
+        setMessage("");
       }
+      setUser(current);
+      cancelDeferredLoads?.();
+      cancelDeferredLoads=null;
+      if (!current || !functions) {
+        setPushEnabled(false);
+        return;
+      }
+      const activeFunctions=functions;
+      void (async()=>{
+        try{
+          const bootstrap=httpsCallable(activeFunctions,"bootstrapSession");
+          await bootstrap();
+          await current.getIdToken(true);
+          if(!isCurrentRun())return;
+          const primaryResults=await Promise.allSettled([
+            loadJobs(isCurrentRun),
+            loadStaff(isCurrentRun),
+            loadSheetIssues(isCurrentRun),
+            loadDashboard(dashboardMonth,isCurrentRun),
+            loadResubmissions(isCurrentRun),
+          ]);
+          if(!isCurrentRun())return;
+          const primaryFailure=primaryResults.find((result)=>result.status==="rejected");
+          if(primaryFailure?.status==="rejected"){
+            setMessage(primaryFailure.reason instanceof Error?primaryFailure.reason.message:String(primaryFailure.reason));
+          }
+          cancelDeferredLoads=scheduleWhenIdle(()=>{
+            if(!isCurrentRun())return;
+            void Promise.allSettled([
+              import("./push")
+                .then(({loadServerPushStatus})=>loadServerPushStatus(activeFunctions))
+                .then((enabled)=>{if(isCurrentRun())setPushEnabled(enabled);}),
+              loadPilotReadiness(isCurrentRun),
+              loadPilotRolloutStatus(isCurrentRun),
+              loadPilotExpansionReview(undefined,isCurrentRun),
+              loadStagedRolloutStatus(undefined,isCurrentRun),
+              loadProductionControlStatus(isCurrentRun),
+              loadProductionRehearsalStatus(undefined,isCurrentRun),
+              loadProductionCutoverStatus(undefined,isCurrentRun),
+              loadProductionSloDashboard(isCurrentRun),
+              loadProductionTelemetryStatus(isCurrentRun),
+              loadProductionDeploymentReadiness(isCurrentRun),
+              loadProductionReleaseEvidenceStatus(true,isCurrentRun),
+              loadMonthHistory(isCurrentRun),
+            ]);
+          });
+        }catch(error){
+          if(isCurrentRun())setMessage(error instanceof Error?error.message:String(error));
+        }
+      })();
     });
+    return()=>{
+      cancelled=true;
+      authRun+=1;
+      cancelDeferredLoads?.();
+      unsubscribe();
+    };
   }, []);
 
 
   useEffect(() => {
-    if (!selectedAdminJobId) return;
+    if (!user || !selectedAdminJobId) return;
     void loadSubmissionTimeline();
-  }, [selectedAdminJobId, resubmitType]);
+  }, [user, selectedAdminJobId, resubmitType]);
 
   useEffect(() => {
     if (!user) return;
@@ -1131,15 +1233,16 @@ async function createMonthSheet() {
   }
 }
 
-async function loadMonthHistory() {
+async function loadMonthHistory(guard?:AuthRunGuard) {
   if (!firebaseConfigured) return;
   if (!functions) return;
   try {
     const callable=httpsCallable(functions,"getMonthCreationHistory");
     const response=await callable({});
+    if(!canApplyAuthResult(guard))return;
     setMonthHistory((response.data as {runs?:MonthHistoryRun[]}).runs ?? []);
   } catch(error) {
-    setMessage(error instanceof Error ? error.message : String(error));
+    if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -1296,22 +1399,23 @@ function downloadTextFile(filename:string,content:string,type:string) {
 }
 
 
-async function loadPilotReadiness() {
+async function loadPilotReadiness(guard?:AuthRunGuard) {
   if (!firebaseConfigured) {
     setPilotReadiness(demoPilotReadiness);
     setMessage("デモ：本番導入の安全チェックを更新しました。");
     return;
   }
   if (!functions) return;
-  setPilotBusy(true);
+  if(!guard)setPilotBusy(true);
   try {
     const callable = httpsCallable(functions, "getPilotReadiness");
     const response = await callable({});
+    if(!canApplyAuthResult(guard))return;
     setPilotReadiness(response.data as PilotReadiness);
   } catch (error) {
-    setMessage(error instanceof Error ? error.message : String(error));
+    if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
   } finally {
-    setPilotBusy(false);
+    if(!guard)setPilotBusy(false);
   }
 }
 
@@ -1410,7 +1514,7 @@ async function previewRowCreation() {
     await signInWithPopup(auth, provider);
   }
 
-  async function loadJobs() {
+  async function loadJobs(guard?:AuthRunGuard) {
     if (!db) return;
     const q = query(
       collection(db, "jobs"),
@@ -1419,19 +1523,22 @@ async function previewRowCreation() {
       limit(100)
     );
     const snap = await getDocs(q);
-    setJobs(snap.docs.map((doc) => {
+    const nextJobs=snap.docs.map((doc) => {
       const data = doc.data() as Record<string, unknown>;
       const rawWorkDate = data.workDate as { toDate?: () => Date } | string | undefined;
       const workDate = typeof rawWorkDate === "object" && rawWorkDate?.toDate
         ? rawWorkDate.toDate().toLocaleDateString("ja-JP", { month: "numeric", day: "numeric", weekday: "short" })
         : String(rawWorkDate ?? data.dateKey ?? "");
       return { id: doc.id, ...data, workDate } as Job;
-    }));
+    });
+    if(!canApplyAuthResult(guard))return;
+    setJobs(nextJobs);
+    setSelectedAdminJobId((current)=>current||nextJobs[0]?.id||"");
   }
 
 
 
-  async function loadStaff() {
+  async function loadStaff(guard?:AuthRunGuard) {
     if (!db) return;
     const q = query(
       collection(db, "staffProfiles"),
@@ -1440,6 +1547,7 @@ async function previewRowCreation() {
       limit(500)
     );
     const snap = await getDocs(q);
+    if(!canApplyAuthResult(guard))return;
     setStaff(snap.docs.map((doc) => ({
       id: doc.id,
       ...(doc.data() as Omit<StaffProfile, "id">),
@@ -1515,73 +1623,78 @@ async function previewRowCreation() {
     );
   }
 
-  async function loadPilotRolloutStatus() {
+  async function loadPilotRolloutStatus(guard?:AuthRunGuard) {
     if (!firebaseConfigured) return;
     if (!functions) return;
     try {
       const callable = httpsCallable(functions, "getPilotRolloutStatus");
       const response = await callable({});
+      if(!canApplyAuthResult(guard))return;
       setPilotRolloutStatus((response.data as { rollout?:PilotRolloutStatus|null }).rollout ?? null);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function loadPilotExpansionReview(rolloutId?:string) {
+  async function loadPilotExpansionReview(rolloutId?:string,guard?:AuthRunGuard) {
     if (!firebaseConfigured || !functions) return;
     try {
       const callable = httpsCallable(functions, "getPilotExpansionReview");
       const response = await callable(rolloutId ? {rolloutId} : {});
+      if(!canApplyAuthResult(guard))return;
       setPilotExpansion(response.data as PilotExpansionData);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function loadStagedRolloutStatus(stagedRolloutId?:string) {
+  async function loadStagedRolloutStatus(stagedRolloutId?:string,guard?:AuthRunGuard) {
     if (!firebaseConfigured || !functions) return;
     try {
       const callable = httpsCallable(functions, "getStagedRolloutStatus");
       const response = await callable(stagedRolloutId ? {stagedRolloutId} : {});
+      if(!canApplyAuthResult(guard))return;
       setStagedRollout((response.data as {rollout?:StagedRolloutData|null}).rollout ?? null);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function loadProductionControlStatus() {
+  async function loadProductionControlStatus(guard?:AuthRunGuard) {
     if (!firebaseConfigured || !functions) return;
     try {
       const callable = httpsCallable(functions, "getProductionControlStatus");
       const response = await callable({});
       const data = response.data as ProductionControlData;
+      if(!canApplyAuthResult(guard))return;
       setProductionControl(data);
       if (data.rehearsalCertified) setProductionManual((current)=>({...current,backupVerified:true,restoreTestPassed:true,migrationPlanReady:true,rollbackPlanReady:true}));
       if (data.review?.manual) setProductionManual(data.review.manual);
       if (data.review?.evidenceRefs?.length) setProductionEvidence(data.review.evidenceRefs.join("\n"));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function loadProductionRehearsalStatus(rehearsalId?:string) {
+  async function loadProductionRehearsalStatus(rehearsalId?:string,guard?:AuthRunGuard) {
     if (!firebaseConfigured || !functions) return;
     try {
       const callable=httpsCallable(functions,"getProductionRehearsalStatus");
       const response=await callable(rehearsalId?{rehearsalId}:{});
       const rehearsal=(response.data as {rehearsal?:ProductionRehearsalData|null}).rehearsal??null;
+      if(!canApplyAuthResult(guard))return;
       setProductionRehearsal(rehearsal);
       if(rehearsal?.metrics)setRehearsalMetrics(rehearsal.metrics);
-    }catch(error){setMessage(error instanceof Error?error.message:String(error));}
+    }catch(error){if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
   }
 
-  async function loadProductionCutoverStatus(runId?:string) {
+  async function loadProductionCutoverStatus(runId?:string,guard?:AuthRunGuard) {
     if(!firebaseConfigured||!functions)return;
     try{
       const callable=httpsCallable(functions,"getProductionCutoverStatus");
-      const response=await callable(runId?{runId}:{});const cutover=(response.data as {cutover?:ProductionCutoverData|null}).cutover??null;setProductionCutover(cutover);
+      const response=await callable(runId?{runId}:{});const cutover=(response.data as {cutover?:ProductionCutoverData|null}).cutover??null;if(!canApplyAuthResult(guard))return;setProductionCutover(cutover);
       if(cutover){const{signedApprovalReady:_,...manual}=cutover.readiness;setCutoverReadiness(manual);if(cutover.readinessEvidenceRefs.length)setCutoverReadinessEvidence(cutover.readinessEvidenceRefs.join("\n"));if(cutover.lastObservation){const{observedAtMs:__,...observation}=cutover.lastObservation;setCutoverObservation(observation);}}
-    }catch(error){setMessage(error instanceof Error?error.message:String(error));}
+    }catch(error){if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
   }
 
   async function createCutover() {
@@ -1616,24 +1729,24 @@ async function previewRowCreation() {
     try{if(!functions)return;const callable=httpsCallable(functions,"cancelProductionCutover");await callable({runId:productionCutover.runId,reason:reason.trim()});await loadProductionCutoverStatus(productionCutover.runId);setMessage("本番切替指揮盤を中止しました。");}catch(error){setMessage(error instanceof Error?error.message:String(error));}finally{setCutoverBusy(false);}
   }
 
-  async function loadProductionSloDashboard() {
+  async function loadProductionSloDashboard(guard?:AuthRunGuard) {
     if(!firebaseConfigured||!functions)return;
-    try{const callable=httpsCallable(functions,"getProductionSloDashboard");const response=await callable({});const data=response.data as ProductionSloDashboard;setProductionSlo(data);if(data.policy)setSloPolicy(data.policy);if(data.openIncident?.ownerName)setIncidentOwner(data.openIncident.ownerName);}catch(error){setMessage(error instanceof Error?error.message:String(error));}
+    try{const callable=httpsCallable(functions,"getProductionSloDashboard");const response=await callable({});const data=response.data as ProductionSloDashboard;if(!canApplyAuthResult(guard))return;setProductionSlo(data);if(data.policy)setSloPolicy(data.policy);if(data.openIncident?.ownerName)setIncidentOwner(data.openIncident.ownerName);}catch(error){if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
   }
 
-  async function loadProductionTelemetryStatus() {
+  async function loadProductionTelemetryStatus(guard?:AuthRunGuard) {
     if(!firebaseConfigured||!functions)return;
-    try{const callable=httpsCallable(functions,"getProductionTelemetryStatus");const response=await callable({});const data=response.data as ProductionTelemetryStatus;setTelemetryStatus(data);setTelemetryProjectId(data.projectId);setTelemetryEnabled(data.enabled);setTelemetryMetrics(data.metrics);}catch(error){setMessage(error instanceof Error?error.message:String(error));}
+    try{const callable=httpsCallable(functions,"getProductionTelemetryStatus");const response=await callable({});const data=response.data as ProductionTelemetryStatus;if(!canApplyAuthResult(guard))return;setTelemetryStatus(data);setTelemetryProjectId(data.projectId);setTelemetryEnabled(data.enabled);setTelemetryMetrics(data.metrics);}catch(error){if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
   }
 
-  async function loadProductionDeploymentReadiness() {
-    if(!firebaseConfigured||!functions)return;setDeploymentReadinessBusy(true);
-    try{const callable=httpsCallable(functions,"getProductionDeploymentReadiness");const response=await callable({});setDeploymentReadiness(response.data as ProductionDeploymentReadiness);}catch(error){setMessage(error instanceof Error?error.message:String(error));}finally{setDeploymentReadinessBusy(false);}
+  async function loadProductionDeploymentReadiness(guard?:AuthRunGuard) {
+    if(!firebaseConfigured||!functions)return;if(!guard)setDeploymentReadinessBusy(true);
+    try{const callable=httpsCallable(functions,"getProductionDeploymentReadiness");const response=await callable({});if(!canApplyAuthResult(guard))return;setDeploymentReadiness(response.data as ProductionDeploymentReadiness);}catch(error){if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}finally{if(!guard)setDeploymentReadinessBusy(false);}
   }
 
-  async function loadProductionReleaseEvidenceStatus(silent=false) {
+  async function loadProductionReleaseEvidenceStatus(silent=false,guard?:AuthRunGuard) {
     if(!firebaseConfigured||!functions)return;if(!silent)setProductionEvidenceBusy(true);
-    try{const callable=httpsCallable(functions,"getProductionReleaseEvidenceStatus");const response=await callable({});setProductionEvidenceStatus(response.data as ProductionEvidenceView);}catch(error){if(!silent)setMessage(error instanceof Error?error.message:String(error));}finally{if(!silent)setProductionEvidenceBusy(false);}
+    try{const callable=httpsCallable(functions,"getProductionReleaseEvidenceStatus");const response=await callable({});if(!canApplyAuthResult(guard))return;setProductionEvidenceStatus(response.data as ProductionEvidenceView);}catch(error){if(!silent&&canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}finally{if(!silent&&!guard)setProductionEvidenceBusy(false);}
   }
 
   async function importProductionEvidencePackage(file:File) {
@@ -2340,10 +2453,11 @@ async function previewRowCreation() {
     await loadResubmissions();
   }
 
-  async function loadResubmissions() {
+  async function loadResubmissions(guard?:AuthRunGuard) {
     if (!firebaseConfigured) return;
     if (!functions) return;
     const response = await httpsCallable(functions, "getAdminResubmissionRequests")({});
+    if(!canApplyAuthResult(guard))return;
     setResubmissions((response.data as {requests?:ResubmissionRequest[]}).requests ?? []);
   }
 
@@ -2360,7 +2474,7 @@ async function previewRowCreation() {
   }
 
 
-  async function loadSheetIssues() {
+  async function loadSheetIssues(guard?:AuthRunGuard) {
     if (!firebaseConfigured) {
       setSheetIssues([
         {
@@ -2393,15 +2507,16 @@ async function previewRowCreation() {
       return;
     }
     if (!functions) return;
-    setIssuesBusy(true);
+    if(!guard)setIssuesBusy(true);
     try {
       const callable = httpsCallable(functions, "getSheetWriteIssues");
       const response = await callable({ limit:100 });
+      if(!canApplyAuthResult(guard))return;
       setSheetIssues((response.data as { issues?:SheetWriteIssue[] }).issues ?? []);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
     } finally {
-      setIssuesBusy(false);
+      if(!guard)setIssuesBusy(false);
     }
   }
 
@@ -2562,21 +2677,22 @@ async function previewRowCreation() {
     }
   }
 
-  async function loadDashboard(month = dashboardMonth) {
+  async function loadDashboard(month = dashboardMonth,guard?:AuthRunGuard) {
     if (!firebaseConfigured) {
       setDashboard({ ...demoDashboard, month });
       return;
     }
     if (!functions) return;
-    setDashboardBusy(true);
+    if(!guard)setDashboardBusy(true);
     try {
       const callable = httpsCallable(functions, "getOperationsDashboard");
       const response = await callable({ month });
+      if(!canApplyAuthResult(guard))return;
       setDashboard(response.data as DashboardData);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
     } finally {
-      setDashboardBusy(false);
+      if(!guard)setDashboardBusy(false);
     }
   }
 
@@ -2924,7 +3040,9 @@ function downloadCsv(filename:string,content:string) {
   }
 
   const unresolved = jobs.filter((job) => job.status === "assigned" && !job.preContact).length;
-  const monthly = dashboard ?? demoDashboard;
+  const monthly = dashboard ?? emptyDashboard(dashboardMonth);
+  const pendingResubmissions=resubmissions.filter((request)=>!["completed","closed","resolved"].includes(request.status)).length;
+  const actionableSheetIssues=sheetIssues.filter((issue)=>!["completed","acknowledged","resolved"].includes(issue.status)).length;
   const cancellationTarget = jobs.find((job) => job.id === cancellationJobId) ?? null;
   const productionBlocked = Boolean(
     productionControl?.control.emergencyLock ||
@@ -3175,7 +3293,7 @@ function downloadCsv(filename:string,content:string) {
               </div>
             )}
             {!!productionSlo?.recentIncidents.length&&<div className="incident-history"><strong>直近インシデント</strong>{productionSlo.recentIncidents.slice(0,5).map(incident=><span key={incident.incidentId}><b>{incident.incidentNumber}</b>{incident.highestSeverity} / {incident.status}</span>)}</div>}
-            <div className="slo-actions"><button className="ghost" onClick={loadProductionSloDashboard} disabled={sloBusy}>SLOを再読込</button><small>SEV1・SEV2は夜間も即時Push、正常3回で復旧確認へ移行</small></div>
+            <div className="slo-actions"><button className="ghost" onClick={()=>loadProductionSloDashboard()} disabled={sloBusy}>SLOを再読込</button><small>SEV1・SEV2は夜間も即時Push、正常3回で復旧確認へ移行</small></div>
           </div>
         )}
         {productionControl?.environment === "production" && deploymentReadiness&&(
@@ -3186,7 +3304,7 @@ function downloadCsv(filename:string,content:string) {
             </div>
             <div className="deployment-readiness-summary"><span><strong>{deploymentReadiness.environment}</strong>環境</span><span><strong>{deploymentReadiness.runtimeProjectId||"—"}</strong>実行Project</span><span><strong>{deploymentReadiness.exportAgeMinutes??"—"}分</strong>指標生成経過</span><span><strong>{deploymentReadiness.collectAgeMinutes??"—"}分</strong>SLO取込経過</span><span><strong>{deploymentReadiness.releaseApprovalPackageId||"—"}</strong>承認Package</span></div>
             <div className="deployment-readiness-checks">{deploymentReadiness.checks.map(check=><span className={check.passed?"passed":"failed"} key={check.key}>{check.passed?"✓":"!"} {check.label}<small>{String(check.actual)} / {check.required}</small></span>)}</div>
-            <div className="deployment-readiness-actions"><button className="ghost" onClick={loadProductionDeploymentReadiness} disabled={deploymentReadinessBusy}>{deploymentReadinessBusy?"診断中…":"12項目を再診断"}</button><small>fingerprint {deploymentReadiness.fingerprint.slice(0,12)}</small></div>
+            <div className="deployment-readiness-actions"><button className="ghost" onClick={()=>loadProductionDeploymentReadiness()} disabled={deploymentReadinessBusy}>{deploymentReadinessBusy?"診断中…":"12項目を再診断"}</button><small>fingerprint {deploymentReadiness.fingerprint.slice(0,12)}</small></div>
           </div>
         )}
         <div className="kill-switch-box">
@@ -3194,7 +3312,7 @@ function downloadCsv(filename:string,content:string) {
           <textarea value={productionKillReason} onChange={(event)=>setProductionKillReason(event.target.value)} placeholder="停止理由（10文字以上）" disabled={productionControl?.control.emergencyLock} />
           <button className="danger kill-switch" onClick={activateKillSwitch} disabled={productionBusy||productionControl?.control.emergencyLock}>全体停止を作動</button>
         </div>
-        <div className="production-actions"><button className="ghost" onClick={loadProductionControlStatus} disabled={productionBusy}>状態を再読込</button><small>環境：{productionControl?.environment??"demo"} / generation {productionControl?.control.generation??0}</small></div>
+        <div className="production-actions"><button className="ghost" onClick={()=>loadProductionControlStatus()} disabled={productionBusy}>状態を再読込</button><small>環境：{productionControl?.environment??"demo"} / generation {productionControl?.control.generation??0}</small></div>
       </section>
       <section className="panel push-panel">
         <div className="sync-head">
@@ -3247,7 +3365,7 @@ function downloadCsv(filename:string,content:string) {
     <label>追加予定行
       <input type="number" min="1" max="20" value={jobForm.slots} onChange={(event)=>updateJobForm("slots",event.target.value)} />
     </label>
-    <button className="ghost" onClick={loadPilotReadiness} disabled={pilotBusy}>
+    <button className="ghost" onClick={()=>loadPilotReadiness()} disabled={pilotBusy}>
       状態を更新
     </button>
     <button onClick={previewRowCreation} disabled={pilotBusy}>
@@ -3335,7 +3453,7 @@ function downloadCsv(filename:string,content:string) {
           <strong>{sheetIssues.length}件</strong>
         </div>
         <div className="sync-actions">
-          <button className="ghost" onClick={loadSheetIssues} disabled={issuesBusy}>
+          <button className="ghost" onClick={()=>loadSheetIssues()} disabled={issuesBusy}>
             {issuesBusy ? "読込中…" : "再読込"}
           </button>
         </div>
@@ -3928,15 +4046,15 @@ function downloadCsv(filename:string,content:string) {
       <section className="two">
         <article className="panel">
           <h2>今すぐ確認</h2>
-          <p>報告書 未提出 <strong>2件</strong></p>
-          <p>売場画像 未提出 <strong>1件</strong></p>
-          <p>再提出 確認待ち <strong>1件</strong></p>
+          <p>事前連絡 未確認 <strong>{unresolved}件</strong></p>
+          <p>再提出 確認待ち <strong>{pendingResubmissions}件</strong></p>
+          <p>スプシ書込 要確認 <strong>{actionableSheetIssues}件</strong></p>
         </article>
         <article className="panel">
-          <h2>今日の概算</h2>
-          <p>請求予定 <strong>642,500円</strong></p>
-          <p>支払予定 <strong>442,000円</strong></p>
-          <p>粗利予定 <strong>200,500円</strong></p>
+          <h2>{dashboardMonth}の概算</h2>
+          <p>請求予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedInvoice):"集計待ち"}</strong></p>
+          <p>支払予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedPayment):"集計待ち"}</strong></p>
+          <p>粗利予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedGrossProfit):"集計待ち"}</strong></p>
         </article>
       </section>
     </main>

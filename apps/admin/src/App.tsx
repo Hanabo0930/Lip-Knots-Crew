@@ -6,20 +6,17 @@ import {
   signOut,
   User,
 } from "firebase/auth";
-import {
-  collection,
-  getDocs,
-  limit,
-  orderBy,
-  query,
-  where,
-} from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
-import { auth, db, firebaseConfigured, functions } from "./firebase";
+import { auth, firebaseConfigured, functions } from "./firebase";
 import { expectedFirebaseProjectId } from "./firebase-config";
 import type { ProductionEvidenceView } from "./ProductionAcceptanceRollbackConsole";
 
 type AuthRunGuard = () => boolean;
+
+type AdminDirectoryPayload = {
+  jobs?: Job[];
+  staff?: StaffProfile[];
+};
 
 function canApplyAuthResult(guard?:AuthRunGuard):boolean {
   return guard?.() ?? true;
@@ -977,12 +974,22 @@ const [monthBusy, setMonthBusy] = useState(false);
       void (async()=>{
         try{
           const bootstrap=httpsCallable(activeFunctions,"bootstrapSession");
-          await bootstrap();
+          const bootstrapResponse=await bootstrap();
+          const bootstrapData=bootstrapResponse.data as AdminDirectoryPayload & {
+            refreshToken?:boolean;
+          };
           await current.getIdToken(true);
           if(!isCurrentRun())return;
+          if(Array.isArray(bootstrapData.jobs)){
+            if(!canApplyAuthResult(isCurrentRun))return;
+            setJobs(bootstrapData.jobs);
+            setSelectedAdminJobId((current)=>current||bootstrapData.jobs![0]?.id||"");
+          }
+          if(Array.isArray(bootstrapData.staff)){
+            if(!canApplyAuthResult(isCurrentRun))return;
+            setStaff(bootstrapData.staff);
+          }
           const primaryResults=await Promise.allSettled([
-            loadJobs(isCurrentRun),
-            loadStaff(isCurrentRun),
             loadSheetIssues(isCurrentRun),
             loadDashboard(dashboardMonth,isCurrentRun),
             loadResubmissions(isCurrentRun),
@@ -1514,44 +1521,28 @@ async function previewRowCreation() {
     await signInWithPopup(auth, provider);
   }
 
-  async function loadJobs(guard?:AuthRunGuard) {
-    if (!db) return;
-    const q = query(
-      collection(db, "jobs"),
-      where("companyId", "==", "lipknots"),
-      orderBy("workDate", "asc"),
-      limit(100)
-    );
-    const snap = await getDocs(q);
-    const nextJobs=snap.docs.map((doc) => {
-      const data = doc.data() as Record<string, unknown>;
-      const rawWorkDate = data.workDate as { toDate?: () => Date } | string | undefined;
-      const workDate = typeof rawWorkDate === "object" && rawWorkDate?.toDate
-        ? rawWorkDate.toDate().toLocaleDateString("ja-JP", { month: "numeric", day: "numeric", weekday: "short" })
-        : String(rawWorkDate ?? data.dateKey ?? "");
-      return { id: doc.id, ...data, workDate } as Job;
-    });
-    if(!canApplyAuthResult(guard))return;
-    setJobs(nextJobs);
-    setSelectedAdminJobId((current)=>current||nextJobs[0]?.id||"");
+  async function loadAdminDirectory(guard?:AuthRunGuard) {
+    if (!functions) return;
+    const callable = httpsCallable(functions, "bootstrapSession");
+    const response = await callable({ refreshDirectory: true });
+    const data = response.data as AdminDirectoryPayload;
+    if (Array.isArray(data.jobs) && canApplyAuthResult(guard)) {
+      setJobs(data.jobs);
+      setSelectedAdminJobId((current) => current || data.jobs![0]?.id || "");
+    }
+    if (Array.isArray(data.staff) && canApplyAuthResult(guard)) {
+      setStaff(data.staff);
+    }
   }
 
-
+  async function loadJobs(guard?:AuthRunGuard) {
+    if (!firebaseConfigured || !functions) return;
+    await loadAdminDirectory(guard);
+  }
 
   async function loadStaff(guard?:AuthRunGuard) {
-    if (!db) return;
-    const q = query(
-      collection(db, "staffProfiles"),
-      where("companyId", "==", "lipknots"),
-      orderBy("displayName", "asc"),
-      limit(500)
-    );
-    const snap = await getDocs(q);
-    if(!canApplyAuthResult(guard))return;
-    setStaff(snap.docs.map((doc) => ({
-      id: doc.id,
-      ...(doc.data() as Omit<StaffProfile, "id">),
-    })));
+    if (!firebaseConfigured || !functions) return;
+    await loadAdminDirectory(guard);
   }
 
 

@@ -17,6 +17,7 @@
     "test:bundle-size": "node scripts/check-bundle-size.mjs",
     "test:web-boot-bundles": "node scripts/check-web-boot-bundles.mjs",
     "test:admin-startup": "node scripts/check-admin-startup.mjs",
+    "test:admin-startup-cache-fix-v2": "node scripts/check-admin-startup-cache-fix-v2.mjs",
     "preflight:staging": "node scripts/staging-preflight.mjs",
     "test:staging-preflight": "node scripts/staging-preflight.mjs --examples --self-test",
     "setup:staging:preview": "node scripts/setup-staging.mjs --config config/staging-setup.json",

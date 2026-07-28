@@ -6,61 +6,177 @@ function valueAfter(flag, fallback = "") {
   return index >= 0 ? String(process.argv[index + 1] ?? "") : fallback;
 }
 
+function parseCsv(value) {
+  return String(value)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 const ref = valueAfter("--ref", "HEAD");
 const repository = valueAfter("--repository", ".");
 const requirePass = process.argv.includes("--require-pass");
+const requestedFunctions = parseCsv(
+  valueAfter("--functions", "getSubmissionProcessingStatus,driveFilePreview"),
+);
+const supportedFunctions = new Set([
+  "bootstrapSession",
+  "getSubmissionTimeline",
+  "getSubmissionProcessingStatus",
+  "getResubmissionComparison",
+  "driveFilePreview",
+  "finalizeStagedUpload",
+]);
 
-let source = "";
-try {
-  source = execFileSync(
-    "git",
-    ["show", `${ref}:functions/src/submission-files.ts`],
-    { cwd: repository, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-  );
-} catch {
+if (
+  requestedFunctions.length === 0
+  || new Set(requestedFunctions).size !== requestedFunctions.length
+  || requestedFunctions.some((name) => !supportedFunctions.has(name))
+) {
   console.error("SOURCE_GUARD_STATUS=FAIL");
-  console.error("SOURCE_GUARD_ERROR=SOURCE_REF_OR_FILE_UNAVAILABLE");
+  console.error("SOURCE_GUARD_ERROR=FUNCTION_LIST_NOT_SUPPORTED");
   process.exit(1);
 }
 
-function functionBlock(exportName, nextExportName) {
+const sourceCache = new Map();
+function sourceFile(path) {
+  if (sourceCache.has(path)) return sourceCache.get(path);
+  try {
+    const source = execFileSync(
+      "git",
+      ["show", `${ref}:${path}`],
+      { cwd: repository, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    sourceCache.set(path, source);
+    return source;
+  } catch {
+    console.error("SOURCE_GUARD_STATUS=FAIL");
+    console.error(`SOURCE_GUARD_ERROR=SOURCE_REF_OR_FILE_UNAVAILABLE:${path}`);
+    process.exit(1);
+  }
+}
+
+function functionBlock(source, exportName) {
   const start = source.indexOf(`export const ${exportName}`);
-  const end = nextExportName ? source.indexOf(`export const ${nextExportName}`, start + 1) : source.length;
-  if (start < 0 || end < 0) return "";
+  if (start < 0) return "";
+  const remaining = source.slice(start + 1);
+  const nextOffset = remaining.search(/\nexport const [A-Za-z0-9_]+/);
+  const end = nextOffset < 0 ? source.length : start + 1 + nextOffset;
   return source.slice(start, end);
 }
 
-const processing = functionBlock("getSubmissionProcessingStatus", "getResubmissionComparison");
-const preview = source.slice(
-  source.indexOf("async function handleDriveFilePreview"),
-  source.indexOf("export const driveFilePreview") + 240,
-);
+function checkBootstrapSession() {
+  const source = sourceFile("functions/src/auth.ts");
+  const bootstrap = functionBlock(source, "bootstrapSession");
+  const checks = {
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(bootstrap),
+    verifiedEmail: /user\.emailVerified/.test(bootstrap),
+    adminAllowlist: /admins\.includes\s*\(\s*email\s*\)/.test(bootstrap),
+    refreshRequiresAdmin:
+      /if\s*\(\s*input\.refreshDirectory\s*\)[\s\S]*?requireAdmin\s*\(\s*request\s*\)/.test(bootstrap),
+    refreshCompanyScope:
+      /companyFromClaims\s*\(\s*session\.token\s*\)/.test(bootstrap)
+      && /fetchAdminDirectory\s*\(\s*companyId\s*\)/.test(bootstrap),
+    initialCompanyScope:
+      /companyId\s*:\s*defaultCompanyId\.value\s*\(\s*\)/.test(bootstrap)
+      && /fetchAdminDirectory\s*\(\s*claims\.companyId\s*\)/.test(bootstrap),
+    directoryCompanyQueries:
+      /async function fetchAdminDirectory\s*\(\s*companyId\s*:\s*string\s*\)/.test(source)
+      && (source.match(/\.where\s*\(\s*"companyId"\s*,\s*"=="\s*,\s*companyId\s*\)/g) ?? []).length === 2,
+    noClientCompanyScope: !/input\.companyId/.test(bootstrap),
+  };
+  return Object.values(checks).every(Boolean);
+}
 
-const processingChecks = {
-  requireAuth: /requireAuth\s*\(\s*request\s*\)/.test(processing),
-  companyScope: /companyFromClaims/.test(processing) && /companyId/.test(processing),
-  jobAccess: /assertJobAccess/.test(processing),
-  staffScope: /data\.staffId/.test(processing) && /permission-denied/.test(processing),
-  jobSubmissionMatch: /data\.jobId\s*!==\s*input\.jobId/.test(processing),
+function checkSubmissionTimeline() {
+  const source = sourceFile("functions/src/submission-files.ts");
+  const block = functionBlock(source, "getSubmissionTimeline");
+  return [
+    /requireAuth\s*\(\s*request\s*\)/,
+    /companyFromClaims\s*\(\s*session\.token\s*\)/,
+    /assertJobAccess\s*\(\s*input\.jobId\s*,\s*companyId/,
+  ].every((pattern) => pattern.test(block));
+}
+
+function checkSubmissionProcessingStatus() {
+  const source = sourceFile("functions/src/submission-files.ts");
+  const block = functionBlock(source, "getSubmissionProcessingStatus");
+  const checks = {
+    requireAuth: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims/.test(block) && /companyId/.test(block),
+    jobAccess: /assertJobAccess/.test(block),
+    staffScope: /data\.staffId/.test(block) && /permission-denied/.test(block),
+    jobSubmissionMatch: /data\.jobId\s*!==\s*input\.jobId/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkResubmissionComparison() {
+  const source = sourceFile("functions/src/submission-files.ts");
+  const block = functionBlock(source, "getResubmissionComparison");
+  const checks = {
+    requireAuth: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    documentScope: /snap\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block),
+    staffScope: /session\.token\.role\s*!==\s*"admin"[\s\S]*data\.staffId\s*!==\s*staffId/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkDriveFilePreview() {
+  const source = sourceFile("functions/src/submission-files.ts");
+  const handlerStart = source.indexOf("async function handleDriveFilePreview");
+  const handler = handlerStart < 0 ? "" : source.slice(handlerStart);
+  const block = `${handler}\n${functionBlock(source, "driveFilePreview")}`;
+  const checks = {
+    tokenShape: /A-Za-z0-9_-\]\{30,120\}/.test(block),
+    tokenHash: /sha256\s*\(\s*token\s*\)/.test(block),
+    tokenLookup: /filePreviewTokens/.test(block) && /\.doc\s*\(\s*hash\s*\)/.test(block),
+    activeAndExpiry:
+      /data\.active\s*!==\s*true/.test(block)
+      && /expires\.toMillis\(\)\s*<\s*Date\.now\(\)/.test(block),
+    invalidTokenRejected: /status\s*\(\s*400\s*\)/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkFinalizeStagedUpload() {
+  const source = sourceFile("functions/src/uploads.ts");
+  const block = functionBlock(source, "finalizeStagedUpload");
+  const checks = {
+    storageEventOnly: /onObjectFinalized\s*\(/.test(block),
+    stagingPathOnly: /parts\[0\]\s*!==\s*"staging"/.test(block),
+    completeIdentity: /!companyId\s*\|\|\s*!uid\s*\|\|\s*!submissionId\s*\|\|\s*!fileId/.test(block),
+    metadataScope: /meta\.uid\s*!==\s*uid\s*\|\|\s*meta\.companyId\s*!==\s*companyId/.test(block),
+    operationalGate: /getProductionOperationalState\s*\(\s*companyId\s*\)/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+const checkers = {
+  bootstrapSession: checkBootstrapSession,
+  getSubmissionTimeline: checkSubmissionTimeline,
+  getSubmissionProcessingStatus: checkSubmissionProcessingStatus,
+  getResubmissionComparison: checkResubmissionComparison,
+  driveFilePreview: checkDriveFilePreview,
+  finalizeStagedUpload: checkFinalizeStagedUpload,
 };
 
-const previewChecks = {
-  tokenShape: /A-Za-z0-9_-\]\{30,120\}/.test(preview),
-  tokenHash: /sha256\s*\(\s*token\s*\)/.test(preview),
-  tokenLookup: /filePreviewTokens/.test(preview) && /\.doc\s*\(\s*hash\s*\)/.test(preview),
-  activeAndExpiry: /data\.active\s*!==\s*true/.test(preview) && /expires\.toMillis\(\)\s*<\s*Date\.now\(\)/.test(preview),
-  invalidTokenRejected: /status\s*\(\s*400\s*\)/.test(preview),
-};
-
-const processingPass = Object.values(processingChecks).every(Boolean);
-const previewPass = Object.values(previewChecks).every(Boolean);
-const appCheckEnforced = /enforceAppCheck\s*:\s*true/.test(source);
+const results = requestedFunctions.map((name) => ({
+  name,
+  passed: checkers[name](),
+}));
+const allPass = results.every(({ passed }) => passed);
+const loadedSource = [...sourceCache.values()].join("\n");
+const appCheckEnforced = /enforceAppCheck\s*:\s*true/.test(loadedSource);
 
 console.log(`SOURCE_REF=${ref}`);
-console.log(`APP_LEVEL_AUTH_getSubmissionProcessingStatus=${processingPass ? "PASS" : "FAIL"}`);
-console.log(`APP_LEVEL_AUTH_driveFilePreview=${previewPass ? "PASS" : "FAIL"}`);
+console.log(`SOURCE_GUARD_FUNCTIONS=${requestedFunctions.join(",")}`);
+for (const { name, passed } of results) {
+  console.log(`APP_LEVEL_AUTH_${name}=${passed ? "PASS" : "FAIL"}`);
+}
 console.log(`APP_CHECK_ENFORCED=${appCheckEnforced ? "true" : "false"}`);
-console.log("APP_CHECK_HANDLING=Firebase Auth and scoped preview tokens are enforced; App Check is not explicitly enforced in this file.");
-console.log(`SOURCE_GUARD_STATUS=${processingPass && previewPass ? "PASS" : "FAIL"}`);
+console.log("APP_CHECK_HANDLING=Firebase Auth, company boundaries, scoped preview tokens, or storage-event identity checks are enforced by function type.");
+console.log(`SOURCE_GUARD_STATUS=${allPass ? "PASS" : "FAIL"}`);
 
-if (requirePass && (!processingPass || !previewPass)) process.exitCode = 1;
+if (requirePass && !allPass) process.exitCode = 1;

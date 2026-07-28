@@ -139,6 +139,7 @@ done
 
 declare -A service_accounts=()
 for function_name in \
+  bootstrapSession \
   getSubmissionTimeline \
   getSubmissionProcessingStatus \
   getResubmissionComparison \

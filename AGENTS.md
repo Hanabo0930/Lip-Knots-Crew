@@ -29,6 +29,7 @@ These rules apply to every automated coding agent working in this repository.
 
 The only Functions allowed in the first unattended staging deployment phase are:
 
+- `bootstrapSession`
 - `getSubmissionTimeline`
 - `getSubmissionProcessingStatus`
 - `getResubmissionComparison`

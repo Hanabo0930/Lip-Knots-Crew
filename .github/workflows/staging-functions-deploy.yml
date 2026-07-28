@@ -7,12 +7,12 @@ on:
         description: CI-passing source branch
         required: true
         type: string
-        default: cursor/staging-preview-performance-20260724
+        default: main
       functions:
         description: Explicit comma-separated allowlisted Functions
         required: true
         type: string
-        default: getSubmissionTimeline,getSubmissionProcessingStatus,getResubmissionComparison,driveFilePreview,finalizeStagedUpload
+        default: bootstrapSession
       confirmation:
         description: Type DEPLOY_LKC_STAGING_FUNCTIONS
         required: true
@@ -67,6 +67,8 @@ jobs:
           ref: ${{ inputs.source_ref }}
           path: source
       - name: Verify application-level authorization in source
+        env:
+          LKC_FUNCTIONS: ${{ inputs.functions }}
         run: |
           git -C source fetch --no-tags --depth=200 origin main
           node guardrails/scripts/automation/check-deploy-source-integrity.mjs \
@@ -76,6 +78,7 @@ jobs:
           node guardrails/scripts/automation/check-function-auth-guards.mjs \
             --repository source \
             --ref "$(git -C source rev-parse HEAD)" \
+            --functions "$LKC_FUNCTIONS" \
             --require-pass
       - name: Require successful canonical CI
         env:

@@ -26,10 +26,12 @@
   ],
   "invokerDiagnosticServices": [
     "getsubmissiontimeline",
+    "requeststaffloginlink",
     "getsubmissionprocessingstatus",
     "drivefilepreview"
   ],
   "invokerMutableServices": [
+    "requeststaffloginlink",
     "getsubmissionprocessingstatus",
     "drivefilepreview"
   ],

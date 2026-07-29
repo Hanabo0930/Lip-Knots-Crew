@@ -8,7 +8,7 @@ lkc_source_ref="${LKC_SOURCE_REF:-cursor/staging-preview-performance-20260724}"
 lkc_confirmation="${LKC_CONFIRMATION:-}"
 
 reference_service="getsubmissiontimeline"
-blocked_services=("getsubmissionprocessingstatus" "drivefilepreview")
+blocked_services=("requeststaffloginlink" "getsubmissionprocessingstatus" "drivefilepreview")
 diagnostic_services=("$reference_service" "${blocked_services[@]}")
 
 if [[ "$operation" != "diagnose" && "$operation" != "apply" ]]; then
@@ -128,7 +128,7 @@ echo "LEGACY_REQUIRE_INVOKER_IAM_POLICY=$legacy_policy"
 echo "FORBIDDEN_PUBLIC_IAM_BINDINGS=$forbidden_bindings"
 echo "SAME_PATTERN_CONFIRMED=$same_pattern"
 echo "SAFE_TO_DISABLE_INVOKER_IAM_CHECK=$safe_to_apply"
-echo "EXACT_LIMITED_COMMANDS=gcloud run services update getsubmissionprocessingstatus --no-invoker-iam-check; gcloud run services update drivefilepreview --no-invoker-iam-check"
+echo "EXACT_LIMITED_COMMANDS=gcloud run services update requeststaffloginlink --no-invoker-iam-check; gcloud run services update getsubmissionprocessingstatus --no-invoker-iam-check; gcloud run services update drivefilepreview --no-invoker-iam-check"
 echo "SOURCE_FILES_CHANGED=false"
 
 if [[ "$operation" == "apply" ]]; then
@@ -146,6 +146,15 @@ if [[ "$operation" == "apply" ]]; then
   done
 fi
 
+request_login_status="$(
+  curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
+    --max-time 20 \
+    --request POST \
+    --header "Content-Type: application/json" \
+    --data '{"data":{}}' \
+    "https://${lkc_region}-${lkc_project}.cloudfunctions.net/requestStaffLoginLink" \
+    || echo "000"
+)"
 processing_status="$(
   curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
     --max-time 20 \
@@ -162,6 +171,7 @@ preview_status="$(
     || echo "000"
 )"
 
+echo "REQUEST_LOGIN_LINK_HTTP=$request_login_status"
 echo "PROCESSING_STATUS_HTTP=$processing_status"
 echo "DRIVE_PREVIEW_HTTP=$preview_status"
 
@@ -175,7 +185,10 @@ if [[ "$operation" == "apply" ]]; then
       post_apply_pass="false"
     fi
   done
-  if [[ "$processing_status" == "403" || "$preview_status" == "403" || "$post_apply_pass" != "true" ]]; then
+  if [[ "$request_login_status" != "400" \
+    || "$processing_status" != "401" \
+    || "$preview_status" != "400" \
+    || "$post_apply_pass" != "true" ]]; then
     echo "OVERALL_RESULT=FAIL"
     exit 1
   fi
@@ -194,6 +207,7 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     echo "- Reference disabled: \`$reference_annotation\`"
     echo "- Managed policy: \`$managed_policy\`"
     echo "- Safe to apply: \`$safe_to_apply\`"
+    echo "- Login request endpoint HTTP: \`$request_login_status\`"
     echo "- Processing endpoint HTTP: \`$processing_status\`"
     echo "- Preview endpoint HTTP: \`$preview_status\`"
   } >> "$GITHUB_STEP_SUMMARY"

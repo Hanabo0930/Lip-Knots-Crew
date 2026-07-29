@@ -17,11 +17,12 @@ const ref = valueAfter("--ref", "HEAD");
 const repository = valueAfter("--repository", ".");
 const requirePass = process.argv.includes("--require-pass");
 const requestedFunctions = parseCsv(
-  valueAfter("--functions", "getSubmissionProcessingStatus,driveFilePreview"),
+  valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
   "bootstrapSession",
   "getSubmissionTimeline",
+  "requestStaffLoginLink",
   "getSubmissionProcessingStatus",
   "getResubmissionComparison",
   "driveFilePreview",
@@ -84,6 +85,36 @@ function checkBootstrapSession() {
       /async function fetchAdminDirectory\s*\(\s*companyId\s*:\s*string\s*\)/.test(source)
       && (source.match(/\.where\s*\(\s*"companyId"\s*,\s*"=="\s*,\s*companyId\s*\)/g) ?? []).length === 2,
     noClientCompanyScope: !/input\.companyId/.test(bootstrap),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkRequestStaffLoginLink() {
+  const source = sourceFile("functions/src/login-links.ts");
+  const block = functionBlock(source, "requestStaffLoginLink");
+  const rateLimitStart = source.indexOf("async function enforceLoginRateLimit");
+  const rateLimit = rateLimitStart < 0 ? "" : source.slice(rateLimitStart);
+  const checks = {
+    strictEmailInput:
+      /RequestLoginSchema\.safeParse\s*\(\s*request\.data\s*\?\?\s*\{\}\s*\)/.test(block)
+      && /z\.string\(\)\.email\(\)\.max\(254\)/.test(source),
+    normalizedEmail: /normalizeEmail\s*\(\s*input\.data\.email\s*\)/.test(block),
+    hashedDirectoryLookup:
+      /emailIndex/.test(block)
+      && /\.doc\s*\(\s*emailHash\s*\(\s*email\s*\)\s*\)/.test(block),
+    activeStaffGate:
+      /indexSnap\.exists/.test(block)
+      && /index\?\.active/.test(block)
+      && /profileSnap\.data\(\)\?\.active\s*===\s*true/.test(block),
+    operationalGate: /assertProductionOperational\s*\(\s*index\.companyId\s*\)/.test(block),
+    rateLimited:
+      /enforceLoginRateLimit\s*\(\s*email\s*\)/.test(block)
+      && /minuteCount\s*>=\s*1\s*\|\|\s*hourCount\s*>=\s*5/.test(rateLimit)
+      && /resource-exhausted/.test(rateLimit),
+    enumerationResistantResponse:
+      /accepted\s*:\s*true/.test(block)
+      && /登録済みのメールアドレスの場合/.test(block),
+    mailSecretScoped: /secrets\s*:\s*\[gmailServiceAccountJson\]/.test(block),
   };
   return Object.values(checks).every(Boolean);
 }
@@ -155,6 +186,7 @@ function checkFinalizeStagedUpload() {
 
 const checkers = {
   bootstrapSession: checkBootstrapSession,
+  requestStaffLoginLink: checkRequestStaffLoginLink,
   getSubmissionTimeline: checkSubmissionTimeline,
   getSubmissionProcessingStatus: checkSubmissionProcessingStatus,
   getResubmissionComparison: checkResubmissionComparison,

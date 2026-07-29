@@ -164,32 +164,13 @@ jobs:
             LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL
           )
           missing=()
-          invalid=()
           for name in "${required[@]}"; do
-            value="${!name:-}"
-            if [[ -z "$value" ]]; then
+            if [[ -z "${!name:-}" ]]; then
               missing+=("$name")
-            elif [[ "$value" == *        working-directory: guardrails
-        env:
-          LKC_SOURCE_REF: ${{ inputs.source_ref }}
-          LKC_FUNCTIONS: ${{ inputs.functions }}
-          LKC_CONFIRMATION: ${{ inputs.confirmation }}
-          LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
-        run: bash scripts/automation/deploy-staging-functions.sh
-\n'* || "$value" == *        working-directory: guardrails
-        env:
-          LKC_SOURCE_REF: ${{ inputs.source_ref }}
-          LKC_FUNCTIONS: ${{ inputs.functions }}
-          LKC_CONFIRMATION: ${{ inputs.confirmation }}
-          LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
-        run: bash scripts/automation/deploy-staging-functions.sh
-\r'* ]]; then
-              invalid+=("$name")
             fi
           done
-          if (( ${#missing[@]} > 0 || ${#invalid[@]} > 0 )); then
+          if (( ${#missing[@]} > 0 )); then
             printf 'STAGING_DOTENV_MISSING=%s\n' "$(IFS=,; echo "${missing[*]}")" >&2
-            printf 'STAGING_DOTENV_INVALID=%s\n' "$(IFS=,; echo "${invalid[*]}")" >&2
             exit 1
           fi
 

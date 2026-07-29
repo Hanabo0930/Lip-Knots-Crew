@@ -137,6 +137,81 @@ jobs:
           service_account: ${{ vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
       - name: Set up Google Cloud CLI
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Materialize verified staging Functions dotenv
+        working-directory: source
+        env:
+          LKC_FUNCTIONS_ADMIN_EMAILS: ${{ vars.LKC_FUNCTIONS_ADMIN_EMAILS }}
+          LKC_FUNCTIONS_EXECUTIVE_APPROVER_EMAILS: ${{ vars.LKC_FUNCTIONS_EXECUTIVE_APPROVER_EMAILS }}
+          LKC_FUNCTIONS_PRODUCTION_FIREBASE_PROJECT_ID: ${{ vars.LKC_FUNCTIONS_PRODUCTION_FIREBASE_PROJECT_ID }}
+          LKC_FUNCTIONS_APPROVAL_PACKAGE_KEY_ID: ${{ vars.LKC_FUNCTIONS_APPROVAL_PACKAGE_KEY_ID }}
+          LKC_FUNCTIONS_DEFAULT_COMPANY_ID: ${{ vars.LKC_FUNCTIONS_DEFAULT_COMPANY_ID }}
+          LKC_FUNCTIONS_STAFF_APP_URL: ${{ vars.LKC_FUNCTIONS_STAFF_APP_URL }}
+          LKC_FUNCTIONS_ADMIN_APP_URL: ${{ vars.LKC_FUNCTIONS_ADMIN_APP_URL }}
+          LKC_FUNCTIONS_MAIL_FROM: ${{ vars.LKC_FUNCTIONS_MAIL_FROM }}
+          LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL: ${{ vars.LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL }}
+          LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL: ${{ vars.LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL }}
+        run: |
+          required=(
+            LKC_FUNCTIONS_ADMIN_EMAILS
+            LKC_FUNCTIONS_EXECUTIVE_APPROVER_EMAILS
+            LKC_FUNCTIONS_PRODUCTION_FIREBASE_PROJECT_ID
+            LKC_FUNCTIONS_APPROVAL_PACKAGE_KEY_ID
+            LKC_FUNCTIONS_DEFAULT_COMPANY_ID
+            LKC_FUNCTIONS_STAFF_APP_URL
+            LKC_FUNCTIONS_ADMIN_APP_URL
+            LKC_FUNCTIONS_MAIL_FROM
+            LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL
+            LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL
+          )
+          missing=()
+          invalid=()
+          for name in "${required[@]}"; do
+            value="${!name:-}"
+            if [[ -z "$value" ]]; then
+              missing+=("$name")
+            elif [[ "$value" == *        working-directory: guardrails
+        env:
+          LKC_SOURCE_REF: ${{ inputs.source_ref }}
+          LKC_FUNCTIONS: ${{ inputs.functions }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+          LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
+        run: bash scripts/automation/deploy-staging-functions.sh
+\n'* || "$value" == *        working-directory: guardrails
+        env:
+          LKC_SOURCE_REF: ${{ inputs.source_ref }}
+          LKC_FUNCTIONS: ${{ inputs.functions }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+          LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
+        run: bash scripts/automation/deploy-staging-functions.sh
+\r'* ]]; then
+              invalid+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 || ${#invalid[@]} > 0 )); then
+            printf 'STAGING_DOTENV_MISSING=%s\n' "$(IFS=,; echo "${missing[*]}")" >&2
+            printf 'STAGING_DOTENV_INVALID=%s\n' "$(IFS=,; echo "${invalid[*]}")" >&2
+            exit 1
+          fi
+
+          dotenv_path="functions/.env.${LKC_PROJECT_ID}"
+          umask 077
+          {
+            printf 'APP_ENVIRONMENT=staging\n'
+            printf 'EXPECTED_FIREBASE_PROJECT_ID=%s\n' "$LKC_PROJECT_ID"
+            printf 'ADMIN_EMAILS=%s\n' "$LKC_FUNCTIONS_ADMIN_EMAILS"
+            printf 'EXECUTIVE_APPROVER_EMAILS=%s\n' "$LKC_FUNCTIONS_EXECUTIVE_APPROVER_EMAILS"
+            printf 'PRODUCTION_FIREBASE_PROJECT_ID=%s\n' "$LKC_FUNCTIONS_PRODUCTION_FIREBASE_PROJECT_ID"
+            printf 'APPROVAL_PACKAGE_KEY_ID=%s\n' "$LKC_FUNCTIONS_APPROVAL_PACKAGE_KEY_ID"
+            printf 'DEFAULT_COMPANY_ID=%s\n' "$LKC_FUNCTIONS_DEFAULT_COMPANY_ID"
+            printf 'STAFF_APP_URL=%s\n' "$LKC_FUNCTIONS_STAFF_APP_URL"
+            printf 'ADMIN_APP_URL=%s\n' "$LKC_FUNCTIONS_ADMIN_APP_URL"
+            printf 'MAIL_FROM=%s\n' "$LKC_FUNCTIONS_MAIL_FROM"
+            printf 'PUBLIC_LOGIN_GATEWAY_URL=%s\n' "$LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL"
+            printf 'FILE_PREVIEW_GATEWAY_URL=%s\n' "$LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL"
+          } > "$dotenv_path"
+          chmod 600 "$dotenv_path"
+          echo "STAGING_DOTENV=READY"
+          echo "STAGING_DOTENV_KEY_COUNT=12"
       - name: Deploy only the explicit Functions allowlist
         working-directory: guardrails
         env:

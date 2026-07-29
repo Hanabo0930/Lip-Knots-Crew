@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Read-only diagnosis or the two-service apply
+        description: Read-only diagnosis or the fixed three-service apply
         required: true
         type: choice
         options:
@@ -52,14 +52,14 @@ jobs:
               --project "$LKC_PROJECT_ID" \
               --region "$LKC_REGION" \
               --source-ref "$LKC_SOURCE_REF" \
-              --services "getsubmissiontimeline,getsubmissionprocessingstatus,drivefilepreview"
+              --services "getsubmissiontimeline,requeststaffloginlink,getsubmissionprocessingstatus,drivefilepreview"
           else
             node scripts/automation/validate-staging-scope.mjs \
               --mode invoker-apply \
               --project "$LKC_PROJECT_ID" \
               --region "$LKC_REGION" \
               --source-ref "$LKC_SOURCE_REF" \
-              --services "getsubmissionprocessingstatus,drivefilepreview" \
+              --services "requeststaffloginlink,getsubmissionprocessingstatus,drivefilepreview" \
               --confirmation "$LKC_CONFIRMATION"
           fi
       - name: Verify application-level authorization in source
@@ -69,6 +69,7 @@ jobs:
           git fetch --no-tags --depth=1 origin "refs/heads/${LKC_SOURCE_REF}:refs/remotes/origin/${LKC_SOURCE_REF}"
           node scripts/automation/check-function-auth-guards.mjs \
             --ref "refs/remotes/origin/${LKC_SOURCE_REF}" \
+            --functions "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview" \
             --require-pass
 
   diagnose:
@@ -107,7 +108,7 @@ jobs:
           service_account: ${{ vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
       - name: Set up Google Cloud CLI
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
-      - name: Apply to exactly two services and verify
+      - name: Apply to exactly three services and verify
         env:
           LKC_SOURCE_REF: ${{ inputs.source_ref }}
           LKC_CONFIRMATION: ${{ inputs.confirmation }}

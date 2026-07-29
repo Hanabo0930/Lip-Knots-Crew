@@ -9,6 +9,19 @@ const base = {
 
 assert.equal(validatePlan({ ...base, mode: "ci" }).mode, "ci");
 
+assert.deepEqual(safetyConfig.invokerDiagnosticServices, [
+  "getsubmissiontimeline",
+  "requeststaffloginlink",
+  "getsubmissionprocessingstatus",
+  "drivefilepreview",
+]);
+
+assert.deepEqual(safetyConfig.invokerMutableServices, [
+  "requeststaffloginlink",
+  "getsubmissionprocessingstatus",
+  "drivefilepreview",
+]);
+
 assert.deepEqual(
   validatePlan({
     ...base,
@@ -80,6 +93,12 @@ const rejectedPlans = [
   {
     ...base,
     mode: "invoker-apply",
+    services: "getsubmissionprocessingstatus,drivefilepreview",
+    confirmation: safetyConfig.confirmations.invokerApply,
+  },
+  {
+    ...base,
+    mode: "invoker-apply",
     services: safetyConfig.invokerMutableServices.join(","),
     confirmation: "wrong",
   },
@@ -124,4 +143,4 @@ for (const plan of rejectedPlans) {
   assert.throws(() => validatePlan(plan));
 }
 
-console.log(`staging automation safety tests passed (${7 + rejectedPlans.length} cases)`);
+console.log(`staging automation safety tests passed (${9 + rejectedPlans.length} cases)`);

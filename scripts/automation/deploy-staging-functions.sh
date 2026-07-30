@@ -49,6 +49,7 @@ for function_name in "${function_names[@]}"; do
   service_name=""
   case "$function_name" in
     bootstrapSession) service_name="bootstrapsession" ;;
+    requestStaffLoginLink) service_name="requeststaffloginlink" ;;
     getSubmissionTimeline) service_name="getsubmissiontimeline" ;;
     getSubmissionProcessingStatus) service_name="getsubmissionprocessingstatus" ;;
     getResubmissionComparison) service_name="getresubmissioncomparison" ;;

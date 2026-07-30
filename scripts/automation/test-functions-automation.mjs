@@ -9,6 +9,7 @@ const read = (path) => readFileSync(resolve(root, path), "utf8");
 
 const expectedFunctions = [
   "bootstrapSession",
+  "requestStaffLoginLink",
   "getSubmissionTimeline",
   "getSubmissionProcessingStatus",
   "getResubmissionComparison",
@@ -52,6 +53,11 @@ assert.match(
 );
 assert.match(
   deployScript,
+  /requestStaffLoginLink\)\s+service_name="requeststaffloginlink"/,
+  "requestStaffLoginLink must map to its exact Cloud Run service",
+);
+assert.match(
+  deployScript,
   /allUsers[\s\S]*allAuthenticatedUsers/,
   "post-deploy verification must reject public IAM bindings",
 );
@@ -62,6 +68,11 @@ assert.match(
   /for function_name in \\\n\s+bootstrapSession \\/,
   "WIF bootstrap must discover bootstrapSession runtime and build identities",
 );
+assert.match(
+  bootstrapScript,
+  /for function_name in \\\n\s+bootstrapSession \\\n\s+requestStaffLoginLink \\/,
+  "WIF bootstrap must discover requestStaffLoginLink runtime and build identities",
+);
 
 const authGuard = read("scripts/automation/check-function-auth-guards.mjs");
 assert.match(
@@ -69,5 +80,10 @@ assert.match(
   /bootstrapSession:\s*checkBootstrapSession/,
   "source guard must report bootstrapSession authorization",
 );
+assert.match(
+  authGuard,
+  /requestStaffLoginLink:\s*checkRequestStaffLoginLink/,
+  "source guard must report requestStaffLoginLink authorization",
+);
 
-console.log("Functions automation safety tests passed (9 cases)");
+console.log("Functions automation safety tests passed (12 cases)");

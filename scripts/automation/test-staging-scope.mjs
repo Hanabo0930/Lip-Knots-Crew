@@ -56,6 +56,17 @@ assert.deepEqual(
     ...base,
     sourceRef: "main",
     mode: "functions-deploy",
+    functions: "requestStaffLoginLink",
+    confirmation: safetyConfig.confirmations.functionsDeploy,
+  }).functions,
+  ["requestStaffLoginLink"],
+);
+
+assert.deepEqual(
+  validatePlan({
+    ...base,
+    sourceRef: "main",
+    mode: "functions-deploy",
     functions: "bootstrapSession",
     confirmation: safetyConfig.confirmations.functionsDeploy,
   }).functions,
@@ -143,4 +154,4 @@ for (const plan of rejectedPlans) {
   assert.throws(() => validatePlan(plan));
 }
 
-console.log(`staging automation safety tests passed (${9 + rejectedPlans.length} cases)`);
+console.log(`staging automation safety tests passed (${10 + rejectedPlans.length} cases)`);

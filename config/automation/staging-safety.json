@@ -11,6 +11,7 @@
   ],
   "allowedFunctions": [
     "bootstrapSession",
+    "requestStaffLoginLink",
     "getSubmissionTimeline",
     "getSubmissionProcessingStatus",
     "getResubmissionComparison",

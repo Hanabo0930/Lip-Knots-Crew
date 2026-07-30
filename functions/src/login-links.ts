@@ -22,7 +22,38 @@ import { incrementProductionMetrics } from "./production-metrics";
 
 const RequestLoginSchema = z.object({
   email: z.string().email().max(254),
+  continueUrl: z.string().url().max(2048).optional(),
 });
+
+function resolveStaffLoginContinueUrl(requested?: string): string {
+  const configured = new URL(staffAppUrl.value());
+  if (!requested) return configured.origin;
+
+  const candidate = new URL(requested);
+  const configuredHost = configured.hostname.toLowerCase();
+  const candidateHost = candidate.hostname.toLowerCase();
+  const hostingSite = /^([a-z0-9-]+)\.(?:web\.app|firebaseapp\.com)$/.exec(configuredHost)?.[1];
+  const isSameHostingPreview = hostingSite
+    ? new RegExp(`^${hostingSite}--[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.web\\.app$`).test(candidateHost)
+    : false;
+  const isOriginOnlyHttps =
+    candidate.protocol === "https:"
+    && !candidate.username
+    && !candidate.password
+    && !candidate.port
+    && candidate.pathname === "/"
+    && !candidate.search
+    && !candidate.hash;
+
+  if (
+    !isOriginOnlyHttps
+    || (candidate.origin !== configured.origin && !isSameHostingPreview)
+  ) {
+    throw new HttpsError("invalid-argument", "ログイン先を確認できません。");
+  }
+
+  return candidate.origin;
+}
 
 const CandidateSchema = z.object({
   days: z.number().int().min(1).max(90).default(30),
@@ -57,6 +88,7 @@ export const requestStaffLoginLink = onCall(
     }
 
     const email = normalizeEmail(input.data.email);
+    const continueUrl = resolveStaffLoginContinueUrl(input.data.continueUrl);
     await enforceLoginRateLimit(email);
 
     const indexSnap = await db.collection("emailIndex").doc(emailHash(email)).get();
@@ -81,6 +113,7 @@ export const requestStaffLoginLink = onCall(
             subject: "Lip Knots Crew ログインのご案内",
             introText: "",
             source: "self_request",
+            continueUrl,
           });
         } catch (error) {
           console.error("Self login email failed", { emailHash: emailHash(email), error });
@@ -353,8 +386,9 @@ async function sendLoginLink(input: {
   introText: string;
   source: string;
   batchId?: string;
+  continueUrl?: string;
 }): Promise<void> {
-  const continueUrl = staffAppUrl.value();
+  const continueUrl = input.continueUrl ?? staffAppUrl.value();
   const actionLink = await auth.generateSignInWithEmailLink(input.email, {
     url: continueUrl,
     handleCodeInApp: true,

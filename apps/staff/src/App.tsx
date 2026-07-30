@@ -116,7 +116,7 @@ export default function App(){
       if(!firebaseConfigured){setMessage("デモ：ログインメールを送りました。");return;}
       if(!functions)return;
       const c=httpsCallable(functions,"requestStaffLoginLink");
-      const r=await c({email});
+      const r=await c({email,continueUrl:window.location.origin});
       setMessage((r.data as {message?:string}).message??"ログインメールを送信しました。");
     },{setMessage});
   }

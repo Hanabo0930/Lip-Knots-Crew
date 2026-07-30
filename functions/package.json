@@ -57,6 +57,7 @@
     "test:final-retention": "rm -rf test-final-retention-lib && tsc -p tsconfig.final-retention-test.json && node test-final-retention-lib/test/final-retention-core.test.js"
   },
   "dependencies": {
+    "@firebase/app": "0.15.1",
     "@google-cloud/firestore": "7.11.6",
     "@google-cloud/storage": "7.21.0",
     "firebase-admin": "13.10.0",

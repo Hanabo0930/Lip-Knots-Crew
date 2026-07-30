@@ -62,9 +62,10 @@ export default function App(){
   const [email,setEmail]=useState(localStorage.getItem("lkcEmail")??""); const [message,setMessage]=useState("");
   const [view,setView]=useState<View>("home"); const [openJobs,setOpenJobs]=useState<Job[]>(firebaseConfigured?[]:demoJobs);
   const [myJobs,setMyJobs]=useState<Job[]>(firebaseConfigured?[]:demoJobs); const [tasks,setTasks]=useState<StaffTask[]>(firebaseConfigured?[]:demoTasks);
-  const [selectedJob,setSelectedJob]=useState<Job|null>(demoJobs[0]??null); const [temperature,setTemperature]=useState("36.2"); const [arrivalTime,setArrivalTime]=useState("9:30");
+  const [selectedJob,setSelectedJob]=useState<Job|null>(firebaseConfigured?null:(demoJobs[0]??null)); const [temperature,setTemperature]=useState("36.2"); const [arrivalTime,setArrivalTime]=useState("9:30");
   const [submissionType,setSubmissionType]=useState<SubmissionType>("report"); const [requestId,setRequestId]=useState("");
   const [submissionConfirmed,setSubmissionConfirmed]=useState(false);
+  const [submissionMessage,setSubmissionMessage]=useState("");
   const [files,setFiles]=useState<File[]>([]); const [uploadState,setUploadState]=useState<Record<string,string>>({});
   const [deviceSessionId,setDeviceSessionId]=useState(""); const [devices,setDevices]=useState<DeviceSession[]>([]); const [showDevices,setShowDevices]=useState(false);
   const [pushEnabled,setPushEnabled]=useState(false);
@@ -72,12 +73,18 @@ export default function App(){
   const [resubmissionDetail,setResubmissionDetail]=useState<ResubmissionDetail|null>(null);
   const [processingSubmission,setProcessingSubmission]=useState(false);
 
-  const draftKey=selectedJob?`${selectedJob.id}_${submissionType}_${requestId||"normal"}`:"";
+  const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
+  const draftKey=selectedAssignedJob?`${selectedAssignedJob.id}_${submissionType}_${requestId||"normal"}`:"";
   useEffect(()=>{ if(!draftKey)return; void loadDraft(draftKey).then(setFiles).catch(()=>undefined); },[draftKey]);
   useEffect(()=>{ if(!draftKey)return; const timer=setTimeout(()=>void saveDraft(draftKey,files),300); return()=>clearTimeout(timer); },[draftKey,files]);
 
   useEffect(()=>{ if(!auth)return; return onAuthStateChanged(auth,async current=>{
-    setUser(current); if(!current||!functions)return;
+    setUser(current);
+    if(firebaseConfigured){
+      setStaffId(""); setMyJobs([]); setTasks([]); setSelectedJob(null);
+      setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionMessage("");
+    }
+    if(!current||!functions)return;
     const bootstrap=httpsCallable(functions,"bootstrapSession"); const result=await bootstrap();
     if((result.data as {refreshToken?:boolean}).refreshToken)await current.getIdToken(true);
     const token=await getIdTokenResult(current); const sid=String(token.claims.staffId??""); setStaffId(sid);
@@ -89,8 +96,9 @@ export default function App(){
 
   async function loadAll(sid=staffId){ await Promise.all([loadOpenJobs(),loadMyJobs(sid),loadTasks()]); }
   async function loadOpenJobs(){ if(!db)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==","lipknots"),where("status","==","open"),orderBy("dateKey","asc"),limit(100))); setOpenJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); }
-  async function loadMyJobs(sid:string){ if(!db||!sid)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==","lipknots"),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=snap.docs.map(d=>({id:d.id,...d.data()} as Job)); setMyJobs(values); if(!selectedJob&&values[0])setSelectedJob(values[0]); }
+  async function loadMyJobs(sid:string){ if(!db||!sid)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==","lipknots"),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=snap.docs.map(d=>({id:d.id,...d.data()} as Job)); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??values[0]??null); }
   async function loadTasks(){ if(!functions)return; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); setTasks((r.data as {tasks?:StaffTask[]}).tasks??[]); }
+  function showSubmissionMessage(value:string){setMessage(value);setSubmissionMessage(value);}
 
   async function refreshSelectedJob(jobId:string){
     if(!db)return;
@@ -231,7 +239,7 @@ export default function App(){
     }
   }
 
-  async function openTask(task:StaffTask){ const job=myJobs.find(j=>j.id===task.jobId)??selectedJob; if(job)setSelectedJob(job); if(task.kind==="precontact"){setView("shifts");return;} if(task.kind==="netprint"){setView("shifts");return;} const type=task.kind==="sales_floor"?"sales_floor":"report"; const req=String(task.metadata?.requestId??""); setSubmissionType(type);setRequestId(req);setSubmissionConfirmed(false); if(job)await loadSubmissionHistory(job.id,type); if(req)await loadResubmissionDetail(req); else setResubmissionDetail(null);setView("submit"); }
+  async function openTask(task:StaffTask){ const job=myJobs.find(j=>j.id===task.jobId); if(!job){setMessage("対象の確定シフトを確認できません。シフト画面から案件を選び直してください。");setView("shifts");return;} setSelectedJob(job); if(task.kind==="precontact"){setView("shifts");return;} if(task.kind==="netprint"){setView("shifts");return;} const type=task.kind==="sales_floor"?"sales_floor":"report"; const req=String(task.metadata?.requestId??""); setSubmissionType(type);setRequestId(req);setSubmissionConfirmed(false);setSubmissionMessage("");await loadSubmissionHistory(job.id,type); if(req)await loadResubmissionDetail(req); else setResubmissionDetail(null);setView("submit"); }
 
   async function pollSubmissionProcessing(jobId:string,submissionId:string,type:SubmissionType,resubmissionRequestId:string){
     if(!functions)return;
@@ -244,40 +252,43 @@ export default function App(){
         const response=await callable({jobId,submissionId});
         const data=response.data as {status:string;completedFiles:number;totalFiles:number;errorMessage:string|null};
         if(data.status==="completed"){
-          setMessage("Driveへの保存が完了しました。");
+          showSubmissionMessage("Driveへの保存が完了しました。");
           await loadSubmissionHistory(jobId,type);
           if(resubmissionRequestId)await loadResubmissionDetail(resubmissionRequestId);
           await refreshSelectedJob(jobId);
           return;
         }
         if(data.status==="error"){
-          setMessage(data.errorMessage??"提出の処理中にエラーが発生しました。");
+          showSubmissionMessage(data.errorMessage??"提出の処理中にエラーが発生しました。");
           return;
         }
-        setMessage(`Drive転送を処理中です（${data.completedFiles}/${data.totalFiles}件）…`);
+        showSubmissionMessage(`Drive転送を処理中です（${data.completedFiles}/${data.totalFiles}件）…`);
         await sleep(delay);
         delay=Math.min(Math.round(delay*1.5),3000);
       }
-      setMessage("バックグラウンドで処理中です。完了すると提出履歴に自動で反映されます。");
+      showSubmissionMessage("バックグラウンドで処理中です。完了すると提出履歴に自動で反映されます。");
     }finally{
       setProcessingSubmission(false);
     }
   }
 
   async function uploadSubmission(){
-    if(!selectedJob||!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission)return;
+    if(!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission)return;
+    const assignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id):undefined;
+    if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");return;}
     const typeLabel=submissionType==="report"?"報告書":"売場画像";
+    setSubmissionMessage("");
     if(!window.confirm(`${typeLabel}として${files.length}件を送信します。種類と画像に間違いはありませんか？`))return;
     if(!firebaseConfigured){
       setUploadState(Object.fromEntries(files.map(f=>[f.name,"送信済み"])));
-      setMessage(`デモ：${typeLabel}を送信しました。`);
+      showSubmissionMessage(`デモ：${typeLabel}を送信しました。`);
       setSubmissionConfirmed(false);
       return;
     }
     if(!functions||!storage)return;
     const activeFunctions=functions;
     const activeStorage=storage;
-    const jobId=selectedJob.id;
+    const jobId=assignedJob.id;
     const currentRequestId=requestId;
     const currentType=submissionType;
     await run("uploadSubmission",async()=>{
@@ -297,9 +308,9 @@ export default function App(){
       await clearDraft(draftKey);
       setFiles([]);
       setSubmissionConfirmed(false);
-      setMessage(`${typeLabel}を送信しました。Drive転送を処理中です…`);
+      showSubmissionMessage(`${typeLabel}を送信しました。Drive転送を処理中です…`);
       void pollSubmissionProcessing(jobId,data.submissionId,currentType,currentRequestId);
-    },{setMessage});
+    },{setMessage:showSubmissionMessage});
   }
 
   async function loadSubmissionHistory(jobId:string,type:SubmissionType){
@@ -331,9 +342,9 @@ export default function App(){
     setResubmissionDetail(r.data as ResubmissionDetail);
   }
 
-  async function chooseSubmission(type:SubmissionType,job:Job,req=""){setSelectedJob(job);setSubmissionType(type);setRequestId(req);setSubmissionConfirmed(false);setFiles([]);setResubmissionDetail(null);await loadSubmissionHistory(job.id,type);if(req)await loadResubmissionDetail(req);setView("submit");}
+  async function chooseSubmission(type:SubmissionType,job:Job,req=""){const assignedJob=myJobs.find(candidate=>candidate.id===job.id);if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");setView("shifts");return;}setSelectedJob(assignedJob);setSubmissionType(type);setRequestId(req);setSubmissionConfirmed(false);setSubmissionMessage("");setFiles([]);setResubmissionDetail(null);await loadSubmissionHistory(assignedJob.id,type);if(req)await loadResubmissionDetail(req);setView("submit");}
 
-  const activeJob=selectedJob??myJobs[0]??null;
+  const activeJob=selectedAssignedJob??myJobs[0]??null;
   const title=useMemo(()=>firebaseConfigured?"Lip Knots Crew":"Lip Knots Crew（デモ）",[]);
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button>{message&&<div className="message">{message}</div>}</section></main>;
 
@@ -345,12 +356,13 @@ export default function App(){
       <section className="hero-card"><h2>今日やること</h2><p>重要な5件を表示しています。</p><div className="task-list">{tasks.slice(0,5).map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{!tasks.length&&<div className="empty">未対応はありません。</div>}</div></section>
       <section><h2>次回シフト</h2>{activeJob?<article className="job shift-job" style={{"--job-accent":jobAccent(activeJob.menuName)} as CSSProperties}><span className="date">{activeJob.workDate||activeJob.dateKey}</span><span className="job-kind">{jobKind(activeJob.menuName)}</span><h3>{activeJob.storeName}</h3><p>{activeJob.makerName} / {activeJob.menuName}</p><span className="prep-chip">{prepSummary(activeJob)}</span><button onClick={()=>{setSelectedJob(activeJob);setView("shifts")}}>シフトを開く</button></article>:<div className="empty">確定シフトはありません。</div>}</section>
     </>}
-    {view==="jobs"&&<section><h2>募集中の案件</h2><div className="grid">{openJobs.map(job=><article className="job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong><div className="actions"><button className="secondary" onClick={()=>setSelectedJob(job)}>詳細</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>)}</div></section>}
+    {view==="jobs"&&<section><h2>募集中の案件</h2><div className="grid">{openJobs.map(job=><article className="job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong><div className="actions"><button className="secondary" onClick={()=>setMessage(`${job.storeName} / ${job.makerName} / ${job.workTime}`)}>詳細</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>)}</div></section>}
     {view==="shifts"&&<section><h2>自分のシフト</h2><div className="grid">{myJobs.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>{selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)}/></label></div><button onClick={()=>void submitPreContact()} disabled={isPending("preContact")}>{isPending("preContact")?"処理中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||isPending(`print-${item.id}`)} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":isPending(`print-${item.id}`)?"処理中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)}>📝 報告書を提出</button></div></section>}</section>}
-    {view==="submit"&&<section className={`panel submission-panel ${submissionType}`}><div className={`submission-identity ${submissionType}`}><span>{submissionType==="report"?"📝 報告書":"🖼️ 売場画像"}</span><strong>{submissionType==="report"?"報告内容が読める画像・PDF":"売場全体や陳列が分かる写真"}</strong></div><h2>{submissionType==="report"?"報告書":"売場画像"}を提出</h2><p>{selectedJob?.storeName}{requestId&&" / 再提出依頼への対応"}</p>
+    {view==="submit"&&!selectedAssignedJob&&<section className="panel"><h2>提出するシフトを選んでください</h2><p>提出は、本人に割り当てられた確定シフトからだけ受け付けます。</p><button onClick={()=>setView("shifts")}>シフトを選ぶ</button></section>}
+    {view==="submit"&&selectedAssignedJob&&<section className={`panel submission-panel ${submissionType}`}><div className={`submission-identity ${submissionType}`}><span>{submissionType==="report"?"📝 報告書":"🖼️ 売場画像"}</span><strong>{submissionType==="report"?"報告内容が読める画像・PDF":"売場全体や陳列が分かる写真"}</strong></div><h2>{submissionType==="report"?"報告書":"売場画像"}を提出</h2><p>{selectedAssignedJob.storeName}{requestId&&" / 再提出依頼への対応"}</p>
       {resubmissionDetail&&<div className="resubmission-guide"><div><strong>再送理由</strong><p>{resubmissionDetail.request.reasons.join(" / ")}</p>{resubmissionDetail.request.note&&<p>{resubmissionDetail.request.note}</p>}</div><div className="source-preview"><span>撮り直す元画像</span>{resubmissionDetail.source?<SubmissionPreviewImage file={resubmissionDetail.source} onRefreshPreview={refreshFilePreview} className="source-preview-frame"/>:<div className="preview-placeholder">対象画像</div>}</div><small>この画像だけを撮り直し、1ファイル選んで再送してください。</small></div>}
-      {submissionType==="sales_floor"&&<button className="secondary" onClick={()=>void setClientSubmitted(!(selectedJob?.submissionStatus?.salesFloor?.clientSubmitted))} disabled={isPending("clientSubmitted")}>{isPending("clientSubmitted")?"処理中…":selectedJob?.submissionStatus?.salesFloor?.clientSubmitted?"クライアント提出を解除":"クライアントへ提出済み"}</button>}
-      <div className="upload-box"><input type="file" multiple={!requestId} accept="image/*,.pdf" onChange={e=>{setFiles(Array.from(e.target.files??[]).slice(0,requestId?1:20));setSubmissionConfirmed(false);}}/><small>{requestId?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB`}</small></div><div className="file-list">{files.map(file=><div key={`${file.name}_${file.lastModified}`}><span>{file.name}</span><em>{uploadState[file.name]??"下書き保存済み"}</em></div>)}</div><label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><button className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?"この画像を再送する":`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>
+      {submissionType==="sales_floor"&&<button className="secondary" onClick={()=>void setClientSubmitted(!selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted)} disabled={isPending("clientSubmitted")}>{isPending("clientSubmitted")?"処理中…":selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted?"クライアント提出を解除":"クライアントへ提出済み"}</button>}
+      <div className="upload-box"><input type="file" multiple={!requestId} accept="image/*,.pdf" onChange={e=>{setFiles(Array.from(e.target.files??[]).slice(0,requestId?1:20));setSubmissionConfirmed(false);setSubmissionMessage("");}}/><small>{requestId?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB`}</small></div><div className="file-list">{files.map(file=><div key={`${file.name}_${file.lastModified}`}><span>{file.name}</span><em>{uploadState[file.name]??"下書き保存済み"}</em></div>)}</div><label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><button className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?"この画像を再送する":`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className="message submission-message" role="status">{submissionMessage}</div>}
       <hr/><h3>提出履歴</h3><div className="history-grid">{submissionHistory.flatMap(group=>group.files).map(file=><article key={`${file.submissionId}_${file.id}`}><SubmissionPreviewImage file={file} onRefreshPreview={refreshFilePreview}/><strong>{file.driveName||file.originalName}</strong><small>{file.purpose==="replacement"?"再送":"提出済み"}</small></article>)}{!submissionHistory.length&&<div className="empty">提出履歴はありません。</div>}</div>
     </section>}
     {view==="contact"&&<section className="panel"><h2>連絡先</h2><button className="secondary contact-button">メールを送る</button><button className="secondary contact-button">電話をかける</button><button className="secondary contact-button">LINEを開く</button></section>}

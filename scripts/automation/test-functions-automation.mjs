@@ -44,6 +44,16 @@ assert.match(
   /--functions "\$LKC_FUNCTIONS"/,
   "source authorization must inspect the exact requested Functions",
 );
+assert.match(
+  workflow,
+  /LKC_FUNCTIONS_GMAIL_DELEGATED_USER:\s*\$\{\{\s*secrets\.LKC_GMAIL_SMOKE_EMAIL\s*\}\}/,
+  "Functions deploy must preserve the delegated Gmail user from a protected secret",
+);
+assert.match(
+  workflow,
+  /printf 'GMAIL_DELEGATED_USER=%s\\n' "\$LKC_FUNCTIONS_GMAIL_DELEGATED_USER"/,
+  "Functions dotenv must materialize GMAIL_DELEGATED_USER",
+);
 
 const deployScript = read("scripts/automation/deploy-staging-functions.sh");
 assert.match(
@@ -73,6 +83,11 @@ assert.match(
   /for function_name in \\\n\s+bootstrapSession \\\n\s+requestStaffLoginLink \\/,
   "WIF bootstrap must discover requestStaffLoginLink runtime and build identities",
 );
+assert.match(
+  bootstrapScript,
+  /roles\/datastore\.viewer/,
+  "staging observer must be able to verify the sanitized delivery record",
+);
 
 const authGuard = read("scripts/automation/check-function-auth-guards.mjs");
 assert.match(
@@ -86,4 +101,4 @@ assert.match(
   "source guard must report requestStaffLoginLink authorization",
 );
 
-console.log("Functions automation safety tests passed (12 cases)");
+console.log("Functions automation safety tests passed (15 cases)");

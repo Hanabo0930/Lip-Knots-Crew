@@ -81,6 +81,16 @@ export function validatePlan(plan) {
     return { mode, project, region, sourceRef, functions };
   }
 
+  if (mode === "gmail-smoke") {
+    if (sourceRef !== "main") {
+      throw new Error(`GMAIL_SMOKE_SOURCE_MUST_BE_MAIN:${sourceRef}`);
+    }
+    if (plan.confirmation !== safetyConfig.confirmations.gmailSmoke) {
+      throw new Error("GMAIL_SMOKE_CONFIRMATION_REJECTED");
+    }
+    return { mode, project, region, sourceRef };
+  }
+
   if (mode === "hosting-preview" || mode === "hosting-promote") {
     if (sourceRef !== "main") throw new Error(`HOSTING_SOURCE_MUST_BE_MAIN:${sourceRef}`);
     const targets = parseCsv(plan.targets);

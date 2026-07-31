@@ -3,6 +3,14 @@ name: Staging Functions Deploy
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: Deploy Functions or run the single-mail Gmail smoke only
+        required: true
+        type: choice
+        options:
+          - deploy
+          - gmail-smoke
+        default: deploy
       source_ref:
         description: CI-passing source branch
         required: true
@@ -14,7 +22,7 @@ on:
         type: string
         default: bootstrapSession
       confirmation:
-        description: Type DEPLOY_LKC_STAGING_FUNCTIONS
+        description: Type the confirmation required by the selected operation
         required: true
         type: string
 
@@ -33,6 +41,7 @@ env:
 
 jobs:
   guard:
+    if: inputs.operation == 'deploy'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -105,6 +114,7 @@ jobs:
               '
 
   deploy:
+    if: inputs.operation == 'deploy'
     needs: guard
     environment: lkc-staging-deploy
     runs-on: ubuntu-latest
@@ -148,6 +158,7 @@ jobs:
           LKC_FUNCTIONS_STAFF_APP_URL: ${{ vars.LKC_FUNCTIONS_STAFF_APP_URL }}
           LKC_FUNCTIONS_ADMIN_APP_URL: ${{ vars.LKC_FUNCTIONS_ADMIN_APP_URL }}
           LKC_FUNCTIONS_MAIL_FROM: ${{ vars.LKC_FUNCTIONS_MAIL_FROM }}
+          LKC_FUNCTIONS_GMAIL_DELEGATED_USER: ${{ secrets.LKC_GMAIL_SMOKE_EMAIL }}
           LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL: ${{ vars.LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL }}
           LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL: ${{ vars.LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL }}
         run: |
@@ -160,6 +171,7 @@ jobs:
             LKC_FUNCTIONS_STAFF_APP_URL
             LKC_FUNCTIONS_ADMIN_APP_URL
             LKC_FUNCTIONS_MAIL_FROM
+            LKC_FUNCTIONS_GMAIL_DELEGATED_USER
             LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL
             LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL
           )
@@ -187,12 +199,13 @@ jobs:
             printf 'STAFF_APP_URL=%s\n' "$LKC_FUNCTIONS_STAFF_APP_URL"
             printf 'ADMIN_APP_URL=%s\n' "$LKC_FUNCTIONS_ADMIN_APP_URL"
             printf 'MAIL_FROM=%s\n' "$LKC_FUNCTIONS_MAIL_FROM"
+            printf 'GMAIL_DELEGATED_USER=%s\n' "$LKC_FUNCTIONS_GMAIL_DELEGATED_USER"
             printf 'PUBLIC_LOGIN_GATEWAY_URL=%s\n' "$LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL"
             printf 'FILE_PREVIEW_GATEWAY_URL=%s\n' "$LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL"
           } > "$dotenv_path"
           chmod 600 "$dotenv_path"
           echo "STAGING_DOTENV=READY"
-          echo "STAGING_DOTENV_KEY_COUNT=12"
+          echo "STAGING_DOTENV_KEY_COUNT=13"
       - name: Deploy only the explicit Functions allowlist
         working-directory: guardrails
         env:
@@ -201,3 +214,137 @@ jobs:
           LKC_CONFIRMATION: ${{ inputs.confirmation }}
           LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
         run: bash scripts/automation/deploy-staging-functions.sh
+
+  smoke-guard:
+    if: inputs.operation == 'gmail-smoke'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require main and the staging enable switch
+        env:
+          LKC_DEPLOY_ENABLED: ${{ vars.LKC_STAGING_DEPLOY_ENABLED }}
+        run: |
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "GMAIL_SMOKE_RESULT=STOPPED_SAFELY"
+            echo "GMAIL_SMOKE_ERROR=MAIN_REQUIRED"
+            exit 1
+          fi
+          if [[ "$LKC_DEPLOY_ENABLED" != "true" ]]; then
+            echo "GMAIL_SMOKE_RESULT=STOPPED_SAFELY"
+            echo "GMAIL_SMOKE_ERROR=ENABLE_SWITCH_OFF"
+            exit 1
+          fi
+      - name: Checkout trusted main guardrails
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+      - name: Validate fixed Gmail smoke scope
+        env:
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          node scripts/automation/validate-staging-scope.mjs \
+            --mode gmail-smoke \
+            --project "$LKC_PROJECT_ID" \
+            --region "$LKC_REGION" \
+            --source-ref main \
+            --confirmation "$LKC_CONFIRMATION"
+
+  gmail-smoke:
+    if: >-
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      (
+        (inputs.operation == 'gmail-smoke' &&
+          needs.smoke-guard.result == 'success') ||
+        (inputs.operation == 'deploy' &&
+          needs.deploy.result == 'success' &&
+          contains(inputs.functions, 'requestStaffLoginLink'))
+      )
+    needs:
+      - guard
+      - deploy
+      - smoke-guard
+    environment: lkc-staging-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require the fixed smoke configuration
+        env:
+          LKC_DEPLOY_ENABLED: ${{ vars.LKC_STAGING_DEPLOY_ENABLED }}
+          LKC_GMAIL_SMOKE_EMAIL: ${{ secrets.LKC_GMAIL_SMOKE_EMAIL }}
+          LKC_GMAIL_SMOKE_CONTINUE_URL: ${{ vars.LKC_FUNCTIONS_STAFF_APP_URL }}
+          LKC_EXPECTED_MAIL_FROM: ${{ vars.LKC_FUNCTIONS_MAIL_FROM }}
+          LKC_EXPECTED_GATEWAY_URL: ${{ vars.LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL }}
+        run: |
+          if [[ "$LKC_DEPLOY_ENABLED" != "true" ]]; then
+            echo "GMAIL_SMOKE_ERROR=ENABLE_SWITCH_OFF"
+            exit 1
+          fi
+          required=(
+            LKC_GMAIL_SMOKE_EMAIL
+            LKC_GMAIL_SMOKE_CONTINUE_URL
+            LKC_EXPECTED_MAIL_FROM
+            LKC_EXPECTED_GATEWAY_URL
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'GMAIL_SMOKE_MISSING=%s\n' "$(IFS=,; echo "${missing[*]}")" >&2
+            exit 1
+          fi
+          echo "GMAIL_SMOKE_CONFIGURATION=READY"
+      - name: Prepare evidence directory
+        run: |
+          evidence_dir="$RUNNER_TEMP/gmail-single-mail-smoke-evidence"
+          mkdir -p "$evidence_dir"
+          echo "LKC_EVIDENCE_DIR=$evidence_dir" >> "$GITHUB_ENV"
+      - name: Checkout trusted main automation
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - name: Authenticate with the short-lived staging observer
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_OBSERVER_SERVICE_ACCOUNT }}
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Send and verify exactly one staging login email
+        env:
+          LKC_GMAIL_SMOKE_EMAIL: ${{ secrets.LKC_GMAIL_SMOKE_EMAIL }}
+          LKC_GMAIL_SMOKE_CONTINUE_URL: ${{ vars.LKC_FUNCTIONS_STAFF_APP_URL }}
+          LKC_EXPECTED_MAIL_FROM: ${{ vars.LKC_FUNCTIONS_MAIL_FROM }}
+          LKC_EXPECTED_GATEWAY_URL: ${{ vars.LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL }}
+          LKC_GMAIL_SMOKE_RUN_ATTEMPT: ${{ github.run_attempt }}
+          LKC_GMAIL_SMOKE_RUN_ID: ${{ github.run_id }}
+        run: node scripts/automation/gmail-single-mail-smoke.mjs
+      - name: Upload sanitized smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gmail-single-mail-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.LKC_EVIDENCE_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Publish Gmail smoke summary
+        if: always()
+        run: |
+          {
+            echo "## Staging Gmail single-mail smoke"
+            echo
+            echo "- Project: \`$LKC_PROJECT_ID\`"
+            echo "- Function: \`requestStaffLoginLink\`"
+            echo "- Run attempt: \`${{ github.run_attempt }}\`"
+            echo "- Result: \`${{ job.status }}\`"
+            echo "- Maximum request count: \`1\`"
+            echo "- Production touched: \`false\`"
+            echo "- Direct Firestore write: \`false\`"
+          } >> "$GITHUB_STEP_SUMMARY"

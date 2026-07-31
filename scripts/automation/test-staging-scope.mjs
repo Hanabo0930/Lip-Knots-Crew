@@ -73,6 +73,16 @@ assert.deepEqual(
   ["bootstrapSession"],
 );
 
+assert.equal(
+  validatePlan({
+    ...base,
+    sourceRef: "main",
+    mode: "gmail-smoke",
+    confirmation: safetyConfig.confirmations.gmailSmoke,
+  }).mode,
+  "gmail-smoke",
+);
+
 assert.deepEqual(
   validatePlan({
     ...base,
@@ -121,6 +131,17 @@ const rejectedPlans = [
   },
   {
     ...base,
+    mode: "gmail-smoke",
+    confirmation: safetyConfig.confirmations.gmailSmoke,
+  },
+  {
+    ...base,
+    sourceRef: "main",
+    mode: "gmail-smoke",
+    confirmation: "wrong",
+  },
+  {
+    ...base,
     mode: "hosting-preview",
     targets: "staff,admin",
     channel: "rc-02516b6e28e4",
@@ -154,4 +175,4 @@ for (const plan of rejectedPlans) {
   assert.throws(() => validatePlan(plan));
 }
 
-console.log(`staging automation safety tests passed (${10 + rejectedPlans.length} cases)`);
+console.log(`staging automation safety tests passed (${11 + rejectedPlans.length} cases)`);

@@ -69,9 +69,13 @@ function parseHttpsUrl(value, name) {
 export function validateOptions(environment = process.env) {
   const projectId = requireValue(environment.LKC_PROJECT_ID, "LKC_PROJECT_ID");
   const region = requireValue(environment.LKC_REGION, "LKC_REGION");
-  const testEmail = requireValue(
-    environment.LKC_GMAIL_SMOKE_EMAIL,
-    "LKC_GMAIL_SMOKE_EMAIL",
+  const testRecipientEmail = requireValue(
+    environment.LKC_GMAIL_SMOKE_RECIPIENT_EMAIL,
+    "LKC_GMAIL_SMOKE_RECIPIENT_EMAIL",
+  ).toLowerCase();
+  const expectedDelegatedUser = requireValue(
+    environment.LKC_EXPECTED_GMAIL_DELEGATED_USER,
+    "LKC_EXPECTED_GMAIL_DELEGATED_USER",
   ).toLowerCase();
   const continueUrl = parseHttpsOrigin(
     environment.LKC_GMAIL_SMOKE_CONTINUE_URL,
@@ -107,8 +111,14 @@ export function validateOptions(environment = process.env) {
   if (/prod(uction)?/iu.test(projectId)) {
     throw new Error(`PRODUCTION_PROJECT_REJECTED:${projectId}`);
   }
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/u.test(testEmail)) {
-    throw new Error("TEST_EMAIL_INVALID");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/u.test(testRecipientEmail)) {
+    throw new Error("TEST_RECIPIENT_EMAIL_INVALID");
+  }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/u.test(expectedDelegatedUser)) {
+    throw new Error("EXPECTED_GMAIL_DELEGATED_USER_INVALID");
+  }
+  if (testRecipientEmail === expectedDelegatedUser) {
+    throw new Error("GMAIL_SMOKE_SENDER_RECIPIENT_NOT_SEPARATED");
   }
   if (runAttempt !== "1") {
     throw new Error("WORKFLOW_RERUN_REJECTED");
@@ -123,7 +133,8 @@ export function validateOptions(environment = process.env) {
   return {
     projectId,
     region,
-    testEmail,
+    testRecipientEmail,
+    expectedDelegatedUser,
     continueUrl,
     expectedMailFrom,
     expectedGatewayUrl,
@@ -195,7 +206,7 @@ export function validateRuntimeConfiguration(input) {
       === options.expectedMailFrom,
     delegatedUserPinned:
       String(mailEnvironment.GMAIL_DELEGATED_USER ?? "").toLowerCase()
-      === options.testEmail,
+      === options.expectedDelegatedUser,
     gmailSecretBound: secretKeys.has(GMAIL_SECRET),
     staffAppUrlPinned:
       parseHttpsOrigin(mailEnvironment.STAFF_APP_URL, "STAFF_APP_URL")
@@ -235,7 +246,7 @@ function parseTimestamp(value) {
   return timestamp;
 }
 
-export function summarizeDeliveries(rows, testEmail, startedAt) {
+export function summarizeDeliveries(rows, testRecipientEmail, startedAt) {
   const startedAtMs = parseTimestamp(startedAt);
   const matches = [];
   for (const row of rows ?? []) {
@@ -244,7 +255,7 @@ export function summarizeDeliveries(rows, testEmail, startedAt) {
     const fields = document.fields ?? {};
     const createdAt = firestoreTimestamp(fields, "createdAt");
     if (
-      firestoreString(fields, "email") !== testEmail
+      firestoreString(fields, "email") !== testRecipientEmail
       || firestoreString(fields, "source") !== DELIVERY_SOURCE
       || !createdAt
       || parseTimestamp(createdAt) < startedAtMs
@@ -306,7 +317,7 @@ async function queryDeliveries(options, token, startedAt) {
   if (!response.ok) throw new Error(`DELIVERY_QUERY_HTTP_${response.status}`);
   return summarizeDeliveries(
     await response.json(),
-    options.testEmail,
+    options.testRecipientEmail,
     startedAt,
   );
 }
@@ -343,7 +354,7 @@ async function probePublicEndpoints(options) {
 
 async function validateTestRecipient(options, token) {
   const emailHash = createHash("sha256")
-    .update(options.testEmail)
+    .update(options.testRecipientEmail)
     .digest("hex");
   const index = await fetchDocument(
     `https://firestore.googleapis.com/v1/projects/${options.projectId}`
@@ -373,7 +384,7 @@ async function invokeSingleMail(mailUrl, options) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       data: {
-        email: options.testEmail,
+        email: options.testRecipientEmail,
         continueUrl: options.continueUrl,
       },
     }),
@@ -443,6 +454,7 @@ async function main() {
     runAttempt: options.runAttempt,
     startedAt,
     testRecipientConfigured: true,
+    senderRecipientSeparated: true,
     requestInvoked: false,
     emailSent: false,
     emailCount: 0,

@@ -158,7 +158,7 @@ jobs:
           LKC_FUNCTIONS_STAFF_APP_URL: ${{ vars.LKC_FUNCTIONS_STAFF_APP_URL }}
           LKC_FUNCTIONS_ADMIN_APP_URL: ${{ vars.LKC_FUNCTIONS_ADMIN_APP_URL }}
           LKC_FUNCTIONS_MAIL_FROM: ${{ vars.LKC_FUNCTIONS_MAIL_FROM }}
-          LKC_FUNCTIONS_GMAIL_DELEGATED_USER: ${{ secrets.LKC_GMAIL_SMOKE_EMAIL }}
+          LKC_FUNCTIONS_GMAIL_DELEGATED_USER: ${{ secrets.LKC_FUNCTIONS_GMAIL_DELEGATED_USER }}
           LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL: ${{ vars.LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL }}
           LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL: ${{ vars.LKC_FUNCTIONS_FILE_PREVIEW_GATEWAY_URL }}
         run: |
@@ -271,7 +271,8 @@ jobs:
       - name: Require the fixed smoke configuration
         env:
           LKC_DEPLOY_ENABLED: ${{ vars.LKC_STAGING_DEPLOY_ENABLED }}
-          LKC_GMAIL_SMOKE_EMAIL: ${{ secrets.LKC_GMAIL_SMOKE_EMAIL }}
+          LKC_GMAIL_SMOKE_RECIPIENT_EMAIL: ${{ secrets.LKC_GMAIL_SMOKE_RECIPIENT_EMAIL }}
+          LKC_EXPECTED_GMAIL_DELEGATED_USER: ${{ secrets.LKC_FUNCTIONS_GMAIL_DELEGATED_USER }}
           LKC_GMAIL_SMOKE_CONTINUE_URL: ${{ vars.LKC_FUNCTIONS_STAFF_APP_URL }}
           LKC_EXPECTED_MAIL_FROM: ${{ vars.LKC_FUNCTIONS_MAIL_FROM }}
           LKC_EXPECTED_GATEWAY_URL: ${{ vars.LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL }}
@@ -281,7 +282,8 @@ jobs:
             exit 1
           fi
           required=(
-            LKC_GMAIL_SMOKE_EMAIL
+            LKC_GMAIL_SMOKE_RECIPIENT_EMAIL
+            LKC_EXPECTED_GMAIL_DELEGATED_USER
             LKC_GMAIL_SMOKE_CONTINUE_URL
             LKC_EXPECTED_MAIL_FROM
             LKC_EXPECTED_GATEWAY_URL
@@ -319,7 +321,8 @@ jobs:
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       - name: Send and verify exactly one staging login email
         env:
-          LKC_GMAIL_SMOKE_EMAIL: ${{ secrets.LKC_GMAIL_SMOKE_EMAIL }}
+          LKC_GMAIL_SMOKE_RECIPIENT_EMAIL: ${{ secrets.LKC_GMAIL_SMOKE_RECIPIENT_EMAIL }}
+          LKC_EXPECTED_GMAIL_DELEGATED_USER: ${{ secrets.LKC_FUNCTIONS_GMAIL_DELEGATED_USER }}
           LKC_GMAIL_SMOKE_CONTINUE_URL: ${{ vars.LKC_FUNCTIONS_STAFF_APP_URL }}
           LKC_EXPECTED_MAIL_FROM: ${{ vars.LKC_FUNCTIONS_MAIL_FROM }}
           LKC_EXPECTED_GATEWAY_URL: ${{ vars.LKC_FUNCTIONS_PUBLIC_LOGIN_GATEWAY_URL }}
@@ -345,6 +348,7 @@ jobs:
             echo "- Run attempt: \`${{ github.run_attempt }}\`"
             echo "- Result: \`${{ job.status }}\`"
             echo "- Maximum request count: \`1\`"
+            echo "- Sender/recipient separated: \`true\`"
             echo "- Production touched: \`false\`"
             echo "- Direct Firestore write: \`false\`"
           } >> "$GITHUB_STEP_SUMMARY"

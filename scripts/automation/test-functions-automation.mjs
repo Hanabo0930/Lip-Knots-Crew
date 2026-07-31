@@ -46,7 +46,7 @@ assert.match(
 );
 assert.match(
   workflow,
-  /LKC_FUNCTIONS_GMAIL_DELEGATED_USER:\s*\$\{\{\s*secrets\.LKC_GMAIL_SMOKE_EMAIL\s*\}\}/,
+  /LKC_FUNCTIONS_GMAIL_DELEGATED_USER:\s*\$\{\{\s*secrets\.LKC_FUNCTIONS_GMAIL_DELEGATED_USER\s*\}\}/,
   "Functions deploy must preserve the delegated Gmail user from a protected secret",
 );
 assert.match(

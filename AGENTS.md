@@ -89,6 +89,8 @@ The staging Gmail smoke may invoke `requestStaffLoginLink` exactly once from
 
 - run only from `main` and only in `lip-knots-crew-staging`;
 - use the protected recipient secret without printing the address;
+- keep the protected Gmail delegated sender and smoke recipient in separate
+  secrets, and reject the run before invocation if their addresses match;
 - reject GitHub workflow reruns before invoking the Function;
 - validate the fixed Function, gateway, delegated user, and bound Gmail secret;
 - use the observer identity for read-only delivery verification;

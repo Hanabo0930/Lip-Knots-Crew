@@ -7,6 +7,9 @@ export const gmailServiceAccountJson = defineSecret(
 export const mailFrom = defineString("MAIL_FROM", {
   default: "staff@lipknots.com",
 });
+export const gmailDelegatedUser = defineString("GMAIL_DELEGATED_USER", {
+  default: "",
+});
 export const staffAppUrl = defineString("STAFF_APP_URL", {
   default: "https://staff.lipknots.com/",
 });
@@ -45,16 +48,17 @@ export async function sendWorkspaceMail(input: {
   }
 
   const from = mailFrom.value();
+  const delegatedUser = gmailDelegatedUser.value().trim() || from;
   const auth = credentials.private_key
     ? new google.auth.JWT({
         email: credentials.client_email,
         key: credentials.private_key.replace(/\\n/g, "\n"),
         scopes: [GMAIL_SEND_SCOPE],
-        subject: from,
+        subject: delegatedUser,
       })
     : await createKeylessDelegatedAuth({
         serviceAccountEmail: credentials.client_email,
-        subject: from,
+        subject: delegatedUser,
       });
 
   const gmail = google.gmail({ version: "v1", auth });
@@ -115,11 +119,15 @@ async function createKeylessDelegatedAuth(input: {
   const token = (await tokenResponse.json()) as {
     access_token?: string;
     error?: string;
+    error_description?: string;
   };
   if (!tokenResponse.ok || !token.access_token) {
+    const detail = [token.error, token.error_description]
+      .filter(Boolean)
+      .join(": ");
     throw new Error(
       `Gmail送信用アクセストークンの取得に失敗しました。${
-        token.error ? ` (${token.error})` : ""
+        detail ? ` (${detail})` : ""
       }`
     );
   }

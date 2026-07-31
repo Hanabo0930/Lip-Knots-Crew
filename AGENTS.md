@@ -102,6 +102,20 @@ limit, login gateway token, and one delivery record for the single test email.
 No other Firestore data, Storage data, IAM, Hosting, or production resource may
 change during this smoke.
 
+The only direct Firestore bootstrap exception is the operator-run script
+`scripts/automation/provision-staging-gmail-smoke-recipient.sh`. It may create
+or replace exactly these two dedicated staging documents:
+
+- `staffProfiles/staging-gmail-smoke-recipient`
+- `emailIndex/{sha256(the protected staging smoke recipient)}`
+
+The script must require the exact staging project, the `info@lipknots.com`
+operator account, an explicit confirmation, and a dedicated
+`info+lkc-staging-smoke...@lipknots.com` alias. It must back up both prior
+documents, reject conflicts before mutation, commit the two writes atomically,
+and verify both documents afterward. This exception does not permit deletion,
+IAM changes, production access, or direct Firestore writes from GitHub Actions.
+
 ## Stop conditions
 
 Stop without expanding scope when:

@@ -39,6 +39,7 @@
   "confirmations": {
     "invokerApply": "APPLY_LKC_STAGING_INVOKER",
     "functionsDeploy": "DEPLOY_LKC_STAGING_FUNCTIONS",
+    "gmailSmoke": "SEND_LKC_STAGING_GMAIL_SMOKE",
     "hostingPromote": "PROMOTE_LKC_STAGING_HOSTING",
     "wifBootstrap": "BOOTSTRAP_LKC_STAGING_WIF"
   }

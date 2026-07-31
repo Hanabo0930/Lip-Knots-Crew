@@ -99,7 +99,11 @@ for service_account in "$observer_email" "$deploy_email"; do
     --quiet
 done
 
-for role_name in roles/run.viewer roles/cloudfunctions.viewer roles/orgpolicy.policyViewer; do
+for role_name in \
+  roles/run.viewer \
+  roles/cloudfunctions.viewer \
+  roles/datastore.viewer \
+  roles/orgpolicy.policyViewer; do
   gcloud projects add-iam-policy-binding "$lkc_project" \
     --member "serviceAccount:${observer_email}" \
     --role "$role_name" \

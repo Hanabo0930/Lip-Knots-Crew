@@ -25,6 +25,16 @@ These rules apply to every automated coding agent working in this repository.
 - Create or update a dedicated branch and draft pull request.
 - Report results through GitHub checks and pull-request comments.
 
+## Operator-effort rule
+
+- Automate repository inspection, edits, checks, safe retries, evidence capture,
+  and draft pull-request creation.
+- Do not ask the operator to paste or run commands when an existing connector
+  or an allowlisted GitHub workflow can perform the same task safely.
+- Reserve operator action for interactive login, permission grants, protected
+  environment approval, `main` merge approval, billing/legal decisions, and
+  production approval.
+
 ## Cloud safety
 
 The only Functions allowed in the first unattended staging deployment phase are:
@@ -73,6 +83,22 @@ on `main` may create expiring preview channels. Live staging promotion must:
 Never deploy Hosting directly from an application branch, rebuild during
 promotion, or deploy Functions, Firestore, Storage, Rules, IAM, or production
 from a Hosting workflow.
+
+The staging Gmail smoke may invoke `requestStaffLoginLink` exactly once from
+`.github/workflows/staging-functions-deploy.yml`. It must:
+
+- run only from `main` and only in `lip-knots-crew-staging`;
+- use the protected recipient secret without printing the address;
+- reject GitHub workflow reruns before invoking the Function;
+- validate the fixed Function, gateway, delegated user, and bound Gmail secret;
+- use the observer identity for read-only delivery verification;
+- perform no direct Firestore write and never open the emailed login link;
+- fail if zero, multiple, failed, or incomplete delivery records are observed.
+
+The expected indirect staging writes are limited to the Function's own rate
+limit, login gateway token, and one delivery record for the single test email.
+No other Firestore data, Storage data, IAM, Hosting, or production resource may
+change during this smoke.
 
 ## Stop conditions
 

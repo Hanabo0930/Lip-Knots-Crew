@@ -10,10 +10,12 @@ import {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const testEmail = "staging-smoke@example.com";
+const delegatedUser = "sender@example.com";
 const baseEnvironment = {
   LKC_PROJECT_ID: "lip-knots-crew-staging",
   LKC_REGION: "asia-northeast1",
-  LKC_GMAIL_SMOKE_EMAIL: testEmail,
+  LKC_GMAIL_SMOKE_RECIPIENT_EMAIL: testEmail,
+  LKC_EXPECTED_GMAIL_DELEGATED_USER: delegatedUser,
   LKC_GMAIL_SMOKE_CONTINUE_URL: "https://lip-knots-crew-staging.web.app/",
   LKC_EXPECTED_MAIL_FROM: "staging@example.com",
   LKC_EXPECTED_GATEWAY_URL:
@@ -26,12 +28,17 @@ const baseEnvironment = {
 const options = validateOptions(baseEnvironment);
 assert.equal(options.projectId, "lip-knots-crew-staging");
 assert.equal(options.continueUrl, "https://lip-knots-crew-staging.web.app");
-assert.equal(options.testEmail, testEmail);
+assert.equal(options.testRecipientEmail, testEmail);
+assert.equal(options.expectedDelegatedUser, delegatedUser);
 
 for (const environment of [
   { ...baseEnvironment, LKC_PROJECT_ID: "lip-knots-crew-production" },
   { ...baseEnvironment, LKC_REGION: "us-central1" },
   { ...baseEnvironment, LKC_GMAIL_SMOKE_RUN_ATTEMPT: "2" },
+  {
+    ...baseEnvironment,
+    LKC_EXPECTED_GMAIL_DELEGATED_USER: testEmail,
+  },
   {
     ...baseEnvironment,
     LKC_GMAIL_SMOKE_CONTINUE_URL:
@@ -58,7 +65,7 @@ const mailFunction = {
       APP_ENVIRONMENT: "staging",
       EXPECTED_FIREBASE_PROJECT_ID: "lip-knots-crew-staging",
       MAIL_FROM: "staging@example.com",
-      GMAIL_DELEGATED_USER: testEmail,
+      GMAIL_DELEGATED_USER: delegatedUser,
       STAFF_APP_URL: "https://lip-knots-crew-staging.web.app/",
       PUBLIC_LOGIN_GATEWAY_URL:
         "https://asia-northeast1-lip-knots-crew-staging.cloudfunctions.net/loginGateway",
@@ -178,6 +185,15 @@ assert.match(workflow, /scripts\/automation\/gmail-single-mail-smoke\.mjs/u);
 assert.match(workflow, /GCP_STAGING_OBSERVER_SERVICE_ACCOUNT/u);
 assert.match(workflow, /LKC_FUNCTIONS_GMAIL_DELEGATED_USER/u);
 assert.match(workflow, /GMAIL_DELEGATED_USER=%s/u);
+assert.match(
+  workflow,
+  /LKC_FUNCTIONS_GMAIL_DELEGATED_USER:\s*\$\{\{\s*secrets\.LKC_FUNCTIONS_GMAIL_DELEGATED_USER\s*\}\}/u,
+);
+assert.match(
+  workflow,
+  /LKC_GMAIL_SMOKE_RECIPIENT_EMAIL:\s*\$\{\{\s*secrets\.LKC_GMAIL_SMOKE_RECIPIENT_EMAIL\s*\}\}/u,
+);
+assert.doesNotMatch(workflow, /secrets\.LKC_GMAIL_SMOKE_EMAIL/u);
 assert.match(workflow, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/u);
 
 const bootstrap = readFileSync(
@@ -186,4 +202,4 @@ const bootstrap = readFileSync(
 );
 assert.match(bootstrap, /roles\/datastore\.viewer/u);
 
-console.log("Gmail smoke automation safety tests passed (18 cases)");
+console.log("Gmail smoke automation safety tests passed (23 cases)");

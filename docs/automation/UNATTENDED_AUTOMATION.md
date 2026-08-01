@@ -19,7 +19,7 @@ The target operating model removes local Cursor Run/Accept prompts:
 | 0. Agent rules and CI | Ready | Source edits, tests, draft PR |
 | 1. GCP read-only diagnosis | Requires one-time WIF bootstrap | Three Cloud Run services, no mutation |
 | 2. Invoker IAM check fix | Manual workflow + typed confirmation + environment gate | Exactly two staging services |
-| 3. Functions deploy | Disabled by repository variable | Explicit eight-function allowlist only; `bootstrapSession` is the safe default |
+| 3. Functions deploy | Disabled by repository variable | Explicit thirteen-function allowlist only; `bootstrapSession` is the safe default |
 | 4. Hosting preview | Disabled until the Hosting bootstrap switch is enabled | Expiring Staff/Admin preview channels after successful `main` CI |
 | 5. Hosting promotion | Typed confirmation + protected environment | Same tested versions to Staff/Admin live staging with automatic rollback |
 | 6. Cursor Automation trigger | Requires one-time Cursor GitHub connection | Issues labeled `cloud-agent` |
@@ -36,7 +36,9 @@ The target operating model removes local Cursor Run/Accept prompts:
   environment files, agent rules, or automation guards.
 - `scripts/automation/check-function-auth-guards.mjs` requires server-side
   authentication and function-specific scope checks before deploy, including
-  company-and-staff-scoped, bounded, read-only access for `listMyDevices`.
+  company-and-staff-scoped, bounded, read-only access for `listMyDevices`,
+  user-owned push-token writes, role-scoped test notification creation, and an
+  exact Firestore-trigger boundary for `processNotificationQueue`.
 - `.github/workflows/release-candidate.yml` is the one canonical full CI. The
   automation work does not create a duplicate PR verification workflow.
 - `.github/workflows/staging-cloud-run-invoker.yml` separates read-only

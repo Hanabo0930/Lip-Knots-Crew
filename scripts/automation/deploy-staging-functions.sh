@@ -56,6 +56,11 @@ for function_name in "${function_names[@]}"; do
     driveFilePreview) service_name="drivefilepreview" ;;
     finalizeStagedUpload) service_name="" ;;
     listMyDevices) service_name="listmydevices" ;;
+    registerPushToken) service_name="registerpushtoken" ;;
+    unregisterPushToken) service_name="unregisterpushtoken" ;;
+    getPushStatus) service_name="getpushstatus" ;;
+    sendTestPush) service_name="sendtestpush" ;;
+    processNotificationQueue) service_name="" ;;
     *)
       echo "DEPLOY_RESULT=FAIL"
       echo "DEPLOY_ERROR=UNMAPPED_FUNCTION_AFTER_GUARD"

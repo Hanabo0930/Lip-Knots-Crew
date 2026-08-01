@@ -17,7 +17,12 @@
     "getResubmissionComparison",
     "driveFilePreview",
     "finalizeStagedUpload",
-    "listMyDevices"
+    "listMyDevices",
+    "registerPushToken",
+    "unregisterPushToken",
+    "getPushStatus",
+    "sendTestPush",
+    "processNotificationQueue"
   ],
   "allowedHostingTargets": [
     "staff",

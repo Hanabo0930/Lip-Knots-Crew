@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,11 @@ const expectedFunctions = [
   "driveFilePreview",
   "finalizeStagedUpload",
   "listMyDevices",
+  "registerPushToken",
+  "unregisterPushToken",
+  "getPushStatus",
+  "sendTestPush",
+  "processNotificationQueue",
 ];
 
 assert.deepEqual(
@@ -72,6 +78,23 @@ assert.match(
   /listMyDevices\)\s+service_name="listmydevices"/,
   "listMyDevices must map to its exact Cloud Run service",
 );
+for (const [functionName, serviceName] of [
+  ["registerPushToken", "registerpushtoken"],
+  ["unregisterPushToken", "unregisterpushtoken"],
+  ["getPushStatus", "getpushstatus"],
+  ["sendTestPush", "sendtestpush"],
+]) {
+  assert.match(
+    deployScript,
+    new RegExp(`${functionName}\\)\\s+service_name="${serviceName}"`),
+    `${functionName} must map to its exact Cloud Run service`,
+  );
+}
+assert.match(
+  deployScript,
+  /processNotificationQueue\)\s+service_name=""/,
+  "processNotificationQueue must remain a non-public Firestore event trigger",
+);
 assert.match(
   deployScript,
   /allUsers[\s\S]*allAuthenticatedUsers/,
@@ -111,5 +134,35 @@ assert.match(
   /listMyDevices:\s*checkListMyDevices/,
   "source guard must report listMyDevices authorization",
 );
+for (const [functionName, checkerName] of [
+  ["registerPushToken", "checkRegisterPushToken"],
+  ["unregisterPushToken", "checkUnregisterPushToken"],
+  ["getPushStatus", "checkGetPushStatus"],
+  ["sendTestPush", "checkSendTestPush"],
+  ["processNotificationQueue", "checkProcessNotificationQueue"],
+]) {
+  assert.match(
+    authGuard,
+    new RegExp(`${functionName}:\\s*${checkerName}`),
+    `source guard must report ${functionName} authorization`,
+  );
+}
 
-console.log("Functions automation safety tests passed (17 cases)");
+const guardedOutput = execFileSync(
+  process.execPath,
+  [
+    "scripts/automation/check-function-auth-guards.mjs",
+    "--repository", root,
+    "--ref", "HEAD",
+    "--functions", expectedFunctions.join(","),
+    "--require-pass",
+  ],
+  { cwd: root, encoding: "utf8" },
+);
+assert.match(
+  guardedOutput,
+  /SOURCE_GUARD_STATUS=PASS/,
+  "every allowlisted Function must pass its source authorization guard",
+);
+
+console.log("Functions automation safety tests passed (28 cases)");

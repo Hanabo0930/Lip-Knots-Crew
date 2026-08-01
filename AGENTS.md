@@ -46,6 +46,7 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `getResubmissionComparison`
 - `driveFilePreview`
 - `finalizeStagedUpload`
+- `listMyDevices`
 
 Never use `firebase deploy --only functions`. Every Functions deployment must list
 each function explicitly and pass `scripts/automation/validate-staging-scope.mjs`.
@@ -59,6 +60,7 @@ The only Cloud Run services whose Invoker IAM check may be changed are:
 - `requeststaffloginlink`
 - `getsubmissionprocessingstatus`
 - `drivefilepreview`
+- `listmydevices`
 
 Do not add or remove `allUsers` or `allAuthenticatedUsers` IAM bindings. Do not
 change organization policy, project-wide IAM, Firestore data, Storage data,

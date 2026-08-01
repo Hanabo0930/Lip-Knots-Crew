@@ -55,6 +55,7 @@ for function_name in "${function_names[@]}"; do
     getResubmissionComparison) service_name="getresubmissioncomparison" ;;
     driveFilePreview) service_name="drivefilepreview" ;;
     finalizeStagedUpload) service_name="" ;;
+    listMyDevices) service_name="listmydevices" ;;
     *)
       echo "DEPLOY_RESULT=FAIL"
       echo "DEPLOY_ERROR=UNMAPPED_FUNCTION_AFTER_GUARD"

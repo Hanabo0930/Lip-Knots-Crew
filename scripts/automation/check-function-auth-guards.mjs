@@ -27,6 +27,7 @@ const supportedFunctions = new Set([
   "getResubmissionComparison",
   "driveFilePreview",
   "finalizeStagedUpload",
+  "listMyDevices",
 ]);
 
 if (
@@ -184,6 +185,23 @@ function checkFinalizeStagedUpload() {
   return Object.values(checks).every(Boolean);
 }
 
+function checkListMyDevices() {
+  const source = sourceFile("functions/src/devices.ts");
+  const block = functionBlock(source, "listMyDevices");
+  const checks = {
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    staffScope: /staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    companyFilter:
+      /\.where\s*\(\s*"companyId"\s*,\s*"=="\s*,\s*companyId\s*\)/.test(block),
+    staffFilter:
+      /\.where\s*\(\s*"staffId"\s*,\s*"=="\s*,\s*staffId\s*\)/.test(block),
+    boundedRead: /\.limit\s*\(\s*30\s*\)/.test(block),
+    noWrites: !/\.(?:add|create|delete|set|update)\s*\(/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
 const checkers = {
   bootstrapSession: checkBootstrapSession,
   requestStaffLoginLink: checkRequestStaffLoginLink,
@@ -192,6 +210,7 @@ const checkers = {
   getResubmissionComparison: checkResubmissionComparison,
   driveFilePreview: checkDriveFilePreview,
   finalizeStagedUpload: checkFinalizeStagedUpload,
+  listMyDevices: checkListMyDevices,
 };
 
 const results = requestedFunctions.map((name) => ({

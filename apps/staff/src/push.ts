@@ -77,5 +77,27 @@ export async function listenForForegroundPush(
   handler: (payload: MessagePayload) => void
 ): Promise<(() => void) | null> {
   const messaging = await getClientMessaging();
-  return messaging ? onMessage(messaging, handler) : null;
+  return messaging ? onMessage(messaging, (payload) => {
+    void showForegroundSystemNotification(payload).catch(() => undefined);
+    handler(payload);
+  }) : null;
+}
+
+async function showForegroundSystemNotification(
+  payload: MessagePayload
+): Promise<void> {
+  if (
+    currentPushPermission() !== "granted" ||
+    !("serviceWorker" in navigator)
+  ) return;
+
+  const data = payload.data ?? {};
+  const registration = await navigator.serviceWorker.ready;
+  await registration.showNotification(data.title || "Lip Knots Crew", {
+    body: data.body || "新しいお知らせがあります。",
+    icon: "/logo.png",
+    badge: "/logo.png",
+    tag: data.category || "lkc-notification",
+    data: { route: data.route || "/" },
+  });
 }

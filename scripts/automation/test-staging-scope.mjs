@@ -84,6 +84,23 @@ assert.deepEqual(
   ["listMyDevices"],
 );
 
+assert.deepEqual(
+  validatePlan({
+    ...base,
+    sourceRef: "main",
+    mode: "functions-deploy",
+    functions: "registerPushToken,unregisterPushToken,getPushStatus,sendTestPush,processNotificationQueue",
+    confirmation: safetyConfig.confirmations.functionsDeploy,
+  }).functions,
+  [
+    "registerPushToken",
+    "unregisterPushToken",
+    "getPushStatus",
+    "sendTestPush",
+    "processNotificationQueue",
+  ],
+);
+
 assert.equal(
   validatePlan({
     ...base,
@@ -186,4 +203,4 @@ for (const plan of rejectedPlans) {
   assert.throws(() => validatePlan(plan));
 }
 
-console.log(`staging automation safety tests passed (${12 + rejectedPlans.length} cases)`);
+console.log(`staging automation safety tests passed (${13 + rejectedPlans.length} cases)`);

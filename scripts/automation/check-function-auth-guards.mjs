@@ -28,6 +28,11 @@ const supportedFunctions = new Set([
   "driveFilePreview",
   "finalizeStagedUpload",
   "listMyDevices",
+  "registerPushToken",
+  "unregisterPushToken",
+  "getPushStatus",
+  "sendTestPush",
+  "processNotificationQueue",
 ]);
 
 if (
@@ -202,6 +207,109 @@ function checkListMyDevices() {
   return Object.values(checks).every(Boolean);
 }
 
+function checkRegisterPushToken() {
+  const source = sourceFile("functions/src/push-tokens.ts");
+  const block = functionBlock(source, "registerPushToken");
+  const checks = {
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    operationalGate: /assertProductionOperational\s*\(\s*companyId\s*\)/.test(block),
+    roleGate:
+      /role\s*!==\s*"staff"\s*&&\s*role\s*!==\s*"admin"/.test(block)
+      && /permission-denied/.test(block),
+    activeStaffGate:
+      /staffProfiles/.test(block)
+      && /profile\.data\(\)\?\.active\s*!==\s*true/.test(block),
+    hashedTokenDocument:
+      /hashToken\s*\(\s*input\.token\s*\)/.test(block)
+      && /collection\(\s*"pushTokens"\s*\)\.doc\(\s*tokenHash\s*\)/.test(block),
+    serverOwnedIdentity:
+      /companyId,/.test(block)
+      && /uid:\s*session\.uid/.test(block)
+      && /staffId,/.test(block)
+      && !/input\.(?:companyId|uid|staffId|role)/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkUnregisterPushToken() {
+  const source = sourceFile("functions/src/push-tokens.ts");
+  const block = functionBlock(source, "unregisterPushToken");
+  const checks = {
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    hashedTokenDocument:
+      /hashToken\s*\(\s*input\.token\s*\)/.test(block)
+      && /collection\(\s*"pushTokens"\s*\)\.doc\(\s*tokenHash\s*\)/.test(block),
+    ownerCheck:
+      /snap\.data\(\)\?\.uid\s*!==\s*session\.uid/.test(block)
+      && /permission-denied/.test(block),
+    softDisable:
+      /active:\s*false/.test(block)
+      && /removedAt:\s*FieldValue\.serverTimestamp\(\)/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkGetPushStatus() {
+  const source = sourceFile("functions/src/push-tokens.ts");
+  const block = functionBlock(source, "getPushStatus");
+  const checks = {
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    uidFilter: /\.where\s*\(\s*"uid"\s*,\s*"=="\s*,\s*session\.uid\s*\)/.test(block),
+    activeFilter: /\.where\s*\(\s*"active"\s*,\s*"=="\s*,\s*true\s*\)/.test(block),
+    boundedRead: /\.limit\s*\(\s*20\s*\)/.test(block),
+    noWrites: !/\.(?:add|create|delete|set|update)\s*\(/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkSendTestPush() {
+  const source = sourceFile("functions/src/push-tokens.ts");
+  const block = functionBlock(source, "sendTestPush");
+  const checks = {
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    operationalGate: /assertProductionOperational\s*\(\s*companyId\s*\)/.test(block),
+    staffTarget:
+      /targetStaffId:\s*staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    adminTarget: /targetRole:\s*"admin"/.test(block),
+    roleGate: /permission-denied/.test(block),
+    noClientTarget:
+      !/request\.data/.test(block)
+      && !/input\.(?:companyId|targetStaffId|targetRole|targetUid)/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkProcessNotificationQueue() {
+  const source = sourceFile("functions/src/notifications.ts");
+  const block = functionBlock(source, "processNotificationQueue");
+  const dispatcherStart = source.indexOf("async function dispatchQueueDocument");
+  const dispatcherEnd = source.indexOf("async function bundleQuietNotifications");
+  const dispatcher = dispatcherStart < 0
+    ? ""
+    : source.slice(dispatcherStart, dispatcherEnd < 0 ? source.length : dispatcherEnd);
+  const checks = {
+    exactEventTrigger: /onDocumentCreated\s*\(\s*"notificationQueue\/\{queueId\}"/.test(block),
+    queuedOnly: /data\.status\s*!==\s*"queued"/.test(block),
+    dueOnly: /deliverAt\s*>\s*Date\.now\(\)\s*\+\s*5_000/.test(block),
+    referenceOnlyDispatch: /dispatchQueueDocument\s*\(\s*snap\.ref\s*\)/.test(block),
+    operationalGate: /getProductionOperationalState\s*\(\s*pendingData\.companyId\s*\)/.test(dispatcher),
+    leasedTransaction:
+      /db\.runTransaction/.test(dispatcher)
+      && /current\.status\s*!==\s*"queued"/.test(dispatcher)
+      && /status:\s*"sending"/.test(dispatcher),
+    scopedActiveTokens:
+      /where\(\s*"companyId"\s*,\s*"=="\s*,\s*data\.companyId\s*\)/.test(dispatcher)
+      && /where\(\s*"active"\s*,\s*"=="\s*,\s*true\s*\)/.test(dispatcher)
+      && /data\.(?:targetStaffId|targetRole|targetUid)/.test(dispatcher),
+    boundedMulticast:
+      /query\.limit\s*\(\s*1000\s*\)/.test(dispatcher)
+      && /sendEachForMulticast/.test(dispatcher),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
 const checkers = {
   bootstrapSession: checkBootstrapSession,
   requestStaffLoginLink: checkRequestStaffLoginLink,
@@ -211,6 +319,11 @@ const checkers = {
   driveFilePreview: checkDriveFilePreview,
   finalizeStagedUpload: checkFinalizeStagedUpload,
   listMyDevices: checkListMyDevices,
+  registerPushToken: checkRegisterPushToken,
+  unregisterPushToken: checkUnregisterPushToken,
+  getPushStatus: checkGetPushStatus,
+  sendTestPush: checkSendTestPush,
+  processNotificationQueue: checkProcessNotificationQueue,
 };
 
 const results = requestedFunctions.map((name) => ({
@@ -227,7 +340,7 @@ for (const { name, passed } of results) {
   console.log(`APP_LEVEL_AUTH_${name}=${passed ? "PASS" : "FAIL"}`);
 }
 console.log(`APP_CHECK_ENFORCED=${appCheckEnforced ? "true" : "false"}`);
-console.log("APP_CHECK_HANDLING=Firebase Auth, company boundaries, scoped preview tokens, or storage-event identity checks are enforced by function type.");
+console.log("APP_CHECK_HANDLING=Firebase Auth, company boundaries, user-owned push tokens, scoped preview tokens, or trusted event identity checks are enforced by function type.");
 console.log(`SOURCE_GUARD_STATUS=${allPass ? "PASS" : "FAIL"}`);
 
 if (requirePass && !allPass) process.exitCode = 1;

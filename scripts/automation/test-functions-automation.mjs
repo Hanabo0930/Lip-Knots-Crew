@@ -15,6 +15,7 @@ const expectedFunctions = [
   "getResubmissionComparison",
   "driveFilePreview",
   "finalizeStagedUpload",
+  "listMyDevices",
 ];
 
 assert.deepEqual(
@@ -68,6 +69,11 @@ assert.match(
 );
 assert.match(
   deployScript,
+  /listMyDevices\)\s+service_name="listmydevices"/,
+  "listMyDevices must map to its exact Cloud Run service",
+);
+assert.match(
+  deployScript,
   /allUsers[\s\S]*allAuthenticatedUsers/,
   "post-deploy verification must reject public IAM bindings",
 );
@@ -100,5 +106,10 @@ assert.match(
   /requestStaffLoginLink:\s*checkRequestStaffLoginLink/,
   "source guard must report requestStaffLoginLink authorization",
 );
+assert.match(
+  authGuard,
+  /listMyDevices:\s*checkListMyDevices/,
+  "source guard must report listMyDevices authorization",
+);
 
-console.log("Functions automation safety tests passed (15 cases)");
+console.log("Functions automation safety tests passed (17 cases)");

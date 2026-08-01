@@ -16,7 +16,8 @@
     "getSubmissionProcessingStatus",
     "getResubmissionComparison",
     "driveFilePreview",
-    "finalizeStagedUpload"
+    "finalizeStagedUpload",
+    "listMyDevices"
   ],
   "allowedHostingTargets": [
     "staff",

@@ -48,6 +48,7 @@ const demoTasks: StaffTask[] = [
 function getOrCreateDeviceId(){ const k="lkcDeviceId"; const v=localStorage.getItem(k); if(v)return v; const n=crypto.randomUUID(); localStorage.setItem(k,n); return n; }
 function deviceLabel(){ return `${/iPhone|iPad|Android/i.test(navigator.userAgent)?"モバイル":"PC"} / ${navigator.platform||"端末"}`; }
 const JOB_ACCENTS=["#d56f91","#5d91c9","#5aa583","#d28a46","#8a76c7","#bf6d62","#3e9ba4","#9b7a56"];
+const DEVICE_HEARTBEAT_INTERVAL_MS=5*60*1000;
 function jobAccent(menuName:string){let hash=0;for(const char of menuName||"案件")hash=((hash*31)+char.codePointAt(0)!)|0;return JOB_ACCENTS[Math.abs(hash)%JOB_ACCENTS.length]??JOB_ACCENTS[0];}
 function jobKind(menuName:string){return menuName.replace(/[（(].*$/u,"").trim()||"案件";}
 function mapDestination(job:Job){return [job.storeName,job.storeAddress].filter(Boolean).join(" ");}
@@ -84,14 +85,42 @@ export default function App(){
       setStaffId(""); setMyJobs([]); setTasks([]); setSelectedJob(null);
       setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionMessage("");
     }
-    if(!current||!functions)return;
+    if(!current||!functions){setDeviceSessionId("");return;}
     const bootstrap=httpsCallable(functions,"bootstrapSession"); const result=await bootstrap();
     if((result.data as {refreshToken?:boolean}).refreshToken)await current.getIdToken(true);
     const token=await getIdTokenResult(current); const sid=String(token.claims.staffId??""); setStaffId(sid);
-    const sessionId=await registerCurrentDevice(); if(sessionId)watchDeviceSession(sessionId);
+    await registerCurrentDevice();
     setPushEnabled(await loadServerPushStatus(functions)); await loadAll(sid);
   }); },[]);
   useEffect(()=>{ if(!auth||!isSignInWithEmailLink(auth,window.location.href))return; const saved=localStorage.getItem("lkcEmail")??window.prompt("メールアドレスを入力してください")??""; if(!saved)return; void signInWithEmailLink(auth,saved,window.location.href).then(()=>{window.history.replaceState({},document.title,"/");setMessage("ログインしました。");}).catch((e:Error)=>setMessage(e.message)); },[]);
+  useEffect(()=>{
+    if(!user||!deviceSessionId||!functions||!db||!auth)return;
+    const activeAuth=auth;
+    const activeFunctions=functions;
+    let stopped=false;
+    const heartbeat=async()=>{
+      try{
+        await httpsCallable(activeFunctions,"heartbeatDeviceSession")({sessionId:deviceSessionId});
+      }catch(error){
+        const code=String((error as {code?:unknown}).code??"");
+        if(!stopped&&code.endsWith("permission-denied")){
+          setMessage("この端末はログアウトされています。");
+          await signOut(activeAuth);
+        }
+      }
+    };
+    const stopWatching=watchDeviceSession(deviceSessionId);
+    void heartbeat();
+    const interval=window.setInterval(()=>void heartbeat(),DEVICE_HEARTBEAT_INTERVAL_MS);
+    const handleVisibility=()=>{if(document.visibilityState==="visible")void heartbeat();};
+    document.addEventListener("visibilitychange",handleVisibility);
+    return()=>{
+      stopped=true;
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange",handleVisibility);
+      stopWatching?.();
+    };
+  },[user,deviceSessionId]);
   useEffect(()=>{ if(!user)return; let unsub:(()=>void)|null=null; void listenForForegroundPush(payload=>setMessage(`${payload.data?.title??"Lip Knots Crew"}：${payload.data?.body??"新しいお知らせがあります。"}`)).then(v=>unsub=v); return()=>unsub?.(); },[user]);
 
   async function loadAll(sid=staffId){ await Promise.all([loadOpenJobs(),loadMyJobs(sid),loadTasks()]); }

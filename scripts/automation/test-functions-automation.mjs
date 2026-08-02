@@ -16,7 +16,13 @@ const expectedFunctions = [
   "getResubmissionComparison",
   "driveFilePreview",
   "finalizeStagedUpload",
+  "registerDeviceSession",
+  "heartbeatDeviceSession",
   "listMyDevices",
+  "revokeMyDevice",
+  "revokeAllMyDevices",
+  "getStaffDevices",
+  "adminRevokeStaffDevices",
   "registerPushToken",
   "unregisterPushToken",
   "getPushStatus",
@@ -79,6 +85,12 @@ assert.match(
   "listMyDevices must map to its exact Cloud Run service",
 );
 for (const [functionName, serviceName] of [
+  ["registerDeviceSession", "registerdevicesession"],
+  ["heartbeatDeviceSession", "heartbeatdevicesession"],
+  ["revokeMyDevice", "revokemydevice"],
+  ["revokeAllMyDevices", "revokeallmydevices"],
+  ["getStaffDevices", "getstaffdevices"],
+  ["adminRevokeStaffDevices", "adminrevokestaffdevices"],
   ["registerPushToken", "registerpushtoken"],
   ["unregisterPushToken", "unregisterpushtoken"],
   ["getPushStatus", "getpushstatus"],
@@ -135,6 +147,12 @@ assert.match(
   "source guard must report listMyDevices authorization",
 );
 for (const [functionName, checkerName] of [
+  ["registerDeviceSession", "checkRegisterDeviceSession"],
+  ["heartbeatDeviceSession", "checkHeartbeatDeviceSession"],
+  ["revokeMyDevice", "checkRevokeMyDevice"],
+  ["revokeAllMyDevices", "checkRevokeAllMyDevices"],
+  ["getStaffDevices", "checkGetStaffDevices"],
+  ["adminRevokeStaffDevices", "checkAdminRevokeStaffDevices"],
   ["registerPushToken", "checkRegisterPushToken"],
   ["unregisterPushToken", "checkUnregisterPushToken"],
   ["getPushStatus", "checkGetPushStatus"],
@@ -147,6 +165,33 @@ for (const [functionName, checkerName] of [
     `source guard must report ${functionName} authorization`,
   );
 }
+
+const staffApp = read("apps/staff/src/App.tsx");
+assert.match(
+  staffApp,
+  /httpsCallable\(activeFunctions,"heartbeatDeviceSession"\)\(\{sessionId:deviceSessionId\}\)/,
+  "Staff must call the heartbeat Function for the server-issued device session",
+);
+assert.match(
+  staffApp,
+  /DEVICE_HEARTBEAT_INTERVAL_MS=5\*60\*1000/,
+  "Staff heartbeat must use the fixed five-minute interval",
+);
+assert.match(
+  staffApp,
+  /document\.visibilityState==="visible"[\s\S]*?heartbeat\(\)/,
+  "Staff must refresh device activity when the tab becomes visible",
+);
+assert.match(
+  staffApp,
+  /code\.endsWith\("permission-denied"\)[\s\S]*?signOut\(activeAuth\)/,
+  "A revoked device heartbeat must sign out locally",
+);
+assert.match(
+  staffApp,
+  /stopWatching\?\.\(\)/,
+  "Device session monitoring must be cleaned up",
+);
 
 const guardedOutput = execFileSync(
   process.execPath,
@@ -165,4 +210,4 @@ assert.match(
   "every allowlisted Function must pass its source authorization guard",
 );
 
-console.log("Functions automation safety tests passed (28 cases)");
+console.log("Functions automation safety tests passed (device/session scope included)");

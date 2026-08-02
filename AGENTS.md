@@ -46,7 +46,13 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `getResubmissionComparison`
 - `driveFilePreview`
 - `finalizeStagedUpload`
+- `registerDeviceSession`
+- `heartbeatDeviceSession`
 - `listMyDevices`
+- `revokeMyDevice`
+- `revokeAllMyDevices`
+- `getStaffDevices`
+- `adminRevokeStaffDevices`
 - `registerPushToken`
 - `unregisterPushToken`
 - `getPushStatus`
@@ -66,6 +72,12 @@ The only Cloud Run services whose Invoker IAM check may be changed are:
 - `getsubmissionprocessingstatus`
 - `drivefilepreview`
 - `listmydevices`
+- `registerdevicesession`
+- `heartbeatdevicesession`
+- `revokemydevice`
+- `revokeallmydevices`
+- `getstaffdevices`
+- `adminrevokestaffdevices`
 - `registerpushtoken`
 - `unregisterpushtoken`
 - `getpushstatus`

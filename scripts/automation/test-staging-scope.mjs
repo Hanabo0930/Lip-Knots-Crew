@@ -89,6 +89,24 @@ assert.deepEqual(
     ...base,
     sourceRef: "main",
     mode: "functions-deploy",
+    functions: "registerDeviceSession,heartbeatDeviceSession,revokeMyDevice,revokeAllMyDevices,getStaffDevices,adminRevokeStaffDevices",
+    confirmation: safetyConfig.confirmations.functionsDeploy,
+  }).functions,
+  [
+    "registerDeviceSession",
+    "heartbeatDeviceSession",
+    "revokeMyDevice",
+    "revokeAllMyDevices",
+    "getStaffDevices",
+    "adminRevokeStaffDevices",
+  ],
+);
+
+assert.deepEqual(
+  validatePlan({
+    ...base,
+    sourceRef: "main",
+    mode: "functions-deploy",
     functions: "registerPushToken,unregisterPushToken,getPushStatus,sendTestPush,processNotificationQueue",
     confirmation: safetyConfig.confirmations.functionsDeploy,
   }).functions,

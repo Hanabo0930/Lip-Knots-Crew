@@ -27,7 +27,13 @@ const supportedFunctions = new Set([
   "getResubmissionComparison",
   "driveFilePreview",
   "finalizeStagedUpload",
+  "registerDeviceSession",
+  "heartbeatDeviceSession",
   "listMyDevices",
+  "revokeMyDevice",
+  "revokeAllMyDevices",
+  "getStaffDevices",
+  "adminRevokeStaffDevices",
   "registerPushToken",
   "unregisterPushToken",
   "getPushStatus",
@@ -190,6 +196,48 @@ function checkFinalizeStagedUpload() {
   return Object.values(checks).every(Boolean);
 }
 
+function checkRegisterDeviceSession() {
+  const source = sourceFile("functions/src/devices.ts");
+  const block = functionBlock(source, "registerDeviceSession");
+  const checks = {
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    staffScope: /staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    operationalGate: /assertProductionOperational\s*\(\s*companyId\s*\)/.test(block),
+    activeCompanyProfile:
+      /profile\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block)
+      && /profile\.data\(\)\?\.active\s*!==\s*true/.test(block),
+    serverOwnedSessionId:
+      /\$\{companyId\}\|\$\{staffId\}\|\$\{session\.uid\}\|\$\{input\.deviceId\}/.test(block),
+    serverOwnedIdentity:
+      /companyId,/.test(block)
+      && /staffId,/.test(block)
+      && /uid:\s*session\.uid/.test(block)
+      && !/input\.(?:companyId|staffId|uid)/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkHeartbeatDeviceSession() {
+  const source = sourceFile("functions/src/devices.ts");
+  const block = functionBlock(source, "heartbeatDeviceSession");
+  const checks = {
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    staffScope: /staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    operationalGate: /assertProductionOperational\s*\(\s*companyId\s*\)/.test(block),
+    exactOwner:
+      /snap\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block)
+      && /snap\.data\(\)\?\.uid\s*!==\s*session\.uid/.test(block)
+      && /snap\.data\(\)\?\.staffId\s*!==\s*staffId/.test(block),
+    activeOnly: /snap\.data\(\)\?\.active\s*!==\s*true/.test(block),
+    serverTimestampOnly:
+      /lastSeenAt:\s*FieldValue\.serverTimestamp\(\)/.test(block)
+      && !/input\.(?:companyId|staffId|uid|active)/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
 function checkListMyDevices() {
   const source = sourceFile("functions/src/devices.ts");
   const block = functionBlock(source, "listMyDevices");
@@ -203,6 +251,74 @@ function checkListMyDevices() {
       /\.where\s*\(\s*"staffId"\s*,\s*"=="\s*,\s*staffId\s*\)/.test(block),
     boundedRead: /\.limit\s*\(\s*30\s*\)/.test(block),
     noWrites: !/\.(?:add|create|delete|set|update)\s*\(/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkRevokeMyDevice() {
+  const source = sourceFile("functions/src/devices.ts");
+  const block = functionBlock(source, "revokeMyDevice");
+  const checks = {
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    staffScope: /staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    exactStaffCompany:
+      /snap\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block)
+      && /snap\.data\(\)\?\.staffId\s*!==\s*staffId/.test(block),
+    softRevoke:
+      /active:\s*false/.test(block)
+      && /revokedBy:\s*session\.uid/.test(block)
+      && /revokeReason:\s*"staff\.self"/.test(block),
+    noClientIdentity: !/input\.(?:companyId|staffId|uid)/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkRevokeAllMyDevices() {
+  const source = sourceFile("functions/src/devices.ts");
+  const block = functionBlock(source, "revokeAllMyDevices");
+  const helperStart = source.indexOf("async function revokeAllSessions");
+  const helper = helperStart < 0 ? "" : source.slice(helperStart);
+  const checks = {
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    staffScope: /staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    companyProfile: /profile\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block),
+    serverScopedHelper: /revokeAllSessions\s*\(\s*companyId\s*,\s*staffId/.test(block),
+    companyFilteredBatch:
+      /\.where\s*\(\s*"companyId"\s*,\s*"=="\s*,\s*companyId\s*\)/.test(helper)
+      && /\.where\s*\(\s*"staffId"\s*,\s*"=="\s*,\s*staffId\s*\)/.test(helper),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkGetStaffDevices() {
+  const source = sourceFile("functions/src/devices.ts");
+  const block = functionBlock(source, "getStaffDevices");
+  const checks = {
+    adminOnly: /requireAdmin\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    companyProfile: /profile\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block),
+    companyFilter: /\.where\s*\(\s*"companyId"\s*,\s*"=="\s*,\s*companyId\s*\)/.test(block),
+    staffFilter: /\.where\s*\(\s*"staffId"\s*,\s*"=="\s*,\s*input\.staffId\s*\)/.test(block),
+    boundedRead: /\.limit\s*\(\s*30\s*\)/.test(block),
+    noWrites: !/\.(?:add|create|delete|set|update)\s*\(/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
+
+function checkAdminRevokeStaffDevices() {
+  const source = sourceFile("functions/src/devices.ts");
+  const block = functionBlock(source, "adminRevokeStaffDevices");
+  const checks = {
+    adminOnly: /requireAdmin\s*\(\s*request\s*\)/.test(block),
+    companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    companyProfile: /profile\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block),
+    companyScopedAll: /revokeAllSessions\s*\(\s*companyId\s*,\s*input\.staffId/.test(block),
+    companyScopedSingle: /device\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block),
+    audited:
+      /action:\s*"device\.revoke\.admin"/.test(block)
+      && /actorUid:\s*session\.uid/.test(block),
   };
   return Object.values(checks).every(Boolean);
 }
@@ -318,7 +434,13 @@ const checkers = {
   getResubmissionComparison: checkResubmissionComparison,
   driveFilePreview: checkDriveFilePreview,
   finalizeStagedUpload: checkFinalizeStagedUpload,
+  registerDeviceSession: checkRegisterDeviceSession,
+  heartbeatDeviceSession: checkHeartbeatDeviceSession,
   listMyDevices: checkListMyDevices,
+  revokeMyDevice: checkRevokeMyDevice,
+  revokeAllMyDevices: checkRevokeAllMyDevices,
+  getStaffDevices: checkGetStaffDevices,
+  adminRevokeStaffDevices: checkAdminRevokeStaffDevices,
   registerPushToken: checkRegisterPushToken,
   unregisterPushToken: checkUnregisterPushToken,
   getPushStatus: checkGetPushStatus,

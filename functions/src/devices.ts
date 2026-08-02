@@ -41,7 +41,11 @@ export const registerDeviceSession = onCall(async (request) => {
   const input = RegisterSchema.parse(request.data ?? {});
 
   const profile = await db.collection("staffProfiles").doc(staffId).get();
-  if (!profile.exists || profile.data()?.active !== true) {
+  if (
+    !profile.exists
+    || profile.data()?.companyId !== companyId
+    || profile.data()?.active !== true
+  ) {
     throw new HttpsError("permission-denied", "このアカウントは利用停止中です。");
   }
 
@@ -71,7 +75,8 @@ export const registerDeviceSession = onCall(async (request) => {
 
 export const heartbeatDeviceSession = onCall(async (request) => {
   const session = requireAuth(request);
-  await assertProductionOperational(companyFromClaims(session.token));
+  const companyId = companyFromClaims(session.token);
+  await assertProductionOperational(companyId);
   const staffId = staffFromClaims(session.token);
   const input = DeviceSchema.parse(request.data ?? {});
   const ref = db.collection("deviceSessions").doc(input.sessionId);
@@ -79,6 +84,7 @@ export const heartbeatDeviceSession = onCall(async (request) => {
 
   if (
     !snap.exists ||
+    snap.data()?.companyId !== companyId ||
     snap.data()?.uid !== session.uid ||
     snap.data()?.staffId !== staffId
   ) {
@@ -116,12 +122,17 @@ export const listMyDevices = onCall(async (request) => {
 
 export const revokeMyDevice = onCall(async (request) => {
   const session = requireAuth(request);
+  const companyId = companyFromClaims(session.token);
   const staffId = staffFromClaims(session.token);
   const input = DeviceSchema.parse(request.data ?? {});
   const ref = db.collection("deviceSessions").doc(input.sessionId);
   const snap = await ref.get();
 
-  if (!snap.exists || snap.data()?.staffId !== staffId) {
+  if (
+    !snap.exists
+    || snap.data()?.companyId !== companyId
+    || snap.data()?.staffId !== staffId
+  ) {
     throw new HttpsError("not-found", "端末が見つかりません。");
   }
 
@@ -137,14 +148,24 @@ export const revokeMyDevice = onCall(async (request) => {
 
 export const revokeAllMyDevices = onCall(async (request) => {
   const session = requireAuth(request);
+  const companyId = companyFromClaims(session.token);
   const staffId = staffFromClaims(session.token);
   const profile = await db.collection("staffProfiles").doc(staffId).get();
+  if (!profile.exists || profile.data()?.companyId !== companyId) {
+    throw new HttpsError("not-found", "スタッフが見つかりません。");
+  }
   const authUids = Array.isArray(profile.data()?.authUids)
     ? profile.data()?.authUids.map((value: unknown) => String(value))
     : [];
 
-  await revokeAllSessions(staffId, authUids, session.uid, "staff.self_all");
-  return { revoked: true, count: authUids.length };
+  const count = await revokeAllSessions(
+    companyId,
+    staffId,
+    authUids,
+    session.uid,
+    "staff.self_all"
+  );
+  return { revoked: true, count };
 });
 
 export const getStaffDevices = onCall(async (request) => {
@@ -188,13 +209,14 @@ export const adminRevokeStaffDevices = onCall(async (request) => {
     const authUids = Array.isArray(profile.data()?.authUids)
       ? profile.data()?.authUids.map((value: unknown) => String(value))
       : [];
-    await revokeAllSessions(
+    const count = await revokeAllSessions(
+      companyId,
       input.staffId,
       authUids,
       session.uid,
       "admin.all_devices"
     );
-    return { revoked: true, mode: "all", count: authUids.length };
+    return { revoked: true, mode: "all", count };
   }
 
   if (!input.sessionId) {
@@ -232,12 +254,14 @@ export const adminRevokeStaffDevices = onCall(async (request) => {
 });
 
 async function revokeAllSessions(
+  companyId: string,
   staffId: string,
   authUids: string[],
   actorUid: string,
   reason: string
-): Promise<void> {
+): Promise<number> {
   const devices = await db.collection("deviceSessions")
+    .where("companyId", "==", companyId)
     .where("staffId", "==", staffId)
     .get();
   const batch = db.batch();
@@ -263,6 +287,8 @@ async function revokeAllSessions(
       console.error("Failed to revoke Firebase session", { uid, error });
     }
   }
+
+  return devices.size;
 }
 
 function serialize(

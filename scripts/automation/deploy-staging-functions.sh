@@ -55,7 +55,13 @@ for function_name in "${function_names[@]}"; do
     getResubmissionComparison) service_name="getresubmissioncomparison" ;;
     driveFilePreview) service_name="drivefilepreview" ;;
     finalizeStagedUpload) service_name="" ;;
+    registerDeviceSession) service_name="registerdevicesession" ;;
+    heartbeatDeviceSession) service_name="heartbeatdevicesession" ;;
     listMyDevices) service_name="listmydevices" ;;
+    revokeMyDevice) service_name="revokemydevice" ;;
+    revokeAllMyDevices) service_name="revokeallmydevices" ;;
+    getStaffDevices) service_name="getstaffdevices" ;;
+    adminRevokeStaffDevices) service_name="adminrevokestaffdevices" ;;
     registerPushToken) service_name="registerpushtoken" ;;
     unregisterPushToken) service_name="unregisterpushtoken" ;;
     getPushStatus) service_name="getpushstatus" ;;

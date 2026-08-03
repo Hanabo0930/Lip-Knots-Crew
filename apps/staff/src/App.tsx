@@ -27,7 +27,7 @@ type Job = {
   submissionStatus?: { report?: { completed?: boolean }; salesFloor?: { completed?: boolean; clientSubmitted?: boolean; lipKnotsSubmitted?: boolean } };
 };
 type StaffTask = { id:string; jobId:string; kind:string; title:string; body:string; priority:"overdue"|"urgent"|"normal"; metadata?:Record<string,unknown> };
-type DeviceSession = { id:string; label?:string; platform?:string; active?:boolean; lastSeenAt?:string };
+type DeviceSession = { id:string; deviceId?:string; uid?:string; label?:string; platform?:string; active?:boolean; lastSeenAt?:string };
 type SubmissionFileView = { id:string; submissionId:string; originalName:string; driveName:string; contentType:string; sequence:number|null; purpose:string; status:string; previewUrl:string|null; completedAt:string|null; replacesFileId:string|null };
 type SubmissionGroup = { id:string; purpose:string; status:string; createdAt:string|null; completedAt:string|null; files:SubmissionFileView[] };
 type ResubmissionDetail = { request:{id:string;jobId:string;type:SubmissionType;reasons:string[];note:string;status:string}; source:SubmissionFileView|null; replacements:SubmissionFileView[] };
@@ -78,6 +78,7 @@ export default function App(){
   const [submissionMessage,setSubmissionMessage]=useState("");
   const [files,setFiles]=useState<File[]>([]); const [uploadState,setUploadState]=useState<Record<string,string>>({});
   const [deviceSessionId,setDeviceSessionId]=useState(""); const [devices,setDevices]=useState<DeviceSession[]>([]); const [showDevices,setShowDevices]=useState(false);
+  const currentDeviceId=useMemo(()=>getOrCreateDeviceId(),[]);
   const [pushEnabled,setPushEnabled]=useState(false);
   const [submissionHistory,setSubmissionHistory]=useState<SubmissionGroup[]>([]);
   const [resubmissionDetail,setResubmissionDetail]=useState<ResubmissionDetail|null>(null);
@@ -177,8 +178,13 @@ export default function App(){
     },{setMessage});
   }
 
-  async function registerCurrentDevice(){ if(!functions)return""; const c=httpsCallable(functions,"registerDeviceSession"); const r=await c({deviceId:getOrCreateDeviceId(),label:deviceLabel(),platform:navigator.platform||"",userAgent:navigator.userAgent}); const id=String((r.data as {sessionId?:string}).sessionId??""); setDeviceSessionId(id); return id; }
+  async function registerCurrentDevice(){ if(!functions)return""; const c=httpsCallable(functions,"registerDeviceSession"); const r=await c({deviceId:currentDeviceId,label:deviceLabel(),platform:navigator.platform||"",userAgent:navigator.userAgent}); const id=String((r.data as {sessionId?:string}).sessionId??""); setDeviceSessionId(id); return id; }
   function watchDeviceSession(id:string){ if(!db||!auth)return; const active=auth; return onSnapshot(doc(db,"deviceSessions",id),async s=>{if(s.exists()&&s.data().active===false){setMessage("この端末はログアウトされました。");await signOut(active);}}); }
+
+  function isCurrentDevice(device:DeviceSession){
+    if(device.id===deviceSessionId)return true;
+    return Boolean(user?.uid&&device.deviceId===currentDeviceId&&device.uid===user.uid);
+  }
 
   async function loadDevices(){
     if(isPending("devices"))return;
@@ -192,6 +198,8 @@ export default function App(){
   }
 
   async function revokeDevice(id:string){
+    const target=devices.find(device=>device.id===id);
+    const currentTarget=target?isCurrentDevice(target):id===deviceSessionId;
     if(!confirm("この端末をログアウトしますか？"))return;
     const key=`revoke-${id}`;
     if(isPending(key))return;
@@ -199,7 +207,7 @@ export default function App(){
       if(!functions){setDevices(v=>v.map(x=>x.id===id?{...x,active:false}:x));return;}
       await httpsCallable(functions,"revokeMyDevice")({sessionId:id});
       await loadDevices();
-      if(id===deviceSessionId&&auth)await signOut(auth);
+      if(currentTarget&&auth)await signOut(auth);
       setMessage("端末をログアウトしました。");
     },{setMessage});
   }
@@ -423,7 +431,7 @@ export default function App(){
       <hr/><h3>提出履歴</h3><div className="history-grid">{submissionHistory.flatMap(group=>group.files).map(file=><article key={`${file.submissionId}_${file.id}`}><SubmissionPreviewImage file={file} onRefreshPreview={refreshFilePreview}/><strong>{file.driveName||file.originalName}</strong><small>{file.purpose==="replacement"?"再送":"提出済み"}</small></article>)}{!submissionHistory.length&&<div className="empty">提出履歴はありません。</div>}</div>
     </section>}
     {view==="contact"&&<section className="panel"><h2>連絡先</h2><button className="secondary contact-button">メールを送る</button><button className="secondary contact-button">電話をかける</button><button className="secondary contact-button">LINEを開く</button></section>}
-    {showDevices&&<section className="panel"><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)}>閉じる</button></div><div className="device-list">{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{device.id===deviceSessionId?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||isPending(`revoke-${device.id}`)} onClick={()=>void revokeDevice(device.id)}>{isPending(`revoke-${device.id}`)?"処理中…":"ログアウト"}</button></div>)}</div></section>}
+    {showDevices&&<section className="panel"><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)}>閉じる</button></div><div className="device-list">{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||isPending(`revoke-${device.id}`)} onClick={()=>void revokeDevice(device.id)}>{isPending(`revoke-${device.id}`)?"処理中…":"ログアウト"}</button></div>)}</div></section>}
     <nav className="bottom-nav">{([['home','🏠','ホーム'],['jobs','📅','案件'],['shifts','📋','シフト'],['submit','📤','提出'],['contact','☎️','連絡']] as [View,string,string][]).map(([id,icon,label])=><button key={id} className={view===id?"active":""} onClick={()=>setView(id)}><span>{icon}</span>{label}</button>)}</nav>
   </main>;
 }

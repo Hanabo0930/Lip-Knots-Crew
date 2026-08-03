@@ -41,9 +41,9 @@ export const db = app ? getFirestore(app) : null;
 export const functions = app ? getFunctions(app, functionsRegion) : null;
 export const storage = app ? getStorage(app) : null;
 
-if (auth) {
-  void setPersistence(auth, browserLocalPersistence);
-}
+export const authPersistenceReady = auth
+  ? setPersistence(auth, browserLocalPersistence)
+  : Promise.resolve();
 
 if (app && useFirebaseEmulators) {
   connectAuthEmulator(auth!, "http://127.0.0.1:9099", { disableWarnings: true });

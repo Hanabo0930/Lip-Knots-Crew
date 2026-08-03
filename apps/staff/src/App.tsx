@@ -6,7 +6,7 @@ import {
 import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytesResumable } from "firebase/storage";
-import { auth, db, firebaseConfigured, functions, storage } from "./firebase";
+import { auth, authPersistenceReady, db, firebaseConfigured, functions, storage } from "./firebase";
 import { clearDraft, loadDraft, saveDraft } from "./draft-store";
 import {
   currentPushPermission, disablePushNotifications, enablePushNotifications,
@@ -49,6 +49,7 @@ function getOrCreateDeviceId(){ const k="lkcDeviceId"; const v=localStorage.getI
 function deviceLabel(){ return `${/iPhone|iPad|Android/i.test(navigator.userAgent)?"モバイル":"PC"} / ${navigator.platform||"端末"}`; }
 const JOB_ACCENTS=["#d56f91","#5d91c9","#5aa583","#d28a46","#8a76c7","#bf6d62","#3e9ba4","#9b7a56"];
 const DEVICE_HEARTBEAT_INTERVAL_MS=5*60*1000;
+let emailLinkSignInAttempt:{url:string;task:Promise<void>}|null=null;
 function jobAccent(menuName:string){let hash=0;for(const char of menuName||"案件")hash=((hash*31)+char.codePointAt(0)!)|0;return JOB_ACCENTS[Math.abs(hash)%JOB_ACCENTS.length]??JOB_ACCENTS[0];}
 function jobKind(menuName:string){return menuName.replace(/[（(].*$/u,"").trim()||"案件";}
 function mapDestination(job:Job){return [job.storeName,job.storeAddress].filter(Boolean).join(" ");}
@@ -56,6 +57,14 @@ function mapsSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=
 function transitRouteUrl(job:Job){return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(mapDestination(job))}&travelmode=transit`;}
 function stationSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.storeNearestStation??"")}`;}
 function prepSummary(job:Job){const items=job.netPrint?.items??[];const printed=items.filter(item=>item.printed).length;if(job.materialStatus)return job.materialStatus;if(!items.length)return"資料番号待ち";return printed===items.length?`準備完了（${printed}/${items.length}件）`:`準備中（${printed}/${items.length}件印刷済み）`;}
+function completeEmailLinkSignIn(url:string,email:string):Promise<void>{
+  if(!auth)return Promise.reject(new Error("ログイン設定を確認できません。"));
+  const activeAuth=auth;
+  if(emailLinkSignInAttempt?.url===url)return emailLinkSignInAttempt.task;
+  const task=authPersistenceReady.then(()=>signInWithEmailLink(activeAuth,email,url)).then(()=>undefined);
+  emailLinkSignInAttempt={url,task};
+  return task;
+}
 
 export default function App(){
   const { isPending, run } = useAsyncAction();
@@ -73,6 +82,8 @@ export default function App(){
   const [submissionHistory,setSubmissionHistory]=useState<SubmissionGroup[]>([]);
   const [resubmissionDetail,setResubmissionDetail]=useState<ResubmissionDetail|null>(null);
   const [processingSubmission,setProcessingSubmission]=useState(false);
+  const [authResolved,setAuthResolved]=useState(!firebaseConfigured);
+  const [emailLinkPending,setEmailLinkPending]=useState(()=>Boolean(auth&&isSignInWithEmailLink(auth,window.location.href)));
 
   const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
   const draftKey=selectedAssignedJob?`${selectedAssignedJob.id}_${submissionType}_${requestId||"normal"}`:"";
@@ -81,6 +92,7 @@ export default function App(){
 
   useEffect(()=>{ if(!auth)return; return onAuthStateChanged(auth,async current=>{
     setUser(current);
+    setAuthResolved(true);
     if(firebaseConfigured){
       setStaffId(""); setMyJobs([]); setTasks([]); setSelectedJob(null);
       setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionMessage("");
@@ -92,7 +104,22 @@ export default function App(){
     await registerCurrentDevice();
     setPushEnabled(await loadServerPushStatus(functions)); await loadAll(sid);
   }); },[]);
-  useEffect(()=>{ if(!auth||!isSignInWithEmailLink(auth,window.location.href))return; const saved=localStorage.getItem("lkcEmail")??window.prompt("メールアドレスを入力してください")??""; if(!saved)return; void signInWithEmailLink(auth,saved,window.location.href).then(()=>{window.history.replaceState({},document.title,"/");setMessage("ログインしました。");}).catch((e:Error)=>setMessage(e.message)); },[]);
+  useEffect(()=>{
+    if(!auth)return;
+    const loginUrl=window.location.href;
+    if(!isSignInWithEmailLink(auth,loginUrl)){setEmailLinkPending(false);return;}
+    const saved=localStorage.getItem("lkcEmail")??window.prompt("メールアドレスを入力してください")??"";
+    if(!saved){setMessage("ログインに使ったメールアドレスを入力してください。");setEmailLinkPending(false);return;}
+    let active=true;
+    setEmailLinkPending(true);
+    setMessage("ログインを確認しています…");
+    void completeEmailLinkSignIn(loginUrl,saved).then(()=>{
+      if(!active)return;
+      window.history.replaceState({},document.title,"/");
+      setMessage("ログインしました。");
+    }).catch((error:Error)=>{if(active)setMessage(error.message);}).finally(()=>{if(active)setEmailLinkPending(false);});
+    return()=>{active=false;};
+  },[]);
   useEffect(()=>{
     if(!user||!deviceSessionId||!functions||!db||!auth)return;
     const activeAuth=auth;
@@ -375,6 +402,7 @@ export default function App(){
 
   const activeJob=selectedAssignedJob??myJobs[0]??null;
   const title=useMemo(()=>firebaseConfigured?"Lip Knots Crew":"Lip Knots Crew（デモ）",[]);
+  if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message">処理中…</div></section></main>;
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button>{message&&<div className="message">{message}</div>}</section></main>;
 
   return <main className="app-shell">

@@ -23,11 +23,7 @@ import { incrementProductionMetrics } from "./production-metrics";
 const RequestLoginSchema = z.object({
   email: z.string().email().max(254),
   continueUrl: z.string().url().max(2048).optional(),
-});
-
-const RedeemLoginCodeSchema = z.object({
-  email: z.string().email().max(254),
-  code: z.string().regex(/^\d{6}$/),
+  code: z.string().regex(/^\d{6}$/).optional(),
 });
 
 const LOGIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -95,6 +91,9 @@ export const requestStaffLoginLink = onCall(
     }
 
     const email = normalizeEmail(input.data.email);
+    if (input.data.code) {
+      return redeemStaffLoginCode(email, input.data.code);
+    }
     const continueUrl = resolveStaffLoginContinueUrl(input.data.continueUrl);
     await enforceLoginRateLimit(email);
 
@@ -131,21 +130,15 @@ export const requestStaffLoginLink = onCall(
     return {
       accepted: true,
       message:
-        "登録済みのメールアドレスの場合、ログインメールを送信しました。",
+        "登録済みのメールアドレスの場合、ログインメールと確認コードを送信しました。",
     };
   }
 );
 
-export const exchangeStaffLoginCode = onCall(async (request) => {
-  const input = RedeemLoginCodeSchema.safeParse(request.data ?? {});
-  if (!input.success) {
-    throw new HttpsError("invalid-argument", "確認コードが正しくないか、期限が切れています。");
-  }
-
-  const email = normalizeEmail(input.data.email);
+async function redeemStaffLoginCode(email: string, code: string) {
   await enforceLoginCodeAttemptRateLimit(email);
   const codeRef = db.collection("loginVerificationCodes")
-    .doc(loginCodeKey(email, input.data.code));
+    .doc(loginCodeKey(email, code));
 
   const redeemed = await db.runTransaction(async (tx) => {
     const snap = await tx.get(codeRef);
@@ -200,7 +193,7 @@ export const exchangeStaffLoginCode = onCall(async (request) => {
   const authUser = await getOrCreateAuthUser(email);
   const customToken = await auth.createCustomToken(authUser.uid);
   return { customToken };
-});
+}
 
 export const getLoginInviteCandidates = onCall(async (request) => {
   const session = requireAdmin(request);

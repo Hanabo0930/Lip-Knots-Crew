@@ -27,7 +27,7 @@ assert(
   "Login codes must be random six-digit values with a 15-minute lifetime"
 );
 assert(
-  /loginVerificationCodes[\s\S]*?active: false,[\s\S]*?usedAt: FieldValue\.serverTimestamp\(\)/u.test(loginSource),
+  /loginLinkRateLimits[\s\S]*?loginCodeActive: false,[\s\S]*?loginCodeUsedAt: FieldValue\.serverTimestamp\(\)/u.test(loginSource),
   "A redeemed code must be atomically disabled and marked as used"
 );
 assert(
@@ -44,9 +44,10 @@ assert(
   "Both HTML and text email instructions must explain the short-lived code"
 );
 assert(
-  /expiredLoginCodes/u.test(loginSource)
+  /expiredCodeStates/u.test(loginSource)
+    && !/loginVerificationCodes|loginCodeAttemptRateLimits/u.test(loginSource)
     && !/exchangeStaffLoginCode/u.test(indexSource + appSource + loginSource),
-  "Expired codes must be cleaned up without adding a non-allowlisted Function"
+  "Expired codes must be cleaned from the existing rate-limit record without extra collections or Functions"
 );
 
 if (failures.length) {

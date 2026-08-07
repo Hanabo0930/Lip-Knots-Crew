@@ -1,7 +1,7 @@
 import { CSSProperties, useEffect, useMemo, useState } from "react";
 import {
   getIdTokenResult, isSignInWithEmailLink, onAuthStateChanged,
-  signInWithEmailLink, signOut, User,
+  signInWithCustomToken, signInWithEmailLink, signOut, User,
 } from "firebase/auth";
 import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -69,7 +69,7 @@ function completeEmailLinkSignIn(url:string,email:string):Promise<void>{
 export default function App(){
   const { isPending, run } = useAsyncAction();
   const [user,setUser]=useState<User|null>(null); const [staffId,setStaffId]=useState("");
-  const [email,setEmail]=useState(localStorage.getItem("lkcEmail")??""); const [message,setMessage]=useState("");
+  const [email,setEmail]=useState(localStorage.getItem("lkcEmail")??""); const [loginCode,setLoginCode]=useState(""); const [message,setMessage]=useState("");
   const [view,setView]=useState<View>("home"); const [openJobs,setOpenJobs]=useState<Job[]>(firebaseConfigured?[]:demoJobs);
   const [myJobs,setMyJobs]=useState<Job[]>(firebaseConfigured?[]:demoJobs); const [tasks,setTasks]=useState<StaffTask[]>(firebaseConfigured?[]:demoTasks);
   const [selectedJob,setSelectedJob]=useState<Job|null>(firebaseConfigured?null:(demoJobs[0]??null)); const [temperature,setTemperature]=useState("36.2"); const [arrivalTime,setArrivalTime]=useState("9:30");
@@ -170,11 +170,34 @@ export default function App(){
     if(!email||isPending("login"))return;
     await run("login",async()=>{
       localStorage.setItem("lkcEmail",email);
-      if(!firebaseConfigured){setMessage("デモ：ログインメールを送りました。");return;}
+      setLoginCode("");
+      if(!firebaseConfigured){setMessage("デモ：ログインメールと確認コードを送りました。");return;}
       if(!functions)return;
       const c=httpsCallable(functions,"requestStaffLoginLink");
       const r=await c({email,continueUrl:window.location.origin});
-      setMessage((r.data as {message?:string}).message??"ログインメールを送信しました。");
+      setMessage((r.data as {message?:string}).message??"ログインメールと確認コードを送信しました。");
+    },{setMessage});
+  }
+
+  async function verifyLoginCode(){
+    const code=loginCode.replace(/\D/g,"");
+    if(!email||code.length!==6||isPending("login-code")){
+      if(code.length!==6)setMessage("メールに記載された6桁の確認コードを入力してください。");
+      return;
+    }
+    await run("login-code",async()=>{
+      localStorage.setItem("lkcEmail",email);
+      if(!firebaseConfigured){setMessage("デモ：確認コードでログインしました。");return;}
+      if(!functions||!auth)return;
+      const activeAuth=auth;
+      const callable=httpsCallable<{email:string;code:string},{customToken:string}>(functions,"exchangeStaffLoginCode");
+      const result=await callable({email,code});
+      const customToken=result.data.customToken;
+      if(!customToken)throw new Error("ログイン情報を確認できません。");
+      await authPersistenceReady;
+      await signInWithCustomToken(activeAuth,customToken);
+      setLoginCode("");
+      setMessage("ログインしました。");
     },{setMessage});
   }
 
@@ -411,7 +434,7 @@ export default function App(){
   const activeJob=selectedAssignedJob??myJobs[0]??null;
   const title=useMemo(()=>firebaseConfigured?"Lip Knots Crew":"Lip Knots Crew（デモ）",[]);
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message">処理中…</div></section></main>;
-  if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button>{message&&<div className="message">{message}</div>}</section></main>;
+  if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className="message">{message}</div>}</section></main>;
 
   return <main className="app-shell">
     <header><img src="/logo.png"/><div><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<div className="header-actions"><button className="ghost" onClick={()=>void loadDevices()} disabled={isPending("devices")}>{isPending("devices")?"処理中…":"端末"}</button><button className="ghost" onClick={()=>auth&&signOut(auth)}>ログアウト</button></div>}</header>

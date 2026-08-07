@@ -137,37 +137,39 @@ export const requestStaffLoginLink = onCall(
 
 async function redeemStaffLoginCode(email: string, code: string) {
   await enforceLoginCodeAttemptRateLimit(email);
-  const codeRef = db.collection("loginVerificationCodes")
-    .doc(loginCodeKey(email, code));
+  const loginStateRef = db.collection("loginLinkRateLimits").doc(emailHash(email));
 
   const redeemed = await db.runTransaction(async (tx) => {
-    const snap = await tx.get(codeRef);
+    const snap = await tx.get(loginStateRef);
     const data = snap.data() as {
-      companyId?: string;
-      staffId?: string;
-      emailHash?: string;
-      expiresAt?: Timestamp;
-      active?: boolean;
+      loginCodeHash?: string;
+      loginCodeCompanyId?: string;
+      loginCodeStaffId?: string;
+      loginCodeExpiresAt?: Timestamp;
+      loginCodeActive?: boolean;
     } | undefined;
 
     if (
       !snap.exists
-      || data?.active !== true
-      || data.emailHash !== emailHash(email)
-      || !data.companyId
-      || !data.staffId
-      || !data.expiresAt
-      || data.expiresAt.toMillis() <= Date.now()
+      || data?.loginCodeActive !== true
+      || data.loginCodeHash !== loginCodeKey(email, code)
+      || !data.loginCodeCompanyId
+      || !data.loginCodeStaffId
+      || !data.loginCodeExpiresAt
+      || data.loginCodeExpiresAt.toMillis() <= Date.now()
     ) {
       throw new HttpsError("invalid-argument", "確認コードが正しくないか、期限が切れています。");
     }
 
-    tx.set(codeRef, {
-      active: false,
-      usedAt: FieldValue.serverTimestamp(),
+    tx.set(loginStateRef, {
+      loginCodeActive: false,
+      loginCodeUsedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 
-    return { companyId: data.companyId, staffId: data.staffId };
+    return {
+      companyId: data.loginCodeCompanyId,
+      staffId: data.loginCodeStaffId,
+    };
   });
 
   await assertProductionOperational(redeemed.companyId);
@@ -432,21 +434,32 @@ export const cleanupExpiredLoginTokens = onSchedule(
     timeoutSeconds: 300,
   },
   async () => {
-    const [expiredGatewayTokens, expiredLoginCodes] = await Promise.all([
+    const [expiredGatewayTokens, expiredCodeStates] = await Promise.all([
       db.collection("loginGatewayTokens")
         .where("expiresAt", "<", Timestamp.now())
         .limit(250)
         .get(),
-      db.collection("loginVerificationCodes")
-        .where("expiresAt", "<", Timestamp.now())
+      db.collection("loginLinkRateLimits")
+        .where("loginCodeExpiresAt", "<", Timestamp.now())
         .limit(250)
         .get(),
     ]);
 
     const batch = db.batch();
     expiredGatewayTokens.docs.forEach((doc) => batch.delete(doc.ref));
-    expiredLoginCodes.docs.forEach((doc) => batch.delete(doc.ref));
-    if (!expiredGatewayTokens.empty || !expiredLoginCodes.empty) await batch.commit();
+    expiredCodeStates.docs.forEach((doc) => batch.update(doc.ref, {
+      loginCodeHash: FieldValue.delete(),
+      loginCodeCompanyId: FieldValue.delete(),
+      loginCodeStaffId: FieldValue.delete(),
+      loginCodeActive: FieldValue.delete(),
+      loginCodeExpiresAt: FieldValue.delete(),
+      loginCodeSource: FieldValue.delete(),
+      loginCodeBatchId: FieldValue.delete(),
+      loginCodeCreatedAt: FieldValue.delete(),
+      loginCodeUsedAt: FieldValue.delete(),
+      loginCodeInvalidatedAt: FieldValue.delete(),
+    }));
+    if (!expiredGatewayTokens.empty || !expiredCodeStates.empty) await batch.commit();
   }
 );
 
@@ -471,8 +484,8 @@ async function sendLoginLink(input: {
   const tokenHash = sha256(rawToken);
   const loginCode = randomInt(0, 1_000_000).toString().padStart(6, "0");
   const loginCodeExpiresAt = Timestamp.fromMillis(Date.now() + LOGIN_CODE_TTL_MS);
-  const loginCodeRef = db.collection("loginVerificationCodes")
-    .doc(loginCodeKey(input.email, loginCode));
+  const loginStateRef = db.collection("loginLinkRateLimits")
+    .doc(emailHash(input.email));
   const expiresAt = Timestamp.fromMillis(Date.now() + 60 * 60 * 1000);
   const gatewayBase = publicLoginGatewayUrl.value();
 
@@ -493,16 +506,18 @@ async function sendLoginLink(input: {
       createdAt: FieldValue.serverTimestamp(),
       openCount: 0,
     }),
-    loginCodeRef.set({
-      companyId: input.companyId,
-      staffId: input.staffId,
-      emailHash: emailHash(input.email),
-      active: true,
-      expiresAt: loginCodeExpiresAt,
-      source: input.source,
-      batchId: input.batchId ?? null,
-      createdAt: FieldValue.serverTimestamp(),
-    }),
+    loginStateRef.set({
+      loginCodeHash: loginCodeKey(input.email, loginCode),
+      loginCodeCompanyId: input.companyId,
+      loginCodeStaffId: input.staffId,
+      loginCodeActive: true,
+      loginCodeExpiresAt,
+      loginCodeSource: input.source,
+      loginCodeBatchId: input.batchId ?? null,
+      loginCodeCreatedAt: FieldValue.serverTimestamp(),
+      loginCodeUsedAt: FieldValue.delete(),
+      loginCodeInvalidatedAt: FieldValue.delete(),
+    }, { merge: true }),
   ]);
 
   const gatewayUrl = `${gatewayBase}?token=${encodeURIComponent(rawToken)}`;
@@ -574,9 +589,9 @@ async function sendLoginLink(input: {
         errorMessage: error instanceof Error ? error.message : String(error),
         failedAt: FieldValue.serverTimestamp(),
       }, { merge: true }),
-      loginCodeRef.set({
-        active: false,
-        invalidatedAt: FieldValue.serverTimestamp(),
+      loginStateRef.set({
+        loginCodeActive: false,
+        loginCodeInvalidatedAt: FieldValue.serverTimestamp(),
       }, { merge: true }),
     ]);
     throw error;
@@ -585,23 +600,23 @@ async function sendLoginLink(input: {
 
 
 async function enforceLoginCodeAttemptRateLimit(email: string): Promise<void> {
-  const ref = db.collection("loginCodeAttemptRateLimits").doc(emailHash(email));
+  const ref = db.collection("loginLinkRateLimits").doc(emailHash(email));
   const now = Timestamp.now();
 
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     const data = snap.data() as {
-      minuteWindowAt?: Timestamp;
-      minuteCount?: number;
-      hourWindowAt?: Timestamp;
-      hourCount?: number;
+      loginCodeMinuteWindowAt?: Timestamp;
+      loginCodeMinuteCount?: number;
+      loginCodeHourWindowAt?: Timestamp;
+      loginCodeHourCount?: number;
     } | undefined;
-    const minuteExpired = !data?.minuteWindowAt
-      || now.toMillis() - data.minuteWindowAt.toMillis() >= 60_000;
-    const hourExpired = !data?.hourWindowAt
-      || now.toMillis() - data.hourWindowAt.toMillis() >= 3_600_000;
-    const minuteCount = minuteExpired ? 0 : (data?.minuteCount ?? 0);
-    const hourCount = hourExpired ? 0 : (data?.hourCount ?? 0);
+    const minuteExpired = !data?.loginCodeMinuteWindowAt
+      || now.toMillis() - data.loginCodeMinuteWindowAt.toMillis() >= 60_000;
+    const hourExpired = !data?.loginCodeHourWindowAt
+      || now.toMillis() - data.loginCodeHourWindowAt.toMillis() >= 3_600_000;
+    const minuteCount = minuteExpired ? 0 : (data?.loginCodeMinuteCount ?? 0);
+    const hourCount = hourExpired ? 0 : (data?.loginCodeHourCount ?? 0);
 
     if (minuteCount >= 5 || hourCount >= 20) {
       throw new HttpsError(
@@ -611,11 +626,11 @@ async function enforceLoginCodeAttemptRateLimit(email: string): Promise<void> {
     }
 
     tx.set(ref, {
-      minuteWindowAt: minuteExpired ? now : data?.minuteWindowAt,
-      minuteCount: minuteCount + 1,
-      hourWindowAt: hourExpired ? now : data?.hourWindowAt,
-      hourCount: hourCount + 1,
-      updatedAt: now,
+      loginCodeMinuteWindowAt: minuteExpired ? now : data?.loginCodeMinuteWindowAt,
+      loginCodeMinuteCount: minuteCount + 1,
+      loginCodeHourWindowAt: hourExpired ? now : data?.loginCodeHourWindowAt,
+      loginCodeHourCount: hourCount + 1,
+      loginCodeAttemptUpdatedAt: now,
     }, { merge: true });
   });
 }

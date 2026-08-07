@@ -190,7 +190,7 @@ export default function App(){
       if(!firebaseConfigured){setMessage("デモ：確認コードでログインしました。");return;}
       if(!functions||!auth)return;
       const activeAuth=auth;
-      const callable=httpsCallable<{email:string;code:string},{customToken:string}>(functions,"exchangeStaffLoginCode");
+      const callable=httpsCallable<{email:string;code:string},{customToken:string}>(functions,"requestStaffLoginLink");
       const result=await callable({email,code});
       const customToken=result.data.customToken;
       if(!customToken)throw new Error("ログイン情報を確認できません。");

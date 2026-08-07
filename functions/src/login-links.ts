@@ -1,4 +1,4 @@
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes, randomInt, createHash } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, onRequest, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
@@ -23,7 +23,10 @@ import { incrementProductionMetrics } from "./production-metrics";
 const RequestLoginSchema = z.object({
   email: z.string().email().max(254),
   continueUrl: z.string().url().max(2048).optional(),
+  code: z.string().regex(/^\d{6}$/).optional(),
 });
+
+const LOGIN_CODE_TTL_MS = 15 * 60 * 1000;
 
 function resolveStaffLoginContinueUrl(requested?: string): string {
   const configured = new URL(staffAppUrl.value());
@@ -88,6 +91,9 @@ export const requestStaffLoginLink = onCall(
     }
 
     const email = normalizeEmail(input.data.email);
+    if (input.data.code) {
+      return redeemStaffLoginCode(email, input.data.code);
+    }
     const continueUrl = resolveStaffLoginContinueUrl(input.data.continueUrl);
     await enforceLoginRateLimit(email);
 
@@ -124,10 +130,72 @@ export const requestStaffLoginLink = onCall(
     return {
       accepted: true,
       message:
-        "登録済みのメールアドレスの場合、ログインメールを送信しました。",
+        "登録済みのメールアドレスの場合、ログインメールと確認コードを送信しました。",
     };
   }
 );
+
+async function redeemStaffLoginCode(email: string, code: string) {
+  await enforceLoginCodeAttemptRateLimit(email);
+  const loginStateRef = db.collection("loginLinkRateLimits").doc(emailHash(email));
+
+  const redeemed = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(loginStateRef);
+    const data = snap.data() as {
+      loginCodeHash?: string;
+      loginCodeCompanyId?: string;
+      loginCodeStaffId?: string;
+      loginCodeExpiresAt?: Timestamp;
+      loginCodeActive?: boolean;
+    } | undefined;
+
+    if (
+      !snap.exists
+      || data?.loginCodeActive !== true
+      || data.loginCodeHash !== loginCodeKey(email, code)
+      || !data.loginCodeCompanyId
+      || !data.loginCodeStaffId
+      || !data.loginCodeExpiresAt
+      || data.loginCodeExpiresAt.toMillis() <= Date.now()
+    ) {
+      throw new HttpsError("invalid-argument", "確認コードが正しくないか、期限が切れています。");
+    }
+
+    tx.set(loginStateRef, {
+      loginCodeActive: false,
+      loginCodeUsedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    return {
+      companyId: data.loginCodeCompanyId,
+      staffId: data.loginCodeStaffId,
+    };
+  });
+
+  await assertProductionOperational(redeemed.companyId);
+  const indexSnap = await db.collection("emailIndex").doc(emailHash(email)).get();
+  const index = indexSnap.data() as {
+    companyId?: string;
+    staffId?: string;
+    active?: boolean;
+  } | undefined;
+  const profileSnap = await db.collection("staffProfiles").doc(redeemed.staffId).get();
+
+  if (
+    !indexSnap.exists
+    || index?.active !== true
+    || index.companyId !== redeemed.companyId
+    || index.staffId !== redeemed.staffId
+    || !profileSnap.exists
+    || profileSnap.data()?.active !== true
+  ) {
+    throw new HttpsError("invalid-argument", "確認コードが正しくないか、期限が切れています。");
+  }
+
+  const authUser = await getOrCreateAuthUser(email);
+  const customToken = await auth.createCustomToken(authUser.uid);
+  return { customToken };
+}
 
 export const getLoginInviteCandidates = onCall(async (request) => {
   const session = requireAdmin(request);
@@ -366,14 +434,32 @@ export const cleanupExpiredLoginTokens = onSchedule(
     timeoutSeconds: 300,
   },
   async () => {
-    const expired = await db.collection("loginGatewayTokens")
-      .where("expiresAt", "<", Timestamp.now())
-      .limit(500)
-      .get();
+    const [expiredGatewayTokens, expiredCodeStates] = await Promise.all([
+      db.collection("loginGatewayTokens")
+        .where("expiresAt", "<", Timestamp.now())
+        .limit(250)
+        .get(),
+      db.collection("loginLinkRateLimits")
+        .where("loginCodeExpiresAt", "<", Timestamp.now())
+        .limit(250)
+        .get(),
+    ]);
 
     const batch = db.batch();
-    expired.docs.forEach((doc) => batch.delete(doc.ref));
-    if (!expired.empty) await batch.commit();
+    expiredGatewayTokens.docs.forEach((doc) => batch.delete(doc.ref));
+    expiredCodeStates.docs.forEach((doc) => batch.update(doc.ref, {
+      loginCodeHash: FieldValue.delete(),
+      loginCodeCompanyId: FieldValue.delete(),
+      loginCodeStaffId: FieldValue.delete(),
+      loginCodeActive: FieldValue.delete(),
+      loginCodeExpiresAt: FieldValue.delete(),
+      loginCodeSource: FieldValue.delete(),
+      loginCodeBatchId: FieldValue.delete(),
+      loginCodeCreatedAt: FieldValue.delete(),
+      loginCodeUsedAt: FieldValue.delete(),
+      loginCodeInvalidatedAt: FieldValue.delete(),
+    }));
+    if (!expiredGatewayTokens.empty || !expiredCodeStates.empty) await batch.commit();
   }
 );
 
@@ -396,6 +482,10 @@ async function sendLoginLink(input: {
 
   const rawToken = randomBytes(32).toString("base64url");
   const tokenHash = sha256(rawToken);
+  const loginCode = randomInt(0, 1_000_000).toString().padStart(6, "0");
+  const loginCodeExpiresAt = Timestamp.fromMillis(Date.now() + LOGIN_CODE_TTL_MS);
+  const loginStateRef = db.collection("loginLinkRateLimits")
+    .doc(emailHash(input.email));
   const expiresAt = Timestamp.fromMillis(Date.now() + 60 * 60 * 1000);
   const gatewayBase = publicLoginGatewayUrl.value();
 
@@ -403,18 +493,32 @@ async function sendLoginLink(input: {
     throw new Error("PUBLIC_LOGIN_GATEWAY_URLが設定されていません。");
   }
 
-  await db.collection("loginGatewayTokens").doc(tokenHash).set({
-    companyId: input.companyId,
-    staffId: input.staffId,
-    emailHash: emailHash(input.email),
-    actionLink,
-    active: true,
-    expiresAt,
-    source: input.source,
-    batchId: input.batchId ?? null,
-    createdAt: FieldValue.serverTimestamp(),
-    openCount: 0,
-  });
+  await Promise.all([
+    db.collection("loginGatewayTokens").doc(tokenHash).set({
+      companyId: input.companyId,
+      staffId: input.staffId,
+      emailHash: emailHash(input.email),
+      actionLink,
+      active: true,
+      expiresAt,
+      source: input.source,
+      batchId: input.batchId ?? null,
+      createdAt: FieldValue.serverTimestamp(),
+      openCount: 0,
+    }),
+    loginStateRef.set({
+      loginCodeHash: loginCodeKey(input.email, loginCode),
+      loginCodeCompanyId: input.companyId,
+      loginCodeStaffId: input.staffId,
+      loginCodeActive: true,
+      loginCodeExpiresAt,
+      loginCodeSource: input.source,
+      loginCodeBatchId: input.batchId ?? null,
+      loginCodeCreatedAt: FieldValue.serverTimestamp(),
+      loginCodeUsedAt: FieldValue.delete(),
+      loginCodeInvalidatedAt: FieldValue.delete(),
+    }, { merge: true }),
+  ]);
 
   const gatewayUrl = `${gatewayBase}?token=${encodeURIComponent(rawToken)}`;
   const intro = input.introText.trim()
@@ -428,11 +532,13 @@ async function sendLoginLink(input: {
       <div style="border:1px solid #eadfe2;border-radius:20px;padding:24px;background:#fff9fb">
         <p>${escapeHtml(input.displayName)}さん</p>
         ${intro}
-        <p>下のボタンを押すだけでログインできます。パスワード入力はありません。</p>
+        <p>SafariやPCでは、下のボタンを押すだけでログインできます。</p>
         <p style="text-align:center;margin:28px 0">
           <a href="${escapeHtml(gatewayUrl)}" style="display:inline-block;background:#c97f98;color:white;text-decoration:none;font-weight:800;padding:14px 24px;border-radius:14px">Lip Knots Crewにログイン</a>
         </p>
-        <p style="font-size:12px;color:#806f68">このリンクの有効期限は1時間です。心当たりがない場合は開かないでください。</p>
+        <p>iPhoneのホーム画面版では、アプリへ戻って次の確認コードを入力してください。</p>
+        <p style="text-align:center;font-size:32px;font-weight:900;letter-spacing:8px;color:#3f332c;margin:20px 0">${loginCode}</p>
+        <p style="font-size:12px;color:#806f68">確認コードは15分間・1回限り有効です。ログインボタンは1時間有効です。心当たりがない場合は使用しないでください。</p>
       </div>
     </div>
   `;
@@ -441,10 +547,13 @@ async function sendLoginLink(input: {
     "",
     input.introText,
     "",
-    "下のURLを開くとLip Knots Crewへログインできます。",
+    "SafariやPCでは、下のURLを開くとLip Knots Crewへログインできます。",
     gatewayUrl,
     "",
-    "有効期限は1時間です。",
+    "iPhoneのホーム画面版では、アプリへ戻って次の確認コードを入力してください。",
+    loginCode,
+    "",
+    "確認コードは15分間・1回限り有効です。ログインURLは1時間有効です。",
   ].filter((line) => line !== "").join("\n");
 
   const deliveryRef = db.collection("loginInviteDeliveries").doc();
@@ -474,13 +583,77 @@ async function sendLoginLink(input: {
       sentAt: FieldValue.serverTimestamp(),
     }, { merge: true });
   } catch (error) {
-    await deliveryRef.set({
-      status: "failed",
-      errorMessage: error instanceof Error ? error.message : String(error),
-      failedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
+    await Promise.all([
+      deliveryRef.set({
+        status: "failed",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        failedAt: FieldValue.serverTimestamp(),
+      }, { merge: true }),
+      loginStateRef.set({
+        loginCodeActive: false,
+        loginCodeInvalidatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true }),
+    ]);
     throw error;
   }
+}
+
+
+async function enforceLoginCodeAttemptRateLimit(email: string): Promise<void> {
+  const ref = db.collection("loginLinkRateLimits").doc(emailHash(email));
+  const now = Timestamp.now();
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const data = snap.data() as {
+      loginCodeMinuteWindowAt?: Timestamp;
+      loginCodeMinuteCount?: number;
+      loginCodeHourWindowAt?: Timestamp;
+      loginCodeHourCount?: number;
+    } | undefined;
+    const minuteExpired = !data?.loginCodeMinuteWindowAt
+      || now.toMillis() - data.loginCodeMinuteWindowAt.toMillis() >= 60_000;
+    const hourExpired = !data?.loginCodeHourWindowAt
+      || now.toMillis() - data.loginCodeHourWindowAt.toMillis() >= 3_600_000;
+    const minuteCount = minuteExpired ? 0 : (data?.loginCodeMinuteCount ?? 0);
+    const hourCount = hourExpired ? 0 : (data?.loginCodeHourCount ?? 0);
+
+    if (minuteCount >= 5 || hourCount >= 20) {
+      throw new HttpsError(
+        "resource-exhausted",
+        "入力回数が上限に達しました。時間を置いてから、もう一度お試しください。"
+      );
+    }
+
+    tx.set(ref, {
+      loginCodeMinuteWindowAt: minuteExpired ? now : data?.loginCodeMinuteWindowAt,
+      loginCodeMinuteCount: minuteCount + 1,
+      loginCodeHourWindowAt: hourExpired ? now : data?.loginCodeHourWindowAt,
+      loginCodeHourCount: hourCount + 1,
+      loginCodeAttemptUpdatedAt: now,
+    }, { merge: true });
+  });
+}
+
+async function getOrCreateAuthUser(email: string) {
+  try {
+    return await auth.getUserByEmail(email);
+  } catch (error) {
+    if ((error as { code?: string }).code !== "auth/user-not-found") throw error;
+  }
+
+  try {
+    return await auth.createUser({ email, emailVerified: true, disabled: false });
+  } catch (error) {
+    if ((error as { code?: string }).code === "auth/email-already-exists") {
+      return auth.getUserByEmail(email);
+    }
+    throw error;
+  }
+}
+
+function loginCodeKey(email: string, code: string): string {
+  return sha256(`${emailHash(normalizeEmail(email))}:${code}`);
 }
 
 async function enforceLoginRateLimit(email: string): Promise<void> {

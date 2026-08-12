@@ -194,7 +194,7 @@ assert.match(
   /LKC_GMAIL_SMOKE_RECIPIENT_EMAIL:\s*\$\{\{\s*secrets\.LKC_GMAIL_SMOKE_RECIPIENT_EMAIL\s*\}\}/u,
 );
 assert.doesNotMatch(workflow, /secrets\.LKC_GMAIL_SMOKE_EMAIL/u);
-assert.match(workflow, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/u);
+assert.match(workflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/u);
 
 const bootstrap = readFileSync(
   resolve(root, "scripts/automation/bootstrap-github-wif.sh"),

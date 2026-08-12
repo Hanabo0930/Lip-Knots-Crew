@@ -6,8 +6,8 @@ const indexSource = await readFile("functions/src/index.ts", "utf8");
 const failures = [];
 
 assert(
-  /signInWithCustomToken[\s\S]*?requestStaffLoginLink/u.test(appSource),
-  "The installed Staff app must exchange the code through the existing allowlisted callable"
+  /emailActionLink[\s\S]*?signInWithEmailLink\(activeAuth,email,emailActionLink\)/u.test(appSource),
+  "The installed Staff app must redeem the code and complete the email-link sign-in inside the PWA"
 );
 assert(
   /inputMode="numeric"[\s\S]*?autoComplete="one-time-code"[\s\S]*?maxLength=\{6\}/u.test(appSource),
@@ -27,24 +27,25 @@ assert(
   "Login codes must be random six-digit values with a 15-minute lifetime"
 );
 assert(
-  /loginLinkRateLimits[\s\S]*?loginCodeActive: false,[\s\S]*?loginCodeUsedAt: FieldValue\.serverTimestamp\(\)/u.test(loginSource),
-  "A redeemed code must be atomically disabled and marked as used"
+  /loginCodeActive: false,[\s\S]*?loginCodeUsedAt: FieldValue\.serverTimestamp\(\)[\s\S]*?redemptionSource: "pwa_code"/u.test(loginSource),
+  "A redeemed code and its gateway token must be disabled atomically"
 );
 assert(
   /minuteCount >= 5 \|\| hourCount >= 20/u.test(loginSource),
   "Code guessing must be rate-limited per email"
 );
 assert(
-  /auth\.createCustomToken\(authUser\.uid\)/u.test(loginSource)
-    && /signInWithCustomToken\(activeAuth,customToken\)/u.test(appSource),
-  "The verified code must become a locally persisted Firebase Auth session"
+  /loginCodeGatewayTokenHash: tokenHash/u.test(loginSource)
+    && /return \{ emailActionLink \}/u.test(loginSource)
+    && !/createCustomToken|signInWithCustomToken/u.test(appSource + loginSource),
+  "Code login must reuse the existing one-time Firebase email action link without IAM signing"
 );
 assert(
   /確認コードは15分間・1回限り有効です/u.test(loginSource),
   "Both HTML and text email instructions must explain the short-lived code"
 );
 assert(
-  /expiredCodeStates/u.test(loginSource)
+  /loginCodeGatewayTokenHash: FieldValue\.delete\(\)/u.test(loginSource)
     && !/loginVerificationCodes|loginCodeAttemptRateLimits/u.test(loginSource)
     && !/exchangeStaffLoginCode/u.test(indexSource + appSource + loginSource),
   "Expired codes must be cleaned from the existing rate-limit record without extra collections or Functions"

@@ -138,25 +138,85 @@ export const requestStaffLoginLink = onCall(
 async function redeemStaffLoginCode(email: string, code: string) {
   await enforceLoginCodeAttemptRateLimit(email);
   const loginStateRef = db.collection("loginLinkRateLimits").doc(emailHash(email));
+  const initialSnap = await loginStateRef.get();
+  const initial = initialSnap.data() as {
+    loginCodeHash?: string;
+    loginCodeCompanyId?: string;
+    loginCodeStaffId?: string;
+    loginCodeGatewayTokenHash?: string;
+    loginCodeExpiresAt?: Timestamp;
+    loginCodeActive?: boolean;
+  } | undefined;
 
-  const redeemed = await db.runTransaction(async (tx) => {
-    const snap = await tx.get(loginStateRef);
-    const data = snap.data() as {
+  if (
+    !initialSnap.exists
+    || initial?.loginCodeActive !== true
+    || initial.loginCodeHash !== loginCodeKey(email, code)
+    || !initial.loginCodeCompanyId
+    || !initial.loginCodeStaffId
+    || !initial.loginCodeGatewayTokenHash
+    || !initial.loginCodeExpiresAt
+    || initial.loginCodeExpiresAt.toMillis() <= Date.now()
+  ) {
+    throw new HttpsError("invalid-argument", "確認コードが正しくないか、期限が切れています。");
+  }
+
+  await assertProductionOperational(initial.loginCodeCompanyId);
+  const indexRef = db.collection("emailIndex").doc(emailHash(email));
+  const profileRef = db.collection("staffProfiles").doc(initial.loginCodeStaffId);
+  const gatewayRef = db.collection("loginGatewayTokens").doc(initial.loginCodeGatewayTokenHash);
+
+  const emailActionLink = await db.runTransaction(async (tx) => {
+    const stateSnap = await tx.get(loginStateRef);
+    const state = stateSnap.data() as {
       loginCodeHash?: string;
       loginCodeCompanyId?: string;
       loginCodeStaffId?: string;
+      loginCodeGatewayTokenHash?: string;
       loginCodeExpiresAt?: Timestamp;
       loginCodeActive?: boolean;
     } | undefined;
+    const indexSnap = await tx.get(indexRef);
+    const profileSnap = await tx.get(profileRef);
+    const gatewaySnap = await tx.get(gatewayRef);
+    const index = indexSnap.data() as {
+      companyId?: string;
+      staffId?: string;
+      active?: boolean;
+    } | undefined;
+    const gateway = gatewaySnap.data() as {
+      companyId?: string;
+      staffId?: string;
+      emailHash?: string;
+      actionLink?: string;
+      active?: boolean;
+      expiresAt?: Timestamp;
+    } | undefined;
 
     if (
-      !snap.exists
-      || data?.loginCodeActive !== true
-      || data.loginCodeHash !== loginCodeKey(email, code)
-      || !data.loginCodeCompanyId
-      || !data.loginCodeStaffId
-      || !data.loginCodeExpiresAt
-      || data.loginCodeExpiresAt.toMillis() <= Date.now()
+      !stateSnap.exists
+      || state?.loginCodeActive !== true
+      || state.loginCodeHash !== loginCodeKey(email, code)
+      || state.loginCodeCompanyId !== initial.loginCodeCompanyId
+      || state.loginCodeStaffId !== initial.loginCodeStaffId
+      || state.loginCodeGatewayTokenHash !== initial.loginCodeGatewayTokenHash
+      || !state.loginCodeExpiresAt
+      || state.loginCodeExpiresAt.toMillis() <= Date.now()
+      || !indexSnap.exists
+      || index?.active !== true
+      || index.companyId !== initial.loginCodeCompanyId
+      || index.staffId !== initial.loginCodeStaffId
+      || !profileSnap.exists
+      || profileSnap.data()?.active !== true
+      || !gatewaySnap.exists
+      || gateway?.active !== true
+      || gateway.companyId !== initial.loginCodeCompanyId
+      || gateway.staffId !== initial.loginCodeStaffId
+      || gateway.emailHash !== emailHash(email)
+      || typeof gateway.actionLink !== "string"
+      || !gateway.actionLink
+      || !gateway.expiresAt
+      || gateway.expiresAt.toMillis() <= Date.now()
     ) {
       throw new HttpsError("invalid-argument", "確認コードが正しくないか、期限が切れています。");
     }
@@ -165,36 +225,16 @@ async function redeemStaffLoginCode(email: string, code: string) {
       loginCodeActive: false,
       loginCodeUsedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
+    tx.set(gatewayRef, {
+      active: false,
+      redeemedAt: FieldValue.serverTimestamp(),
+      redemptionSource: "pwa_code",
+    }, { merge: true });
 
-    return {
-      companyId: data.loginCodeCompanyId,
-      staffId: data.loginCodeStaffId,
-    };
+    return gateway.actionLink;
   });
 
-  await assertProductionOperational(redeemed.companyId);
-  const indexSnap = await db.collection("emailIndex").doc(emailHash(email)).get();
-  const index = indexSnap.data() as {
-    companyId?: string;
-    staffId?: string;
-    active?: boolean;
-  } | undefined;
-  const profileSnap = await db.collection("staffProfiles").doc(redeemed.staffId).get();
-
-  if (
-    !indexSnap.exists
-    || index?.active !== true
-    || index.companyId !== redeemed.companyId
-    || index.staffId !== redeemed.staffId
-    || !profileSnap.exists
-    || profileSnap.data()?.active !== true
-  ) {
-    throw new HttpsError("invalid-argument", "確認コードが正しくないか、期限が切れています。");
-  }
-
-  const authUser = await getOrCreateAuthUser(email);
-  const customToken = await auth.createCustomToken(authUser.uid);
-  return { customToken };
+  return { emailActionLink };
 }
 
 export const getLoginInviteCandidates = onCall(async (request) => {
@@ -451,6 +491,7 @@ export const cleanupExpiredLoginTokens = onSchedule(
       loginCodeHash: FieldValue.delete(),
       loginCodeCompanyId: FieldValue.delete(),
       loginCodeStaffId: FieldValue.delete(),
+      loginCodeGatewayTokenHash: FieldValue.delete(),
       loginCodeActive: FieldValue.delete(),
       loginCodeExpiresAt: FieldValue.delete(),
       loginCodeSource: FieldValue.delete(),
@@ -510,6 +551,7 @@ async function sendLoginLink(input: {
       loginCodeHash: loginCodeKey(input.email, loginCode),
       loginCodeCompanyId: input.companyId,
       loginCodeStaffId: input.staffId,
+      loginCodeGatewayTokenHash: tokenHash,
       loginCodeActive: true,
       loginCodeExpiresAt,
       loginCodeSource: input.source,
@@ -633,23 +675,6 @@ async function enforceLoginCodeAttemptRateLimit(email: string): Promise<void> {
       loginCodeAttemptUpdatedAt: now,
     }, { merge: true });
   });
-}
-
-async function getOrCreateAuthUser(email: string) {
-  try {
-    return await auth.getUserByEmail(email);
-  } catch (error) {
-    if ((error as { code?: string }).code !== "auth/user-not-found") throw error;
-  }
-
-  try {
-    return await auth.createUser({ email, emailVerified: true, disabled: false });
-  } catch (error) {
-    if ((error as { code?: string }).code === "auth/email-already-exists") {
-      return auth.getUserByEmail(email);
-    }
-    throw error;
-  }
 }
 
 function loginCodeKey(email: string, code: string): string {

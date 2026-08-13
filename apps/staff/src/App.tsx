@@ -16,6 +16,7 @@ import SubmissionPreviewImage, { type PreviewFile } from "./SubmissionPreviewIma
 import { sleep, useAsyncAction } from "./useAsyncAction";
 
 type View = "home" | "jobs" | "shifts" | "submit" | "contact";
+type BusinessDataStatus = "idle" | "loading" | "ready" | "error";
 type SubmissionType = "report" | "sales_floor";
 type NetPrintItem = { id: string; number: string; printed?: boolean };
 type Job = {
@@ -84,6 +85,7 @@ export default function App(){
   const [resubmissionDetail,setResubmissionDetail]=useState<ResubmissionDetail|null>(null);
   const [processingSubmission,setProcessingSubmission]=useState(false);
   const [authResolved,setAuthResolved]=useState(!firebaseConfigured);
+  const [businessDataStatus,setBusinessDataStatus]=useState<BusinessDataStatus>(firebaseConfigured?"idle":"ready");
   const [emailLinkPending,setEmailLinkPending]=useState(()=>Boolean(auth&&isSignInWithEmailLink(auth,window.location.href)));
 
   const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
@@ -97,13 +99,29 @@ export default function App(){
     if(firebaseConfigured){
       setStaffId(""); setMyJobs([]); setTasks([]); setSelectedJob(null);
       setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionMessage("");
+      setBusinessDataStatus(current?"loading":"idle");
     }
     if(!current||!functions){setDeviceSessionId("");return;}
-    const bootstrap=httpsCallable(functions,"bootstrapSession"); const result=await bootstrap();
-    if((result.data as {refreshToken?:boolean}).refreshToken)await current.getIdToken(true);
-    const token=await getIdTokenResult(current); const sid=String(token.claims.staffId??""); setStaffId(sid);
-    await registerCurrentDevice();
-    setPushEnabled(await loadServerPushStatus(functions)); await loadAll(sid);
+    try{
+      const bootstrap=httpsCallable(functions,"bootstrapSession"); const result=await bootstrap();
+      if((result.data as {refreshToken?:boolean}).refreshToken)await current.getIdToken(true);
+      const token=await getIdTokenResult(current); const sid=String(token.claims.staffId??""); setStaffId(sid);
+      try{
+        await registerCurrentDevice();
+      }catch{
+        setMessage("端末情報を登録できませんでした。再読み込みしてください。");
+      }
+      await loadAll(sid);
+      setBusinessDataStatus("ready");
+      try{
+        setPushEnabled(await loadServerPushStatus(functions));
+      }catch{
+        setMessage("通知状態を読み込めませんでした。通知設定を確認してください。");
+      }
+    }catch{
+      setBusinessDataStatus("error");
+      setMessage("業務データを読み込めませんでした。再読み込みしてください。");
+    }
   }); },[]);
   useEffect(()=>{
     if(!auth)return;
@@ -433,6 +451,14 @@ export default function App(){
 
   const activeJob=selectedAssignedJob??myJobs[0]??null;
   const title=useMemo(()=>firebaseConfigured?"Lip Knots Crew":"Lip Knots Crew（デモ）",[]);
+  const taskSummary=businessDataStatus==="ready"
+    ? tasks.length?`重要な${Math.min(tasks.length,5)}件を表示しています。`:"今日の対応はすべて完了しています。"
+    : businessDataStatus==="loading"?"業務データを読み込んでいます…":"業務データを確認できません。";
+  const businessDataFallback=businessDataStatus==="loading"
+    ? <div className="empty">業務データを読み込んでいます…</div>
+    : businessDataStatus==="error"
+      ? <div className="empty">業務データを読み込めませんでした。<button className="secondary" onClick={()=>window.location.reload()}>再読み込み</button></div>
+      : null;
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message">処理中…</div></section></main>;
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className="message">{message}</div>}</section></main>;
 
@@ -441,10 +467,10 @@ export default function App(){
     {message&&<div className="message">{message}</div>}
     {view==="home"&&<>
       <section className="panel push-panel"><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span></div><div className="push-actions">{!pushEnabled?<button onClick={()=>void enablePush()} disabled={isPending("push-enable")}>{isPending("push-enable")?"処理中…":"通知を有効にする"}</button>:<><button className="secondary" onClick={()=>void requestPushTest()} disabled={isPending("push-test")}>{isPending("push-test")?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={isPending("push-disable")}>{isPending("push-disable")?"処理中…":"通知OFF"}</button></>}</div></section>
-      <section className="hero-card"><h2>今日やること</h2><p>重要な5件を表示しています。</p><div className="task-list">{tasks.slice(0,5).map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{!tasks.length&&<div className="empty">未対応はありません。</div>}</div></section>
-      <section><h2>次回シフト</h2>{activeJob?<article className="job shift-job" style={{"--job-accent":jobAccent(activeJob.menuName)} as CSSProperties}><span className="date">{activeJob.workDate||activeJob.dateKey}</span><span className="job-kind">{jobKind(activeJob.menuName)}</span><h3>{activeJob.storeName}</h3><p>{activeJob.makerName} / {activeJob.menuName}</p><span className="prep-chip">{prepSummary(activeJob)}</span><button onClick={()=>{setSelectedJob(activeJob);setView("shifts")}}>シフトを開く</button></article>:<div className="empty">確定シフトはありません。</div>}</section>
+      <section className="hero-card"><h2>今日やること</h2><p>{taskSummary}</p><div className="task-list">{businessDataFallback??<>{tasks.slice(0,5).map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{!tasks.length&&<div className="empty">未対応はありません。</div>}</>}</div></section>
+      <section><h2>次回シフト</h2>{businessDataFallback??(activeJob?<article className="job shift-job" style={{"--job-accent":jobAccent(activeJob.menuName)} as CSSProperties}><span className="date">{activeJob.workDate||activeJob.dateKey}</span><span className="job-kind">{jobKind(activeJob.menuName)}</span><h3>{activeJob.storeName}</h3><p>{activeJob.makerName} / {activeJob.menuName}</p><span className="prep-chip">{prepSummary(activeJob)}</span><button onClick={()=>{setSelectedJob(activeJob);setView("shifts")}}>シフトを開く</button></article>:<div className="empty">確定シフトはありません。</div>)}</section>
     </>}
-    {view==="jobs"&&<section><h2>募集中の案件</h2><div className="grid">{openJobs.map(job=><article className="job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong><div className="actions"><button className="secondary" onClick={()=>setMessage(`${job.storeName} / ${job.makerName} / ${job.workTime}`)}>詳細</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>)}</div></section>}
+    {view==="jobs"&&<section><h2>募集中の案件</h2>{businessDataFallback??<div className="grid">{openJobs.map(job=><article className="job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong><div className="actions"><button className="secondary" onClick={()=>setMessage(`${job.storeName} / ${job.makerName} / ${job.workTime}`)}>詳細</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>)}</div>}</section>}
     {view==="shifts"&&<section><h2>自分のシフト</h2><div className="grid">{myJobs.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>{selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)}/></label></div><button onClick={()=>void submitPreContact()} disabled={isPending("preContact")}>{isPending("preContact")?"処理中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||isPending(`print-${item.id}`)} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":isPending(`print-${item.id}`)?"処理中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)}>📝 報告書を提出</button></div></section>}</section>}
     {view==="submit"&&!selectedAssignedJob&&<section className="panel"><h2>提出するシフトを選んでください</h2><p>提出は、本人に割り当てられた確定シフトからだけ受け付けます。</p><button onClick={()=>setView("shifts")}>シフトを選ぶ</button></section>}
     {view==="submit"&&selectedAssignedJob&&<section className={`panel submission-panel ${submissionType}`}><div className={`submission-identity ${submissionType}`}><span>{submissionType==="report"?"📝 報告書":"🖼️ 売場画像"}</span><strong>{submissionType==="report"?"報告内容が読める画像・PDF":"売場全体や陳列が分かる写真"}</strong></div><h2>{submissionType==="report"?"報告書":"売場画像"}を提出</h2><p>{selectedAssignedJob.storeName}{requestId&&" / 再提出依頼への対応"}</p>

@@ -1,8 +1,11 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
+
+const MAX_INSPECTION_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 1_500;
 
 function valueAfter(flag, fallback = "") {
   const index = process.argv.indexOf(flag);
@@ -46,6 +49,10 @@ export function validateTargetUrl(rawUrl, allowedSites) {
   return url.origin;
 }
 
+export function shouldRetryBrowserIssues(issues, attempt, maxAttempts = MAX_INSPECTION_ATTEMPTS) {
+  return issues.length > 0 && attempt < maxAttempts;
+}
+
 export function evaluateBrowserResult(result) {
   const issues = [];
   if (result.httpStatus !== 200) issues.push(`HTTP_${result.httpStatus}`);
@@ -69,7 +76,7 @@ function isFatalConsoleError(message) {
   ].some((pattern) => pattern.test(message));
 }
 
-async function inspectPage(browser, { label, url, evidenceDirectory }) {
+async function inspectPage(browser, { label, url, evidenceDirectory, attempt }) {
   const pageErrors = [];
   const fatalConsoleErrors = [];
   const failedResources = [];
@@ -147,7 +154,7 @@ async function inspectPage(browser, { label, url, evidenceDirectory }) {
   }
 
   await page.screenshot({
-    path: path.join(evidenceDirectory, `${label}.png`),
+    path: path.join(evidenceDirectory, `${label}-attempt-${attempt}.png`),
     fullPage: true,
   }).catch((error) => {
     pageErrors.push(`SCREENSHOT_FAILED:${sanitizeMessage(error)}`);
@@ -157,6 +164,7 @@ async function inspectPage(browser, { label, url, evidenceDirectory }) {
   const result = {
     label,
     url,
+    attempt,
     httpStatus,
     rootVisible,
     rootChildCount,
@@ -168,6 +176,35 @@ async function inspectPage(browser, { label, url, evidenceDirectory }) {
     failedResources,
   };
   return { ...result, issues: evaluateBrowserResult(result) };
+}
+
+async function inspectTargetWithRetry(browser, target, evidenceDirectory) {
+  const attempts = [];
+  for (let attempt = 1; attempt <= MAX_INSPECTION_ATTEMPTS; attempt += 1) {
+    const result = await inspectPage(browser, {
+      ...target,
+      evidenceDirectory,
+      attempt,
+    });
+    attempts.push(result);
+    if (!shouldRetryBrowserIssues(result.issues, attempt)) break;
+    console.warn(
+      `${target.label}: browser check attempt ${attempt} failed (${result.issues.join(", ")}); retrying once.`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+  }
+
+  const finalResult = attempts.at(-1);
+  if (!finalResult) throw new Error(`BROWSER_CHECK_NO_RESULT:${target.label}`);
+  await copyFile(
+    path.join(evidenceDirectory, `${target.label}-attempt-${finalResult.attempt}.png`),
+    path.join(evidenceDirectory, `${target.label}.png`),
+  ).catch(() => undefined);
+  return {
+    ...finalResult,
+    attemptCount: attempts.length,
+    attempts,
+  };
 }
 
 async function main() {
@@ -192,14 +229,14 @@ async function main() {
   try {
     results = [];
     for (const target of targets) {
-      results.push(await inspectPage(browser, { ...target, evidenceDirectory }));
+      results.push(await inspectTargetWithRetry(browser, target, evidenceDirectory));
     }
   } finally {
     await browser.close();
   }
 
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     checkedAt: new Date().toISOString(),
     results,
     passed: results.every((result) => result.issues.length === 0),
@@ -213,7 +250,8 @@ async function main() {
   for (const result of results) {
     console.log(
       `${result.label}: HTTP ${result.httpStatus}, root children ${result.rootChildCount}, ` +
-      `navigation ${result.navigationDurationMs}ms, issues ${result.issues.length}`,
+      `navigation ${result.navigationDurationMs}ms, issues ${result.issues.length}, ` +
+      `attempts ${result.attemptCount}`,
     );
   }
   if (!report.passed) throw new Error("BROWSER_CHECK_FAILED");

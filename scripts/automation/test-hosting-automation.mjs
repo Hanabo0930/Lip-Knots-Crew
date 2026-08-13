@@ -27,6 +27,7 @@ import {
 } from "./resolve-hosting-channel.mjs";
 import {
   evaluateBrowserResult,
+  shouldRetryBrowserIssues,
   validateTargetUrl,
 } from "./hosting-browser-check.mjs";
 import {
@@ -312,6 +313,12 @@ const passingBrowserResult = {
   failedResources: [],
 };
 assert.deepEqual(evaluateBrowserResult(passingBrowserResult), []);
+cases += 1;
+assert.equal(shouldRetryBrowserIssues([], 1), false);
+cases += 1;
+assert.equal(shouldRetryBrowserIssues(["ROOT_NOT_MOUNTED"], 1), true);
+cases += 1;
+assert.equal(shouldRetryBrowserIssues(["ROOT_NOT_MOUNTED"], 2), false);
 cases += 1;
 assert.ok(
   evaluateBrowserResult({

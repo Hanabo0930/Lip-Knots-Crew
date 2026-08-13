@@ -99,6 +99,11 @@ assert.match(
   promoteWorkflow,
   /- name: Verify both live staging apps after rollback[\s\S]*?if: always\(\) && steps\.rollback\.outputs\.attempted == 'true'/u,
 );
+assert.match(
+  promoteWorkflow,
+  /steps\.promotion\.outcome }}\" == \"skipped\"[\s\S]*?HOSTING_PROMOTION_RESULT=STOPPED_SAFELY[\s\S]*?steps\.promotion\.outcome }}\" != \"success\"/u,
+  "A pre-promotion failure must be reported as safely stopped before rollback classification",
+);
 cases += 1;
 
 const restoreOptions = {

@@ -101,7 +101,12 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .submission-confirmation span { line-height:1.5; }
 .upload-box { border:2px dashed #e1c7d0; background:#fff7fa; border-radius:16px; padding:18px; margin:14px 0; }
 .upload-box small { display:block; color:#806f68; margin-top:8px; }
-.contact-button { width:100%; margin-bottom:10px; }
+.contact-panel>p { color:#806f68; }
+.contact-actions { display:grid; gap:10px; }
+.contact-button { width:100%; min-height:48px; display:flex; align-items:center; justify-content:center; border:1px solid #e5ded8; border-radius:14px; padding:13px 16px; background:#fff; color:#5f4b44; font-weight:800; text-decoration:none; }
+.contact-button:focus-visible { outline:3px solid rgba(201,127,152,.35); outline-offset:2px; }
+.contact-details { display:grid; gap:5px; margin-top:16px; color:#806f68; font-size:13px; }
+.contact-details a { color:#9d4c68; font-weight:800; }
 .bottom-nav { position:fixed; bottom:0; left:50%; transform:translateX(-50%); width:min(980px,100%); display:grid; grid-template-columns:repeat(5,1fr); background:rgba(255,255,255,.96); border-top:1px solid #eadfe2; z-index:40; }
 .bottom-nav button { border-radius:0; background:white; color:#806f68; padding:10px 4px; font-size:11px; }
 .bottom-nav button span { display:block; font-size:19px; margin-bottom:2px; }

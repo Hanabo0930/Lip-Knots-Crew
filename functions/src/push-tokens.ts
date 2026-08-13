@@ -129,7 +129,7 @@ export const getPushStatus = onCall(async (request) => {
   const data = queue.data() ?? {};
   if (
     data.companyId !== companyFromClaims(session.token) ||
-    data.targetUid !== session.uid ||
+    data.data?.requestedByUid !== session.uid ||
     (data.category !== "push_test" && data.category !== "push_test_admin")
   ) {
     throw new HttpsError("permission-denied", "通知テストを確認できません。");
@@ -153,27 +153,28 @@ export const sendTestPush = onCall(async (request) => {
   const role = String(session.token.role ?? "");
   let result: { queued: boolean; queueId: string };
   if (role === "staff") {
-    staffFromClaims(session.token);
     result = await enqueueNotification({
       companyId,
-      targetUid: session.uid,
+      targetStaffId: staffFromClaims(session.token),
       title: "通知テスト",
       body: "Lip Knots Crewから通知を受け取れます。",
       route: "/",
       category: "push_test",
       dedupeKey: `${session.uid}_${Date.now()}`,
       bypassQuietHours: true,
+      data: { requestedByUid: session.uid },
     });
   } else if (role === "admin") {
     result = await enqueueNotification({
       companyId,
-      targetUid: session.uid,
+      targetRole: "admin",
       title: "管理者通知テスト",
       body: "Lip Knots Crewの管理通知を受け取れます。",
       route: "/",
       category: "push_test_admin",
       dedupeKey: `${session.uid}_${Date.now()}`,
       bypassQuietHours: true,
+      data: { requestedByUid: session.uid },
     });
   } else {
     throw new HttpsError("permission-denied", "通知テストを実行できません。");

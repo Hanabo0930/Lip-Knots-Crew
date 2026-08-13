@@ -23,6 +23,18 @@ const RemoveSchema = z.object({
   token: z.string().min(30).max(4096),
 });
 
+const PushStatusSchema = z.object({
+  queueId: z.string().regex(/^nq_[a-f0-9]{36}$/).optional(),
+});
+
+const TERMINAL_PUSH_STATUSES = new Set([
+  "completed",
+  "partial",
+  "no_tokens",
+  "error",
+  "paused_global",
+]);
+
 export const registerPushToken = onCall(async (request) => {
   const session = requireAuth(request);
   const input = TokenSchema.parse(request.data ?? {});
@@ -82,12 +94,24 @@ export const unregisterPushToken = onCall(async (request) => {
 
 export const getPushStatus = onCall(async (request) => {
   const session = requireAuth(request);
+  const input = PushStatusSchema.parse(request.data ?? {});
   const snap = await db.collection("pushTokens")
     .where("uid", "==", session.uid)
     .where("active", "==", true)
     .limit(20)
     .get();
-  return {
+  const response: {
+    enabled: boolean;
+    tokens: { id: string; deviceSessionId: string; platform: string }[];
+    test?: {
+      queueId: string;
+      status: string;
+      finished: boolean;
+      successCount: number;
+      failureCount: number;
+      invalidTokenCount: number;
+    };
+  } = {
     enabled: !snap.empty,
     tokens: snap.docs.map((doc) => ({
       id: doc.id,
@@ -95,6 +119,31 @@ export const getPushStatus = onCall(async (request) => {
       platform: doc.data().platform ?? "",
     })),
   };
+
+  if (!input.queueId) return response;
+
+  const queue = await db.collection("notificationQueue").doc(input.queueId).get();
+  if (!queue.exists) {
+    throw new HttpsError("not-found", "通知テストを確認できません。");
+  }
+  const data = queue.data() ?? {};
+  if (
+    data.companyId !== companyFromClaims(session.token) ||
+    data.data?.requestedByUid !== session.uid ||
+    (data.category !== "push_test" && data.category !== "push_test_admin")
+  ) {
+    throw new HttpsError("permission-denied", "通知テストを確認できません。");
+  }
+  const status = String(data.status ?? "queued");
+  response.test = {
+    queueId: input.queueId,
+    status,
+    finished: TERMINAL_PUSH_STATUSES.has(status),
+    successCount: Number(data.successCount ?? 0),
+    failureCount: Number(data.failureCount ?? 0),
+    invalidTokenCount: Number(data.invalidTokenCount ?? 0),
+  };
+  return response;
 });
 
 export const sendTestPush = onCall(async (request) => {
@@ -102,8 +151,9 @@ export const sendTestPush = onCall(async (request) => {
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
   const role = String(session.token.role ?? "");
+  let result: { queued: boolean; queueId: string };
   if (role === "staff") {
-    await enqueueNotification({
+    result = await enqueueNotification({
       companyId,
       targetStaffId: staffFromClaims(session.token),
       title: "通知テスト",
@@ -112,9 +162,10 @@ export const sendTestPush = onCall(async (request) => {
       category: "push_test",
       dedupeKey: `${session.uid}_${Date.now()}`,
       bypassQuietHours: true,
+      data: { requestedByUid: session.uid },
     });
   } else if (role === "admin") {
-    await enqueueNotification({
+    result = await enqueueNotification({
       companyId,
       targetRole: "admin",
       title: "管理者通知テスト",
@@ -123,11 +174,12 @@ export const sendTestPush = onCall(async (request) => {
       category: "push_test_admin",
       dedupeKey: `${session.uid}_${Date.now()}`,
       bypassQuietHours: true,
+      data: { requestedByUid: session.uid },
     });
   } else {
     throw new HttpsError("permission-denied", "通知テストを実行できません。");
   }
-  return { queued: true };
+  return result;
 });
 
 function hashToken(token: string): string {

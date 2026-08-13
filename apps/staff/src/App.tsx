@@ -1,7 +1,7 @@
 import { CSSProperties, useEffect, useMemo, useState } from "react";
 import {
   getIdTokenResult, isSignInWithEmailLink, onAuthStateChanged,
-  signInWithCustomToken, signInWithEmailLink, signOut, User,
+  signInWithEmailLink, signOut, User,
 } from "firebase/auth";
 import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
@@ -190,12 +190,12 @@ export default function App(){
       if(!firebaseConfigured){setMessage("デモ：確認コードでログインしました。");return;}
       if(!functions||!auth)return;
       const activeAuth=auth;
-      const callable=httpsCallable<{email:string;code:string},{customToken:string}>(functions,"requestStaffLoginLink");
+      const callable=httpsCallable<{email:string;code:string},{emailActionLink:string}>(functions,"requestStaffLoginLink");
       const result=await callable({email,code});
-      const customToken=result.data.customToken;
-      if(!customToken)throw new Error("ログイン情報を確認できません。");
+      const emailActionLink=result.data.emailActionLink;
+      if(!emailActionLink||!isSignInWithEmailLink(activeAuth,emailActionLink))throw new Error("ログイン情報を確認できません。");
       await authPersistenceReady;
-      await signInWithCustomToken(activeAuth,customToken);
+      await signInWithEmailLink(activeAuth,email,emailActionLink);
       setLoginCode("");
       setMessage("ログインしました。");
     },{setMessage});

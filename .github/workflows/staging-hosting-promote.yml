@@ -287,6 +287,10 @@ jobs:
       - name: Enforce the final result
         if: always()
         run: |
+          if [[ "${{ steps.promotion.outcome }}" == "skipped" ]]; then
+            echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
+            exit 1
+          fi
           if [[ "${{ steps.promotion.outcome }}" != "success" || "${{ steps.live_check.outcome }}" != "success" ]]; then
             if [[ "${{ steps.rollback.outcome }}" != "success" || "${{ steps.rollback_check.outcome }}" != "success" ]]; then
               echo "HOSTING_PROMOTION_RESULT=ROLLBACK_FAILED"

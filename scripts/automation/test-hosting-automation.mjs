@@ -101,7 +101,7 @@ assert.match(
 );
 assert.match(
   promoteWorkflow,
-  /steps\.promotion\.outcome }}\" == \"skipped\"[\s\S]*?HOSTING_PROMOTION_RESULT=STOPPED_SAFELY[\s\S]*?steps\.promotion\.outcome }}\" != \"success\"/u,
+  /steps\.promotion\.outcome \}\}\" == \"skipped\"[\s\S]*?HOSTING_PROMOTION_RESULT=STOPPED_SAFELY[\s\S]*?steps\.promotion\.outcome \}\}\" != \"success\"/u,
   "A pre-promotion failure must be reported as safely stopped before rollback classification",
 );
 cases += 1;

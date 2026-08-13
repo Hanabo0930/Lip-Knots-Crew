@@ -9,6 +9,15 @@ export type PushResult = {
   message: string;
 };
 
+export type PushTestStatus = {
+  queueId: string;
+  status: string;
+  finished: boolean;
+  successCount: number;
+  failureCount: number;
+  invalidTokenCount: number;
+};
+
 export function currentPushPermission(): NotificationPermission | "unsupported" {
   return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
 }
@@ -68,9 +77,21 @@ export async function loadServerPushStatus(functions: Functions): Promise<boolea
   return (response.data as { enabled?: boolean }).enabled === true;
 }
 
-export async function requestTestPush(functions: Functions): Promise<void> {
+export async function requestTestPush(functions: Functions): Promise<string> {
   const callable = httpsCallable(functions, "sendTestPush");
-  await callable({});
+  const response = await callable({});
+  const queueId = String((response.data as { queueId?: string }).queueId ?? "");
+  if (!queueId) throw new Error("通知テストの受付結果を確認できません。");
+  return queueId;
+}
+
+export async function loadTestPushStatus(
+  functions: Functions,
+  queueId: string
+): Promise<PushTestStatus | null> {
+  const callable = httpsCallable(functions, "getPushStatus");
+  const response = await callable({ queueId });
+  return (response.data as { test?: PushTestStatus }).test ?? null;
 }
 
 export async function listenForForegroundPush(

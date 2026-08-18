@@ -74,6 +74,7 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .task-card span { color:#806f68; font-size:13px; }
 .task-card.urgent { background:#fff3df; border-color:#efd2a8; }
 .task-card.overdue { background:#fdeceb; border-color:#efc1bd; }
+.task-list-toggle { width:100%; margin-top:2px; }
 .netprint-row { display:flex; justify-content:space-between; align-items:center; gap:12px; border:1px solid #eadfe2; border-radius:14px; padding:12px; margin-bottom:8px; }
 .submission-actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
 .sales-floor-button { background:#4f91c7; }

@@ -86,6 +86,7 @@ export default function App(){
   const [deviceSessionId,setDeviceSessionId]=useState(""); const [devices,setDevices]=useState<DeviceSession[]>([]); const [showDevices,setShowDevices]=useState(false);
   const currentDeviceId=useMemo(()=>getOrCreateDeviceId(),[]);
   const [pushEnabled,setPushEnabled]=useState(false);
+  const [showAllTasks,setShowAllTasks]=useState(false);
   const [submissionHistory,setSubmissionHistory]=useState<SubmissionGroup[]>([]);
   const [resubmissionDetail,setResubmissionDetail]=useState<ResubmissionDetail|null>(null);
   const [processingSubmission,setProcessingSubmission]=useState(false);
@@ -173,6 +174,7 @@ export default function App(){
     };
   },[user,deviceSessionId]);
   useEffect(()=>{ if(!user)return; let unsub:(()=>void)|null=null; void listenForForegroundPush(payload=>setMessage(`${payload.data?.title??"Lip Knots Crew"}：${payload.data?.body??"新しいお知らせがあります。"}`)).then(v=>unsub=v); return()=>unsub?.(); },[user]);
+  useEffect(()=>{if(tasks.length<=5)setShowAllTasks(false);},[tasks.length]);
 
   async function loadAll(sid=staffId){ await Promise.all([loadOpenJobs(),loadMyJobs(sid),loadTasks()]); }
   async function loadOpenJobs(){ if(!db)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==","lipknots"),where("status","==","open"),orderBy("dateKey","asc"),limit(100))); setOpenJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); }
@@ -338,7 +340,7 @@ export default function App(){
       if(!functions)return;
       await httpsCallable(functions,"markNetPrintPrinted")({jobId:selectedJob.id,itemId:item.id});
       setMessage("印刷済みにしました。");
-      await refreshSelectedJob(selectedJob.id);
+      await Promise.all([refreshSelectedJob(selectedJob.id),loadTasks()]);
     },{setMessage});
   }
 
@@ -363,6 +365,7 @@ export default function App(){
         if(!functions)return;
         await httpsCallable(functions,"setSalesFloorClientSubmitted")({jobId:selectedJob.id,submitted:value});
         setMessage(value?"クライアント提出済みにしました。":"クライアント提出を解除しました。");
+        await Promise.all([refreshSelectedJob(selectedJob.id),loadTasks()]);
       },{setMessage});
     }catch{
       setSelectedJob(previous);
@@ -384,9 +387,8 @@ export default function App(){
         const data=response.data as {status:string;completedFiles:number;totalFiles:number;errorMessage:string|null};
         if(data.status==="completed"){
           showSubmissionMessage("Driveへの保存が完了しました。");
-          await loadSubmissionHistory(jobId,type);
+          await Promise.all([loadSubmissionHistory(jobId,type),refreshSelectedJob(jobId),loadTasks()]);
           if(resubmissionRequestId)await loadResubmissionDetail(resubmissionRequestId);
-          await refreshSelectedJob(jobId);
           return;
         }
         if(data.status==="error"){
@@ -476,9 +478,12 @@ export default function App(){
   async function chooseSubmission(type:SubmissionType,job:Job,req=""){const assignedJob=myJobs.find(candidate=>candidate.id===job.id);if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");setView("shifts");return;}setSelectedJob(assignedJob);setSubmissionType(type);setRequestId(req);setSubmissionConfirmed(false);setSubmissionMessage("");setFiles([]);setResubmissionDetail(null);await loadSubmissionHistory(assignedJob.id,type);if(req)await loadResubmissionDetail(req);setView("submit");}
 
   const activeJob=selectedAssignedJob??myJobs[0]??null;
+  const visibleTasks=showAllTasks?tasks:tasks.slice(0,5);
   const title=useMemo(()=>firebaseConfigured?"Lip Knots Crew":"Lip Knots Crew（デモ）",[]);
   const taskSummary=businessDataStatus==="ready"
-    ? tasks.length?`重要な${Math.min(tasks.length,5)}件を表示しています。`:"今日の対応はすべて完了しています。"
+    ? tasks.length
+      ? showAllTasks&&tasks.length>5?`未対応${tasks.length}件をすべて表示しています。`:`重要な${Math.min(tasks.length,5)}件を表示しています。`
+      : "今日の対応はすべて完了しています。"
     : businessDataStatus==="loading"?"業務データを読み込んでいます…":"業務データを確認できません。";
   const businessDataFallback=businessDataStatus==="loading"
     ? <div className="empty">業務データを読み込んでいます…</div>
@@ -493,7 +498,7 @@ export default function App(){
     {message&&<div className="message">{message}</div>}
     {view==="home"&&<>
       <section className="panel push-panel"><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span></div><div className="push-actions">{!pushEnabled?<button onClick={()=>void enablePush()} disabled={isPending("push-enable")}>{isPending("push-enable")?"処理中…":"通知を有効にする"}</button>:<><button className="secondary" onClick={()=>void requestPushTest()} disabled={isPending("push-test")}>{isPending("push-test")?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={isPending("push-disable")}>{isPending("push-disable")?"処理中…":"通知OFF"}</button></>}</div></section>
-      <section className="hero-card"><h2>今日やること</h2><p>{taskSummary}</p><div className="task-list">{businessDataFallback??<>{tasks.slice(0,5).map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{!tasks.length&&<div className="empty">未対応はありません。</div>}</>}</div></section>
+      <section className="hero-card"><h2>今日やること</h2><p>{taskSummary}</p><div className="task-list">{businessDataFallback??<>{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{!tasks.length&&<div className="empty">未対応はありません。</div>}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</>}</div></section>
       <section><h2>次回シフト</h2>{businessDataFallback??(activeJob?<article className="job shift-job" style={{"--job-accent":jobAccent(activeJob.menuName)} as CSSProperties}><span className="date">{activeJob.workDate||activeJob.dateKey}</span><span className="job-kind">{jobKind(activeJob.menuName)}</span><h3>{activeJob.storeName}</h3><p>{activeJob.makerName} / {activeJob.menuName}</p><span className="prep-chip">{prepSummary(activeJob)}</span><button onClick={()=>{setSelectedJob(activeJob);setView("shifts")}}>シフトを開く</button></article>:<div className="empty">確定シフトはありません。</div>)}</section>
     </>}
     {view==="jobs"&&<section><h2>募集中の案件</h2>{businessDataFallback??<div className="grid">{openJobs.map(job=><article className="job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong><div className="actions"><button className="secondary" onClick={()=>setMessage(`${job.storeName} / ${job.makerName} / ${job.workTime}`)}>詳細</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>)}</div>}</section>}

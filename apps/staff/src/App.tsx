@@ -74,7 +74,7 @@ function completeEmailLinkSignIn(url:string,email:string):Promise<void>{
 
 export default function App(){
   const { isPending, run } = useAsyncAction();
-  const [user,setUser]=useState<User|null>(null); const [staffId,setStaffId]=useState("");
+  const [user,setUser]=useState<User|null>(null); const [companyId,setCompanyId]=useState(""); const [staffId,setStaffId]=useState("");
   const [email,setEmail]=useState(localStorage.getItem("lkcEmail")??""); const [loginCode,setLoginCode]=useState(""); const [message,setMessage]=useState("");
   const [view,setView]=useState<View>("home"); const [openJobs,setOpenJobs]=useState<Job[]>(firebaseConfigured?[]:demoJobs);
   const [myJobs,setMyJobs]=useState<Job[]>(firebaseConfigured?[]:demoJobs); const [tasks,setTasks]=useState<StaffTask[]>(firebaseConfigured?[]:demoTasks);
@@ -103,7 +103,7 @@ export default function App(){
     setUser(current);
     setAuthResolved(true);
     if(firebaseConfigured){
-      setStaffId(""); setMyJobs([]); setTasks([]); setSelectedJob(null);
+      setCompanyId(""); setStaffId(""); setMyJobs([]); setTasks([]); setSelectedJob(null);
       setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionMessage("");
       setBusinessDataStatus(current?"loading":"idle");
     }
@@ -111,13 +111,16 @@ export default function App(){
     try{
       const bootstrap=httpsCallable(functions,"bootstrapSession"); const result=await bootstrap();
       if((result.data as {refreshToken?:boolean}).refreshToken)await current.getIdToken(true);
-      const token=await getIdTokenResult(current); const sid=String(token.claims.staffId??""); setStaffId(sid);
+      const token=await getIdTokenResult(current);
+      const cid=String(token.claims.companyId??""); const sid=String(token.claims.staffId??"");
+      if(!cid||!sid)throw new Error("スタッフの所属情報を確認できません。");
+      setCompanyId(cid); setStaffId(sid);
       try{
         await registerCurrentDevice();
       }catch{
         setMessage("端末情報を登録できませんでした。再読み込みしてください。");
       }
-      await loadAll(sid);
+      await loadAll(sid,cid);
       setBusinessDataStatus("ready");
       try{
         setPushEnabled(await loadServerPushStatus(functions));
@@ -176,9 +179,9 @@ export default function App(){
   useEffect(()=>{ if(!user)return; let unsub:(()=>void)|null=null; void listenForForegroundPush(payload=>setMessage(`${payload.data?.title??"Lip Knots Crew"}：${payload.data?.body??"新しいお知らせがあります。"}`)).then(v=>unsub=v); return()=>unsub?.(); },[user]);
   useEffect(()=>{if(tasks.length<=5)setShowAllTasks(false);},[tasks.length]);
 
-  async function loadAll(sid=staffId){ await Promise.all([loadOpenJobs(),loadMyJobs(sid),loadTasks()]); }
-  async function loadOpenJobs(){ if(!db)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==","lipknots"),where("status","==","open"),orderBy("dateKey","asc"),limit(100))); setOpenJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); }
-  async function loadMyJobs(sid:string){ if(!db||!sid)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==","lipknots"),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=snap.docs.map(d=>({id:d.id,...d.data()} as Job)); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??values[0]??null); }
+  async function loadAll(sid=staffId,cid=companyId){ await Promise.all([loadOpenJobs(cid),loadMyJobs(sid,cid),loadTasks()]); }
+  async function loadOpenJobs(cid=companyId){ if(!db||!cid)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("status","==","open"),orderBy("dateKey","asc"),limit(100))); setOpenJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); }
+  async function loadMyJobs(sid=staffId,cid=companyId){ if(!db||!sid||!cid)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=snap.docs.map(d=>({id:d.id,...d.data()} as Job)); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??values[0]??null); }
   async function loadTasks(){ if(!functions)return; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); setTasks((r.data as {tasks?:StaffTask[]}).tasks??[]); }
   function showSubmissionMessage(value:string){setMessage(value);setSubmissionMessage(value);}
 

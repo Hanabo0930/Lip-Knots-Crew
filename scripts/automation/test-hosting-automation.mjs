@@ -68,6 +68,11 @@ for (const [workflowPath, evidenceFolder] of [
     ),
     `${workflowPath} must initialize its evidence directory at runtime`,
   );
+  assert.match(
+    workflow,
+    /http:\/\/azure\.archive\.ubuntu\.com\/ubuntu#https:\/\/archive\.ubuntu\.com\/ubuntu/u,
+    `${workflowPath} must avoid the unreliable runner-local Azure Ubuntu mirror`,
+  );
   cases += 1;
 }
 

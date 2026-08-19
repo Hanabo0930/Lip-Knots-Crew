@@ -158,6 +158,13 @@ jobs:
             --staff-channels-json "$RUNNER_TEMP/lkc-staff-channels.json" \
             --admin-channels-json "$RUNNER_TEMP/lkc-admin-channels.json" \
             --github-output "$GITHUB_OUTPUT"
+      - name: Prefer the HTTPS Ubuntu package mirror
+        run: |
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i \
+              's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
+              /etc/apt/apt-mirrors.txt
+          fi
       - name: Install the locked Chromium runtime
         working-directory: source
         run: npx playwright install --with-deps chromium

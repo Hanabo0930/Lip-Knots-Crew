@@ -5,11 +5,10 @@ import { db, messaging } from "./firebase";
 import { tokyoParts } from "./notification-time";
 import { getProductionOperationalState } from "./system-safety";
 import { incrementProductionMetrics } from "./production-metrics";
-
-const INVALID_TOKEN_CODES = new Set([
-  "messaging/registration-token-not-registered",
-  "messaging/invalid-registration-token",
-]);
+import {
+  classifyPushFailureCodes,
+  isInvalidPushTokenCode,
+} from "./push-delivery";
 
 type QueueData = {
   companyId: string;
@@ -130,6 +129,7 @@ async function dispatchQueueDocument(
     let successCount = 0;
     let failureCount = 0;
     const invalidTokenIds: string[] = [];
+    const failureCodeCounts: Record<string, number> = {};
 
     for (let index = 0; index < tokens.length; index += 500) {
       const chunk = tokens.slice(index, index + 500);
@@ -152,7 +152,11 @@ async function dispatchQueueDocument(
       failureCount += result.failureCount;
       result.responses.forEach((response, responseIndex) => {
         const code = response.error?.code ?? "";
-        if (!response.success && INVALID_TOKEN_CODES.has(code)) {
+        if (!response.success) {
+          const safeCode = code || "messaging/unknown-error";
+          failureCodeCounts[safeCode] = (failureCodeCounts[safeCode] ?? 0) + 1;
+        }
+        if (!response.success && isInvalidPushTokenCode(code)) {
           const item = chunk[responseIndex];
           if (item) invalidTokenIds.push(item.id);
         }
@@ -176,6 +180,8 @@ async function dispatchQueueDocument(
       successCount,
       failureCount,
       invalidTokenCount: invalidTokenIds.length,
+      failureReason: classifyPushFailureCodes(Object.keys(failureCodeCounts)),
+      failureCodeCounts,
       completedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });

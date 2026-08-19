@@ -169,6 +169,11 @@ jobs:
       - name: Re-check both preview apps before any live change
         working-directory: source
         run: |
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i \
+              's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
+              /etc/apt/apt-mirrors.txt
+          fi
           npx playwright install --with-deps chromium
           node scripts/automation/hosting-browser-check.mjs \
             --staff-url "${{ steps.channel.outputs.staff_url }}" \

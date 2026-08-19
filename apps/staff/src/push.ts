@@ -16,6 +16,14 @@ export type PushTestStatus = {
   successCount: number;
   failureCount: number;
   invalidTokenCount: number;
+  failureReason:
+    | "none"
+    | "invalid_token"
+    | "sender_mismatch"
+    | "service_auth"
+    | "rate_limited"
+    | "temporary"
+    | "unknown";
 };
 
 export function currentPushPermission(): NotificationPermission | "unsupported" {
@@ -69,6 +77,36 @@ export async function disablePushNotifications(
     await deleteToken(messaging);
   }
   return { enabled:false, permission:currentPushPermission(), message:"この端末の通知を無効にしました。" };
+}
+
+export async function refreshPushNotifications(
+  functions: Functions,
+  deviceSessionId = ""
+): Promise<PushResult> {
+  if (!('serviceWorker' in navigator) || currentPushPermission() !== "granted") {
+    return {
+      enabled: false,
+      permission: currentPushPermission(),
+      message: "端末の通知許可を確認してください。",
+    };
+  }
+  const messaging = await getClientMessaging();
+  if (!messaging) {
+    return { enabled:false, permission:"unsupported", message:"このブラウザでは通知を利用できません。" };
+  }
+  const vapidKey = import.meta.env.VITE_FIREBASE_VAPID_KEY;
+  if (!vapidKey) throw new Error("VITE_FIREBASE_VAPID_KEYが未設定です。");
+  const registration = await navigator.serviceWorker.ready;
+  const previousToken = await getToken(messaging, {
+    vapidKey,
+    serviceWorkerRegistration: registration,
+  });
+  if (previousToken) {
+    const unregister = httpsCallable(functions, "unregisterPushToken");
+    await unregister({ token: previousToken }).catch(() => undefined);
+  }
+  await deleteToken(messaging);
+  return enablePushNotifications(functions, deviceSessionId);
 }
 
 export async function loadServerPushStatus(functions: Functions): Promise<boolean> {

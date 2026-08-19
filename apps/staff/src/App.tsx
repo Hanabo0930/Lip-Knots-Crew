@@ -10,7 +10,8 @@ import { auth, authPersistenceReady, db, firebaseConfigured, functions, storage 
 import { clearDraft, loadDraft, saveDraft } from "./draft-store";
 import {
   currentPushPermission, disablePushNotifications, enablePushNotifications,
-  listenForForegroundPush, loadServerPushStatus, loadTestPushStatus, requestTestPush,
+  listenForForegroundPush, loadServerPushStatus, loadTestPushStatus, refreshPushNotifications,
+  requestTestPush, type PushTestStatus,
 } from "./push";
 import SubmissionPreviewImage, { type PreviewFile } from "./SubmissionPreviewImage";
 import { sleep, useAsyncAction } from "./useAsyncAction";
@@ -286,30 +287,43 @@ export default function App(){
   async function requestPushTest(){
     if(isPending("push-test")||!functions)return;
     await run("push-test",async()=>{
-      const queueId=await requestTestPush(functions!);
-      setMessage("テスト通知を処理しています…");
-      const started=Date.now();
-      let delay=400;
-      while(Date.now()-started<15_000){
-        const test=await loadTestPushStatus(functions!,queueId);
-        if(test?.finished){
-          if(test.status==="completed"&&test.successCount>0){
-            setMessage(`通知サービスへの送信に成功しました（対象${test.successCount}台）。端末に表示されたか確認してください。`);
-          }else if(test.status==="partial"){
-            setMessage(`通知サービスへの送信結果：成功${test.successCount}台・失敗${test.failureCount}台。端末設定を確認してください。`);
-          }else if(test.status==="no_tokens"){
-            setPushEnabled(false);
-            setMessage("有効な通知端末が見つかりません。通知をいったんOFFにして、もう一度有効にしてください。");
-          }else{
-            setMessage("通知サービスへ送信できませんでした。少し待ってから再度お試しください。");
-          }
-          return;
-        }
-        await sleep(delay);
-        delay=Math.min(Math.round(delay*1.5),2000);
+      let test=await submitAndWaitForPushTest();
+      if(test?.finished&&(test.invalidTokenCount>0||test.failureReason==="invalid_token")){
+        setMessage("古い通知登録を検出しました。端末を自動で再登録しています…");
+        const refreshed=await refreshPushNotifications(functions!,deviceSessionId);
+        setPushEnabled(refreshed.enabled);
+        if(!refreshed.enabled){setMessage(refreshed.message);return;}
+        test=await submitAndWaitForPushTest();
       }
-      setMessage("通知はバックグラウンドで処理中です。少し待って端末表示を確認してください。");
+      if(!test){
+        setMessage("通知はバックグラウンドで処理中です。少し待って端末表示を確認してください。");
+      }else if(test.status==="completed"&&test.successCount>0){
+        setMessage(`通知サービスへの送信に成功しました（対象${test.successCount}台）。端末に表示されたか確認してください。`);
+      }else if(test.status==="no_tokens"){
+        setPushEnabled(false);
+        setMessage("有効な通知端末が見つかりません。通知をもう一度有効にしてください。");
+      }else if(test.failureReason==="sender_mismatch"||test.failureReason==="service_auth"){
+        setMessage("端末ではなく通知サービス側の設定エラーです。運営側で設定を確認します。");
+      }else if(test.failureReason==="rate_limited"||test.failureReason==="temporary"){
+        setMessage("通知サービスが一時的に混み合っています。少し待ってから再度お試しください。");
+      }else{
+        setMessage(`通知サービスへの送信結果：成功${test.successCount}台・失敗${test.failureCount}台。運営側で原因を確認します。`);
+      }
     },{setMessage});
+  }
+
+  async function submitAndWaitForPushTest():Promise<PushTestStatus|null>{
+    const queueId=await requestTestPush(functions!);
+    setMessage("テスト通知を処理しています…");
+    const started=Date.now();
+    let delay=400;
+    while(Date.now()-started<15_000){
+      const test=await loadTestPushStatus(functions!,queueId);
+      if(test?.finished)return test;
+      await sleep(delay);
+      delay=Math.min(Math.round(delay*1.5),2000);
+    }
+    return null;
   }
 
   async function apply(job:Job){

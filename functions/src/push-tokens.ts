@@ -10,6 +10,10 @@ import {
 } from "./utils";
 import { enqueueNotification } from "./notification-core";
 import { assertProductionOperational } from "./system-safety";
+import {
+  normalizePushFailureReason,
+  type PushFailureReason,
+} from "./push-delivery";
 
 const TokenSchema = z.object({
   token: z.string().min(30).max(4096),
@@ -110,6 +114,7 @@ export const getPushStatus = onCall(async (request) => {
       successCount: number;
       failureCount: number;
       invalidTokenCount: number;
+      failureReason: PushFailureReason;
     };
   } = {
     enabled: !snap.empty,
@@ -142,6 +147,7 @@ export const getPushStatus = onCall(async (request) => {
     successCount: Number(data.successCount ?? 0),
     failureCount: Number(data.failureCount ?? 0),
     invalidTokenCount: Number(data.invalidTokenCount ?? 0),
+    failureReason: normalizePushFailureReason(data.failureReason),
   };
   return response;
 });

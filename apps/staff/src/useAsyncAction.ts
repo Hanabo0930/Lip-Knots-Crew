@@ -14,7 +14,10 @@ export function useAsyncAction() {
 
   const run = useCallback(async (key: string, action: () => Promise<void>, options?: RunOptions) => {
     if (pendingRef.current.has(key)) return;
-    setPendingKeys((current) => new Set(current).add(key));
+    const started = new Set(pendingRef.current);
+    started.add(key);
+    pendingRef.current = started;
+    setPendingKeys(started);
     try {
       await action();
       if (options?.successMessage) options.setMessage(options.successMessage);
@@ -23,11 +26,10 @@ export function useAsyncAction() {
       options?.setMessage(message);
       throw error;
     } finally {
-      setPendingKeys((current) => {
-        const next = new Set(current);
-        next.delete(key);
-        return next;
-      });
+      const finished = new Set(pendingRef.current);
+      finished.delete(key);
+      pendingRef.current = finished;
+      setPendingKeys(finished);
     }
   }, []);
 

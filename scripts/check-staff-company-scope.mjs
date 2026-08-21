@@ -18,8 +18,8 @@ assert.match(
 );
 assert.match(
   source,
-  /await loadAll\(sid,cid\)/u,
-  "Staff startup must scope its initial data load to the claimed company.",
+  /await loadPrimaryBusinessData\(sid,cid\)/u,
+  "Staff startup must scope its priority data load to the claimed company.",
 );
 assert.match(
   source,

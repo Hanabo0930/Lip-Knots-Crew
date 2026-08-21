@@ -115,6 +115,25 @@ export async function loadServerPushStatus(functions: Functions): Promise<boolea
   return (response.data as { enabled?: boolean }).enabled === true;
 }
 
+export async function loadServerPushStatusWithRetry(
+  functions: Functions,
+  attempts = 3
+): Promise<boolean> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await loadServerPushStatus(functions);
+    } catch (error) {
+      lastError = error;
+      const code = String((error as { code?: unknown }).code ?? "");
+      const retryable = !/(unauthenticated|permission-denied|invalid-argument)$/u.test(code);
+      if (!retryable || attempt === attempts - 1) break;
+      await new Promise((resolve) => window.setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
 export async function requestTestPush(functions: Functions): Promise<string> {
   const callable = httpsCallable(functions, "sendTestPush");
   const response = await callable({});

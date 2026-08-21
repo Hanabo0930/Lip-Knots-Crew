@@ -10,9 +10,14 @@ import { auth, authPersistenceReady, db, firebaseConfigured, functions, storage 
 import { clearDraft, loadDraft, saveDraft } from "./draft-store";
 import {
   currentPushPermission, disablePushNotifications, enablePushNotifications,
-  listenForForegroundPush, loadServerPushStatus, loadTestPushStatus, refreshPushNotifications,
+  listenForForegroundPush, loadServerPushStatusWithRetry, loadTestPushStatus, refreshPushNotifications,
   requestTestPush, type PushTestStatus,
 } from "./push";
+import {
+  formatDiagnosticReport,
+  runStaffDiagnostics,
+  type DiagnosticReport,
+} from "./diagnostics";
 import SubmissionPreviewImage, { type PreviewFile } from "./SubmissionPreviewImage";
 import { sleep, useAsyncAction } from "./useAsyncAction";
 
@@ -51,12 +56,14 @@ function getOrCreateDeviceId(){ const k="lkcDeviceId"; const v=localStorage.getI
 function deviceLabel(){ return `${/iPhone|iPad|Android/i.test(navigator.userAgent)?"モバイル":"PC"} / ${navigator.platform||"端末"}`; }
 const JOB_ACCENTS=["#d56f91","#5d91c9","#5aa583","#d28a46","#8a76c7","#bf6d62","#3e9ba4","#9b7a56"];
 const DEVICE_HEARTBEAT_INTERVAL_MS=5*60*1000;
+const PUSH_STATUS_REFRESH_INTERVAL_MS=60*1000;
 const CONTACT_EMAIL="info@lipknots.com";
 const CONTACT_PHONE="08037906064";
 const CONTACT_PHONE_LABEL="080-3790-6064";
 const CONTACT_FORM_URL="https://lipknots.com/contact/";
 const CONTACT_EMAIL_SUBJECT="Lip Knots Crewからのお問い合わせ";
 let emailLinkSignInAttempt:{url:string;task:Promise<void>}|null=null;
+let lastPushStatusRefreshAt=0;
 function jobAccent(menuName:string){let hash=0;for(const char of menuName||"案件")hash=((hash*31)+char.codePointAt(0)!)|0;return JOB_ACCENTS[Math.abs(hash)%JOB_ACCENTS.length]??JOB_ACCENTS[0];}
 function jobKind(menuName:string){return menuName.replace(/[（(].*$/u,"").trim()||"案件";}
 function mapDestination(job:Job){return [job.storeName,job.storeAddress].filter(Boolean).join(" ");}
@@ -64,6 +71,8 @@ function mapsSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=
 function transitRouteUrl(job:Job){return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(mapDestination(job))}&travelmode=transit`;}
 function stationSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.storeNearestStation??"")}`;}
 function prepSummary(job:Job){const items=job.netPrint?.items??[];const printed=items.filter(item=>item.printed).length;if(job.materialStatus)return job.materialStatus;if(!items.length)return"資料番号待ち";return printed===items.length?`準備完了（${printed}/${items.length}件）`:`準備中（${printed}/${items.length}件印刷済み）`;}
+function messageTone(value:string){if(/できません|失敗|エラー|拒否|見つかりません|必要です/u.test(value))return"error";if(/処理中|確認しています|読み込|送信中|転送中|待って/u.test(value))return"working";return"success";}
+function messageClassName(value:string){return `message ${messageTone(value)}`;}
 function completeEmailLinkSignIn(url:string,email:string):Promise<void>{
   if(!auth)return Promise.reject(new Error("ログイン設定を確認できません。"));
   const activeAuth=auth;
@@ -93,6 +102,10 @@ export default function App(){
   const [processingSubmission,setProcessingSubmission]=useState(false);
   const [authResolved,setAuthResolved]=useState(!firebaseConfigured);
   const [businessDataStatus,setBusinessDataStatus]=useState<BusinessDataStatus>(firebaseConfigured?"idle":"ready");
+  const [openJobsStatus,setOpenJobsStatus]=useState<BusinessDataStatus>(firebaseConfigured?"idle":"ready");
+  const [businessLoadMs,setBusinessLoadMs]=useState<number|null>(firebaseConfigured?null:0);
+  const [showDiagnostics,setShowDiagnostics]=useState(false);
+  const [diagnosticReport,setDiagnosticReport]=useState<DiagnosticReport|null>(null);
   const [emailLinkPending,setEmailLinkPending]=useState(()=>Boolean(auth&&isSignInWithEmailLink(auth,window.location.href)));
 
   const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
@@ -101,12 +114,19 @@ export default function App(){
   useEffect(()=>{ if(!draftKey)return; const timer=setTimeout(()=>void saveDraft(draftKey,files),300); return()=>clearTimeout(timer); },[draftKey,files]);
 
   useEffect(()=>{ if(!auth)return; return onAuthStateChanged(auth,async current=>{
+    const loadStarted=performance.now();
     setUser(current);
     setAuthResolved(true);
     if(firebaseConfigured){
-      setCompanyId(""); setStaffId(""); setMyJobs([]); setTasks([]); setSelectedJob(null);
+      setCompanyId(""); setStaffId(""); setOpenJobs([]); setMyJobs([]); setTasks([]); setSelectedJob(null);
       setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionMessage("");
       setBusinessDataStatus(current?"loading":"idle");
+      setOpenJobsStatus("idle");
+      setBusinessLoadMs(null);
+      setPushEnabled(false);
+      setShowDiagnostics(false);
+      setDiagnosticReport(null);
+      lastPushStatusRefreshAt=0;
     }
     if(!current||!functions){setDeviceSessionId("");return;}
     try{
@@ -116,18 +136,12 @@ export default function App(){
       const cid=String(token.claims.companyId??""); const sid=String(token.claims.staffId??"");
       if(!cid||!sid)throw new Error("スタッフの所属情報を確認できません。");
       setCompanyId(cid); setStaffId(sid);
-      try{
-        await registerCurrentDevice();
-      }catch{
-        setMessage("端末情報を登録できませんでした。再読み込みしてください。");
-      }
-      await loadAll(sid,cid);
+      await loadPrimaryBusinessData(sid,cid);
       setBusinessDataStatus("ready");
-      try{
-        setPushEnabled(await loadServerPushStatus(functions));
-      }catch{
-        setMessage("通知状態を読み込めませんでした。通知設定を確認してください。");
-      }
+      setBusinessLoadMs(Math.round(performance.now()-loadStarted));
+      void registerCurrentDevice().catch(()=>setMessage("端末情報を登録できませんでした。再読み込みしてください。"));
+      void loadOpenJobs(cid).catch(()=>undefined);
+      void refreshPushStatus(true);
     }catch{
       setBusinessDataStatus("error");
       setMessage("業務データを読み込めませんでした。再読み込みしてください。");
@@ -168,7 +182,7 @@ export default function App(){
     const stopWatching=watchDeviceSession(deviceSessionId);
     void heartbeat();
     const interval=window.setInterval(()=>void heartbeat(),DEVICE_HEARTBEAT_INTERVAL_MS);
-    const handleVisibility=()=>{if(document.visibilityState==="visible")void heartbeat();};
+    const handleVisibility=()=>{if(document.visibilityState==="visible"){void heartbeat();void refreshPushStatus(false);}};
     document.addEventListener("visibilitychange",handleVisibility);
     return()=>{
       stopped=true;
@@ -180,11 +194,66 @@ export default function App(){
   useEffect(()=>{ if(!user)return; let unsub:(()=>void)|null=null; void listenForForegroundPush(payload=>setMessage(`${payload.data?.title??"Lip Knots Crew"}：${payload.data?.body??"新しいお知らせがあります。"}`)).then(v=>unsub=v); return()=>unsub?.(); },[user]);
   useEffect(()=>{if(tasks.length<=5)setShowAllTasks(false);},[tasks.length]);
 
-  async function loadAll(sid=staffId,cid=companyId){ await Promise.all([loadOpenJobs(cid),loadMyJobs(sid,cid),loadTasks()]); }
-  async function loadOpenJobs(cid=companyId){ if(!db||!cid)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("status","==","open"),orderBy("dateKey","asc"),limit(100))); setOpenJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); }
+  async function loadPrimaryBusinessData(sid=staffId,cid=companyId){ await Promise.all([loadMyJobs(sid,cid),loadTasks()]); }
+  async function loadOpenJobs(cid=companyId){
+    if(!db||!cid){setOpenJobsStatus("ready");return;}
+    setOpenJobsStatus("loading");
+    try{
+      const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("status","==","open"),orderBy("dateKey","asc"),limit(100)));
+      setOpenJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job)));
+      setOpenJobsStatus("ready");
+    }catch(error){
+      setOpenJobsStatus("error");
+      throw error;
+    }
+  }
   async function loadMyJobs(sid=staffId,cid=companyId){ if(!db||!sid||!cid)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=snap.docs.map(d=>({id:d.id,...d.data()} as Job)); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??values[0]??null); }
   async function loadTasks(){ if(!functions)return; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); setTasks((r.data as {tasks?:StaffTask[]}).tasks??[]); }
   function showSubmissionMessage(value:string){setMessage(value);setSubmissionMessage(value);}
+
+  async function refreshPushStatus(showFailure:boolean){
+    if(!functions||Date.now()-lastPushStatusRefreshAt<PUSH_STATUS_REFRESH_INTERVAL_MS)return;
+    lastPushStatusRefreshAt=Date.now();
+    try{
+      setPushEnabled(await loadServerPushStatusWithRetry(functions));
+    }catch{
+      if(showFailure)setMessage("通知状態を読み込めませんでした。自動で再確認します。");
+    }
+  }
+
+  async function openQuickDiagnostics(){
+    if(isPending("diagnostics"))return;
+    setShowDiagnostics(true);
+    setDiagnosticReport(null);
+    await run("diagnostics",async()=>{
+      const report=await runStaffDiagnostics({
+        signedIn:Boolean(user),
+        companyScoped:Boolean(companyId&&staffId),
+        businessDataStatus,
+        businessLoadMs,
+        deviceSessionRegistered:Boolean(deviceSessionId),
+        functions,
+      });
+      setDiagnosticReport(report);
+      if(report.serverPushEnabled!==null)setPushEnabled(report.serverPushEnabled);
+      setMessage(report.summary==="pass"?"自動診断はすべて正常です。スクリーンショットは不要です。":report.summary==="warn"?"自動診断が完了しました。確認項目があります。":"自動診断でエラーを検出しました。結果をコピーして運営へ送ってください。");
+    },{setMessage});
+  }
+
+  async function copyDiagnostics(){
+    if(!diagnosticReport)return;
+    try{
+      await navigator.clipboard.writeText(formatDiagnosticReport(diagnosticReport));
+      setMessage("診断結果をコピーしました。この文章だけ送れば確認できます。");
+    }catch{
+      setMessage("診断結果をコピーできませんでした。端末のコピー許可を確認してください。");
+    }
+  }
+
+  function navigate(next:View){
+    setView(next);
+    if(next==="jobs"&&openJobsStatus==="idle")void loadOpenJobs().catch(()=>undefined);
+  }
 
   async function refreshSelectedJob(jobId:string){
     if(!db)return;
@@ -507,28 +576,35 @@ export default function App(){
     : businessDataStatus==="error"
       ? <div className="empty">業務データを読み込めませんでした。<button className="secondary" onClick={()=>window.location.reload()}>再読み込み</button></div>
       : null;
-  if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message">処理中…</div></section></main>;
-  if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className="message">{message}</div>}</section></main>;
+  const openJobsFallback=openJobsStatus==="loading"
+    ? <div className="empty">募集中の案件を読み込んでいます…</div>
+    : openJobsStatus==="error"
+      ? <div className="empty">案件を読み込めませんでした。<button className="secondary" onClick={()=>void loadOpenJobs().catch(()=>undefined)}>もう一度試す</button></div>
+      : null;
+  const diagnosticSummaryLabel=diagnosticReport?.summary==="pass"?"すべて正常":diagnosticReport?.summary==="warn"?"確認あり":diagnosticReport?"エラーあり":"診断中";
+  if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message working">処理中…</div></section></main>;
+  if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
 
   return <main className="app-shell">
-    <header><img src="/logo.png"/><div><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<div className="header-actions"><button className="ghost" onClick={()=>void loadDevices()} disabled={isPending("devices")}>{isPending("devices")?"処理中…":"端末"}</button><button className="ghost" onClick={()=>auth&&signOut(auth)}>ログアウト</button></div>}</header>
-    {message&&<div className="message">{message}</div>}
+    <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<div className="header-actions"><button className="ghost" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")} aria-busy={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"状態確認"}</button><button className="ghost" onClick={()=>void loadDevices()} disabled={isPending("devices")}>{isPending("devices")?"処理中…":"端末"}</button><button className="ghost" onClick={()=>auth&&signOut(auth)}>ログアウト</button></div>}</header>
+    {message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}
+    {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite"><div className="section-heading"><div><h2>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<div className="diagnostic-actions">{diagnosticReport&&<button onClick={()=>void copyDiagnostics()}>結果をコピー</button>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>setShowDiagnostics(false)}>閉じる</button></div></section>}
     {view==="home"&&<>
       <section className="panel push-panel"><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span></div><div className="push-actions">{!pushEnabled?<button onClick={()=>void enablePush()} disabled={isPending("push-enable")}>{isPending("push-enable")?"処理中…":"通知を有効にする"}</button>:<><button className="secondary" onClick={()=>void requestPushTest()} disabled={isPending("push-test")}>{isPending("push-test")?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={isPending("push-disable")}>{isPending("push-disable")?"処理中…":"通知OFF"}</button></>}</div></section>
       <section className="hero-card"><h2>今日やること</h2><p>{taskSummary}</p><div className="task-list">{businessDataFallback??<>{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{!tasks.length&&<div className="empty">未対応はありません。</div>}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</>}</div></section>
       <section><h2>次回シフト</h2>{businessDataFallback??(activeJob?<article className="job shift-job" style={{"--job-accent":jobAccent(activeJob.menuName)} as CSSProperties}><span className="date">{activeJob.workDate||activeJob.dateKey}</span><span className="job-kind">{jobKind(activeJob.menuName)}</span><h3>{activeJob.storeName}</h3><p>{activeJob.makerName} / {activeJob.menuName}</p><span className="prep-chip">{prepSummary(activeJob)}</span><button onClick={()=>{setSelectedJob(activeJob);setView("shifts")}}>シフトを開く</button></article>:<div className="empty">確定シフトはありません。</div>)}</section>
     </>}
-    {view==="jobs"&&<section><h2>募集中の案件</h2>{businessDataFallback??<div className="grid">{openJobs.map(job=><article className="job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong><div className="actions"><button className="secondary" onClick={()=>setMessage(`${job.storeName} / ${job.makerName} / ${job.workTime}`)}>詳細</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>)}</div>}</section>}
+    {view==="jobs"&&<section><h2>募集中の案件</h2>{openJobsFallback??<div className="grid">{openJobs.map(job=><article className="job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong><div className="actions"><button className="secondary" onClick={()=>setMessage(`${job.storeName} / ${job.makerName} / ${job.workTime}`)}>詳細</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>)}{!openJobs.length&&<div className="empty">現在募集中の案件はありません。</div>}</div>}</section>}
     {view==="shifts"&&<section><h2>自分のシフト</h2><div className="grid">{myJobs.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>{selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)}/></label></div><button onClick={()=>void submitPreContact()} disabled={isPending("preContact")}>{isPending("preContact")?"処理中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||isPending(`print-${item.id}`)} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":isPending(`print-${item.id}`)?"処理中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)}>📝 報告書を提出</button></div></section>}</section>}
     {view==="submit"&&!selectedAssignedJob&&<section className="panel"><h2>提出するシフトを選んでください</h2><p>提出は、本人に割り当てられた確定シフトからだけ受け付けます。</p><button onClick={()=>setView("shifts")}>シフトを選ぶ</button></section>}
     {view==="submit"&&selectedAssignedJob&&<section className={`panel submission-panel ${submissionType}`}><div className={`submission-identity ${submissionType}`}><span>{submissionType==="report"?"📝 報告書":"🖼️ 売場画像"}</span><strong>{submissionType==="report"?"報告内容が読める画像・PDF":"売場全体や陳列が分かる写真"}</strong></div><h2>{submissionType==="report"?"報告書":"売場画像"}を提出</h2><p>{selectedAssignedJob.storeName}{requestId&&" / 再提出依頼への対応"}</p>
       {resubmissionDetail&&<div className="resubmission-guide"><div><strong>再送理由</strong><p>{resubmissionDetail.request.reasons.join(" / ")}</p>{resubmissionDetail.request.note&&<p>{resubmissionDetail.request.note}</p>}</div><div className="source-preview"><span>撮り直す元画像</span>{resubmissionDetail.source?<SubmissionPreviewImage file={resubmissionDetail.source} onRefreshPreview={refreshFilePreview} className="source-preview-frame"/>:<div className="preview-placeholder">対象画像</div>}</div><small>この画像だけを撮り直し、1ファイル選んで再送してください。</small></div>}
       {submissionType==="sales_floor"&&<button className="secondary" onClick={()=>void setClientSubmitted(!selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted)} disabled={isPending("clientSubmitted")}>{isPending("clientSubmitted")?"処理中…":selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted?"クライアント提出を解除":"クライアントへ提出済み"}</button>}
-      <div className="upload-box"><input type="file" multiple={!requestId} accept="image/*,.pdf" onChange={e=>{setFiles(Array.from(e.target.files??[]).slice(0,requestId?1:20));setSubmissionConfirmed(false);setSubmissionMessage("");}}/><small>{requestId?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB`}</small></div><div className="file-list">{files.map(file=><div key={`${file.name}_${file.lastModified}`}><span>{file.name}</span><em>{uploadState[file.name]??"下書き保存済み"}</em></div>)}</div><label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><button className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?"この画像を再送する":`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className="message submission-message" role="status">{submissionMessage}</div>}
+      <div className="upload-box"><input type="file" multiple={!requestId} accept="image/*,.pdf" onChange={e=>{setFiles(Array.from(e.target.files??[]).slice(0,requestId?1:20));setSubmissionConfirmed(false);setSubmissionMessage("");}}/><small>{requestId?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB`}</small></div><div className="file-list">{files.map(file=><div key={`${file.name}_${file.lastModified}`}><span>{file.name}</span><em>{uploadState[file.name]??"下書き保存済み"}</em></div>)}</div><label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><button className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?"この画像を再送する":`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className={`${messageClassName(submissionMessage)} submission-message`} role={messageTone(submissionMessage)==="error"?"alert":"status"}>{submissionMessage}</div>}
       <hr/><h3>提出履歴</h3><div className="history-grid">{submissionHistory.flatMap(group=>group.files).map(file=><article key={`${file.submissionId}_${file.id}`}><SubmissionPreviewImage file={file} onRefreshPreview={refreshFilePreview}/><strong>{file.driveName||file.originalName}</strong><small>{file.purpose==="replacement"?"再送":"提出済み"}</small></article>)}{!submissionHistory.length&&<div className="empty">提出履歴はありません。</div>}</div>
     </section>}
     {view==="contact"&&<section className="panel contact-panel"><h2>連絡先</h2><p>業務に関する連絡はこちらから行えます。</p><div className="contact-actions"><a className="contact-button" href={`mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(CONTACT_EMAIL_SUBJECT)}`}>メールを送る</a><a className="contact-button" href={`tel:${CONTACT_PHONE}`}>電話をかける</a><a className="contact-button" href={CONTACT_FORM_URL} target="_blank" rel="noreferrer">お問い合わせフォームを開く</a></div><div className="contact-details"><strong>受付：平日 9:00〜18:00</strong><span>電話：<a href={`tel:${CONTACT_PHONE}`}>{CONTACT_PHONE_LABEL}</a></span><span>メール：<a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a></span></div></section>}
     {showDevices&&<section className="panel"><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)}>閉じる</button></div><div className="device-list">{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||isPending(`revoke-${device.id}`)} onClick={()=>void revokeDevice(device.id)}>{isPending(`revoke-${device.id}`)?"処理中…":"ログアウト"}</button></div>)}</div></section>}
-    <nav className="bottom-nav">{([['home','🏠','ホーム'],['jobs','📅','案件'],['shifts','📋','シフト'],['submit','📤','提出'],['contact','☎️','連絡']] as [View,string,string][]).map(([id,icon,label])=><button key={id} className={view===id?"active":""} onClick={()=>setView(id)}><span>{icon}</span>{label}</button>)}</nav>
+    <nav className="bottom-nav">{([['home','🏠','ホーム'],['jobs','📅','案件'],['shifts','📋','シフト'],['submit','📤','提出'],['contact','☎️','連絡']] as [View,string,string][]).map(([id,icon,label])=><button key={id} className={view===id?"active":""} onClick={()=>navigate(id)}><span>{icon}</span>{label}</button>)}</nav>
   </main>;
 }

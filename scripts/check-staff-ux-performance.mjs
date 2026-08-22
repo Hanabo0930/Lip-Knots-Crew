@@ -52,8 +52,8 @@ assert.match(
 );
 assert.match(
   app,
-  /loadBusinessSnapshot<Job,StaffTask>[\s\S]*await loadPrimaryBusinessData/u,
-  "Cached business data must render before the authoritative network refresh finishes.",
+  /const bootstrapPromise=bootstrap\(\);[\s\S]*getIdTokenResult\(current\)[\s\S]*restoreCachedBusinessData\(initialCid,initialSid\)[\s\S]*await bootstrapPromise/u,
+  "Trusted cached business data must render while session revalidation continues in parallel.",
 );
 assert.match(
   app,
@@ -97,6 +97,16 @@ assert.match(
 );
 assert.match(
   app,
+  /restoredScope&&\(restoredScope\.companyId!==cid\|\|restoredScope\.staffId!==sid\)[\s\S]*clearBusinessSnapshot\(current\.uid,restoredScope\.companyId,restoredScope\.staffId\)/u,
+  "A changed authoritative staff scope must remove and hide the stale cached scope.",
+);
+assert.match(
+  app,
+  /if\(restoredCachedData&&sessionVerified\)[\s\S]*if\(restoredScope\)clearBusinessSnapshot/u,
+  "Unverified cached data must be cleared when session revalidation fails.",
+);
+assert.match(
+  app,
   /if\(!restoredCachedData\)setHomeDisplayMs\(refreshedInMs\);[\s\S]*setBusinessRefreshMs\(refreshedInMs\)/u,
   "Background refresh timing must not overwrite cached home display timing.",
 );
@@ -126,4 +136,4 @@ assert.match(
   "Submission history must expose a non-blocking loading state.",
 );
 
-console.log("Staff UX and performance checks passed (23 assertions).");
+console.log("Staff UX and performance checks passed (25 assertions).");

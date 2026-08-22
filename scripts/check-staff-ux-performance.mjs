@@ -222,5 +222,35 @@ assert.match(
   /\.message\.warning/u,
   "Recoverable warnings must be visually distinct from success and failure.",
 );
+assert.match(
+  app,
+  /submission-destination[\s\S]*value=\{selectedAssignedJob\.id\}[\s\S]*changeSubmissionJob/u,
+  "Submission must keep the selected shift visible and changeable in place.",
+);
+assert.match(
+  app,
+  /submission-type-picker[\s\S]*aria-label="提出種類"[\s\S]*aria-pressed=\{submissionType==="sales_floor"\}/u,
+  "Submission type must be switchable without returning to the shift screen.",
+);
+assert.match(
+  app,
+  /discardFilesBeforeContextChange\("選択中のファイルを外して提出先を変更しますか？"\)/u,
+  "Changing the destination must protect selected files from accidental loss.",
+);
+assert.match(
+  app,
+  /function removeSubmissionFile[\s\S]*filter\(file=>fileStateKey\(file\)!==targetKey\)/u,
+  "A mistaken file must be removable without reopening the picker.",
+);
+assert.match(
+  app,
+  /e\.currentTarget\.value=""/u,
+  "The file picker must allow the same file to be selected again after removal.",
+);
+assert.match(
+  styles,
+  /\.file-remove \{ flex:0 0 auto;/u,
+  "File removal must expose a dedicated touch-friendly control.",
+);
 
-console.log("Staff UX and performance checks passed (42 assertions).");
+console.log("Staff UX and performance checks passed (48 assertions).");

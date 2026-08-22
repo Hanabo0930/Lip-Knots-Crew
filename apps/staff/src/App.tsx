@@ -772,4 +772,3 @@ export default function App(){
     <nav className="bottom-nav">{([['home','🏠','ホーム'],['jobs','📅','案件'],['shifts','📋','シフト'],['submit','📤','提出'],['contact','☎️','連絡']] as [View,string,string][]).map(([id,icon,label])=><button key={id} className={view===id?"active":""} onClick={()=>navigate(id)}><span>{icon}</span>{label}</button>)}</nav>
   </main>;
 }
-f3fa62eb9f547b067f63435eb23d1810438c27d4

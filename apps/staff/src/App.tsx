@@ -114,7 +114,9 @@ export default function App(){
   const [businessDataSource,setBusinessDataSource]=useState<BusinessDataSource>(firebaseConfigured?"none":"live");
   const [businessRefreshing,setBusinessRefreshing]=useState(false);
   const [openJobsStatus,setOpenJobsStatus]=useState<BusinessDataStatus>(firebaseConfigured?"idle":"ready");
-  const [businessLoadMs,setBusinessLoadMs]=useState<number|null>(firebaseConfigured?null:0);
+  const [homeDisplayMs,setHomeDisplayMs]=useState<number|null>(firebaseConfigured?null:0);
+  const [businessRefreshMs,setBusinessRefreshMs]=useState<number|null>(firebaseConfigured?null:0);
+  const [homeLoadedFromCache,setHomeLoadedFromCache]=useState(false);
   const [showDiagnostics,setShowDiagnostics]=useState(false);
   const [diagnosticReport,setDiagnosticReport]=useState<DiagnosticReport|null>(null);
   const [emailLinkPending,setEmailLinkPending]=useState(()=>Boolean(auth&&isSignInWithEmailLink(auth,window.location.href)));
@@ -135,7 +137,9 @@ export default function App(){
       setBusinessDataSource("none");
       setBusinessRefreshing(Boolean(current));
       setOpenJobsStatus("idle");
-      setBusinessLoadMs(null);
+      setHomeDisplayMs(null);
+      setBusinessRefreshMs(null);
+      setHomeLoadedFromCache(false);
       setPushEnabled(false);
       setShowDiagnostics(false);
       setDiagnosticReport(null);
@@ -159,12 +163,15 @@ export default function App(){
         setSelectedJob(snapshot.jobs[0]??null);
         setBusinessDataStatus("ready");
         setBusinessDataSource("cached");
-        setBusinessLoadMs(0);
+        setHomeDisplayMs(Math.round(performance.now()-loadStarted));
+        setHomeLoadedFromCache(true);
       }
       await loadPrimaryBusinessData(sid,cid,current.uid);
       setBusinessDataStatus("ready");
       setBusinessDataSource("live");
-      setBusinessLoadMs(Math.round(performance.now()-loadStarted));
+      const refreshedInMs=Math.round(performance.now()-loadStarted);
+      if(!restoredCachedData)setHomeDisplayMs(refreshedInMs);
+      setBusinessRefreshMs(refreshedInMs);
       lastBusinessDataRefreshAt=Date.now();
       void registerCurrentDevice().catch(()=>setMessage("端末情報を登録できませんでした。再読み込みしてください。"));
       void loadOpenJobs(cid).catch(()=>undefined);
@@ -259,7 +266,7 @@ export default function App(){
       await loadPrimaryBusinessData(staffId,companyId,user.uid);
       setBusinessDataStatus("ready");
       setBusinessDataSource("live");
-      setBusinessLoadMs(Math.round(performance.now()-started));
+      setBusinessRefreshMs(Math.round(performance.now()-started));
       if(openJobsStatus!=="idle")void loadOpenJobs(companyId).catch(()=>undefined);
     }catch{
       lastBusinessDataRefreshAt=0;
@@ -288,7 +295,9 @@ export default function App(){
         signedIn:Boolean(user),
         companyScoped:Boolean(companyId&&staffId),
         businessDataStatus,
-        businessLoadMs,
+        homeDisplayMs,
+        businessRefreshMs,
+        homeLoadedFromCache,
         deviceSessionRegistered:Boolean(deviceSessionId),
         functions,
       });

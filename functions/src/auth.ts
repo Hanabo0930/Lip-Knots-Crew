@@ -48,6 +48,18 @@ function formatWorkDate(raw: FirebaseFirestore.DocumentData): string {
   return String(raw.dateKey ?? "");
 }
 
+function customClaimsMatch(
+  current: Record<string, unknown> | undefined,
+  expected: Record<string, string>,
+): boolean {
+  if (!current) return false;
+  const currentKeys = Object.keys(current).sort();
+  const expectedKeys = Object.keys(expected).sort();
+  return currentKeys.length === expectedKeys.length
+    && currentKeys.every((key, index) => key === expectedKeys[index])
+    && expectedKeys.every((key) => current[key] === expected[key]);
+}
+
 async function fetchAdminDirectory(companyId: string) {
   const [jobsSnap, staffSnap] = await Promise.all([
     db.collection("jobs")
@@ -149,23 +161,25 @@ export const bootstrapSession = onCall(async (request) => {
     companyId: index.companyId,
     staffId: index.staffId,
   };
-
-  await auth.setCustomUserClaims(session.uid, claims);
+  const refreshToken = !customClaimsMatch(user.customClaims, claims);
   const normalizedEmailHash = emailHash(email);
-  await Promise.all([
-    db.collection("staffProfiles").doc(index.staffId).set({
+  const batch = db.batch();
+  batch.set(db.collection("staffProfiles").doc(index.staffId), {
       lastLoginAt: FieldValue.serverTimestamp(),
       authUids: FieldValue.arrayUnion(session.uid),
-    }, { merge: true }),
-    db.collection("authIdentities").doc(session.uid).set({
+    }, { merge: true });
+  batch.set(db.collection("authIdentities").doc(session.uid), {
       companyId: index.companyId,
       staffId: index.staffId,
       email,
       emailHash: normalizedEmailHash,
       active: true,
       lastLoginAt: FieldValue.serverTimestamp(),
-    }, { merge: true }),
+    }, { merge: true });
+  await Promise.all([
+    refreshToken ? auth.setCustomUserClaims(session.uid, claims) : Promise.resolve(),
+    batch.commit(),
   ]);
 
-  return { ...claims, refreshToken: true };
+  return { ...claims, refreshToken };
 });

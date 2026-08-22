@@ -182,5 +182,45 @@ assert.match(
   /\.history-loading/u,
   "Submission history must expose a non-blocking loading state.",
 );
+assert.match(
+  app,
+  /account-menu-toggle[\s\S]*aria-controls="account-menu"/u,
+  "Mobile account actions must collapse behind one clear menu control.",
+);
+assert.match(
+  app,
+  /if\(!message\|\|messageTone\(message\)!=="success"\)return;[\s\S]*setTimeout[\s\S]*6000/u,
+  "Successful notices must clear automatically without hiding errors or working states.",
+);
+assert.match(
+  app,
+  /confirm\("この端末からログアウトしますか？"\)/u,
+  "The compact account menu must protect against accidental logout.",
+);
+assert.match(
+  app,
+  /showDevices&&<section className="panel device-panel">[\s\S]*showDiagnostics&&/u,
+  "Device management must render near the top instead of below the active screen.",
+);
+assert.match(
+  styles,
+  /\.account-menu-actions \{ display:grid;/u,
+  "The compact account menu must have explicit mobile-friendly styling.",
+);
+assert.match(
+  styles,
+  /\.message-dismiss \{ min-height:34px;/u,
+  "Dismissible notices must keep a touch-friendly close control.",
+);
+assert.match(
+  app,
+  /自動で再確認\|前回の業務データ\|一時的に混み合/u,
+  "Recoverable stale-data and retry notices must use a warning tone instead of false success.",
+);
+assert.match(
+  styles,
+  /\.message\.warning/u,
+  "Recoverable warnings must be visually distinct from success and failure.",
+);
 
-console.log("Staff UX and performance checks passed (34 assertions).");
+console.log("Staff UX and performance checks passed (42 assertions).");

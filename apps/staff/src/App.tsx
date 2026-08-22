@@ -148,16 +148,13 @@ export default function App(){
     }
     if(!current||!functions){setDeviceSessionId("");setBusinessRefreshing(false);return;}
     let restoredCachedData=false;
+    let sessionVerified=false;
+    let restoredScope:{companyId:string;staffId:string}|null=null;
     try{
-      const bootstrap=httpsCallable(functions,"bootstrapSession"); const result=await bootstrap();
-      if((result.data as {refreshToken?:boolean}).refreshToken)await current.getIdToken(true);
-      const token=await getIdTokenResult(current);
-      const cid=String(token.claims.companyId??""); const sid=String(token.claims.staffId??"");
-      if(!cid||!sid)throw new Error("スタッフの所属情報を確認できません。");
-      setCompanyId(cid); setStaffId(sid);
-      const snapshot=loadBusinessSnapshot<Job,StaffTask>(current.uid,cid,sid);
-      if(snapshot){
-        restoredCachedData=true;
+      const restoreCachedBusinessData=(cid:string,sid:string)=>{
+        const snapshot=loadBusinessSnapshot<Job,StaffTask>(current.uid,cid,sid);
+        if(!snapshot)return false;
+        setCompanyId(cid); setStaffId(sid);
         setMyJobs(snapshot.jobs);
         setTasks(snapshot.tasks);
         setSelectedJob(snapshot.jobs[0]??null);
@@ -165,6 +162,38 @@ export default function App(){
         setBusinessDataSource("cached");
         setHomeDisplayMs(Math.round(performance.now()-loadStarted));
         setHomeLoadedFromCache(true);
+        return true;
+      };
+      const bootstrap=httpsCallable(functions,"bootstrapSession");
+      const bootstrapPromise=bootstrap();
+      const initialToken=await getIdTokenResult(current).catch(()=>null);
+      const initialCid=String(initialToken?.claims.companyId??"");
+      const initialSid=String(initialToken?.claims.staffId??"");
+      if(initialCid&&initialSid&&restoreCachedBusinessData(initialCid,initialSid)){
+        restoredCachedData=true;
+        restoredScope={companyId:initialCid,staffId:initialSid};
+      }
+      const result=await bootstrapPromise;
+      const refreshToken=Boolean((result.data as {refreshToken?:boolean}).refreshToken);
+      if(refreshToken)await current.getIdToken(true);
+      const token=refreshToken||!initialToken?await getIdTokenResult(current):initialToken;
+      const cid=String(token.claims.companyId??""); const sid=String(token.claims.staffId??"");
+      if(!cid||!sid)throw new Error("スタッフの所属情報を確認できません。");
+      sessionVerified=true;
+      if(restoredScope&&(restoredScope.companyId!==cid||restoredScope.staffId!==sid)){
+        clearBusinessSnapshot(current.uid,restoredScope.companyId,restoredScope.staffId);
+        restoredCachedData=false;
+        restoredScope=null;
+        setMyJobs([]); setTasks([]); setSelectedJob(null);
+        setBusinessDataStatus("loading");
+        setBusinessDataSource("none");
+        setHomeDisplayMs(null);
+        setHomeLoadedFromCache(false);
+      }
+      setCompanyId(cid); setStaffId(sid);
+      if(!restoredCachedData&&restoreCachedBusinessData(cid,sid)){
+        restoredCachedData=true;
+        restoredScope={companyId:cid,staffId:sid};
       }
       await loadPrimaryBusinessData(sid,cid,current.uid);
       setBusinessDataStatus("ready");
@@ -177,12 +206,17 @@ export default function App(){
       void loadOpenJobs(cid).catch(()=>undefined);
       void refreshPushStatus(true);
     }catch{
-      if(restoredCachedData){
+      if(restoredCachedData&&sessionVerified){
         setBusinessDataStatus("ready");
         setBusinessDataSource("cached");
         setMessage("最新情報を更新できなかったため、前回の業務データを表示しています。");
       }else{
+        if(restoredScope)clearBusinessSnapshot(current.uid,restoredScope.companyId,restoredScope.staffId);
+        setCompanyId(""); setStaffId(""); setMyJobs([]); setTasks([]); setSelectedJob(null);
         setBusinessDataStatus("error");
+        setBusinessDataSource("none");
+        setHomeDisplayMs(null);
+        setHomeLoadedFromCache(false);
         setMessage("業務データを読み込めませんでした。再読み込みしてください。");
       }
     }finally{

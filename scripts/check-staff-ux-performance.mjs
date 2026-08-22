@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 const app = readFileSync("apps/staff/src/App.tsx", "utf8");
 const diagnostics = readFileSync("apps/staff/src/diagnostics.ts", "utf8");
+const auth = readFileSync("functions/src/auth.ts", "utf8");
 const push = readFileSync("apps/staff/src/push.ts", "utf8");
 const asyncAction = readFileSync("apps/staff/src/useAsyncAction.ts", "utf8");
 const businessCache = readFileSync("apps/staff/src/business-cache.ts", "utf8");
@@ -90,6 +91,31 @@ assert.match(
   "Business cache must support removal during logout.",
 );
 assert.match(
+  app,
+  /setHomeDisplayMs\(Math\.round\(performance\.now\(\)-loadStarted\)\)[\s\S]*setHomeLoadedFromCache\(true\)/u,
+  "Cached home content must record its actual visible-ready time.",
+);
+assert.match(
+  app,
+  /if\(!restoredCachedData\)setHomeDisplayMs\(refreshedInMs\);[\s\S]*setBusinessRefreshMs\(refreshedInMs\)/u,
+  "Background refresh timing must not overwrite cached home display timing.",
+);
+assert.match(
+  diagnostics,
+  /label: "最新情報の更新"[\s\S]*ホーム表示を止めずに更新/u,
+  "Diagnostics must distinguish visible home speed from background freshness.",
+);
+assert.match(
+  auth,
+  /const refreshToken = !customClaimsMatch\(user\.customClaims, claims\)/u,
+  "Returning staff sessions must skip an unnecessary ID-token refresh when claims are unchanged.",
+);
+assert.match(
+  auth,
+  /const batch = db\.batch\(\)[\s\S]*batch\.commit\(\)/u,
+  "Staff login metadata writes must share one Firestore round trip.",
+);
+assert.match(
   concurrency,
   /Promise\.allSettled\(workers\)/u,
   "Upload actions must stay pending until every active worker has settled.",
@@ -100,4 +126,4 @@ assert.match(
   "Submission history must expose a non-blocking loading state.",
 );
 
-console.log("Staff UX and performance checks passed (18 assertions).");
+console.log("Staff UX and performance checks passed (23 assertions).");

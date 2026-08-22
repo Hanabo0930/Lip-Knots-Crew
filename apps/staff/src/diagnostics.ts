@@ -22,7 +22,9 @@ type DiagnosticInput = {
   signedIn: boolean;
   companyScoped: boolean;
   businessDataStatus: "idle" | "loading" | "ready" | "error";
-  businessLoadMs: number | null;
+  homeDisplayMs: number | null;
+  businessRefreshMs: number | null;
+  homeLoadedFromCache: boolean;
   deviceSessionRegistered: boolean;
   functions: Functions | null;
 };
@@ -73,12 +75,21 @@ export async function runStaffDiagnostics(input: DiagnosticInput): Promise<Diagn
     },
   ];
 
-  if (input.businessLoadMs !== null) {
+  if (input.homeDisplayMs !== null) {
     checks.push({
       id: "speed",
       label: "ホーム表示速度",
-      level: input.businessLoadMs <= 3_000 ? "pass" : input.businessLoadMs <= 8_000 ? "warn" : "fail",
-      detail: `${(input.businessLoadMs / 1_000).toFixed(1)}秒`,
+      level: input.homeDisplayMs <= 3_000 ? "pass" : input.homeDisplayMs <= 8_000 ? "warn" : "fail",
+      detail: `${(input.homeDisplayMs / 1_000).toFixed(1)}秒${input.homeLoadedFromCache ? "（前回データを先に表示）" : ""}`,
+    });
+  }
+
+  if (input.businessRefreshMs !== null) {
+    checks.push({
+      id: "refresh",
+      label: "最新情報の更新",
+      level: input.businessRefreshMs <= 10_000 ? "pass" : input.businessRefreshMs <= 20_000 ? "warn" : "fail",
+      detail: `${(input.businessRefreshMs / 1_000).toFixed(1)}秒（ホーム表示を止めずに更新）`,
     });
   }
 

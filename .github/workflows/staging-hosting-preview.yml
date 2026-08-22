@@ -18,6 +18,8 @@ env:
   LKC_PROJECT_ID: lip-knots-crew-staging
   LKC_REGION: asia-northeast1
   LKC_TARGETS: staff,admin
+  LKC_GCP_WORKLOAD_IDENTITY_PROVIDER: projects/740154137290/locations/global/workloadIdentityPools/lkc-github-staging/providers/lkc-main-workflows
+  LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT: lkc-gh-staging-deploy@lip-knots-crew-staging.iam.gserviceaccount.com
 
 jobs:
   guard:
@@ -70,7 +72,6 @@ jobs:
 
   preview:
     needs: guard
-    environment: lkc-staging-hosting
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -99,8 +100,8 @@ jobs:
       - name: Authenticate with the short-lived staging identity
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ env.LKC_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
       - name: Discover sites and recover public staging client config
         id: hosting
         env:

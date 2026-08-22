@@ -89,13 +89,40 @@ assert.ok(
     [
       "  preview:",
       "    needs: guard",
-      "    environment: lkc-staging-hosting",
       "    runs-on: ubuntu-latest",
     ].join("\n"),
   ),
-  "Hosting preview must use the protected lkc-staging-hosting environment",
+  "Hosting preview must start automatically after its guard succeeds",
 );
-cases += 1;
+assert.doesNotMatch(
+  previewWorkflow,
+  /^    environment: lkc-staging-hosting$/mu,
+  "Hosting preview must not wait for the live-promotion approval environment",
+);
+assert.match(
+  previewWorkflow,
+  /LKC_GCP_WORKLOAD_IDENTITY_PROVIDER: projects\/740154137290\/locations\/global\/workloadIdentityPools\/lkc-github-staging\/providers\/lkc-main-workflows/u,
+  "Hosting preview must pin the staging-only workload identity provider",
+);
+assert.match(
+  previewWorkflow,
+  /LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT: lkc-gh-staging-deploy@lip-knots-crew-staging\.iam\.gserviceaccount\.com/u,
+  "Hosting preview must pin the staging-only deployment service account",
+);
+assert.match(
+  previewWorkflow,
+  /workload_identity_provider: \$\{\{ env\.LKC_GCP_WORKLOAD_IDENTITY_PROVIDER \}\}/u,
+);
+assert.match(
+  previewWorkflow,
+  /service_account: \$\{\{ env\.LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT \}\}/u,
+);
+assert.match(
+  promoteWorkflow,
+  /^    environment: lkc-staging-hosting$/mu,
+  "Hosting promotion must keep the protected approval environment",
+);
+cases += 7;
 assert.match(
   promoteWorkflow,
   /node scripts\/automation\/restore-staging-hosting\.mjs/u,

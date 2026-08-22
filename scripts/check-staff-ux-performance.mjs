@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 
 const app = readFileSync("apps/staff/src/App.tsx", "utf8");
 const diagnostics = readFileSync("apps/staff/src/diagnostics.ts", "utf8");
@@ -9,6 +11,36 @@ const asyncAction = readFileSync("apps/staff/src/useAsyncAction.ts", "utf8");
 const businessCache = readFileSync("apps/staff/src/business-cache.ts", "utf8");
 const concurrency = readFileSync("apps/staff/src/concurrency.ts", "utf8");
 const styles = readFileSync("apps/staff/src/styles.css", "utf8");
+
+const storedBusinessCache = new Map();
+const businessCacheModule = { exports: {} };
+runInNewContext(
+  ts.transpileModule(businessCache, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText,
+  {
+    exports: businessCacheModule.exports,
+    module: businessCacheModule,
+    localStorage: {
+      getItem: (key) => storedBusinessCache.get(key) ?? null,
+      removeItem: (key) => storedBusinessCache.delete(key),
+      setItem: (key, value) => storedBusinessCache.set(key, String(value)),
+    },
+  },
+);
+const businessCacheApi = businessCacheModule.exports;
+businessCacheApi.saveBusinessSnapshot("uid-a", "company-a", "staff-a", [{ id: "job-a" }], [{ id: "task-a" }]);
+assert.deepEqual(
+  { ...businessCacheApi.loadLastBusinessScope("uid-a") },
+  { companyId: "company-a", staffId: "staff-a" },
+);
+const cachedSnapshot = businessCacheApi.loadBusinessSnapshot("uid-a", "company-a", "staff-a");
+assert.equal(JSON.stringify(cachedSnapshot.jobs), JSON.stringify([{ id: "job-a" }]));
+assert.equal(JSON.stringify(cachedSnapshot.tasks), JSON.stringify([{ id: "task-a" }]));
+assert.equal(businessCacheApi.loadLastBusinessScope("uid-b"), null);
+businessCacheApi.clearBusinessSnapshot("uid-a", "company-a", "staff-a");
+assert.equal(businessCacheApi.loadBusinessSnapshot("uid-a", "company-a", "staff-a"), null);
+assert.equal(businessCacheApi.loadLastBusinessScope("uid-a"), null);
 
 assert.match(
   app,
@@ -54,6 +86,21 @@ assert.match(
   app,
   /const bootstrapPromise=bootstrap\(\);[\s\S]*getIdTokenResult\(current\)[\s\S]*restoreCachedBusinessData\(initialCid,initialSid\)[\s\S]*await bootstrapPromise/u,
   "Trusted cached business data must render while session revalidation continues in parallel.",
+);
+assert.match(
+  app,
+  /const knownScope=loadLastBusinessScope\(current\.uid\);[\s\S]*restoreCachedBusinessData\(knownScope\.companyId,knownScope\.staffId\)[\s\S]*getIdTokenResult\(current\)/u,
+  "A returning signed-in user must see the last verified business snapshot before token lookup finishes.",
+);
+assert.match(
+  businessCache,
+  /saveLastBusinessScope\(uid, companyId, staffId\)[\s\S]*export function clearBusinessSnapshot/u,
+  "A verified live snapshot must persist a bounded per-user scope hint for instant startup.",
+);
+assert.match(
+  app,
+  /navigator\.share\(\{title:"Lip Knots Crew かんたん診断",text\}\)[\s\S]*await copyDiagnostics\(\)/u,
+  "Diagnostics must support the iPhone share sheet with copy fallback.",
 );
 assert.match(
   app,
@@ -136,4 +183,4 @@ assert.match(
   "Submission history must expose a non-blocking loading state.",
 );
 
-console.log("Staff UX and performance checks passed (25 assertions).");
+console.log("Staff UX and performance checks passed (34 assertions).");

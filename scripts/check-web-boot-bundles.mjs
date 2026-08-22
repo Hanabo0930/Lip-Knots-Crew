@@ -1,5 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join, posix, relative, resolve, sep } from "node:path";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 
 const apps = ["staff", "admin"];
 const failures = [];
@@ -7,6 +9,9 @@ const failures = [];
 verifyCycleDetector();
 
 for (const app of apps) {
+  const pwaUpdateSource = await readFile(resolve("apps", app, "src", "pwa-update.ts"), "utf8");
+  verifyPwaUpdateLifecycle(app, pwaUpdateSource);
+  verifyPwaUpdateBehavior(app, pwaUpdateSource);
   const distRoot = resolve("apps", app, "dist");
   const indexHtml = await readFile(join(distRoot, "index.html"), "utf8");
   const entrySource = findEntrySource(indexHtml);
@@ -148,4 +153,91 @@ function verifyCycleDetector() {
   if (!findCycle(circular, "entry.js") || findCycle(acyclic, "entry.js")) {
     throw new Error("web boot cycle detector self-test failed");
   }
+}
+
+function verifyPwaUpdateLifecycle(app, source) {
+  const checks = [
+    ["uses a time-bounded reload guard", source.includes("RELOAD_GUARD_MS") && source.includes("Date.now() - lastReloadAt < RELOAD_GUARD_MS")],
+    ["does not permanently suppress later updates", !source.includes('sessionStorage.setItem(reloadKey, "1")') && source.includes("String(Date.now())")],
+    ["activates an already-waiting worker", source.includes("activateWaitingWorker(registration)") && source.includes("registration.waiting.postMessage")],
+    ["checks for updates when the app returns", source.includes('document.addEventListener("visibilitychange", checkForUpdates)') && source.includes("registration.update()")],
+  ];
+  for (const [label, passed] of checks) {
+    if (!passed) failures.push(`${app}: PWA update lifecycle ${label}`);
+  }
+}
+
+function verifyPwaUpdateBehavior(app, source) {
+  const now = Date.now();
+  const firstUpdate = runPwaUpdateModule(source, null, now);
+  const immediateRepeat = runPwaUpdateModule(source, now, now);
+  const laterUpdate = runPwaUpdateModule(source, now - 60_000, now);
+  const checks = [
+    ["activates a waiting worker", firstUpdate.waitingMessages === 1],
+    ["checks once immediately and again after foregrounding", firstUpdate.updateChecks === 2],
+    ["reloads once for the first controller change", firstUpdate.reloads === 1],
+    ["suppresses only an immediate repeat reload", immediateRepeat.reloads === 0],
+    ["allows a later release to reload automatically", laterUpdate.reloads === 1],
+  ];
+  for (const [label, passed] of checks) {
+    if (!passed) failures.push(`${app}: executable PWA update check ${label}`);
+  }
+}
+
+function runPwaUpdateModule(source, previousReloadAt, now) {
+  const serviceWorkerEvents = new Map();
+  const documentEvents = new Map();
+  const storage = new Map();
+  if (previousReloadAt !== null) storage.set("reload", String(previousReloadAt));
+  let reloads = 0;
+  let updateChecks = 0;
+  let waitingMessages = 0;
+  const registration = {
+    installing: null,
+    waiting: { postMessage: () => { waitingMessages += 1; } },
+    addEventListener: () => undefined,
+    update: () => { updateChecks += 1; return Promise.resolve(); },
+  };
+  const module = { exports: {} };
+  const compiled = ts.transpileModule(
+    source.replace("import.meta.env.PROD", "true"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  runInNewContext(compiled, {
+    Date: { now: () => now },
+    Number,
+    Promise,
+    String,
+    document: {
+      visibilityState: "visible",
+      addEventListener: (name, listener) => documentEvents.set(name, listener),
+    },
+    exports: module.exports,
+    module,
+    navigator: {
+      serviceWorker: {
+        controller: {},
+        addEventListener: (name, listener) => serviceWorkerEvents.set(name, listener),
+      },
+    },
+    require: (specifier) => {
+      if (specifier !== "virtual:pwa-register") throw new Error(`unexpected PWA import: ${specifier}`);
+      return {
+        registerSW: (options) => {
+          options.onRegisteredSW?.("/sw.js", registration);
+          return () => undefined;
+        },
+      };
+    },
+    sessionStorage: {
+      getItem: () => storage.get("reload") ?? null,
+      setItem: (_key, value) => storage.set("reload", String(value)),
+    },
+    window: { location: { reload: () => { reloads += 1; } } },
+  });
+  module.exports.registerControlledServiceWorker();
+  documentEvents.get("visibilitychange")?.();
+  serviceWorkerEvents.get("controllerchange")?.();
+  serviceWorkerEvents.get("controllerchange")?.();
+  return { reloads, updateChecks, waitingMessages };
 }

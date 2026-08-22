@@ -5,7 +5,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button {
   border: 0; border-radius: 14px; padding: 13px 16px;
   min-height: 48px; background: #c97f98; color: white; font-weight: 800; cursor: pointer;
@@ -48,10 +48,17 @@ h1,h2,h3 { margin-top: 0; }
 .panel { margin-top:28px; }
 .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px; }
 label { font-weight:800; font-size:13px; }
-input { width:100%; margin-top:6px; border:1px solid #ddd; border-radius:12px; padding:12px; background:white; }
+input, select { width:100%; margin-top:6px; border:1px solid #ddd; border-radius:12px; padding:12px; background:white; color:#3f332c; }
+select { min-height:48px; }
 hr { border:0; border-top:1px solid #eee; margin:24px 0; }
-.file-list div { display:flex; justify-content:space-between; padding:10px; border-bottom:1px solid #eee; gap:10px; }
+.file-list { display:grid; gap:8px; }
+.file-list>div { display:flex; align-items:center; justify-content:space-between; padding:11px 12px; border:1px solid #eadfe2; border-radius:13px; gap:10px; }
+.file-copy { min-width:0; display:grid; gap:4px; }
+.file-copy span,.file-copy em { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .file-list em { font-style:normal; color:#c97f98; font-weight:800; }
+.file-list-toolbar { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:16px 0 8px; }
+.file-list-toolbar .ghost,.file-remove { min-height:40px; padding:8px 12px; font-size:12px; }
+.file-remove { flex:0 0 auto; background:#fff; color:#a33b35; border:1px solid #efc4c0; }
 .empty { color:#806f68; padding:20px; }
 .login-shell { min-height:100vh; display:grid; place-items:center; padding:20px; }
 .login-card { width:min(430px,100%); background:white; border:1px solid #eadfe2; border-radius:26px; padding:28px; text-align:center; box-shadow:0 22px 55px rgba(95,75,68,.13); }
@@ -133,6 +140,14 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .empty.compact { padding:10px 0; }
 .submission-panel.sales_floor { border-top:7px solid #4f91c7; }
 .submission-panel.report { border-top:7px solid #d18449; }
+.submission-context-card { display:grid; gap:14px; margin-bottom:16px; padding:16px; border:1px solid #ded8d4; border-radius:17px; background:#fbfaf9; }
+.submission-step-label { display:block; margin-bottom:6px; color:#5f4b44; font-size:13px; font-weight:900; }
+.submission-type-picker>div { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.submission-type-button { background:#fff; color:#5f4b44; border:2px solid #e5ded8; }
+.submission-type-button.sales_floor.active { background:#eaf4fc; color:#356f9e; border-color:#4f91c7; box-shadow:0 0 0 2px rgba(79,145,199,.12); }
+.submission-type-button.report.active { background:#fff1e5; color:#9d5b27; border-color:#d18449; box-shadow:0 0 0 2px rgba(209,132,73,.12); }
+.submission-context-lock { color:#98601f; font-weight:800; }
+.submission-target-summary { margin:-7px 0 16px; color:#806f68; font-weight:800; line-height:1.55; }
 .submission-identity { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:13px 15px; margin-bottom:18px; border-radius:15px; }
 .submission-identity span { font-size:18px; font-weight:900; }
 .submission-identity strong { font-size:12px; text-align:right; }
@@ -155,7 +170,7 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .bottom-nav button { border-radius:0; background:white; color:#806f68; padding:10px 4px; font-size:11px; }
 .bottom-nav button span { display:block; font-size:19px; margin-bottom:2px; }
 .bottom-nav button.active { color:#c97f98; background:#fff5f8; }
-@media(max-width:650px){ .submission-actions{grid-template-columns:1fr;} .netprint-row{align-items:stretch;flex-direction:column;} .shift-detail-heading,.prep-heading{flex-direction:column;} .route-actions a{width:100%;} }
+@media(max-width:650px){ .submission-actions{grid-template-columns:1fr;} .netprint-row{align-items:stretch;flex-direction:column;} .shift-detail-heading,.prep-heading{flex-direction:column;} .route-actions a{width:100%;} .submission-context-card{padding:13px;} .file-list>div{align-items:stretch;flex-direction:column;} .file-remove{width:100%;} }
 
 .resubmission-guide { border:2px solid #efd2a8; background:#fff8e8; border-radius:17px; padding:14px; margin:12px 0; }
 .resubmission-guide p { margin:5px 0; color:#6f5b53; }

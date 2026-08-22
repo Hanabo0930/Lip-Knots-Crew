@@ -8,7 +8,12 @@ import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytesResumable } from "firebase/storage";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, storage } from "./firebase";
 import { clearDraft, loadDraft, saveDraft } from "./draft-store";
-import { clearBusinessSnapshot, loadBusinessSnapshot, saveBusinessSnapshot } from "./business-cache";
+import {
+  clearBusinessSnapshot,
+  loadBusinessSnapshot,
+  loadLastBusinessScope,
+  saveBusinessSnapshot,
+} from "./business-cache";
 import { runWithConcurrency } from "./concurrency";
 import {
   currentPushPermission, disablePushNotifications, enablePushNotifications,
@@ -166,10 +171,17 @@ export default function App(){
       };
       const bootstrap=httpsCallable(functions,"bootstrapSession");
       const bootstrapPromise=bootstrap();
+      const knownScope=loadLastBusinessScope(current.uid);
+      if(knownScope&&restoreCachedBusinessData(knownScope.companyId,knownScope.staffId)){
+        restoredCachedData=true;
+        restoredScope=knownScope;
+      }else if(knownScope){
+        clearBusinessSnapshot(current.uid,knownScope.companyId,knownScope.staffId);
+      }
       const initialToken=await getIdTokenResult(current).catch(()=>null);
       const initialCid=String(initialToken?.claims.companyId??"");
       const initialSid=String(initialToken?.claims.staffId??"");
-      if(initialCid&&initialSid&&restoreCachedBusinessData(initialCid,initialSid)){
+      if(!restoredCachedData&&initialCid&&initialSid&&restoreCachedBusinessData(initialCid,initialSid)){
         restoredCachedData=true;
         restoredScope={companyId:initialCid,staffId:initialSid};
       }
@@ -349,6 +361,21 @@ export default function App(){
     }catch{
       setMessage("診断結果をコピーできませんでした。端末のコピー許可を確認してください。");
     }
+  }
+
+  async function shareDiagnostics(){
+    if(!diagnosticReport)return;
+    const text=formatDiagnosticReport(diagnosticReport);
+    if(navigator.share){
+      try{
+        await navigator.share({title:"Lip Knots Crew かんたん診断",text});
+        setMessage("診断結果を共有しました。");
+        return;
+      }catch(error){
+        if((error as {name?:string}).name==="AbortError")return;
+      }
+    }
+    await copyDiagnostics();
   }
 
   function navigate(next:View){
@@ -725,7 +752,7 @@ export default function App(){
   return <main className="app-shell">
     <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<div className="header-actions"><button className="ghost" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")} aria-busy={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"状態確認"}</button><button className="ghost" onClick={()=>void loadDevices()} disabled={isPending("devices")}>{isPending("devices")?"処理中…":"端末"}</button><button className="ghost" onClick={()=>void logoutCurrentUser()}>ログアウト</button></div>}</header>
     {message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}
-    {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite"><div className="section-heading"><div><h2>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<div className="diagnostic-actions">{diagnosticReport&&<button onClick={()=>void copyDiagnostics()}>結果をコピー</button>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>setShowDiagnostics(false)}>閉じる</button></div></section>}
+    {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite"><div className="section-heading"><div><h2>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<div className="diagnostic-actions">{diagnosticReport&&<><button onClick={()=>void shareDiagnostics()}>結果を共有</button><button className="secondary" onClick={()=>void copyDiagnostics()}>コピー</button></>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>setShowDiagnostics(false)}>閉じる</button></div></section>}
     {view==="home"&&<>
       <section className="panel push-panel"><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span></div><div className="push-actions">{!pushEnabled?<button onClick={()=>void enablePush()} disabled={isPending("push-enable")}>{isPending("push-enable")?"処理中…":"通知を有効にする"}</button>:<><button className="secondary" onClick={()=>void requestPushTest()} disabled={isPending("push-test")}>{isPending("push-test")?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={isPending("push-disable")}>{isPending("push-disable")?"処理中…":"通知OFF"}</button></>}</div></section>
       <section className="hero-card"><div className="section-heading compact-heading"><h2>今日やること</h2><span className={`refresh-status ${businessDataSource}`}>{businessRefreshing?"自動更新中…":businessDataSource==="cached"?"前回データ":businessDataSource==="live"?"最新":"確認中"}</span></div><p>{taskSummary}</p><div className="task-list">{businessDataFallback??<>{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{!tasks.length&&<div className="empty">未対応はありません。</div>}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</>}</div></section>
@@ -745,3 +772,4 @@ export default function App(){
     <nav className="bottom-nav">{([['home','🏠','ホーム'],['jobs','📅','案件'],['shifts','📋','シフト'],['submit','📤','提出'],['contact','☎️','連絡']] as [View,string,string][]).map(([id,icon,label])=><button key={id} className={view===id?"active":""} onClick={()=>navigate(id)}><span>{icon}</span>{label}</button>)}</nav>
   </main>;
 }
+f3fa62eb9f547b067f63435eb23d1810438c27d4

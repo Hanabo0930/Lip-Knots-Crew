@@ -8,6 +8,8 @@ import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytesResumable } from "firebase/storage";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, storage } from "./firebase";
 import { clearDraft, loadDraft, saveDraft } from "./draft-store";
+import { clearBusinessSnapshot, loadBusinessSnapshot, saveBusinessSnapshot } from "./business-cache";
+import { runWithConcurrency } from "./concurrency";
 import {
   currentPushPermission, disablePushNotifications, enablePushNotifications,
   listenForForegroundPush, loadServerPushStatusWithRetry, loadTestPushStatus, refreshPushNotifications,
@@ -23,6 +25,8 @@ import { sleep, useAsyncAction } from "./useAsyncAction";
 
 type View = "home" | "jobs" | "shifts" | "submit" | "contact";
 type BusinessDataStatus = "idle" | "loading" | "ready" | "error";
+type BusinessDataSource = "none" | "cached" | "live";
+type SubmissionHistoryStatus = "idle" | "loading" | "ready" | "error";
 type SubmissionType = "report" | "sales_floor";
 type NetPrintItem = { id: string; number: string; printed?: boolean };
 type Job = {
@@ -57,6 +61,8 @@ function deviceLabel(){ return `${/iPhone|iPad|Android/i.test(navigator.userAgen
 const JOB_ACCENTS=["#d56f91","#5d91c9","#5aa583","#d28a46","#8a76c7","#bf6d62","#3e9ba4","#9b7a56"];
 const DEVICE_HEARTBEAT_INTERVAL_MS=5*60*1000;
 const PUSH_STATUS_REFRESH_INTERVAL_MS=60*1000;
+const BUSINESS_DATA_REFRESH_INTERVAL_MS=30*1000;
+const UPLOAD_CONCURRENCY=3;
 const CONTACT_EMAIL="info@lipknots.com";
 const CONTACT_PHONE="08037906064";
 const CONTACT_PHONE_LABEL="080-3790-6064";
@@ -64,6 +70,7 @@ const CONTACT_FORM_URL="https://lipknots.com/contact/";
 const CONTACT_EMAIL_SUBJECT="Lip Knots Crewからのお問い合わせ";
 let emailLinkSignInAttempt:{url:string;task:Promise<void>}|null=null;
 let lastPushStatusRefreshAt=0;
+let lastBusinessDataRefreshAt=0;
 function jobAccent(menuName:string){let hash=0;for(const char of menuName||"案件")hash=((hash*31)+char.codePointAt(0)!)|0;return JOB_ACCENTS[Math.abs(hash)%JOB_ACCENTS.length]??JOB_ACCENTS[0];}
 function jobKind(menuName:string){return menuName.replace(/[（(].*$/u,"").trim()||"案件";}
 function mapDestination(job:Job){return [job.storeName,job.storeAddress].filter(Boolean).join(" ");}
@@ -73,6 +80,7 @@ function stationSearchUrl(job:Job){return `https://www.google.com/maps/search/?a
 function prepSummary(job:Job){const items=job.netPrint?.items??[];const printed=items.filter(item=>item.printed).length;if(job.materialStatus)return job.materialStatus;if(!items.length)return"資料番号待ち";return printed===items.length?`準備完了（${printed}/${items.length}件）`:`準備中（${printed}/${items.length}件印刷済み）`;}
 function messageTone(value:string){if(/できません|失敗|エラー|拒否|見つかりません|必要です/u.test(value))return"error";if(/処理中|確認しています|読み込|送信中|転送中|待って/u.test(value))return"working";return"success";}
 function messageClassName(value:string){return `message ${messageTone(value)}`;}
+function fileStateKey(file:File){return `${file.name}_${file.lastModified}_${file.size}`;}
 function completeEmailLinkSignIn(url:string,email:string):Promise<void>{
   if(!auth)return Promise.reject(new Error("ログイン設定を確認できません。"));
   const activeAuth=auth;
@@ -98,10 +106,13 @@ export default function App(){
   const [pushEnabled,setPushEnabled]=useState(false);
   const [showAllTasks,setShowAllTasks]=useState(false);
   const [submissionHistory,setSubmissionHistory]=useState<SubmissionGroup[]>([]);
+  const [submissionHistoryStatus,setSubmissionHistoryStatus]=useState<SubmissionHistoryStatus>("idle");
   const [resubmissionDetail,setResubmissionDetail]=useState<ResubmissionDetail|null>(null);
   const [processingSubmission,setProcessingSubmission]=useState(false);
   const [authResolved,setAuthResolved]=useState(!firebaseConfigured);
   const [businessDataStatus,setBusinessDataStatus]=useState<BusinessDataStatus>(firebaseConfigured?"idle":"ready");
+  const [businessDataSource,setBusinessDataSource]=useState<BusinessDataSource>(firebaseConfigured?"none":"live");
+  const [businessRefreshing,setBusinessRefreshing]=useState(false);
   const [openJobsStatus,setOpenJobsStatus]=useState<BusinessDataStatus>(firebaseConfigured?"idle":"ready");
   const [businessLoadMs,setBusinessLoadMs]=useState<number|null>(firebaseConfigured?null:0);
   const [showDiagnostics,setShowDiagnostics]=useState(false);
@@ -119,16 +130,20 @@ export default function App(){
     setAuthResolved(true);
     if(firebaseConfigured){
       setCompanyId(""); setStaffId(""); setOpenJobs([]); setMyJobs([]); setTasks([]); setSelectedJob(null);
-      setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionMessage("");
+      setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionHistoryStatus("idle"); setSubmissionMessage("");
       setBusinessDataStatus(current?"loading":"idle");
+      setBusinessDataSource("none");
+      setBusinessRefreshing(Boolean(current));
       setOpenJobsStatus("idle");
       setBusinessLoadMs(null);
       setPushEnabled(false);
       setShowDiagnostics(false);
       setDiagnosticReport(null);
       lastPushStatusRefreshAt=0;
+      lastBusinessDataRefreshAt=0;
     }
-    if(!current||!functions){setDeviceSessionId("");return;}
+    if(!current||!functions){setDeviceSessionId("");setBusinessRefreshing(false);return;}
+    let restoredCachedData=false;
     try{
       const bootstrap=httpsCallable(functions,"bootstrapSession"); const result=await bootstrap();
       if((result.data as {refreshToken?:boolean}).refreshToken)await current.getIdToken(true);
@@ -136,15 +151,35 @@ export default function App(){
       const cid=String(token.claims.companyId??""); const sid=String(token.claims.staffId??"");
       if(!cid||!sid)throw new Error("スタッフの所属情報を確認できません。");
       setCompanyId(cid); setStaffId(sid);
-      await loadPrimaryBusinessData(sid,cid);
+      const snapshot=loadBusinessSnapshot<Job,StaffTask>(current.uid,cid,sid);
+      if(snapshot){
+        restoredCachedData=true;
+        setMyJobs(snapshot.jobs);
+        setTasks(snapshot.tasks);
+        setSelectedJob(snapshot.jobs[0]??null);
+        setBusinessDataStatus("ready");
+        setBusinessDataSource("cached");
+        setBusinessLoadMs(0);
+      }
+      await loadPrimaryBusinessData(sid,cid,current.uid);
       setBusinessDataStatus("ready");
+      setBusinessDataSource("live");
       setBusinessLoadMs(Math.round(performance.now()-loadStarted));
+      lastBusinessDataRefreshAt=Date.now();
       void registerCurrentDevice().catch(()=>setMessage("端末情報を登録できませんでした。再読み込みしてください。"));
       void loadOpenJobs(cid).catch(()=>undefined);
       void refreshPushStatus(true);
     }catch{
-      setBusinessDataStatus("error");
-      setMessage("業務データを読み込めませんでした。再読み込みしてください。");
+      if(restoredCachedData){
+        setBusinessDataStatus("ready");
+        setBusinessDataSource("cached");
+        setMessage("最新情報を更新できなかったため、前回の業務データを表示しています。");
+      }else{
+        setBusinessDataStatus("error");
+        setMessage("業務データを読み込めませんでした。再読み込みしてください。");
+      }
+    }finally{
+      setBusinessRefreshing(false);
     }
   }); },[]);
   useEffect(()=>{
@@ -175,6 +210,7 @@ export default function App(){
         const code=String((error as {code?:unknown}).code??"");
         if(!stopped&&code.endsWith("permission-denied")){
           setMessage("この端末はログアウトされています。");
+          clearBusinessSnapshot(user.uid,companyId,staffId);
           await signOut(activeAuth);
         }
       }
@@ -182,7 +218,7 @@ export default function App(){
     const stopWatching=watchDeviceSession(deviceSessionId);
     void heartbeat();
     const interval=window.setInterval(()=>void heartbeat(),DEVICE_HEARTBEAT_INTERVAL_MS);
-    const handleVisibility=()=>{if(document.visibilityState==="visible"){void heartbeat();void refreshPushStatus(false);}};
+    const handleVisibility=()=>{if(document.visibilityState==="visible"){void heartbeat();void refreshPushStatus(false);void refreshBusinessData(false);}};
     document.addEventListener("visibilitychange",handleVisibility);
     return()=>{
       stopped=true;
@@ -190,11 +226,14 @@ export default function App(){
       document.removeEventListener("visibilitychange",handleVisibility);
       stopWatching?.();
     };
-  },[user,deviceSessionId]);
+  },[user,deviceSessionId,companyId,staffId]);
   useEffect(()=>{ if(!user)return; let unsub:(()=>void)|null=null; void listenForForegroundPush(payload=>setMessage(`${payload.data?.title??"Lip Knots Crew"}：${payload.data?.body??"新しいお知らせがあります。"}`)).then(v=>unsub=v); return()=>unsub?.(); },[user]);
   useEffect(()=>{if(tasks.length<=5)setShowAllTasks(false);},[tasks.length]);
 
-  async function loadPrimaryBusinessData(sid=staffId,cid=companyId){ await Promise.all([loadMyJobs(sid,cid),loadTasks()]); }
+  async function loadPrimaryBusinessData(sid=staffId,cid=companyId,uid=user?.uid??""){
+    const [jobs,nextTasks]=await Promise.all([loadMyJobs(sid,cid),loadTasks()]);
+    saveBusinessSnapshot(uid,cid,sid,jobs,nextTasks);
+  }
   async function loadOpenJobs(cid=companyId){
     if(!db||!cid){setOpenJobsStatus("ready");return;}
     setOpenJobsStatus("loading");
@@ -207,9 +246,28 @@ export default function App(){
       throw error;
     }
   }
-  async function loadMyJobs(sid=staffId,cid=companyId){ if(!db||!sid||!cid)return; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=snap.docs.map(d=>({id:d.id,...d.data()} as Job)); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??values[0]??null); }
-  async function loadTasks(){ if(!functions)return; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); setTasks((r.data as {tasks?:StaffTask[]}).tasks??[]); }
+  async function loadMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{ if(!db||!sid||!cid)return[]; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=snap.docs.map(d=>({id:d.id,...d.data()} as Job)); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??values[0]??null); return values; }
+  async function loadTasks():Promise<StaffTask[]>{ if(!functions)return[]; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); const values=(r.data as {tasks?:StaffTask[]}).tasks??[]; setTasks(values); return values; }
   function showSubmissionMessage(value:string){setMessage(value);setSubmissionMessage(value);}
+
+  async function refreshBusinessData(showFailure:boolean){
+    if(!user||!staffId||!companyId||Date.now()-lastBusinessDataRefreshAt<BUSINESS_DATA_REFRESH_INTERVAL_MS)return;
+    lastBusinessDataRefreshAt=Date.now();
+    setBusinessRefreshing(true);
+    const started=performance.now();
+    try{
+      await loadPrimaryBusinessData(staffId,companyId,user.uid);
+      setBusinessDataStatus("ready");
+      setBusinessDataSource("live");
+      setBusinessLoadMs(Math.round(performance.now()-started));
+      if(openJobsStatus!=="idle")void loadOpenJobs(companyId).catch(()=>undefined);
+    }catch{
+      lastBusinessDataRefreshAt=0;
+      if(showFailure)setMessage("最新情報を更新できませんでした。通信状態を確認してください。");
+    }finally{
+      setBusinessRefreshing(false);
+    }
+  }
 
   async function refreshPushStatus(showFailure:boolean){
     if(!functions||Date.now()-lastPushStatusRefreshAt<PUSH_STATUS_REFRESH_INTERVAL_MS)return;
@@ -300,7 +358,11 @@ export default function App(){
   }
 
   async function registerCurrentDevice(){ if(!functions)return""; const c=httpsCallable(functions,"registerDeviceSession"); const r=await c({deviceId:currentDeviceId,label:deviceLabel(),platform:navigator.platform||"",userAgent:navigator.userAgent}); const id=String((r.data as {sessionId?:string}).sessionId??""); setDeviceSessionId(id); return id; }
-  function watchDeviceSession(id:string){ if(!db||!auth)return; const active=auth; return onSnapshot(doc(db,"deviceSessions",id),async s=>{if(s.exists()&&s.data().active===false){setMessage("この端末はログアウトされました。");await signOut(active);}}); }
+  async function logoutCurrentUser(){
+    if(user)clearBusinessSnapshot(user.uid,companyId,staffId);
+    if(auth)await signOut(auth);
+  }
+  function watchDeviceSession(id:string){ if(!db||!auth)return; return onSnapshot(doc(db,"deviceSessions",id),async s=>{if(s.exists()&&s.data().active===false){setMessage("この端末はログアウトされました。");await logoutCurrentUser();}}); }
 
   function isCurrentDevice(device:DeviceSession){
     if(device.id===deviceSessionId)return true;
@@ -328,7 +390,7 @@ export default function App(){
       if(!functions){setDevices(v=>v.map(x=>x.id===id?{...x,active:false}:x));return;}
       await httpsCallable(functions,"revokeMyDevice")({sessionId:id});
       await loadDevices();
-      if(currentTarget&&auth)await signOut(auth);
+      if(currentTarget)await logoutCurrentUser();
       setMessage("端末をログアウトしました。");
     },{setMessage});
   }
@@ -459,7 +521,7 @@ export default function App(){
     }
   }
 
-  async function openTask(task:StaffTask){ const job=myJobs.find(j=>j.id===task.jobId); if(!job){setMessage("対象の確定シフトを確認できません。シフト画面から案件を選び直してください。");setView("shifts");return;} setSelectedJob(job); if(task.kind==="precontact"){setView("shifts");return;} if(task.kind==="netprint"){setView("shifts");return;} const type=task.kind==="sales_floor"?"sales_floor":"report"; const req=String(task.metadata?.requestId??""); setSubmissionType(type);setRequestId(req);setSubmissionConfirmed(false);setSubmissionMessage("");await loadSubmissionHistory(job.id,type); if(req)await loadResubmissionDetail(req); else setResubmissionDetail(null);setView("submit"); }
+  async function openTask(task:StaffTask){ const job=myJobs.find(j=>j.id===task.jobId); if(!job){setMessage("対象の確定シフトを確認できません。シフト画面から案件を選び直してください。");setView("shifts");return;} setSelectedJob(job); if(task.kind==="precontact"){setView("shifts");return;} if(task.kind==="netprint"){setView("shifts");return;} const type=task.kind==="sales_floor"?"sales_floor":"report"; const req=String(task.metadata?.requestId??""); await prepareSubmission(type,job,req); }
 
   async function pollSubmissionProcessing(jobId:string,submissionId:string,type:SubmissionType,resubmissionRequestId:string){
     if(!functions)return;
@@ -497,9 +559,8 @@ export default function App(){
     if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");return;}
     const typeLabel=submissionType==="report"?"報告書":"売場画像";
     setSubmissionMessage("");
-    if(!window.confirm(`${typeLabel}として${files.length}件を送信します。種類と画像に間違いはありませんか？`))return;
     if(!firebaseConfigured){
-      setUploadState(Object.fromEntries(files.map(f=>[f.name,"送信済み"])));
+      setUploadState(Object.fromEntries(files.map(f=>[fileStateKey(f),"送信済み"])));
       showSubmissionMessage(`デモ：${typeLabel}を送信しました。`);
       setSubmissionConfirmed(false);
       return;
@@ -514,16 +575,20 @@ export default function App(){
       const purpose=currentRequestId?"replacement":"additional";
       const r=await httpsCallable(activeFunctions,"createUploadSession")({jobId,type:currentType,purpose,resubmissionRequestId:currentRequestId||undefined,files:files.map(f=>({originalName:f.name,contentType:f.type||"application/octet-stream",size:f.size}))});
       const data=r.data as {submissionId:string;files:{storagePath:string}[]};
-      const state:Record<string,string>={};
-      for(let i=0;i<data.files.length;i++){
-        const target=data.files[i],file=files[i];
-        if(!target||!file)continue;
-        state[file.name]="送信中";
-        setUploadState({...state});
-        await new Promise<void>((resolve,reject)=>uploadBytesResumable(ref(activeStorage,target.storagePath),file,{contentType:file.type}).on("state_changed",undefined,reject,resolve));
-        state[file.name]="送信済み";
-        setUploadState({...state});
-      }
+      if(!data.submissionId||data.files.length!==files.length)throw new Error("送信先を正しく準備できませんでした。もう一度お試しください。");
+      const uploads=data.files.flatMap((target,index)=>{const file=files[index];return file?[{target,file}]:[];});
+      setUploadState(Object.fromEntries(uploads.map(({file})=>[fileStateKey(file),"送信待ち"])));
+      await runWithConcurrency(uploads,UPLOAD_CONCURRENCY,async({target,file})=>{
+        const key=fileStateKey(file);
+        setUploadState(current=>({...current,[key]:"送信中 0%"}));
+        await new Promise<void>((resolve,reject)=>uploadBytesResumable(ref(activeStorage,target.storagePath),file,{contentType:file.type}).on(
+          "state_changed",
+          snapshot=>setUploadState(current=>({...current,[key]:`送信中 ${Math.round(snapshot.bytesTransferred/Math.max(snapshot.totalBytes,1)*100)}%`})),
+          reject,
+          resolve,
+        ));
+        setUploadState(current=>({...current,[key]:"送信済み"}));
+      });
       await clearDraft(draftKey);
       setFiles([]);
       setSubmissionConfirmed(false);
@@ -533,13 +598,21 @@ export default function App(){
   }
 
   async function loadSubmissionHistory(jobId:string,type:SubmissionType){
-    if(!firebaseConfigured){
-      setSubmissionHistory([{id:"demo",purpose:"initial",status:"completed",createdAt:new Date().toISOString(),completedAt:new Date().toISOString(),files:[{id:"demo_file",submissionId:"demo",originalName:"report.jpg",driveName:"7.12 ベイシア成田 Aさん (1).jpg",contentType:"image/jpeg",sequence:1,purpose:"initial",status:"completed",previewUrl:null,completedAt:new Date().toISOString(),replacesFileId:null}]}]);
-      return;
+    setSubmissionHistoryStatus("loading");
+    try{
+      if(!firebaseConfigured){
+        setSubmissionHistory([{id:"demo",purpose:"initial",status:"completed",createdAt:new Date().toISOString(),completedAt:new Date().toISOString(),files:[{id:"demo_file",submissionId:"demo",originalName:"report.jpg",driveName:"7.12 ベイシア成田 Aさん (1).jpg",contentType:"image/jpeg",sequence:1,purpose:"initial",status:"completed",previewUrl:null,completedAt:new Date().toISOString(),replacesFileId:null}]}]);
+        setSubmissionHistoryStatus("ready");
+        return;
+      }
+      if(!functions){setSubmissionHistoryStatus("error");return;}
+      const r=await httpsCallable(functions,"getSubmissionTimeline")({jobId,type});
+      setSubmissionHistory((r.data as {submissions?:SubmissionGroup[]}).submissions??[]);
+      setSubmissionHistoryStatus("ready");
+    }catch(error){
+      setSubmissionHistoryStatus("error");
+      throw error;
     }
-    if(!functions)return;
-    const r=await httpsCallable(functions,"getSubmissionTimeline")({jobId,type});
-    setSubmissionHistory((r.data as {submissions?:SubmissionGroup[]}).submissions??[]);
   }
 
   async function refreshFilePreview(file:PreviewFile):Promise<string|null>{
@@ -561,7 +634,28 @@ export default function App(){
     setResubmissionDetail(r.data as ResubmissionDetail);
   }
 
-  async function chooseSubmission(type:SubmissionType,job:Job,req=""){const assignedJob=myJobs.find(candidate=>candidate.id===job.id);if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");setView("shifts");return;}setSelectedJob(assignedJob);setSubmissionType(type);setRequestId(req);setSubmissionConfirmed(false);setSubmissionMessage("");setFiles([]);setResubmissionDetail(null);await loadSubmissionHistory(assignedJob.id,type);if(req)await loadResubmissionDetail(req);setView("submit");}
+  async function prepareSubmission(type:SubmissionType,job:Job,req=""){
+    setSelectedJob(job);
+    setSubmissionType(type);
+    setRequestId(req);
+    setSubmissionConfirmed(false);
+    setSubmissionMessage("");
+    setFiles([]);
+    setSubmissionHistory([]);
+    setSubmissionHistoryStatus("loading");
+    setResubmissionDetail(null);
+    setView("submit");
+    try{
+      await Promise.all([
+        loadSubmissionHistory(job.id,type),
+        req?loadResubmissionDetail(req):Promise.resolve(),
+      ]);
+    }catch{
+      showSubmissionMessage("提出情報を読み込めませんでした。画面内の再読み込みをお試しください。");
+    }
+  }
+
+  async function chooseSubmission(type:SubmissionType,job:Job,req=""){const assignedJob=myJobs.find(candidate=>candidate.id===job.id);if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");setView("shifts");return;}await prepareSubmission(type,assignedJob,req);}
 
   const activeJob=selectedAssignedJob??myJobs[0]??null;
   const visibleTasks=showAllTasks?tasks:tasks.slice(0,5);
@@ -586,12 +680,12 @@ export default function App(){
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
 
   return <main className="app-shell">
-    <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<div className="header-actions"><button className="ghost" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")} aria-busy={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"状態確認"}</button><button className="ghost" onClick={()=>void loadDevices()} disabled={isPending("devices")}>{isPending("devices")?"処理中…":"端末"}</button><button className="ghost" onClick={()=>auth&&signOut(auth)}>ログアウト</button></div>}</header>
+    <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<div className="header-actions"><button className="ghost" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")} aria-busy={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"状態確認"}</button><button className="ghost" onClick={()=>void loadDevices()} disabled={isPending("devices")}>{isPending("devices")?"処理中…":"端末"}</button><button className="ghost" onClick={()=>void logoutCurrentUser()}>ログアウト</button></div>}</header>
     {message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}
     {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite"><div className="section-heading"><div><h2>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<div className="diagnostic-actions">{diagnosticReport&&<button onClick={()=>void copyDiagnostics()}>結果をコピー</button>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>setShowDiagnostics(false)}>閉じる</button></div></section>}
     {view==="home"&&<>
       <section className="panel push-panel"><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span></div><div className="push-actions">{!pushEnabled?<button onClick={()=>void enablePush()} disabled={isPending("push-enable")}>{isPending("push-enable")?"処理中…":"通知を有効にする"}</button>:<><button className="secondary" onClick={()=>void requestPushTest()} disabled={isPending("push-test")}>{isPending("push-test")?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={isPending("push-disable")}>{isPending("push-disable")?"処理中…":"通知OFF"}</button></>}</div></section>
-      <section className="hero-card"><h2>今日やること</h2><p>{taskSummary}</p><div className="task-list">{businessDataFallback??<>{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{!tasks.length&&<div className="empty">未対応はありません。</div>}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</>}</div></section>
+      <section className="hero-card"><div className="section-heading compact-heading"><h2>今日やること</h2><span className={`refresh-status ${businessDataSource}`}>{businessRefreshing?"自動更新中…":businessDataSource==="cached"?"前回データ":businessDataSource==="live"?"最新":"確認中"}</span></div><p>{taskSummary}</p><div className="task-list">{businessDataFallback??<>{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{!tasks.length&&<div className="empty">未対応はありません。</div>}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</>}</div></section>
       <section><h2>次回シフト</h2>{businessDataFallback??(activeJob?<article className="job shift-job" style={{"--job-accent":jobAccent(activeJob.menuName)} as CSSProperties}><span className="date">{activeJob.workDate||activeJob.dateKey}</span><span className="job-kind">{jobKind(activeJob.menuName)}</span><h3>{activeJob.storeName}</h3><p>{activeJob.makerName} / {activeJob.menuName}</p><span className="prep-chip">{prepSummary(activeJob)}</span><button onClick={()=>{setSelectedJob(activeJob);setView("shifts")}}>シフトを開く</button></article>:<div className="empty">確定シフトはありません。</div>)}</section>
     </>}
     {view==="jobs"&&<section><h2>募集中の案件</h2>{openJobsFallback??<div className="grid">{openJobs.map(job=><article className="job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong><div className="actions"><button className="secondary" onClick={()=>setMessage(`${job.storeName} / ${job.makerName} / ${job.workTime}`)}>詳細</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>)}{!openJobs.length&&<div className="empty">現在募集中の案件はありません。</div>}</div>}</section>}
@@ -600,8 +694,8 @@ export default function App(){
     {view==="submit"&&selectedAssignedJob&&<section className={`panel submission-panel ${submissionType}`}><div className={`submission-identity ${submissionType}`}><span>{submissionType==="report"?"📝 報告書":"🖼️ 売場画像"}</span><strong>{submissionType==="report"?"報告内容が読める画像・PDF":"売場全体や陳列が分かる写真"}</strong></div><h2>{submissionType==="report"?"報告書":"売場画像"}を提出</h2><p>{selectedAssignedJob.storeName}{requestId&&" / 再提出依頼への対応"}</p>
       {resubmissionDetail&&<div className="resubmission-guide"><div><strong>再送理由</strong><p>{resubmissionDetail.request.reasons.join(" / ")}</p>{resubmissionDetail.request.note&&<p>{resubmissionDetail.request.note}</p>}</div><div className="source-preview"><span>撮り直す元画像</span>{resubmissionDetail.source?<SubmissionPreviewImage file={resubmissionDetail.source} onRefreshPreview={refreshFilePreview} className="source-preview-frame"/>:<div className="preview-placeholder">対象画像</div>}</div><small>この画像だけを撮り直し、1ファイル選んで再送してください。</small></div>}
       {submissionType==="sales_floor"&&<button className="secondary" onClick={()=>void setClientSubmitted(!selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted)} disabled={isPending("clientSubmitted")}>{isPending("clientSubmitted")?"処理中…":selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted?"クライアント提出を解除":"クライアントへ提出済み"}</button>}
-      <div className="upload-box"><input type="file" multiple={!requestId} accept="image/*,.pdf" onChange={e=>{setFiles(Array.from(e.target.files??[]).slice(0,requestId?1:20));setSubmissionConfirmed(false);setSubmissionMessage("");}}/><small>{requestId?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB`}</small></div><div className="file-list">{files.map(file=><div key={`${file.name}_${file.lastModified}`}><span>{file.name}</span><em>{uploadState[file.name]??"下書き保存済み"}</em></div>)}</div><label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><button className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?"この画像を再送する":`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className={`${messageClassName(submissionMessage)} submission-message`} role={messageTone(submissionMessage)==="error"?"alert":"status"}>{submissionMessage}</div>}
-      <hr/><h3>提出履歴</h3><div className="history-grid">{submissionHistory.flatMap(group=>group.files).map(file=><article key={`${file.submissionId}_${file.id}`}><SubmissionPreviewImage file={file} onRefreshPreview={refreshFilePreview}/><strong>{file.driveName||file.originalName}</strong><small>{file.purpose==="replacement"?"再送":"提出済み"}</small></article>)}{!submissionHistory.length&&<div className="empty">提出履歴はありません。</div>}</div>
+      <div className="upload-box"><input type="file" multiple={!requestId} accept="image/*,.pdf" onChange={e=>{setFiles(Array.from(e.target.files??[]).slice(0,requestId?1:20));setSubmissionConfirmed(false);setSubmissionMessage("");}}/><small>{requestId?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB`}</small></div><div className="file-list">{files.map(file=><div key={fileStateKey(file)}><span>{file.name}</span><em>{uploadState[fileStateKey(file)]??"下書き保存済み"}</em></div>)}</div><label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><button className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission} aria-busy={isPending("uploadSubmission")||processingSubmission}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?"この画像を再送する":`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className={`${messageClassName(submissionMessage)} submission-message`} role={messageTone(submissionMessage)==="error"?"alert":"status"}>{submissionMessage}</div>}
+      <hr/><h3>提出履歴</h3>{submissionHistoryStatus==="loading"?<div className="history-loading" role="status">提出画面は操作できます。履歴を自動で読み込んでいます…</div>:submissionHistoryStatus==="error"?<div className="empty history-error">提出履歴を読み込めませんでした。<button className="secondary" onClick={()=>void loadSubmissionHistory(selectedAssignedJob.id,submissionType).catch(()=>undefined)}>履歴を再読み込み</button></div>:<div className="history-grid">{submissionHistory.flatMap(group=>group.files).map(file=><article key={`${file.submissionId}_${file.id}`}><SubmissionPreviewImage file={file} onRefreshPreview={refreshFilePreview}/><strong>{file.driveName||file.originalName}</strong><small>{file.purpose==="replacement"?"再送":"提出済み"}</small></article>)}{!submissionHistory.length&&<div className="empty">提出履歴はありません。</div>}</div>}
     </section>}
     {view==="contact"&&<section className="panel contact-panel"><h2>連絡先</h2><p>業務に関する連絡はこちらから行えます。</p><div className="contact-actions"><a className="contact-button" href={`mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(CONTACT_EMAIL_SUBJECT)}`}>メールを送る</a><a className="contact-button" href={`tel:${CONTACT_PHONE}`}>電話をかける</a><a className="contact-button" href={CONTACT_FORM_URL} target="_blank" rel="noreferrer">お問い合わせフォームを開く</a></div><div className="contact-details"><strong>受付：平日 9:00〜18:00</strong><span>電話：<a href={`tel:${CONTACT_PHONE}`}>{CONTACT_PHONE_LABEL}</a></span><span>メール：<a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a></span></div></section>}
     {showDevices&&<section className="panel"><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)}>閉じる</button></div><div className="device-list">{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||isPending(`revoke-${device.id}`)} onClick={()=>void revokeDevice(device.id)}>{isPending(`revoke-${device.id}`)?"処理中…":"ログアウト"}</button></div>)}</div></section>}

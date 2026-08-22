@@ -18,7 +18,7 @@ assert.match(
 );
 assert.match(
   source,
-  /await loadPrimaryBusinessData\(sid,cid\)/u,
+  /await loadPrimaryBusinessData\(sid,cid,current\.uid\)/u,
   "Staff startup must scope its priority data load to the claimed company.",
 );
 assert.match(

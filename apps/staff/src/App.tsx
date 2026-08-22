@@ -83,7 +83,7 @@ function mapsSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=
 function transitRouteUrl(job:Job){return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(mapDestination(job))}&travelmode=transit`;}
 function stationSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(job.storeNearestStation??"")}`;}
 function prepSummary(job:Job){const items=job.netPrint?.items??[];const printed=items.filter(item=>item.printed).length;if(job.materialStatus)return job.materialStatus;if(!items.length)return"資料番号待ち";return printed===items.length?`準備完了（${printed}/${items.length}件）`:`準備中（${printed}/${items.length}件印刷済み）`;}
-function messageTone(value:string){if(/できません|失敗|エラー|拒否|見つかりません|必要です/u.test(value))return"error";if(/処理中|確認しています|読み込|送信中|転送中|待って/u.test(value))return"working";return"success";}
+function messageTone(value:string){if(/自動で再確認|前回の業務データ|一時的に混み合/u.test(value))return"warning";if(/できません|失敗|エラー|拒否|見つかりません|必要です/u.test(value))return"error";if(/処理中|確認しています|読み込|送信中|転送中|待って/u.test(value))return"working";return"success";}
 function messageClassName(value:string){return `message ${messageTone(value)}`;}
 function fileStateKey(file:File){return `${file.name}_${file.lastModified}_${file.size}`;}
 function completeEmailLinkSignIn(url:string,email:string):Promise<void>{
@@ -107,6 +107,7 @@ export default function App(){
   const [submissionMessage,setSubmissionMessage]=useState("");
   const [files,setFiles]=useState<File[]>([]); const [uploadState,setUploadState]=useState<Record<string,string>>({});
   const [deviceSessionId,setDeviceSessionId]=useState(""); const [devices,setDevices]=useState<DeviceSession[]>([]); const [showDevices,setShowDevices]=useState(false);
+  const [showAccountMenu,setShowAccountMenu]=useState(false);
   const currentDeviceId=useMemo(()=>getOrCreateDeviceId(),[]);
   const [pushEnabled,setPushEnabled]=useState(false);
   const [showAllTasks,setShowAllTasks]=useState(false);
@@ -282,6 +283,11 @@ export default function App(){
   },[user,deviceSessionId,companyId,staffId]);
   useEffect(()=>{ if(!user)return; let unsub:(()=>void)|null=null; void listenForForegroundPush(payload=>setMessage(`${payload.data?.title??"Lip Knots Crew"}：${payload.data?.body??"新しいお知らせがあります。"}`)).then(v=>unsub=v); return()=>unsub?.(); },[user]);
   useEffect(()=>{if(tasks.length<=5)setShowAllTasks(false);},[tasks.length]);
+  useEffect(()=>{
+    if(!message||messageTone(message)!=="success")return;
+    const timer=window.setTimeout(()=>setMessage(current=>current===message?"":current),6000);
+    return()=>window.clearTimeout(timer);
+  },[message]);
 
   async function loadPrimaryBusinessData(sid=staffId,cid=companyId,uid=user?.uid??""){
     const [jobs,nextTasks]=await Promise.all([loadMyJobs(sid,cid),loadTasks()]);
@@ -431,6 +437,11 @@ export default function App(){
   async function logoutCurrentUser(){
     if(user)clearBusinessSnapshot(user.uid,companyId,staffId);
     if(auth)await signOut(auth);
+  }
+  async function requestLogout(){
+    if(!confirm("この端末からログアウトしますか？"))return;
+    setShowAccountMenu(false);
+    await logoutCurrentUser();
   }
   function watchDeviceSession(id:string){ if(!db||!auth)return; return onSnapshot(doc(db,"deviceSessions",id),async s=>{if(s.exists()&&s.data().active===false){setMessage("この端末はログアウトされました。");await logoutCurrentUser();}}); }
 
@@ -746,12 +757,15 @@ export default function App(){
       ? <div className="empty">案件を読み込めませんでした。<button className="secondary" onClick={()=>void loadOpenJobs().catch(()=>undefined)}>もう一度試す</button></div>
       : null;
   const diagnosticSummaryLabel=diagnosticReport?.summary==="pass"?"すべて正常":diagnosticReport?.summary==="warn"?"確認あり":diagnosticReport?"エラーあり":"診断中";
+  const currentMessageTone=messageTone(message);
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message working">処理中…</div></section></main>;
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
 
   return <main className="app-shell">
-    <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<div className="header-actions"><button className="ghost" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")} aria-busy={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"状態確認"}</button><button className="ghost" onClick={()=>void loadDevices()} disabled={isPending("devices")}>{isPending("devices")?"処理中…":"端末"}</button><button className="ghost" onClick={()=>void logoutCurrentUser()}>ログアウト</button></div>}</header>
-    {message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}
+    <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button className="ghost account-menu-toggle" onClick={()=>setShowAccountMenu(value=>!value)} aria-expanded={showAccountMenu} aria-controls="account-menu">{showAccountMenu?"閉じる":"メニュー"}</button>}</header>
+    {showAccountMenu&&<section id="account-menu" className="panel account-menu-panel"><div className="section-heading"><div><h2>アカウント</h2><p>状態確認・端末管理・ログアウトはこちらです。</p></div></div><div className="account-menu-actions"><button className="secondary" onClick={()=>{setShowAccountMenu(false);void openQuickDiagnostics();}} disabled={isPending("diagnostics")} aria-busy={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"状態確認"}</button><button className="secondary" onClick={()=>{setShowAccountMenu(false);void loadDevices();}} disabled={isPending("devices")}>{isPending("devices")?"処理中…":"端末管理"}</button><button className="ghost logout-button" onClick={()=>void requestLogout()}>ログアウト</button></div></section>}
+    {message&&<div className={messageClassName(message)} role={currentMessageTone==="error"?"alert":"status"}><span>{message}</span>{currentMessageTone!=="working"&&<button className="message-dismiss" onClick={()=>setMessage("")} aria-label="お知らせを閉じる">閉じる</button>}</div>}
+    {showDevices&&<section className="panel device-panel"><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)}>閉じる</button></div><div className="device-list">{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||isPending(`revoke-${device.id}`)} onClick={()=>void revokeDevice(device.id)}>{isPending(`revoke-${device.id}`)?"処理中…":"ログアウト"}</button></div>)}</div></section>}
     {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite"><div className="section-heading"><div><h2>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<div className="diagnostic-actions">{diagnosticReport&&<><button onClick={()=>void shareDiagnostics()}>結果を共有</button><button className="secondary" onClick={()=>void copyDiagnostics()}>コピー</button></>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>setShowDiagnostics(false)}>閉じる</button></div></section>}
     {view==="home"&&<>
       <section className="panel push-panel"><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span></div><div className="push-actions">{!pushEnabled?<button onClick={()=>void enablePush()} disabled={isPending("push-enable")}>{isPending("push-enable")?"処理中…":"通知を有効にする"}</button>:<><button className="secondary" onClick={()=>void requestPushTest()} disabled={isPending("push-test")}>{isPending("push-test")?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={isPending("push-disable")}>{isPending("push-disable")?"処理中…":"通知OFF"}</button></>}</div></section>
@@ -768,7 +782,6 @@ export default function App(){
       <hr/><h3>提出履歴</h3>{submissionHistoryStatus==="loading"?<div className="history-loading" role="status">提出画面は操作できます。履歴を自動で読み込んでいます…</div>:submissionHistoryStatus==="error"?<div className="empty history-error">提出履歴を読み込めませんでした。<button className="secondary" onClick={()=>void loadSubmissionHistory(selectedAssignedJob.id,submissionType).catch(()=>undefined)}>履歴を再読み込み</button></div>:<div className="history-grid">{submissionHistory.flatMap(group=>group.files).map(file=><article key={`${file.submissionId}_${file.id}`}><SubmissionPreviewImage file={file} onRefreshPreview={refreshFilePreview}/><strong>{file.driveName||file.originalName}</strong><small>{file.purpose==="replacement"?"再送":"提出済み"}</small></article>)}{!submissionHistory.length&&<div className="empty">提出履歴はありません。</div>}</div>}
     </section>}
     {view==="contact"&&<section className="panel contact-panel"><h2>連絡先</h2><p>業務に関する連絡はこちらから行えます。</p><div className="contact-actions"><a className="contact-button" href={`mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(CONTACT_EMAIL_SUBJECT)}`}>メールを送る</a><a className="contact-button" href={`tel:${CONTACT_PHONE}`}>電話をかける</a><a className="contact-button" href={CONTACT_FORM_URL} target="_blank" rel="noreferrer">お問い合わせフォームを開く</a></div><div className="contact-details"><strong>受付：平日 9:00〜18:00</strong><span>電話：<a href={`tel:${CONTACT_PHONE}`}>{CONTACT_PHONE_LABEL}</a></span><span>メール：<a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a></span></div></section>}
-    {showDevices&&<section className="panel"><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)}>閉じる</button></div><div className="device-list">{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||isPending(`revoke-${device.id}`)} onClick={()=>void revokeDevice(device.id)}>{isPending(`revoke-${device.id}`)?"処理中…":"ログアウト"}</button></div>)}</div></section>}
     <nav className="bottom-nav">{([['home','🏠','ホーム'],['jobs','📅','案件'],['shifts','📋','シフト'],['submit','📤','提出'],['contact','☎️','連絡']] as [View,string,string][]).map(([id,icon,label])=><button key={id} className={view===id?"active":""} onClick={()=>navigate(id)}><span>{icon}</span>{label}</button>)}</nav>
   </main>;
 }

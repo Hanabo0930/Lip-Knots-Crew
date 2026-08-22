@@ -86,6 +86,23 @@ function prepSummary(job:Job){const items=job.netPrint?.items??[];const printed=
 function messageTone(value:string){if(/自動で再確認|前回の業務データ|一時的に混み合/u.test(value))return"warning";if(/できません|失敗|エラー|拒否|見つかりません|必要です/u.test(value))return"error";if(/処理中|確認しています|読み込|送信中|転送中|待って/u.test(value))return"working";return"success";}
 function messageClassName(value:string){return `message ${messageTone(value)}`;}
 function fileStateKey(file:File){return `${file.name}_${file.lastModified}_${file.size}`;}
+function formatFileSize(size:number){if(size<1024)return`${size} B`;if(size<1024*1024)return`${(size/1024).toFixed(1)} KB`;return`${(size/(1024*1024)).toFixed(1)} MB`;}
+function SelectedSubmissionFile({file,status,disabled,onRemove}:{file:File;status:string;disabled:boolean;onRemove:()=>void}){
+  const [previewUrl,setPreviewUrl]=useState("");
+  const isImage=file.type.startsWith("image/");
+  const isPdf=file.type==="application/pdf"||file.name.toLowerCase().endsWith(".pdf");
+  useEffect(()=>{
+    if(!isImage){setPreviewUrl("");return;}
+    const url=URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return()=>URL.revokeObjectURL(url);
+  },[file,isImage]);
+  return <div className="selected-file-row">
+    <div className="selected-file-preview">{previewUrl?<img src={previewUrl} alt={`${file.name}の送信前確認`}/>:<span>{isPdf?"PDF":"FILE"}</span>}</div>
+    <div className="file-copy"><span>{file.name}</span><small>{formatFileSize(file.size)}</small><em>{status}</em></div>
+    <button className="file-remove" onClick={onRemove} disabled={disabled}>外す</button>
+  </div>;
+}
 function completeEmailLinkSignIn(url:string,email:string):Promise<void>{
   if(!auth)return Promise.reject(new Error("ログイン設定を確認できません。"));
   const activeAuth=auth;
@@ -830,7 +847,7 @@ export default function App(){
       {resubmissionDetail&&<div className="resubmission-guide"><div><strong>再送理由</strong><p>{resubmissionDetail.request.reasons.join(" / ")}</p>{resubmissionDetail.request.note&&<p>{resubmissionDetail.request.note}</p>}</div><div className="source-preview"><span>撮り直す元画像</span>{resubmissionDetail.source?<SubmissionPreviewImage file={resubmissionDetail.source} onRefreshPreview={refreshFilePreview} className="source-preview-frame"/>:<div className="preview-placeholder">対象画像</div>}</div><small>この画像だけを撮り直し、1ファイル選んで再送してください。</small></div>}
       {submissionType==="sales_floor"&&<button className="secondary" onClick={()=>void setClientSubmitted(!selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted)} disabled={isPending("clientSubmitted")}>{isPending("clientSubmitted")?"処理中…":selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted?"クライアント提出を解除":"クライアントへ提出済み"}</button>}
       <div className="upload-box"><input type="file" multiple={!requestId} accept="image/*,.pdf" onChange={e=>{const nextFiles=Array.from(e.target.files??[]).slice(0,requestId?1:20);setFiles(nextFiles);setSubmissionConfirmed(false);setSubmissionMessage("");setUploadState({});e.currentTarget.value="";}}/><small>{requestId?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB`}</small></div>
-      {files.length>0&&<><div className="file-list-toolbar"><strong>選択中：{files.length}件</strong><button className="ghost" onClick={()=>void clearSubmissionFiles()} disabled={isPending("uploadSubmission")||processingSubmission}>すべて解除</button></div><div className="file-list">{files.map(file=><div key={fileStateKey(file)}><div className="file-copy"><span>{file.name}</span><em>{uploadState[fileStateKey(file)]??"下書き保存済み"}</em></div><button className="file-remove" onClick={()=>removeSubmissionFile(file)} disabled={isPending("uploadSubmission")||processingSubmission}>外す</button></div>)}</div></>}
+      {files.length>0&&<><div className="file-list-toolbar"><div><strong>選択中：{files.length}件</strong><small>送信前に画像を確認してください</small></div><button className="ghost" onClick={()=>void clearSubmissionFiles()} disabled={isPending("uploadSubmission")||processingSubmission}>すべて解除</button></div><div className="file-list">{files.map(file=><SelectedSubmissionFile key={fileStateKey(file)} file={file} status={uploadState[fileStateKey(file)]??"下書き保存済み"} disabled={isPending("uploadSubmission")||processingSubmission} onRemove={()=>removeSubmissionFile(file)}/>)}</div></>}
       <label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><button className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission} aria-busy={isPending("uploadSubmission")||processingSubmission}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?"この画像を再送する":`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className={`${messageClassName(submissionMessage)} submission-message`} role={messageTone(submissionMessage)==="error"?"alert":"status"}>{submissionMessage}</div>}
       <hr/><h3>提出履歴</h3>{submissionHistoryStatus==="loading"?<div className="history-loading" role="status">提出画面は操作できます。履歴を自動で読み込んでいます…</div>:submissionHistoryStatus==="error"?<div className="empty history-error">提出履歴を読み込めませんでした。<button className="secondary" onClick={()=>void loadSubmissionHistory(selectedAssignedJob.id,submissionType).catch(()=>undefined)}>履歴を再読み込み</button></div>:<div className="history-grid">{submissionHistory.flatMap(group=>group.files).map(file=><article key={`${file.submissionId}_${file.id}`}><SubmissionPreviewImage file={file} onRefreshPreview={refreshFilePreview}/><strong>{file.driveName||file.originalName}</strong><small>{file.purpose==="replacement"?"再送":"提出済み"}</small></article>)}{!submissionHistory.length&&<div className="empty">提出履歴はありません。</div>}</div>}
     </section>}

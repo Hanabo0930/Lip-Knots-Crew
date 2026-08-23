@@ -277,5 +277,30 @@ assert.match(
   /\.selected-file-preview \{ width:72px; height:72px;/u,
   "Selected file previews must have a stable touch-screen layout.",
 );
+assert.match(
+  app,
+  /title="確定シフトはありません"[\s\S]*action="募集中の案件を見る"[\s\S]*navigate\("jobs"\)/u,
+  "A user without a confirmed shift must have a direct path to open jobs.",
+);
+assert.match(
+  app,
+  /title="提出できる確定シフトはありません"[\s\S]*action="募集中の案件を見る"/u,
+  "Submission must not send a user without shifts into an empty shift screen.",
+);
+assert.match(
+  app,
+  /aria-expanded=\{expanded\}[\s\S]*詳細を閉じる[\s\S]*詳細を見る/u,
+  "Open-job details must stay visible in the card until the user closes them.",
+);
+assert.doesNotMatch(
+  app,
+  /setMessage\(`\$\{job\.storeName\} \/ \$\{job\.makerName\} \/ \$\{job\.workTime\}`\)/u,
+  "Job details must not be shown only in a temporary global notice.",
+);
+assert.match(
+  styles,
+  /\.empty-action \{ display:grid;[\s\S]*\.empty-action button \{ width:100%;/u,
+  "Empty-state actions must remain prominent and touch friendly on mobile.",
+);
 
-console.log("Staff UX and performance checks passed (53 assertions).");
+console.log("Staff UX and performance checks passed (58 assertions).");

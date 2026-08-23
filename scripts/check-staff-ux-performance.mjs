@@ -277,5 +277,35 @@ assert.match(
   /\.selected-file-preview \{ width:72px; height:72px;/u,
   "Selected file previews must have a stable touch-screen layout.",
 );
+assert.match(
+  app,
+  /capture="environment"[\s\S]*addSubmissionFiles/u,
+  "Mobile staff must be able to open the rear camera directly.",
+);
+assert.match(
+  app,
+  /file-picker-button library[\s\S]*multiple=\{!requestId\}[\s\S]*accept="image\/\*,\.pdf"/u,
+  "Photo-library and PDF selection must stay separate from direct camera capture.",
+);
+assert.match(
+  app,
+  /const base=requestId\?\[\]:files;[\s\S]*const next=\[\.\.\.base,\.\.\.additions\]/u,
+  "Normal submission picks must append without discarding files already selected.",
+);
+assert.match(
+  app,
+  /const seen=new Set\(base\.map\(fileStateKey\)\)[\s\S]*seen\.has\(key\)/u,
+  "Repeated camera or library picks must not duplicate the same file.",
+);
+assert.match(
+  app,
+  /MAX_SUBMISSION_FILE_SIZE=50\*1024\*1024[\s\S]*file\.size<=MAX_SUBMISSION_FILE_SIZE/u,
+  "Oversized files must be rejected before any upload session is created.",
+);
+assert.match(
+  styles,
+  /\.file-picker-button \{ min-height:54px;[\s\S]*touch-action:manipulation/u,
+  "Camera and library controls must remain large and responsive on touch screens.",
+);
 
-console.log("Staff UX and performance checks passed (53 assertions).");
+console.log("Staff UX and performance checks passed (59 assertions).");

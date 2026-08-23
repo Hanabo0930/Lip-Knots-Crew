@@ -279,6 +279,31 @@ assert.match(
 );
 assert.match(
   app,
+  /title="確定シフトはありません"[\s\S]*action="募集中の案件を見る"[\s\S]*navigate\("jobs"\)/u,
+  "A user without a confirmed shift must have a direct path to open jobs.",
+);
+assert.match(
+  app,
+  /title="提出できる確定シフトはありません"[\s\S]*action="募集中の案件を見る"/u,
+  "Submission must not send a user without shifts into an empty shift screen.",
+);
+assert.match(
+  app,
+  /aria-expanded=\{expanded\}[\s\S]*詳細を閉じる[\s\S]*詳細を見る/u,
+  "Open-job details must stay visible in the card until the user closes them.",
+);
+assert.doesNotMatch(
+  app,
+  /setMessage\(`\$\{job\.storeName\} \/ \$\{job\.makerName\} \/ \$\{job\.workTime\}`\)/u,
+  "Job details must not be shown only in a temporary global notice.",
+);
+assert.match(
+  styles,
+  /\.empty-action \{ display:grid;[\s\S]*\.empty-action button \{ width:100%;/u,
+  "Empty-state actions must remain prominent and touch friendly on mobile.",
+);
+assert.match(
+  app,
   /capture="environment"[\s\S]*addSubmissionFiles/u,
   "Mobile staff must be able to open the rear camera directly.",
 );
@@ -308,4 +333,4 @@ assert.match(
   "Camera and library controls must remain large and responsive on touch screens.",
 );
 
-console.log("Staff UX and performance checks passed (59 assertions).");
+console.log("Staff UX and performance checks passed (64 assertions).");

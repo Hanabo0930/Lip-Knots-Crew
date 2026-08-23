@@ -39,6 +39,11 @@ h1,h2,h3 { margin-top: 0; }
 .prep-chip { display:inline-flex; width:max-content; max-width:100%; padding:6px 10px; margin:0 0 13px; border-radius:999px; background:#eef7f1; color:#317a54; font-size:12px; font-weight:900; }
 .actions { display:flex; gap:8px; margin-top:14px; }
 .actions button { flex:1; }
+.open-job { align-self:start; }
+.job-details { display:grid; gap:7px; margin:15px 0 0; padding:13px; border-radius:14px; background:#fbf7f8; }
+.job-details>div { display:grid; grid-template-columns:74px minmax(0,1fr); gap:9px; }
+.job-details dt { color:#806f68; font-size:12px; font-weight:800; }
+.job-details dd { margin:0; overflow-wrap:anywhere; font-weight:800; }
 .message { margin:0 0 14px; padding:12px 14px; background:#e9f6ef; color:#38761d; border:1px solid #cce8d7; border-radius:13px; font-weight:700; display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .message>span { min-width:0; }
 .message-dismiss { min-height:34px; padding:6px 10px; flex:0 0 auto; border-radius:10px; background:rgba(255,255,255,.76); color:inherit; border:1px solid currentColor; font-size:12px; }
@@ -65,6 +70,10 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .file-list-toolbar .ghost,.file-remove { min-height:40px; padding:8px 12px; font-size:12px; }
 .file-remove { flex:0 0 auto; background:#fff; color:#a33b35; border:1px solid #efc4c0; }
 .empty { color:#806f68; padding:20px; }
+.empty-action { display:grid; gap:9px; place-items:start; border:1px dashed #dfd3d7; border-radius:18px; background:#fffdfd; }
+.empty-action strong { color:#3f332c; font-size:17px; }
+.empty-action p { margin:0; line-height:1.6; }
+.empty-action button { width:100%; margin-top:3px; }
 .login-shell { min-height:100vh; display:grid; place-items:center; padding:20px; }
 .login-card { width:min(430px,100%); background:white; border:1px solid #eadfe2; border-radius:26px; padding:28px; text-align:center; box-shadow:0 22px 55px rgba(95,75,68,.13); }
 .login-card img { width:160px; height:90px; object-fit:contain; }

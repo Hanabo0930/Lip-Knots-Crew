@@ -252,5 +252,30 @@ assert.match(
   /\.file-remove \{ flex:0 0 auto;/u,
   "File removal must expose a dedicated touch-friendly control.",
 );
+assert.match(
+  app,
+  /function SelectedSubmissionFile[\s\S]*URL\.createObjectURL\(file\)[\s\S]*URL\.revokeObjectURL\(url\)/u,
+  "Selected image previews must release temporary browser URLs after use.",
+);
+assert.match(
+  app,
+  /alt=\{`\$\{file\.name\}の送信前確認`\}/u,
+  "Selected image previews must identify the file for assistive technology.",
+);
+assert.match(
+  app,
+  /isPdf\?"PDF":"FILE"/u,
+  "Non-image selections must show a clear PDF or file marker.",
+);
+assert.match(
+  app,
+  /formatFileSize\(file\.size\)/u,
+  "Selected files must show their size before upload.",
+);
+assert.match(
+  styles,
+  /\.selected-file-preview \{ width:72px; height:72px;/u,
+  "Selected file previews must have a stable touch-screen layout.",
+);
 
-console.log("Staff UX and performance checks passed (48 assertions).");
+console.log("Staff UX and performance checks passed (53 assertions).");

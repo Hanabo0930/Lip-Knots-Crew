@@ -304,6 +304,21 @@ assert.match(
 );
 assert.match(
   app,
+  /async function refreshOpenJobs\(showConfirmation=true\)[\s\S]*await loadOpenJobs\(\)[\s\S]*募集中の案件を最新情報に更新しました/u,
+  "Open jobs must support a one-tap refresh without reloading the whole app.",
+);
+assert.match(
+  app,
+  /title="現在募集中の案件はありません"[\s\S]*action="最新情報を確認"[\s\S]*secondaryAction="ホームへ戻る"/u,
+  "An empty open-jobs screen must offer both refresh and a safe route home.",
+);
+assert.match(
+  styles,
+  /\.empty-action-actions \{ display:grid; width:100%; gap:8px; \}/u,
+  "Multiple empty-state actions must keep a stable full-width mobile layout.",
+);
+assert.match(
+  app,
   /capture="environment"[\s\S]*addSubmissionFiles/u,
   "Mobile staff must be able to open the rear camera directly.",
 );
@@ -333,4 +348,4 @@ assert.match(
   "Camera and library controls must remain large and responsive on touch screens.",
 );
 
-console.log("Staff UX and performance checks passed (64 assertions).");
+console.log("Staff UX and performance checks passed (67 assertions).");

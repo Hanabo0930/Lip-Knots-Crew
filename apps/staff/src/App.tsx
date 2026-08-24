@@ -105,11 +105,14 @@ function SelectedSubmissionFile({file,status,disabled,onRemove}:{file:File;statu
     <button className="file-remove" onClick={onRemove} disabled={disabled}>外す</button>
   </div>;
 }
-function EmptyAction({title,body,action,onAction}:{title:string;body:string;action:string;onAction:()=>void}){
+function EmptyAction({title,body,action,onAction,secondaryAction,onSecondaryAction}:{title:string;body:string;action:string;onAction:()=>void;secondaryAction?:string;onSecondaryAction?:()=>void}){
   return <div className="empty empty-action">
     <strong>{title}</strong>
     <p>{body}</p>
-    <button onClick={onAction}>{action}</button>
+    <div className="empty-action-actions">
+      <button onClick={onAction}>{action}</button>
+      {secondaryAction&&onSecondaryAction&&<button className="secondary" onClick={onSecondaryAction}>{secondaryAction}</button>}
+    </div>
   </div>;
 }
 function completeEmailLinkSignIn(url:string,email:string):Promise<void>{
@@ -334,6 +337,14 @@ export default function App(){
       throw error;
     }
   }
+  async function refreshOpenJobs(showConfirmation=true){
+    try{
+      await loadOpenJobs();
+      if(showConfirmation)setMessage("募集中の案件を最新情報に更新しました。");
+    }catch{
+      if(showConfirmation)setMessage("案件を読み込めませんでした。通信状態を確認して、もう一度お試しください。");
+    }
+  }
   async function loadMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{ if(!db||!sid||!cid)return[]; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=snap.docs.map(d=>({id:d.id,...d.data()} as Job)); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??values[0]??null); return values; }
   async function loadTasks():Promise<StaffTask[]>{ if(!functions)return[]; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); const values=(r.data as {tasks?:StaffTask[]}).tasks??[]; setTasks(values); return values; }
   function showSubmissionMessage(value:string){setMessage(value);setSubmissionMessage(value);}
@@ -415,7 +426,7 @@ export default function App(){
 
   function navigate(next:View){
     setView(next);
-    if(next==="jobs"&&openJobsStatus==="idle")void loadOpenJobs().catch(()=>undefined);
+    if(next==="jobs"&&openJobsStatus==="idle")void refreshOpenJobs(false);
   }
 
   async function refreshSelectedJob(jobId:string){
@@ -847,7 +858,7 @@ export default function App(){
   const openJobsFallback=openJobsStatus==="loading"
     ? <div className="empty">募集中の案件を読み込んでいます…</div>
     : openJobsStatus==="error"
-      ? <div className="empty">案件を読み込めませんでした。<button className="secondary" onClick={()=>void loadOpenJobs().catch(()=>undefined)}>もう一度試す</button></div>
+      ? <div className="empty">案件を読み込めませんでした。<button className="secondary" onClick={()=>void refreshOpenJobs()}>もう一度試す</button></div>
       : null;
   const diagnosticSummaryLabel=diagnosticReport?.summary==="pass"?"すべて正常":diagnosticReport?.summary==="warn"?"確認あり":diagnosticReport?"エラーあり":"診断中";
   const currentMessageTone=messageTone(message);
@@ -865,7 +876,7 @@ export default function App(){
       <section className="hero-card"><div className="section-heading compact-heading"><h2>今日やること</h2><span className={`refresh-status ${businessDataSource}`}>{businessRefreshing?"自動更新中…":businessDataSource==="cached"?"前回データ":businessDataSource==="live"?"最新":"確認中"}</span></div><p>{taskSummary}</p><div className="task-list">{businessDataFallback??<>{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{!tasks.length&&<div className="empty">未対応はありません。</div>}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</>}</div></section>
       <section><h2>次回シフト</h2>{businessDataFallback??(activeJob?<article className="job shift-job" style={{"--job-accent":jobAccent(activeJob.menuName)} as CSSProperties}><span className="date">{activeJob.workDate||activeJob.dateKey}</span><span className="job-kind">{jobKind(activeJob.menuName)}</span><h3>{activeJob.storeName}</h3><p>{activeJob.makerName} / {activeJob.menuName}</p><span className="prep-chip">{prepSummary(activeJob)}</span><button onClick={()=>{setSelectedJob(activeJob);setView("shifts")}}>シフトを開く</button></article>:<EmptyAction title="確定シフトはありません" body="募集中の案件があれば、このまま確認して応募できます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>)}</section>
     </>}
-    {view==="jobs"&&<section><h2>募集中の案件</h2>{openJobsFallback??<div className="grid">{openJobs.map(job=>{const expanded=expandedOpenJobId===job.id;return <article className="job open-job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong>{expanded&&<dl className="job-details" id={`job-details-${job.id}`}><div><dt>実施日</dt><dd>{job.workDate||job.dateKey}</dd></div><div><dt>勤務時間</dt><dd>{job.workTime||"確認中"}</dd></div>{job.storeAddress&&<div><dt>店舗住所</dt><dd>{job.storeAddress}</dd></div>}{job.clientName&&<div><dt>依頼元</dt><dd>{job.clientName}</dd></div>}</dl>}<div className="actions"><button className="secondary" aria-expanded={expanded} aria-controls={`job-details-${job.id}`} onClick={()=>setExpandedOpenJobId(current=>current===job.id?"":job.id)}>{expanded?"詳細を閉じる":"詳細を見る"}</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>})}{!openJobs.length&&<EmptyAction title="現在募集中の案件はありません" body="新しい案件が公開されると、この画面に表示されます。" action="ホームへ戻る" onAction={()=>navigate("home")}/>}</div>}</section>}
+    {view==="jobs"&&<section><h2>募集中の案件</h2>{openJobsFallback??<div className="grid">{openJobs.map(job=>{const expanded=expandedOpenJobId===job.id;return <article className="job open-job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong>{expanded&&<dl className="job-details" id={`job-details-${job.id}`}><div><dt>実施日</dt><dd>{job.workDate||job.dateKey}</dd></div><div><dt>勤務時間</dt><dd>{job.workTime||"確認中"}</dd></div>{job.storeAddress&&<div><dt>店舗住所</dt><dd>{job.storeAddress}</dd></div>}{job.clientName&&<div><dt>依頼元</dt><dd>{job.clientName}</dd></div>}</dl>}<div className="actions"><button className="secondary" aria-expanded={expanded} aria-controls={`job-details-${job.id}`} onClick={()=>setExpandedOpenJobId(current=>current===job.id?"":job.id)}>{expanded?"詳細を閉じる":"詳細を見る"}</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>})}{!openJobs.length&&<EmptyAction title="現在募集中の案件はありません" body="新しい案件が公開されると、この画面に表示されます。ここからいつでも最新情報を確認できます。" action="最新情報を確認" onAction={()=>void refreshOpenJobs()} secondaryAction="ホームへ戻る" onSecondaryAction={()=>navigate("home")}/>}</div>}</section>}
     {view==="shifts"&&<section>
       <h2>自分のシフト</h2>
       {businessDataFallback??<>

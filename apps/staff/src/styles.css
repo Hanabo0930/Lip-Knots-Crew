@@ -152,6 +152,13 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .home-shift-empty { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:12px; padding:13px 14px; border:1px dashed #dfd3d7; border-radius:16px; background:#fffdfd; }
 .home-shift-empty strong { min-width:0; }
 .home-shift-empty button { min-width:132px; }
+.shift-list-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 12px; }
+.shift-list-heading h3 { margin:0; }
+.shift-list-heading>span { display:inline-flex; min-width:42px; justify-content:center; padding:6px 9px; border-radius:999px; background:#eef5fc; color:#35658c; font-size:12px; font-weight:900; }
+.past-shifts { margin-top:18px; }
+.past-shifts-toggle { width:100%; }
+.past-shift-grid { margin-top:12px; }
+.shift-list-heading.past { margin-top:24px; }
 .refresh-status { display:inline-flex; align-items:center; min-height:28px; padding:5px 9px; border-radius:999px; background:#eef5fc; color:#35658c; font-size:11px; font-weight:900; white-space:nowrap; }
 .refresh-status.live { background:#e8f5ee; color:#317a54; }
 .refresh-status.cached { background:#fff3df; color:#98601f; }

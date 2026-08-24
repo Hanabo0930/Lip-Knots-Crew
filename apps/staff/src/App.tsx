@@ -31,6 +31,7 @@ import {
   localDateKey,
   nextShiftJob,
   orderAssignedJobs,
+  splitAssignedJobs,
 } from "./job-list";
 import { sleep, useAsyncAction } from "./useAsyncAction";
 
@@ -149,6 +150,7 @@ export default function App(){
   const [pushEnabled,setPushEnabled]=useState(false);
   const [showPushActions,setShowPushActions]=useState(false);
   const [showAllTasks,setShowAllTasks]=useState(false);
+  const [showPastShifts,setShowPastShifts]=useState(false);
   const [submissionHistory,setSubmissionHistory]=useState<SubmissionGroup[]>([]);
   const [submissionHistoryStatus,setSubmissionHistoryStatus]=useState<SubmissionHistoryStatus>("idle");
   const [resubmissionDetail,setResubmissionDetail]=useState<ResubmissionDetail|null>(null);
@@ -166,10 +168,15 @@ export default function App(){
   const [emailLinkPending,setEmailLinkPending]=useState(()=>Boolean(auth&&isSignInWithEmailLink(auth,window.location.href)));
 
   const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
+  const {upcoming:upcomingShifts,past:pastShifts}=useMemo(()=>splitAssignedJobs(myJobs),[myJobs]);
   const draftKey=selectedAssignedJob?`${selectedAssignedJob.id}_${submissionType}_${requestId||"normal"}`:"";
   useEffect(()=>{ if(!draftKey)return; void loadDraft(draftKey).then(setFiles).catch(()=>undefined); },[draftKey]);
   useEffect(()=>{ if(!draftKey)return; const timer=setTimeout(()=>void saveDraft(draftKey,files),300); return()=>clearTimeout(timer); },[draftKey,files]);
   useEffect(()=>{ if(!pushEnabled)setShowPushActions(false); },[pushEnabled]);
+  useEffect(()=>{
+    if(showPastShifts||!selectedJob||!upcomingShifts.length||!pastShifts.some(job=>job.id===selectedJob.id))return;
+    setSelectedJob(upcomingShifts[0]);
+  },[pastShifts,selectedJob,showPastShifts,upcomingShifts]);
 
   useEffect(()=>{ if(!auth)return; return onAuthStateChanged(auth,async current=>{
     const loadStarted=performance.now();
@@ -186,6 +193,7 @@ export default function App(){
       setBusinessRefreshMs(null);
       setHomeLoadedFromCache(false);
       setPushEnabled(false);
+      setShowPastShifts(false);
       setShowDiagnostics(false);
       setDiagnosticReport(null);
       lastPushStatusRefreshAt=0;
@@ -890,8 +898,14 @@ export default function App(){
     {view==="shifts"&&<section>
       <h2>自分のシフト</h2>
       {businessDataFallback??<>
-        <div className="grid">{myJobs.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>
-        {!myJobs.length&&<EmptyAction title="確定シフトはありません" body="募集中の案件を確認すると、次の仕事へすぐ進めます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>}
+        <div className="shift-list-heading"><h3>これからのシフト</h3><span>{upcomingShifts.length}件</span></div>
+        {upcomingShifts.length
+          ? <div className="grid">{upcomingShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>
+          : <EmptyAction title="今後の確定シフトはありません" body="募集中の案件を確認すると、次の仕事へすぐ進めます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>}
+        {pastShifts.length>0&&<div className="past-shifts">
+          {upcomingShifts.length>0?<button className="secondary past-shifts-toggle" aria-expanded={showPastShifts} aria-controls="past-shifts-list" onClick={()=>setShowPastShifts(value=>!value)}>{showPastShifts?"過去のシフトを閉じる":`過去のシフトを見る（${pastShifts.length}件）`}</button>:<div className="shift-list-heading past"><h3>過去のシフト</h3><span>{pastShifts.length}件</span></div>}
+          {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list" className="grid past-shift-grid">{pastShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>}
+        </div>}
         {selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)}/></label></div><button onClick={()=>void submitPreContact()} disabled={isPending("preContact")}>{isPending("preContact")?"処理中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||isPending(`print-${item.id}`)} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":isPending(`print-${item.id}`)?"処理中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)}>📝 報告書を提出</button></div></section>}
       </>}
     </section>}

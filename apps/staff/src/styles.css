@@ -111,6 +111,12 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .push-status { display:inline-flex; padding:7px 10px; border-radius:999px; background:#eee; color:#777; font-size:12px; font-weight:900; white-space:nowrap; }
 .push-status.enabled { background:#e8f5ee; color:#317a54; }
 .push-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:13px; }
+.push-panel.enabled { padding:16px 18px; }
+.push-panel.enabled .section-heading { flex-direction:row; align-items:center; }
+.push-panel.enabled .section-heading h2 { margin-bottom:0; }
+.push-panel.enabled .section-heading p { display:none; }
+.push-panel.enabled .push-actions { display:grid; grid-template-columns:1fr 1fr; margin-top:10px; }
+.push-panel.enabled .push-actions button { width:100%; }
 .diagnostic-panel { border-top:6px solid #7d93aa; }
 .diagnostic-panel.pass { border-top-color:#5aa583; }
 .diagnostic-panel.warn { border-top-color:#d28a46; }
@@ -135,7 +141,11 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .task-card.urgent { background:#fff3df; border-color:#efd2a8; }
 .task-card.overdue { background:#fdeceb; border-color:#efc1bd; }
 .task-list-toggle { width:100%; margin-top:2px; }
-.compact-heading { align-items:center; }
+.task-clear { display:flex; align-items:center; gap:11px; margin-top:15px; padding:13px 14px; border:1px solid #cce8d7; border-radius:15px; background:#f1faf5; }
+.task-clear>span { width:30px; height:30px; display:grid; place-items:center; flex:0 0 auto; border-radius:50%; background:#dff3e8; color:#317a54; font-weight:900; }
+.task-clear strong,.task-clear small { display:block; }
+.task-clear small { margin-top:3px; color:#6f7c73; }
+.compact-heading { flex-direction:row; justify-content:space-between; align-items:center; }
 .compact-heading h2 { margin-bottom:0; }
 .refresh-status { display:inline-flex; align-items:center; min-height:28px; padding:5px 9px; border-radius:999px; background:#eef5fc; color:#35658c; font-size:11px; font-weight:900; white-space:nowrap; }
 .refresh-status.live { background:#e8f5ee; color:#317a54; }

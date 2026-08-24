@@ -347,5 +347,25 @@ assert.match(
   /\.file-picker-button \{ min-height:54px;[\s\S]*touch-action:manipulation/u,
   "Camera and library controls must remain large and responsive on touch screens.",
 );
+assert.match(
+  app,
+  /className=\{`panel push-panel \$\{pushEnabled\?"enabled":""\}`\}/u,
+  "An enabled push panel must switch to the compact daily-use layout.",
+);
+assert.match(
+  styles,
+  /\.push-panel\.enabled \{ padding:16px 18px; \}[\s\S]*\.push-panel\.enabled \.push-actions \{ display:grid; grid-template-columns:1fr 1fr;/u,
+  "Enabled push controls must remain compact and evenly tappable.",
+);
+assert.match(
+  app,
+  /tasks\.length\?<><p>\{taskSummary\}<\/p>[\s\S]*className="task-clear" role="status"[\s\S]*新しい対応が届くと、ここに表示されます/u,
+  "A completed day must use one compact, non-duplicated status instead of two empty messages.",
+);
+assert.match(
+  styles,
+  /\.task-clear \{ display:flex;[\s\S]*\.compact-heading \{ flex-direction:row; justify-content:space-between; align-items:center; \}/u,
+  "Home status and freshness must remain compact and scannable on mobile.",
+);
 
-console.log("Staff UX and performance checks passed (67 assertions).");
+console.log("Staff UX and performance checks passed (71 assertions).");

@@ -354,8 +354,23 @@ assert.match(
 );
 assert.match(
   styles,
-  /\.push-panel\.enabled \{ padding:16px 18px; \}[\s\S]*\.push-panel\.enabled \.push-actions \{ display:grid; grid-template-columns:1fr 1fr;/u,
-  "Enabled push controls must remain compact and evenly tappable.",
+  /\.push-summary-actions \{ display:flex; align-items:center; gap:8px; \}[\s\S]*\.push-settings-toggle \{ min-height:38px;[\s\S]*\.push-panel\.enabled \{ padding:12px 16px; \}/u,
+  "Enabled push status and its settings control must fit in one compact row.",
+);
+assert.match(
+  app,
+  /pushEnabled&&<button className="ghost push-settings-toggle" aria-expanded=\{showPushActions\} aria-controls="push-enabled-actions"[\s\S]*showPushActions&&<div id="push-enabled-actions" className="push-actions">/u,
+  "Daily notification controls must stay collapsed until the user opens settings.",
+);
+assert.match(
+  app,
+  /id="push-enabled-actions"[\s\S]*通知テスト[\s\S]*通知OFF/u,
+  "Collapsed notification settings must preserve both test and disable actions.",
+);
+assert.match(
+  app,
+  /useEffect\(\(\)=>\{ if\(!pushEnabled\)setShowPushActions\(false\); \},\[pushEnabled\]\)/u,
+  "Notification settings must close when notifications become disabled.",
 );
 assert.match(
   app,
@@ -383,4 +398,4 @@ assert.match(
   "The empty next-shift state must remain compact while preserving a clear touch target.",
 );
 
-console.log("Staff UX and performance checks passed (74 assertions).");
+console.log("Staff UX and performance checks passed (77 assertions).");

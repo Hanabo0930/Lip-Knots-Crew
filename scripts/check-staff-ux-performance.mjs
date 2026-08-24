@@ -367,5 +367,20 @@ assert.match(
   /\.task-clear \{ display:flex;[\s\S]*\.compact-heading \{ flex-direction:row; justify-content:space-between; align-items:center; \}/u,
   "Home status and freshness must remain compact and scannable on mobile.",
 );
+assert.match(
+  app,
+  /activeJob\?<article[\s\S]*className="home-shift-empty"[\s\S]*確定シフトはありません[\s\S]*募集案件を見る/u,
+  "A home screen without an assigned shift must keep one direct route to open jobs.",
+);
+assert.doesNotMatch(
+  app,
+  /body="募集中の案件があれば、このまま確認して応募できます。"/u,
+  "The home screen must not reserve a full explanatory card when no shift is assigned.",
+);
+assert.match(
+  styles,
+  /\.home-shift-empty \{ display:grid; grid-template-columns:minmax\(0,1fr\) auto; align-items:center;[\s\S]*\.home-shift-empty button \{ min-width:132px; \}/u,
+  "The empty next-shift state must remain compact while preserving a clear touch target.",
+);
 
-console.log("Staff UX and performance checks passed (71 assertions).");
+console.log("Staff UX and performance checks passed (74 assertions).");

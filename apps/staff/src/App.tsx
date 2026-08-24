@@ -26,6 +26,12 @@ import {
   type DiagnosticReport,
 } from "./diagnostics";
 import SubmissionPreviewImage, { type PreviewFile } from "./SubmissionPreviewImage";
+import {
+  availableOpenJobs,
+  localDateKey,
+  nextShiftJob,
+  orderAssignedJobs,
+} from "./job-list";
 import { sleep, useAsyncAction } from "./useAsyncAction";
 
 type View = "home" | "jobs" | "shifts" | "submit" | "contact";
@@ -81,9 +87,6 @@ let lastPushStatusRefreshAt=0;
 let lastBusinessDataRefreshAt=0;
 function jobAccent(menuName:string){let hash=0;for(const char of menuName||"案件")hash=((hash*31)+char.codePointAt(0)!)|0;return JOB_ACCENTS[Math.abs(hash)%JOB_ACCENTS.length]??JOB_ACCENTS[0];}
 function jobKind(menuName:string){return menuName.replace(/[（(].*$/u,"").trim()||"案件";}
-function activeAssignedJobs(jobs:Job[]){return jobs.filter(job=>job.status==="assigned"&&job.cancelled!==true);}
-function localDateKey(date=new Date()){return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;}
-function nextShiftJob(jobs:Job[],today=localDateKey()){return activeAssignedJobs(jobs).reduce<Job|null>((next,job)=>/^\d{4}-\d{2}-\d{2}$/u.test(job.dateKey)&&job.dateKey>=today&&(!next||job.dateKey<next.dateKey)?job:next,null);}
 function mapDestination(job:Job){return [job.storeName,job.storeAddress].filter(Boolean).join(" ");}
 function mapsSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapDestination(job))}`;}
 function transitRouteUrl(job:Job){return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(mapDestination(job))}&travelmode=transit`;}
@@ -196,7 +199,7 @@ export default function App(){
       const restoreCachedBusinessData=(cid:string,sid:string)=>{
         const snapshot=loadBusinessSnapshot<Job,StaffTask>(current.uid,cid,sid);
         if(!snapshot)return false;
-        const jobs=activeAssignedJobs(snapshot.jobs);
+        const jobs=orderAssignedJobs(snapshot.jobs);
         setCompanyId(cid); setStaffId(sid);
         setMyJobs(jobs);
         setTasks(snapshot.tasks);
@@ -334,8 +337,8 @@ export default function App(){
     if(!db||!cid){setOpenJobsStatus("ready");return;}
     setOpenJobsStatus("loading");
     try{
-      const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("status","==","open"),orderBy("dateKey","asc"),limit(100)));
-      const values=snap.docs.map(d=>({id:d.id,...d.data()} as Job));
+      const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("status","==","open"),where("dateKey",">=",localDateKey()),orderBy("dateKey","asc"),limit(100)));
+      const values=availableOpenJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job)));
       setOpenJobs(values);
       setExpandedOpenJobId(current=>values.some(job=>job.id===current)?current:"");
       setOpenJobsStatus("ready");
@@ -352,7 +355,7 @@ export default function App(){
       if(showConfirmation)setMessage("案件を読み込めませんでした。通信状態を確認して、もう一度お試しください。");
     }
   }
-  async function loadMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{ if(!db||!sid||!cid)return[]; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=activeAssignedJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??values[0]??null); return values; }
+  async function loadMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{ if(!db||!sid||!cid)return[]; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=orderAssignedJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??nextShiftJob(values)??values[0]??null); return values; }
   async function loadTasks():Promise<StaffTask[]>{ if(!functions)return[]; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); const values=(r.data as {tasks?:StaffTask[]}).tasks??[]; setTasks(values); return values; }
   function showSubmissionMessage(value:string){setMessage(value);setSubmissionMessage(value);}
 

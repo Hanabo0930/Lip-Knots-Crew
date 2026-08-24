@@ -10,6 +10,7 @@ const push = readFileSync("apps/staff/src/push.ts", "utf8");
 const asyncAction = readFileSync("apps/staff/src/useAsyncAction.ts", "utf8");
 const businessCache = readFileSync("apps/staff/src/business-cache.ts", "utf8");
 const concurrency = readFileSync("apps/staff/src/concurrency.ts", "utf8");
+const jobList = readFileSync("apps/staff/src/job-list.ts", "utf8");
 const styles = readFileSync("apps/staff/src/styles.css", "utf8");
 
 const storedBusinessCache = new Map();
@@ -41,6 +42,38 @@ assert.equal(businessCacheApi.loadLastBusinessScope("uid-b"), null);
 businessCacheApi.clearBusinessSnapshot("uid-a", "company-a", "staff-a");
 assert.equal(businessCacheApi.loadBusinessSnapshot("uid-a", "company-a", "staff-a"), null);
 assert.equal(businessCacheApi.loadLastBusinessScope("uid-a"), null);
+
+const jobListModule = { exports: {} };
+runInNewContext(
+  ts.transpileModule(jobList, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText,
+  { exports: jobListModule.exports, module: jobListModule },
+);
+const jobListApi = jobListModule.exports;
+const mixedAssignedJobs = [
+  { id: "past-old", dateKey: "2026-08-01", status: "assigned" },
+  { id: "future-later", dateKey: "2026-08-28", status: "assigned" },
+  { id: "cancelled", dateKey: "2026-08-25", status: "assigned", cancelled: true },
+  { id: "past-recent", dateKey: "2026-08-23", status: "assigned" },
+  { id: "future-next", dateKey: "2026-08-24", status: "assigned" },
+  { id: "unassigned", dateKey: "2026-08-26", status: "open" },
+];
+assert.deepEqual(
+  Array.from(jobListApi.orderAssignedJobs(mixedAssignedJobs, "2026-08-24"), (job) => job.id),
+  ["future-next", "future-later", "past-recent", "past-old"],
+);
+assert.equal(jobListApi.nextShiftJob(mixedAssignedJobs, "2026-08-24").id, "future-next");
+assert.deepEqual(
+  Array.from(jobListApi.availableOpenJobs([
+    { id: "past", dateKey: "2026-08-23", status: "open" },
+    { id: "future-later", dateKey: "2026-08-28", status: "open" },
+    { id: "future-next", dateKey: "2026-08-24", status: "open" },
+    { id: "cancelled", dateKey: "2026-08-25", status: "open", cancelled: true },
+    { id: "assigned", dateKey: "2026-08-26", status: "assigned" },
+  ], "2026-08-24"), (job) => job.id),
+  ["future-next", "future-later"],
+);
 
 assert.match(
   app,
@@ -398,8 +431,8 @@ assert.match(
   "The empty next-shift state must remain compact while preserving a clear touch target.",
 );
 assert.match(
-  app,
-  /function nextShiftJob\(jobs:Job\[\],today=localDateKey\(\)\)[\s\S]*activeAssignedJobs\(jobs\)[\s\S]*job\.dateKey>=today[\s\S]*job\.dateKey<next\.dateKey/u,
+  jobList,
+  /function nextShiftJob[\s\S]*orderAssignedJobs\(jobs, today\)[\s\S]*isUpcomingJob\(job, today\)/u,
   "The home screen must choose the earliest assigned shift from today onward.",
 );
 assert.match(
@@ -408,14 +441,26 @@ assert.match(
   "The next-shift card must not follow an older shift selected elsewhere in the app.",
 );
 assert.match(
-  app,
-  /function activeAssignedJobs\(jobs:Job\[\]\)\{return jobs\.filter\(job=>job\.status==="assigned"&&job\.cancelled!==true\);\}/u,
+  jobList,
+  /job\.status === "assigned" && job\.cancelled !== true/u,
   "Cancelled or unassigned jobs must not appear as confirmed staff shifts.",
 );
 assert.match(
   app,
-  /const jobs=activeAssignedJobs\(snapshot\.jobs\);[\s\S]*setMyJobs\(jobs\)[\s\S]*const values=activeAssignedJobs\(snap\.docs\.map/u,
-  "Both cached and live staff shift lists must apply the same active-assignment filter.",
+  /const jobs=orderAssignedJobs\(snapshot\.jobs\);[\s\S]*setMyJobs\(jobs\)[\s\S]*const values=orderAssignedJobs\(snap\.docs\.map/u,
+  "Both cached and live staff shift lists must apply the same daily-use ordering and assignment filter.",
 );
 
-console.log("Staff UX and performance checks passed (81 assertions).");
+assert.match(
+  app,
+  /where\("status","==","open"\),where\("dateKey",">=",localDateKey\(\)\),orderBy\("dateKey","asc"\)/u,
+  "Open jobs must exclude dates before today at the database query boundary.",
+);
+
+assert.match(
+  app,
+  /const values=availableOpenJobs\(snap\.docs\.map/u,
+  "Open jobs must remove cancelled or stale records before rendering.",
+);
+
+console.log("Staff UX and performance checks passed (86 assertions).");

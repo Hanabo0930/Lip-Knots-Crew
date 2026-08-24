@@ -37,6 +37,7 @@ type NetPrintItem = { id: string; number: string; printed?: boolean };
 type Job = {
   id: string; workDate: string; dateKey: string; clientName: string; makerName: string;
   menuName: string; storeName: string; workTime: string; basePay: number; status: string;
+  cancelled?: boolean;
   storeAddress?: string; storeNearestStation?: string; materialStatus?: string;
   assignedStaffId?: string; preContact?: { temperature?: string; arrivalTime?: string };
   netPrint?: { items?: NetPrintItem[] };
@@ -80,6 +81,9 @@ let lastPushStatusRefreshAt=0;
 let lastBusinessDataRefreshAt=0;
 function jobAccent(menuName:string){let hash=0;for(const char of menuName||"案件")hash=((hash*31)+char.codePointAt(0)!)|0;return JOB_ACCENTS[Math.abs(hash)%JOB_ACCENTS.length]??JOB_ACCENTS[0];}
 function jobKind(menuName:string){return menuName.replace(/[（(].*$/u,"").trim()||"案件";}
+function activeAssignedJobs(jobs:Job[]){return jobs.filter(job=>job.status==="assigned"&&job.cancelled!==true);}
+function localDateKey(date=new Date()){return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;}
+function nextShiftJob(jobs:Job[],today=localDateKey()){return activeAssignedJobs(jobs).reduce<Job|null>((next,job)=>/^\d{4}-\d{2}-\d{2}$/u.test(job.dateKey)&&job.dateKey>=today&&(!next||job.dateKey<next.dateKey)?job:next,null);}
 function mapDestination(job:Job){return [job.storeName,job.storeAddress].filter(Boolean).join(" ");}
 function mapsSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapDestination(job))}`;}
 function transitRouteUrl(job:Job){return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(mapDestination(job))}&travelmode=transit`;}
@@ -192,10 +196,11 @@ export default function App(){
       const restoreCachedBusinessData=(cid:string,sid:string)=>{
         const snapshot=loadBusinessSnapshot<Job,StaffTask>(current.uid,cid,sid);
         if(!snapshot)return false;
+        const jobs=activeAssignedJobs(snapshot.jobs);
         setCompanyId(cid); setStaffId(sid);
-        setMyJobs(snapshot.jobs);
+        setMyJobs(jobs);
         setTasks(snapshot.tasks);
-        setSelectedJob(snapshot.jobs[0]??null);
+        setSelectedJob(jobs[0]??null);
         setBusinessDataStatus("ready");
         setBusinessDataSource("cached");
         setHomeDisplayMs(Math.round(performance.now()-loadStarted));
@@ -347,7 +352,7 @@ export default function App(){
       if(showConfirmation)setMessage("案件を読み込めませんでした。通信状態を確認して、もう一度お試しください。");
     }
   }
-  async function loadMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{ if(!db||!sid||!cid)return[]; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=snap.docs.map(d=>({id:d.id,...d.data()} as Job)); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??values[0]??null); return values; }
+  async function loadMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{ if(!db||!sid||!cid)return[]; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=activeAssignedJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??values[0]??null); return values; }
   async function loadTasks():Promise<StaffTask[]>{ if(!functions)return[]; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); const values=(r.data as {tasks?:StaffTask[]}).tasks??[]; setTasks(values); return values; }
   function showSubmissionMessage(value:string){setMessage(value);setSubmissionMessage(value);}
 
@@ -844,7 +849,7 @@ export default function App(){
 
   async function chooseSubmission(type:SubmissionType,job:Job,req=""){const assignedJob=myJobs.find(candidate=>candidate.id===job.id);if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");setView("shifts");return;}await prepareSubmission(type,assignedJob,req);}
 
-  const activeJob=selectedAssignedJob??myJobs[0]??null;
+  const nextShift=nextShiftJob(myJobs);
   const visibleTasks=showAllTasks?tasks:tasks.slice(0,5);
   const title=useMemo(()=>firebaseConfigured?"Lip Knots Crew":"Lip Knots Crew（デモ）",[]);
   const taskSummary=businessDataStatus==="ready"
@@ -876,7 +881,7 @@ export default function App(){
     {view==="home"&&<>
       <section className={`panel push-panel ${pushEnabled?"enabled":""}`}><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><div className="push-summary-actions"><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span>{pushEnabled&&<button className="ghost push-settings-toggle" aria-expanded={showPushActions} aria-controls="push-enabled-actions" onClick={()=>setShowPushActions(value=>!value)}>{showPushActions?"閉じる":"設定"}</button>}</div></div>{!pushEnabled?<div className="push-actions"><button onClick={()=>void enablePush()} disabled={isPending("push-enable")}>{isPending("push-enable")?"処理中…":"通知を有効にする"}</button></div>:showPushActions&&<div id="push-enabled-actions" className="push-actions"><button className="secondary" onClick={()=>void requestPushTest()} disabled={isPending("push-test")}>{isPending("push-test")?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={isPending("push-disable")}>{isPending("push-disable")?"処理中…":"通知OFF"}</button></div>}</section>
       <section className="hero-card"><div className="section-heading compact-heading"><h2>今日やること</h2><span className={`refresh-status ${businessDataSource}`}>{businessRefreshing?"自動更新中…":businessDataSource==="cached"?"前回データ":businessDataSource==="live"?"最新":"確認中"}</span></div>{businessDataFallback??(tasks.length?<><p>{taskSummary}</p><div className="task-list">{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</div></>:<div className="task-clear" role="status"><span aria-hidden="true">✓</span><div><strong>今日の対応はすべて完了しています</strong><small>新しい対応が届くと、ここに表示されます。</small></div></div>)}</section>
-      <section><h2>次回シフト</h2>{businessDataFallback??(activeJob?<article className="job shift-job" style={{"--job-accent":jobAccent(activeJob.menuName)} as CSSProperties}><span className="date">{activeJob.workDate||activeJob.dateKey}</span><span className="job-kind">{jobKind(activeJob.menuName)}</span><h3>{activeJob.storeName}</h3><p>{activeJob.makerName} / {activeJob.menuName}</p><span className="prep-chip">{prepSummary(activeJob)}</span><button onClick={()=>{setSelectedJob(activeJob);setView("shifts")}}>シフトを開く</button></article>:<div className="home-shift-empty"><strong>確定シフトはありません</strong><button className="secondary" onClick={()=>navigate("jobs")}>募集案件を見る</button></div>)}</section>
+      <section><h2>次回シフト</h2>{businessDataFallback??(nextShift?<article className="job shift-job" style={{"--job-accent":jobAccent(nextShift.menuName)} as CSSProperties}><span className="date">{nextShift.workDate||nextShift.dateKey}</span><span className="job-kind">{jobKind(nextShift.menuName)}</span><h3>{nextShift.storeName}</h3><p>{nextShift.makerName} / {nextShift.menuName}</p><span className="prep-chip">{prepSummary(nextShift)}</span><button onClick={()=>{setSelectedJob(nextShift);setView("shifts")}}>シフトを開く</button></article>:<div className="home-shift-empty"><strong>確定シフトはありません</strong><button className="secondary" onClick={()=>navigate("jobs")}>募集案件を見る</button></div>)}</section>
     </>}
     {view==="jobs"&&<section><h2>募集中の案件</h2>{openJobsFallback??<div className="grid">{openJobs.map(job=>{const expanded=expandedOpenJobId===job.id;return <article className="job open-job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong>{expanded&&<dl className="job-details" id={`job-details-${job.id}`}><div><dt>実施日</dt><dd>{job.workDate||job.dateKey}</dd></div><div><dt>勤務時間</dt><dd>{job.workTime||"確認中"}</dd></div>{job.storeAddress&&<div><dt>店舗住所</dt><dd>{job.storeAddress}</dd></div>}{job.clientName&&<div><dt>依頼元</dt><dd>{job.clientName}</dd></div>}</dl>}<div className="actions"><button className="secondary" aria-expanded={expanded} aria-controls={`job-details-${job.id}`} onClick={()=>setExpandedOpenJobId(current=>current===job.id?"":job.id)}>{expanded?"詳細を閉じる":"詳細を見る"}</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>})}{!openJobs.length&&<EmptyAction title="現在募集中の案件はありません" body="新しい案件が公開されると、この画面に表示されます。ここからいつでも最新情報を確認できます。" action="最新情報を確認" onAction={()=>void refreshOpenJobs()} secondaryAction="ホームへ戻る" onSecondaryAction={()=>navigate("home")}/>}</div>}</section>}
     {view==="shifts"&&<section>

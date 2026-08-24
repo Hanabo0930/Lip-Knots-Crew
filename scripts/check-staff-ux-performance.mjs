@@ -384,7 +384,7 @@ assert.match(
 );
 assert.match(
   app,
-  /activeJob\?<article[\s\S]*className="home-shift-empty"[\s\S]*確定シフトはありません[\s\S]*募集案件を見る/u,
+  /nextShift\?<article[\s\S]*className="home-shift-empty"[\s\S]*確定シフトはありません[\s\S]*募集案件を見る/u,
   "A home screen without an assigned shift must keep one direct route to open jobs.",
 );
 assert.doesNotMatch(
@@ -397,5 +397,25 @@ assert.match(
   /\.home-shift-empty \{ display:grid; grid-template-columns:minmax\(0,1fr\) auto; align-items:center;[\s\S]*\.home-shift-empty button \{ min-width:132px; \}/u,
   "The empty next-shift state must remain compact while preserving a clear touch target.",
 );
+assert.match(
+  app,
+  /function nextShiftJob\(jobs:Job\[\],today=localDateKey\(\)\)[\s\S]*activeAssignedJobs\(jobs\)[\s\S]*job\.dateKey>=today[\s\S]*job\.dateKey<next\.dateKey/u,
+  "The home screen must choose the earliest assigned shift from today onward.",
+);
+assert.match(
+  app,
+  /const nextShift=nextShiftJob\(myJobs\);[\s\S]*<h2>次回シフト<\/h2>[\s\S]*nextShift\?<article[\s\S]*setSelectedJob\(nextShift\)/u,
+  "The next-shift card must not follow an older shift selected elsewhere in the app.",
+);
+assert.match(
+  app,
+  /function activeAssignedJobs\(jobs:Job\[\]\)\{return jobs\.filter\(job=>job\.status==="assigned"&&job\.cancelled!==true\);\}/u,
+  "Cancelled or unassigned jobs must not appear as confirmed staff shifts.",
+);
+assert.match(
+  app,
+  /const jobs=activeAssignedJobs\(snapshot\.jobs\);[\s\S]*setMyJobs\(jobs\)[\s\S]*const values=activeAssignedJobs\(snap\.docs\.map/u,
+  "Both cached and live staff shift lists must apply the same active-assignment filter.",
+);
 
-console.log("Staff UX and performance checks passed (77 assertions).");
+console.log("Staff UX and performance checks passed (81 assertions).");

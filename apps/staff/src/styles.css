@@ -110,8 +110,10 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .push-panel { background:linear-gradient(135deg,#fff8fb,#fffdf3); }
 .push-status { display:inline-flex; padding:7px 10px; border-radius:999px; background:#eee; color:#777; font-size:12px; font-weight:900; white-space:nowrap; }
 .push-status.enabled { background:#e8f5ee; color:#317a54; }
+.push-summary-actions { display:flex; align-items:center; gap:8px; }
+.push-settings-toggle { min-height:38px; padding:8px 12px; font-size:12px; }
 .push-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:13px; }
-.push-panel.enabled { padding:16px 18px; }
+.push-panel.enabled { padding:12px 16px; }
 .push-panel.enabled .section-heading { flex-direction:row; align-items:center; }
 .push-panel.enabled .section-heading h2 { margin-bottom:0; }
 .push-panel.enabled .section-heading p { display:none; }

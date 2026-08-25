@@ -444,6 +444,7 @@ export default function App(){
 
   function navigate(next:View){
     setView(next);
+    window.scrollTo({top:0,left:0,behavior:"auto"});
     if(next==="jobs"&&openJobsStatus==="idle")void refreshOpenJobs(false);
   }
 
@@ -661,7 +662,7 @@ export default function App(){
     }
   }
 
-  async function openTask(task:StaffTask){ const job=myJobs.find(j=>j.id===task.jobId); if(!job){setMessage("対象の確定シフトを確認できません。シフト画面から案件を選び直してください。");setView("shifts");return;} setSelectedJob(job); if(task.kind==="precontact"){setView("shifts");return;} if(task.kind==="netprint"){setView("shifts");return;} const type=task.kind==="sales_floor"?"sales_floor":"report"; const req=String(task.metadata?.requestId??""); await prepareSubmission(type,job,req); }
+  async function openTask(task:StaffTask){ const job=myJobs.find(j=>j.id===task.jobId); if(!job){setMessage("対象の確定シフトを確認できません。シフト画面から案件を選び直してください。");navigate("shifts");return;} setSelectedJob(job); if(task.kind==="precontact"){navigate("shifts");return;} if(task.kind==="netprint"){navigate("shifts");return;} const type=task.kind==="sales_floor"?"sales_floor":"report"; const req=String(task.metadata?.requestId??""); await prepareSubmission(type,job,req); }
 
   async function pollSubmissionProcessing(jobId:string,submissionId:string,type:SubmissionType,resubmissionRequestId:string){
     if(!functions)return;
@@ -784,7 +785,7 @@ export default function App(){
     setSubmissionHistory([]);
     setSubmissionHistoryStatus("loading");
     setResubmissionDetail(null);
-    setView("submit");
+    navigate("submit");
     try{
       await Promise.all([
         loadSubmissionHistory(job.id,type),
@@ -858,7 +859,7 @@ export default function App(){
     setSubmissionMessage("");
   }
 
-  async function chooseSubmission(type:SubmissionType,job:Job,req=""){const assignedJob=myJobs.find(candidate=>candidate.id===job.id);if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");setView("shifts");return;}await prepareSubmission(type,assignedJob,req);}
+  async function chooseSubmission(type:SubmissionType,job:Job,req=""){const assignedJob=myJobs.find(candidate=>candidate.id===job.id);if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");navigate("shifts");return;}await prepareSubmission(type,assignedJob,req);}
 
   const nextShift=nextShiftJob(myJobs);
   const visibleTasks=showAllTasks?tasks:tasks.slice(0,5);
@@ -892,7 +893,7 @@ export default function App(){
     {view==="home"&&<>
       <section className={`panel push-panel ${pushEnabled?"enabled":""}`}><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><div className="push-summary-actions"><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span>{pushEnabled&&<button className="ghost push-settings-toggle" aria-expanded={showPushActions} aria-controls="push-enabled-actions" onClick={()=>setShowPushActions(value=>!value)}>{showPushActions?"閉じる":"設定"}</button>}</div></div>{!pushEnabled?<div className="push-actions"><button onClick={()=>void enablePush()} disabled={isPending("push-enable")}>{isPending("push-enable")?"処理中…":"通知を有効にする"}</button></div>:showPushActions&&<div id="push-enabled-actions" className="push-actions"><button className="secondary" onClick={()=>void requestPushTest()} disabled={isPending("push-test")}>{isPending("push-test")?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={isPending("push-disable")}>{isPending("push-disable")?"処理中…":"通知OFF"}</button></div>}</section>
       <section className="hero-card"><div className="section-heading compact-heading"><h2>今日やること</h2><span className={`refresh-status ${businessDataSource}`}>{businessRefreshing?"自動更新中…":businessDataSource==="cached"?"前回データ":businessDataSource==="live"?"最新":"確認中"}</span></div>{businessDataFallback??(tasks.length?<><p>{taskSummary}</p><div className="task-list">{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</div></>:<div className="task-clear" role="status"><span aria-hidden="true">✓</span><div><strong>今日の対応はすべて完了しています</strong><small>新しい対応が届くと、ここに表示されます。</small></div></div>)}</section>
-      <section><h2>次回シフト</h2>{businessDataFallback??(nextShift?<article className="job shift-job" style={{"--job-accent":jobAccent(nextShift.menuName)} as CSSProperties}><span className="date">{nextShift.workDate||nextShift.dateKey}</span><span className="job-kind">{jobKind(nextShift.menuName)}</span><h3>{nextShift.storeName}</h3><p>{nextShift.makerName} / {nextShift.menuName}</p><span className="prep-chip">{prepSummary(nextShift)}</span><button onClick={()=>{setSelectedJob(nextShift);setView("shifts")}}>シフトを開く</button></article>:<div className="home-shift-empty"><strong>確定シフトはありません</strong><button className="secondary" onClick={()=>navigate("jobs")}>募集案件を見る</button></div>)}</section>
+      <section><h2>次回シフト</h2>{businessDataFallback??(nextShift?<article className="job shift-job" style={{"--job-accent":jobAccent(nextShift.menuName)} as CSSProperties}><span className="date">{nextShift.workDate||nextShift.dateKey}</span><span className="job-kind">{jobKind(nextShift.menuName)}</span><h3>{nextShift.storeName}</h3><p>{nextShift.makerName} / {nextShift.menuName}</p><span className="prep-chip">{prepSummary(nextShift)}</span><button onClick={()=>{setSelectedJob(nextShift);navigate("shifts")}}>シフトを開く</button></article>:<div className="home-shift-empty"><strong>確定シフトはありません</strong><button className="secondary" onClick={()=>navigate("jobs")}>募集案件を見る</button></div>)}</section>
     </>}
     {view==="jobs"&&<section><h2>募集中の案件</h2>{openJobsFallback??<div className="grid">{openJobs.map(job=>{const expanded=expandedOpenJobId===job.id;return <article className="job open-job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong>{expanded&&<dl className="job-details" id={`job-details-${job.id}`}><div><dt>実施日</dt><dd>{job.workDate||job.dateKey}</dd></div><div><dt>勤務時間</dt><dd>{job.workTime||"確認中"}</dd></div>{job.storeAddress&&<div><dt>店舗住所</dt><dd>{job.storeAddress}</dd></div>}{job.clientName&&<div><dt>依頼元</dt><dd>{job.clientName}</dd></div>}</dl>}<div className="actions"><button className="secondary" aria-expanded={expanded} aria-controls={`job-details-${job.id}`} onClick={()=>setExpandedOpenJobId(current=>current===job.id?"":job.id)}>{expanded?"詳細を閉じる":"詳細を見る"}</button><button onClick={()=>void apply(job)} disabled={isPending(`apply-${job.id}`)}>{isPending(`apply-${job.id}`)?"処理中…":"この案件に応募する"}</button></div></article>})}{!openJobs.length&&<EmptyAction title="現在募集中の案件はありません" body="新しい案件が公開されると、この画面に表示されます。ここからいつでも最新情報を確認できます。" action="最新情報を確認" onAction={()=>void refreshOpenJobs()} secondaryAction="ホームへ戻る" onSecondaryAction={()=>navigate("home")}/>}</div>}</section>}
     {view==="shifts"&&<section>
@@ -925,6 +926,6 @@ export default function App(){
       <hr/><h3>提出履歴</h3>{submissionHistoryStatus==="loading"?<div className="history-loading" role="status">提出画面は操作できます。履歴を自動で読み込んでいます…</div>:submissionHistoryStatus==="error"?<div className="empty history-error">提出履歴を読み込めませんでした。<button className="secondary" onClick={()=>void loadSubmissionHistory(selectedAssignedJob.id,submissionType).catch(()=>undefined)}>履歴を再読み込み</button></div>:<div className="history-grid">{submissionHistory.flatMap(group=>group.files).map(file=><article key={`${file.submissionId}_${file.id}`}><SubmissionPreviewImage file={file} onRefreshPreview={refreshFilePreview}/><strong>{file.driveName||file.originalName}</strong><small>{file.purpose==="replacement"?"再送":"提出済み"}</small></article>)}{!submissionHistory.length&&<div className="empty">提出履歴はありません。</div>}</div>}
     </section>}
     {view==="contact"&&<section className="panel contact-panel"><h2>連絡先</h2><p>業務に関する連絡はこちらから行えます。</p><div className="contact-actions"><a className="contact-button" href={`mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(CONTACT_EMAIL_SUBJECT)}`}>メールを送る</a><a className="contact-button" href={`tel:${CONTACT_PHONE}`}>電話をかける</a><a className="contact-button" href={CONTACT_FORM_URL} target="_blank" rel="noreferrer">お問い合わせフォームを開く</a></div><div className="contact-details"><strong>受付：平日 9:00〜18:00</strong><span>電話：<a href={`tel:${CONTACT_PHONE}`}>{CONTACT_PHONE_LABEL}</a></span><span>メール：<a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a></span></div></section>}
-    <nav className="bottom-nav">{([['home','🏠','ホーム'],['jobs','📅','案件'],['shifts','📋','シフト'],['submit','📤','提出'],['contact','☎️','連絡']] as [View,string,string][]).map(([id,icon,label])=><button key={id} className={view===id?"active":""} onClick={()=>navigate(id)}><span>{icon}</span>{label}</button>)}</nav>
+    <nav className="bottom-nav">{([['home','🏠','ホーム'],['jobs','📅','案件'],['shifts','📋','シフト'],['submit','📤','提出'],['contact','☎️','連絡']] as [View,string,string][]).map(([id,icon,label])=><button key={id} className={view===id?"active":""} aria-current={view===id?"page":undefined} onClick={()=>navigate(id)}><span>{icon}</span>{label}</button>)}</nav>
   </main>;
 }

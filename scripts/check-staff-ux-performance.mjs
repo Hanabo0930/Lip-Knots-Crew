@@ -508,6 +508,12 @@ assert.match(
   "Every Staff screen change must return the mobile viewport to the new screen heading.",
 );
 
+assert.match(
+  app,
+  /function navigate\(next:View\)\{[\s\S]*setShowAccountMenu\(false\);[\s\S]*setShowDevices\(false\);[\s\S]*setShowDiagnostics\(false\);[\s\S]*setView\(next\)/u,
+  "Staff navigation must dismiss global utility panels before showing the selected screen.",
+);
+
 assert.equal(
   app.match(/setView\(/gu)?.length,
   1,
@@ -520,4 +526,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (96 assertions).");
+console.log("Staff UX and performance checks passed (97 assertions).");

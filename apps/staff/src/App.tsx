@@ -443,6 +443,9 @@ export default function App(){
   }
 
   function navigate(next:View){
+    setShowAccountMenu(false);
+    setShowDevices(false);
+    setShowDiagnostics(false);
     setView(next);
     window.scrollTo({top:0,left:0,behavior:"auto"});
     if(next==="jobs"&&openJobsStatus==="idle")void refreshOpenJobs(false);

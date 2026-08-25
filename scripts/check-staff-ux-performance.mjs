@@ -64,6 +64,15 @@ assert.deepEqual(
   ["future-next", "future-later", "past-recent", "past-old"],
 );
 assert.equal(jobListApi.nextShiftJob(mixedAssignedJobs, "2026-08-24").id, "future-next");
+const splitAssignedJobs = jobListApi.splitAssignedJobs(mixedAssignedJobs, "2026-08-24");
+assert.deepEqual(
+  Array.from(splitAssignedJobs.upcoming, (job) => job.id),
+  ["future-next", "future-later"],
+);
+assert.deepEqual(
+  Array.from(splitAssignedJobs.past, (job) => job.id),
+  ["past-recent", "past-old"],
+);
 assert.deepEqual(
   Array.from(jobListApi.availableOpenJobs([
     { id: "past", dateKey: "2026-08-23", status: "open" },
@@ -312,8 +321,8 @@ assert.match(
 );
 assert.match(
   app,
-  /title="確定シフトはありません"[\s\S]*action="募集中の案件を見る"[\s\S]*navigate\("jobs"\)/u,
-  "A user without a confirmed shift must have a direct path to open jobs.",
+  /title="今後の確定シフトはありません"[\s\S]*action="募集中の案件を見る"[\s\S]*navigate\("jobs"\)/u,
+  "A user without an upcoming confirmed shift must have a direct path to open jobs.",
 );
 assert.match(
   app,
@@ -463,4 +472,34 @@ assert.match(
   "Open jobs must remove cancelled or stale records before rendering.",
 );
 
-console.log("Staff UX and performance checks passed (86 assertions).");
+assert.match(
+  app,
+  /useMemo\(\(\)=>splitAssignedJobs\(myJobs\),\[myJobs\]\)/u,
+  "The shift screen must derive upcoming and past lists from the same ordered assigned-job source.",
+);
+
+assert.match(
+  app,
+  /これからのシフト[\s\S]*upcomingShifts\.map[\s\S]*className="secondary past-shifts-toggle" aria-expanded=\{showPastShifts\} aria-controls="past-shifts-list"[\s\S]*過去のシフトを見る/u,
+  "Upcoming shifts must stay first while past shifts remain behind one accessible toggle.",
+);
+
+assert.match(
+  app,
+  /\(showPastShifts\|\|!upcomingShifts\.length\)&&<div id="past-shifts-list"/u,
+  "Past shifts must remain directly visible when no upcoming shift exists.",
+);
+
+assert.match(
+  app,
+  /if\(showPastShifts\|\|!selectedJob\|\|!upcomingShifts\.length\|\|!pastShifts\.some[\s\S]*setSelectedJob\(upcomingShifts\[0\]\)/u,
+  "Closing past shifts must return hidden selection to the nearest upcoming shift.",
+);
+
+assert.match(
+  styles,
+  /\.shift-list-heading \{ display:flex;[\s\S]*\.past-shifts-toggle \{ width:100%; \}[\s\S]*\.past-shift-grid \{ margin-top:12px; \}/u,
+  "Shift grouping and history controls must keep a full-width touch-friendly mobile layout.",
+);
+
+console.log("Staff UX and performance checks passed (93 assertions).");

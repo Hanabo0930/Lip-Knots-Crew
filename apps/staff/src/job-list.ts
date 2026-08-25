@@ -37,6 +37,14 @@ export function nextShiftJob<T extends StaffJobListItem>(jobs: T[], today = loca
   return orderAssignedJobs(jobs, today).find((job) => isUpcomingJob(job, today)) ?? null;
 }
 
+export function splitAssignedJobs<T extends StaffJobListItem>(jobs: T[], today = localDateKey()): { upcoming: T[]; past: T[] } {
+  const ordered = orderAssignedJobs(jobs, today);
+  return {
+    upcoming: ordered.filter((job) => isUpcomingJob(job, today)),
+    past: ordered.filter((job) => !isUpcomingJob(job, today)),
+  };
+}
+
 export function availableOpenJobs<T extends StaffJobListItem>(jobs: T[], today = localDateKey()): T[] {
   return jobs
     .filter((job) => job.status === "open" && job.cancelled !== true && isUpcomingJob(job, today))

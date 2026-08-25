@@ -151,7 +151,7 @@ assert.match(
 );
 assert.match(
   app,
-  /setView\("submit"\);[\s\S]*await Promise\.all/u,
+  /navigate\("submit"\);[\s\S]*await Promise\.all/u,
   "Submission navigation must become visible before history requests finish.",
 );
 assert.match(
@@ -502,4 +502,22 @@ assert.match(
   "Shift grouping and history controls must keep a full-width touch-friendly mobile layout.",
 );
 
-console.log("Staff UX and performance checks passed (93 assertions).");
+assert.match(
+  app,
+  /function navigate\(next:View\)\{[\s\S]*setView\(next\);[\s\S]*window\.scrollTo\(\{top:0,left:0,behavior:"auto"\}\)/u,
+  "Every Staff screen change must return the mobile viewport to the new screen heading.",
+);
+
+assert.equal(
+  app.match(/setView\(/gu)?.length,
+  1,
+  "All Staff view changes must use the shared navigation helper instead of bypassing scroll reset.",
+);
+
+assert.match(
+  app,
+  /className=\{view===id\?"active":""\} aria-current=\{view===id\?"page":undefined\} onClick=\{\(\)=>navigate\(id\)\}/u,
+  "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
+);
+
+console.log("Staff UX and performance checks passed (96 assertions).");

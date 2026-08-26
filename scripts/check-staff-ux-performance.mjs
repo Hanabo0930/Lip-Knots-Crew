@@ -514,6 +514,12 @@ assert.match(
   "Staff navigation must dismiss global utility panels before showing the selected screen.",
 );
 
+assert.match(
+  app,
+  /async function openQuickDiagnostics\(\)\{[\s\S]*setShowAccountMenu\(false\);[\s\S]*setShowDevices\(false\);[\s\S]*setShowDiagnostics\(true\);[\s\S]*function toggleAccountMenu\(\)\{[\s\S]*setShowAccountMenu\(opening\);[\s\S]*if\(opening\)\{[\s\S]*setShowDevices\(false\);[\s\S]*setShowDiagnostics\(false\);[\s\S]*async function loadDevices\(\)\{[\s\S]*setShowAccountMenu\(false\);[\s\S]*setShowDiagnostics\(false\);[\s\S]*onClick=\{toggleAccountMenu\}/u,
+  "Staff utility switches must keep the account menu, device manager, and diagnostics mutually exclusive.",
+);
+
 assert.equal(
   app.match(/setView\(/gu)?.length,
   1,
@@ -526,4 +532,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (97 assertions).");
+console.log("Staff UX and performance checks passed (98 assertions).");

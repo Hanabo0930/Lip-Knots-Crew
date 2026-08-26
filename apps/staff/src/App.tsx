@@ -398,6 +398,8 @@ export default function App(){
 
   async function openQuickDiagnostics(){
     if(isPending("diagnostics"))return;
+    setShowAccountMenu(false);
+    setShowDevices(false);
     setShowDiagnostics(true);
     setDiagnosticReport(null);
     await run("diagnostics",async()=>{
@@ -449,6 +451,15 @@ export default function App(){
     setView(next);
     window.scrollTo({top:0,left:0,behavior:"auto"});
     if(next==="jobs"&&openJobsStatus==="idle")void refreshOpenJobs(false);
+  }
+
+  function toggleAccountMenu(){
+    const opening=!showAccountMenu;
+    setShowAccountMenu(opening);
+    if(opening){
+      setShowDevices(false);
+      setShowDiagnostics(false);
+    }
   }
 
   async function refreshSelectedJob(jobId:string){
@@ -514,6 +525,8 @@ export default function App(){
 
   async function loadDevices(){
     if(isPending("devices"))return;
+    setShowAccountMenu(false);
+    setShowDiagnostics(false);
     await run("devices",async()=>{
       if(!firebaseConfigured){setDevices([{id:"current",label:deviceLabel(),active:true},{id:"old",label:"以前のiPhone",active:true}]);setShowDevices(true);return;}
       if(!functions)return;
@@ -888,7 +901,7 @@ export default function App(){
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
 
   return <main className="app-shell">
-    <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button className="ghost account-menu-toggle" onClick={()=>setShowAccountMenu(value=>!value)} aria-expanded={showAccountMenu} aria-controls="account-menu">{showAccountMenu?"閉じる":"メニュー"}</button>}</header>
+    <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button className="ghost account-menu-toggle" onClick={toggleAccountMenu} aria-expanded={showAccountMenu} aria-controls="account-menu">{showAccountMenu?"閉じる":"メニュー"}</button>}</header>
     {showAccountMenu&&<section id="account-menu" className="panel account-menu-panel"><div className="section-heading"><div><h2>アカウント</h2><p>状態確認・端末管理・ログアウトはこちらです。</p></div></div><div className="account-menu-actions"><button className="secondary" onClick={()=>{setShowAccountMenu(false);void openQuickDiagnostics();}} disabled={isPending("diagnostics")} aria-busy={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"状態確認"}</button><button className="secondary" onClick={()=>{setShowAccountMenu(false);void loadDevices();}} disabled={isPending("devices")}>{isPending("devices")?"処理中…":"端末管理"}</button><button className="ghost logout-button" onClick={()=>void requestLogout()}>ログアウト</button></div></section>}
     {message&&<div className={messageClassName(message)} role={currentMessageTone==="error"?"alert":"status"}><span>{message}</span>{currentMessageTone!=="working"&&<button className="message-dismiss" onClick={()=>setMessage("")} aria-label="お知らせを閉じる">閉じる</button>}</div>}
     {showDevices&&<section className="panel device-panel"><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)}>閉じる</button></div><div className="device-list">{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||isPending(`revoke-${device.id}`)} onClick={()=>void revokeDevice(device.id)}>{isPending(`revoke-${device.id}`)?"処理中…":"ログアウト"}</button></div>)}</div></section>}

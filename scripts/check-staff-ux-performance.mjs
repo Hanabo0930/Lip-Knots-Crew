@@ -241,6 +241,11 @@ assert.match(
 );
 assert.match(
   app,
+  /async function requestLogout\(\)\{[\s\S]*isPending\("logout"\)[\s\S]*setMessage\("ログアウト処理中です…"\);[\s\S]*await run\("logout",logoutCurrentUser,\{setMessage\}\)[\s\S]*logout-button[\s\S]*disabled=\{isPending\("logout"\)\}[\s\S]*aria-busy=\{isPending\("logout"\)\}[\s\S]*ログアウト中…/u,
+  "Confirmed Staff logout must show progress, block repeat actions, and keep retry context on failure.",
+);
+assert.match(
+  app,
   /showDevices&&<section className="panel device-panel" aria-busy=\{isPending\("devices"\)\}>[\s\S]*showDiagnostics&&/u,
   "Device management must render near the top instead of below the active screen.",
 );
@@ -538,4 +543,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (99 assertions).");
+console.log("Staff UX and performance checks passed (100 assertions).");

@@ -241,7 +241,7 @@ assert.match(
 );
 assert.match(
   app,
-  /showDevices&&<section className="panel device-panel">[\s\S]*showDiagnostics&&/u,
+  /showDevices&&<section className="panel device-panel" aria-busy=\{isPending\("devices"\)\}>[\s\S]*showDiagnostics&&/u,
   "Device management must render near the top instead of below the active screen.",
 );
 assert.match(
@@ -520,6 +520,12 @@ assert.match(
   "Staff utility switches must keep the account menu, device manager, and diagnostics mutually exclusive.",
 );
 
+assert.match(
+  app,
+  /async function loadDevices\(\)\{[\s\S]*setShowDevices\(true\);[\s\S]*await run\("devices"[\s\S]*aria-busy=\{isPending\("devices"\)\}[\s\S]*role="status">端末情報を読み込んでいます…[\s\S]*title="端末情報がありません"[\s\S]*onAction=\{\(\)=>void loadDevices\(\)\}/u,
+  "Staff device management must open immediately and keep loading and retry feedback inside the panel.",
+);
+
 assert.equal(
   app.match(/setView\(/gu)?.length,
   1,
@@ -532,4 +538,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (98 assertions).");
+console.log("Staff UX and performance checks passed (99 assertions).");

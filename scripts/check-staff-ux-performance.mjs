@@ -421,6 +421,11 @@ assert.match(
 );
 assert.match(
   app,
+  /async function runPushAction\(action:PushAction,task:\(\)=>Promise<void>\)\{[\s\S]*run\("push-action"[\s\S]*setPendingPushAction\(action\)[\s\S]*aria-busy=\{pushActionPending\}[\s\S]*push-settings-toggle[\s\S]*disabled=\{pushActionPending\}[\s\S]*通知テスト[\s\S]*disabled=\{pushActionPending\}[\s\S]*通知OFF/u,
+  "Notification enable, test, disable, and settings controls must share one exclusive pending action.",
+);
+assert.match(
+  app,
   /tasks\.length\?<><p>\{taskSummary\}<\/p>[\s\S]*className="task-clear" role="status"[\s\S]*新しい対応が届くと、ここに表示されます/u,
   "A completed day must use one compact, non-duplicated status instead of two empty messages.",
 );
@@ -543,4 +548,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (100 assertions).");
+console.log("Staff UX and performance checks passed (101 assertions).");

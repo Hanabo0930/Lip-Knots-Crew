@@ -40,6 +40,7 @@ type BusinessDataStatus = "idle" | "loading" | "ready" | "error";
 type BusinessDataSource = "none" | "cached" | "live";
 type SubmissionHistoryStatus = "idle" | "loading" | "ready" | "error";
 type SubmissionType = "report" | "sales_floor";
+type PushAction = "enable" | "disable" | "test";
 type NetPrintItem = { id: string; number: string; printed?: boolean };
 type Job = {
   id: string; workDate: string; dateKey: string; clientName: string; makerName: string;
@@ -148,6 +149,7 @@ export default function App(){
   const [showAccountMenu,setShowAccountMenu]=useState(false);
   const currentDeviceId=useMemo(()=>getOrCreateDeviceId(),[]);
   const [pushEnabled,setPushEnabled]=useState(false);
+  const [pendingPushAction,setPendingPushAction]=useState<PushAction|null>(null);
   const [showPushActions,setShowPushActions]=useState(false);
   const [showAllTasks,setShowAllTasks]=useState(false);
   const [showPastShifts,setShowPastShifts]=useState(false);
@@ -552,29 +554,34 @@ export default function App(){
     },{setMessage});
   }
 
+  async function runPushAction(action:PushAction,task:()=>Promise<void>){
+    await run("push-action",async()=>{
+      setPendingPushAction(action);
+      try{await task();}finally{setPendingPushAction(null);}
+    },{setMessage});
+  }
+
   async function enablePush(){
-    if(isPending("push-enable"))return;
-    await run("push-enable",async()=>{
+    await runPushAction("enable",async()=>{
       if(!functions){setPushEnabled(true);setMessage("デモ：通知を有効にしました。");return;}
       const r=await enablePushNotifications(functions,deviceSessionId);
       setPushEnabled(r.enabled);
       setMessage(r.message);
-    },{setMessage});
+    });
   }
 
   async function disablePush(){
-    if(isPending("push-disable"))return;
-    await run("push-disable",async()=>{
+    await runPushAction("disable",async()=>{
       if(!functions){setPushEnabled(false);setMessage("デモ：通知を無効にしました。");return;}
       await disablePushNotifications(functions);
       setPushEnabled(false);
       setMessage("通知を無効にしました。");
-    },{setMessage});
+    });
   }
 
   async function requestPushTest(){
-    if(isPending("push-test")||!functions)return;
-    await run("push-test",async()=>{
+    if(!functions)return;
+    await runPushAction("test",async()=>{
       let test=await submitAndWaitForPushTest();
       if(test?.finished&&(test.invalidTokenCount>0||test.failureReason==="invalid_token")){
         setMessage("古い通知登録を検出しました。端末を自動で再登録しています…");
@@ -597,7 +604,7 @@ export default function App(){
       }else{
         setMessage(`通知サービスへの送信結果：成功${test.successCount}台・失敗${test.failureCount}台。運営側で原因を確認します。`);
       }
-    },{setMessage});
+    });
   }
 
   async function submitAndWaitForPushTest():Promise<PushTestStatus|null>{
@@ -897,6 +904,7 @@ export default function App(){
       ? <div className="empty">案件を読み込めませんでした。<button className="secondary" onClick={()=>void refreshOpenJobs()}>もう一度試す</button></div>
       : null;
   const diagnosticSummaryLabel=diagnosticReport?.summary==="pass"?"すべて正常":diagnosticReport?.summary==="warn"?"確認あり":diagnosticReport?"エラーあり":"診断中";
+  const pushActionPending=isPending("push-action");
   const currentMessageTone=messageTone(message);
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message working">処理中…</div></section></main>;
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
@@ -908,7 +916,7 @@ export default function App(){
     {showDevices&&<section className="panel device-panel" aria-busy={isPending("devices")}><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)}>閉じる</button></div><div className="device-list">{isPending("devices")&&<div className="empty compact" role="status">端末情報を読み込んでいます…</div>}{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||isPending("devices")||isPending(`revoke-${device.id}`)} onClick={()=>void revokeDevice(device.id)}>{isPending(`revoke-${device.id}`)?"処理中…":"ログアウト"}</button></div>)}{!isPending("devices")&&!devices.length&&<EmptyAction title="端末情報がありません" body="通信状態を確認して、最新の端末情報をもう一度読み込んでください。" action="もう一度読み込む" onAction={()=>void loadDevices()}/>}</div></section>}
     {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite"><div className="section-heading"><div><h2>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<div className="diagnostic-actions">{diagnosticReport&&<><button onClick={()=>void shareDiagnostics()}>結果を共有</button><button className="secondary" onClick={()=>void copyDiagnostics()}>コピー</button></>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>setShowDiagnostics(false)}>閉じる</button></div></section>}
     {view==="home"&&<>
-      <section className={`panel push-panel ${pushEnabled?"enabled":""}`}><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><div className="push-summary-actions"><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span>{pushEnabled&&<button className="ghost push-settings-toggle" aria-expanded={showPushActions} aria-controls="push-enabled-actions" onClick={()=>setShowPushActions(value=>!value)}>{showPushActions?"閉じる":"設定"}</button>}</div></div>{!pushEnabled?<div className="push-actions"><button onClick={()=>void enablePush()} disabled={isPending("push-enable")}>{isPending("push-enable")?"処理中…":"通知を有効にする"}</button></div>:showPushActions&&<div id="push-enabled-actions" className="push-actions"><button className="secondary" onClick={()=>void requestPushTest()} disabled={isPending("push-test")}>{isPending("push-test")?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={isPending("push-disable")}>{isPending("push-disable")?"処理中…":"通知OFF"}</button></div>}</section>
+      <section className={`panel push-panel ${pushEnabled?"enabled":""}`} aria-busy={pushActionPending}><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><div className="push-summary-actions"><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span>{pushEnabled&&<button className="ghost push-settings-toggle" aria-expanded={showPushActions} aria-controls="push-enabled-actions" onClick={()=>setShowPushActions(value=>!value)} disabled={pushActionPending}>{showPushActions?"閉じる":"設定"}</button>}</div></div>{!pushEnabled?<div className="push-actions"><button onClick={()=>void enablePush()} disabled={pushActionPending}>{pendingPushAction==="enable"?"処理中…":"通知を有効にする"}</button></div>:showPushActions&&<div id="push-enabled-actions" className="push-actions"><button className="secondary" onClick={()=>void requestPushTest()} disabled={pushActionPending}>{pendingPushAction==="test"?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={pushActionPending}>{pendingPushAction==="disable"?"処理中…":"通知OFF"}</button></div>}</section>
       <section className="hero-card"><div className="section-heading compact-heading"><h2>今日やること</h2><span className={`refresh-status ${businessDataSource}`}>{businessRefreshing?"自動更新中…":businessDataSource==="cached"?"前回データ":businessDataSource==="live"?"最新":"確認中"}</span></div>{businessDataFallback??(tasks.length?<><p>{taskSummary}</p><div className="task-list">{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</div></>:<div className="task-clear" role="status"><span aria-hidden="true">✓</span><div><strong>今日の対応はすべて完了しています</strong><small>新しい対応が届くと、ここに表示されます。</small></div></div>)}</section>
       <section><h2>次回シフト</h2>{businessDataFallback??(nextShift?<article className="job shift-job" style={{"--job-accent":jobAccent(nextShift.menuName)} as CSSProperties}><span className="date">{nextShift.workDate||nextShift.dateKey}</span><span className="job-kind">{jobKind(nextShift.menuName)}</span><h3>{nextShift.storeName}</h3><p>{nextShift.makerName} / {nextShift.menuName}</p><span className="prep-chip">{prepSummary(nextShift)}</span><button onClick={()=>{setSelectedJob(nextShift);navigate("shifts")}}>シフトを開く</button></article>:<div className="home-shift-empty"><strong>確定シフトはありません</strong><button className="secondary" onClick={()=>navigate("jobs")}>募集案件を見る</button></div>)}</section>
     </>}

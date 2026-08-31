@@ -241,12 +241,12 @@ assert.match(
 );
 assert.match(
   app,
-  /async function requestLogout\(\)\{[\s\S]*isPending\("logout"\)[\s\S]*setMessage\("ログアウト処理中です…"\);[\s\S]*await run\("logout",logoutCurrentUser,\{setMessage\}\)[\s\S]*logout-button[\s\S]*disabled=\{isPending\("logout"\)\}[\s\S]*aria-busy=\{isPending\("logout"\)\}[\s\S]*ログアウト中…/u,
+  /async function requestLogout\(\)\{[\s\S]*isPending\("logout"\)[\s\S]*setMessage\("ログアウト処理中です…"\);[\s\S]*await run\("logout",logoutCurrentUser,\{setMessage\}\)[\s\S]*logout-button[\s\S]*disabled=\{isPending\("logout"\)\|\|deviceActionPending\}[\s\S]*aria-busy=\{isPending\("logout"\)\}[\s\S]*ログアウト中…/u,
   "Confirmed Staff logout must show progress, block repeat actions, and keep retry context on failure.",
 );
 assert.match(
   app,
-  /showDevices&&<section className="panel device-panel" aria-busy=\{isPending\("devices"\)\}>[\s\S]*showDiagnostics&&/u,
+  /showDevices&&<section className="panel device-panel" aria-busy=\{deviceActionPending\}>[\s\S]*showDiagnostics&&/u,
   "Device management must render near the top instead of below the active screen.",
 );
 assert.match(
@@ -532,8 +532,14 @@ assert.match(
 
 assert.match(
   app,
-  /async function loadDevices\(\)\{[\s\S]*setShowDevices\(true\);[\s\S]*await run\("devices"[\s\S]*aria-busy=\{isPending\("devices"\)\}[\s\S]*role="status">端末情報を読み込んでいます…[\s\S]*title="端末情報がありません"[\s\S]*onAction=\{\(\)=>void loadDevices\(\)\}/u,
+  /async function loadDevices\(\)\{[\s\S]*setShowDevices\(true\);[\s\S]*await run\("device-action"[\s\S]*aria-busy=\{deviceActionPending\}[\s\S]*role="status">端末情報を読み込んでいます…[\s\S]*title="端末情報がありません"[\s\S]*onAction=\{\(\)=>void loadDevices\(\)\}/u,
   "Staff device management must open immediately and keep loading and retry feedback inside the panel.",
+);
+
+assert.match(
+  app,
+  /async function revokeDevice\(id:string\)\{[\s\S]*await run\("device-action"[\s\S]*confirm\("この端末をログアウトしますか？"\)[\s\S]*setPendingDeviceId\(id\)[\s\S]*await fetchDevices\(\)[\s\S]*finally\{setPendingDeviceId\(""\);\}[\s\S]*deviceActionPending&&!pendingDeviceId[\s\S]*disabled=\{device\.active===false\|\|deviceActionPending\}[\s\S]*pendingDeviceId===device\.id\?"ログアウト中…"/u,
+  "Device loading and logout must share one exclusive action while preserving per-device progress.",
 );
 
 assert.equal(
@@ -548,4 +554,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (101 assertions).");
+console.log("Staff UX and performance checks passed (102 assertions).");

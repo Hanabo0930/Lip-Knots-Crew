@@ -548,6 +548,12 @@ assert.match(
   "Staff job applications must share one exclusive action while keeping the selected job visibly in progress.",
 );
 
+assert.match(
+  app,
+  /async function submitPreContact\(\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\("preContact"\)[\s\S]*async function markPrinted\(item:NetPrintItem\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\(`print-\$\{item\.id\}`\)[\s\S]*async function setClientSubmitted\(value:boolean\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\("clientSubmitted"\)[\s\S]*const shiftActionPending=isPending\("shift-action"\)[\s\S]*aria-busy=\{shiftActionPending\}[\s\S]*pendingShiftAction==="preContact"\?"送信中…"[\s\S]*pendingShiftAction===`print-\$\{item\.id\}`\?"反映中…"[\s\S]*pendingShiftAction==="clientSubmitted"\?"更新中…"/u,
+  "Staff shift mutations must share one exclusive action while preserving target-specific progress.",
+);
+
 assert.equal(
   app.match(/setView\(/gu)?.length,
   1,
@@ -560,4 +566,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (103 assertions).");
+console.log("Staff UX and performance checks passed (104 assertions).");

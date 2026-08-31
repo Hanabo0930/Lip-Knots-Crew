@@ -146,6 +146,7 @@ export default function App(){
   const [submissionMessage,setSubmissionMessage]=useState("");
   const [files,setFiles]=useState<File[]>([]); const [uploadState,setUploadState]=useState<Record<string,string>>({});
   const [deviceSessionId,setDeviceSessionId]=useState(""); const [devices,setDevices]=useState<DeviceSession[]>([]); const [showDevices,setShowDevices]=useState(false);
+  const [pendingDeviceId,setPendingDeviceId]=useState("");
   const [showAccountMenu,setShowAccountMenu]=useState(false);
   const currentDeviceId=useMemo(()=>getOrCreateDeviceId(),[]);
   const [pushEnabled,setPushEnabled]=useState(false);
@@ -526,31 +527,33 @@ export default function App(){
     return Boolean(user?.uid&&device.deviceId===currentDeviceId&&device.uid===user.uid);
   }
 
+  async function fetchDevices(){
+    if(!firebaseConfigured){setDevices([{id:"current",label:deviceLabel(),active:true},{id:"old",label:"以前のiPhone",active:true}]);return;}
+    if(!functions)return;
+    const r=await httpsCallable(functions,"listMyDevices")({});
+    setDevices((r.data as {devices?:DeviceSession[]}).devices??[]);
+  }
+
   async function loadDevices(){
-    if(isPending("devices"))return;
     setShowAccountMenu(false);
     setShowDiagnostics(false);
     setShowDevices(true);
-    await run("devices",async()=>{
-      if(!firebaseConfigured){setDevices([{id:"current",label:deviceLabel(),active:true},{id:"old",label:"以前のiPhone",active:true}]);return;}
-      if(!functions)return;
-      const r=await httpsCallable(functions,"listMyDevices")({});
-      setDevices((r.data as {devices?:DeviceSession[]}).devices??[]);
-    },{setMessage});
+    await run("device-action",fetchDevices,{setMessage});
   }
 
   async function revokeDevice(id:string){
     const target=devices.find(device=>device.id===id);
     const currentTarget=target?isCurrentDevice(target):id===deviceSessionId;
-    if(!confirm("この端末をログアウトしますか？"))return;
-    const key=`revoke-${id}`;
-    if(isPending(key))return;
-    await run(key,async()=>{
-      if(!functions){setDevices(v=>v.map(x=>x.id===id?{...x,active:false}:x));return;}
-      await httpsCallable(functions,"revokeMyDevice")({sessionId:id});
-      await loadDevices();
-      if(currentTarget)await logoutCurrentUser();
-      setMessage("端末をログアウトしました。");
+    await run("device-action",async()=>{
+      if(!confirm("この端末をログアウトしますか？"))return;
+      setPendingDeviceId(id);
+      try{
+        if(!functions){setDevices(v=>v.map(x=>x.id===id?{...x,active:false}:x));return;}
+        await httpsCallable(functions,"revokeMyDevice")({sessionId:id});
+        await fetchDevices();
+        if(currentTarget)await logoutCurrentUser();
+        setMessage("端末をログアウトしました。");
+      }finally{setPendingDeviceId("");}
     },{setMessage});
   }
 
@@ -904,16 +907,17 @@ export default function App(){
       ? <div className="empty">案件を読み込めませんでした。<button className="secondary" onClick={()=>void refreshOpenJobs()}>もう一度試す</button></div>
       : null;
   const diagnosticSummaryLabel=diagnosticReport?.summary==="pass"?"すべて正常":diagnosticReport?.summary==="warn"?"確認あり":diagnosticReport?"エラーあり":"診断中";
+  const deviceActionPending=isPending("device-action");
   const pushActionPending=isPending("push-action");
   const currentMessageTone=messageTone(message);
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message working">処理中…</div></section></main>;
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
 
   return <main className="app-shell">
-    <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button className="ghost account-menu-toggle" onClick={toggleAccountMenu} aria-expanded={showAccountMenu} aria-controls="account-menu">{showAccountMenu?"閉じる":"メニュー"}</button>}</header>
-    {showAccountMenu&&<section id="account-menu" className="panel account-menu-panel"><div className="section-heading"><div><h2>アカウント</h2><p>状態確認・端末管理・ログアウトはこちらです。</p></div></div><div className="account-menu-actions"><button className="secondary" onClick={()=>{setShowAccountMenu(false);void openQuickDiagnostics();}} disabled={isPending("diagnostics")||isPending("logout")} aria-busy={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"状態確認"}</button><button className="secondary" onClick={()=>{setShowAccountMenu(false);void loadDevices();}} disabled={isPending("devices")||isPending("logout")}>{isPending("devices")?"処理中…":"端末管理"}</button><button className="ghost logout-button" onClick={()=>void requestLogout()} disabled={isPending("logout")} aria-busy={isPending("logout")}>{isPending("logout")?"ログアウト中…":"ログアウト"}</button></div></section>}
+    <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button className="ghost account-menu-toggle" onClick={toggleAccountMenu} aria-expanded={showAccountMenu} aria-controls="account-menu" disabled={isPending("logout")||deviceActionPending}>{showAccountMenu?"閉じる":"メニュー"}</button>}</header>
+    {showAccountMenu&&<section id="account-menu" className="panel account-menu-panel"><div className="section-heading"><div><h2>アカウント</h2><p>状態確認・端末管理・ログアウトはこちらです。</p></div></div><div className="account-menu-actions"><button className="secondary" onClick={()=>{setShowAccountMenu(false);void openQuickDiagnostics();}} disabled={isPending("diagnostics")||isPending("logout")||deviceActionPending} aria-busy={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"状態確認"}</button><button className="secondary" onClick={()=>{setShowAccountMenu(false);void loadDevices();}} disabled={deviceActionPending||isPending("logout")}>{deviceActionPending?"処理中…":"端末管理"}</button><button className="ghost logout-button" onClick={()=>void requestLogout()} disabled={isPending("logout")||deviceActionPending} aria-busy={isPending("logout")}>{isPending("logout")?"ログアウト中…":"ログアウト"}</button></div></section>}
     {message&&<div className={messageClassName(message)} role={currentMessageTone==="error"?"alert":"status"}><span>{message}</span>{currentMessageTone!=="working"&&<button className="message-dismiss" onClick={()=>setMessage("")} aria-label="お知らせを閉じる">閉じる</button>}</div>}
-    {showDevices&&<section className="panel device-panel" aria-busy={isPending("devices")}><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)}>閉じる</button></div><div className="device-list">{isPending("devices")&&<div className="empty compact" role="status">端末情報を読み込んでいます…</div>}{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||isPending("devices")||isPending(`revoke-${device.id}`)} onClick={()=>void revokeDevice(device.id)}>{isPending(`revoke-${device.id}`)?"処理中…":"ログアウト"}</button></div>)}{!isPending("devices")&&!devices.length&&<EmptyAction title="端末情報がありません" body="通信状態を確認して、最新の端末情報をもう一度読み込んでください。" action="もう一度読み込む" onAction={()=>void loadDevices()}/>}</div></section>}
+    {showDevices&&<section className="panel device-panel" aria-busy={deviceActionPending}><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)} disabled={deviceActionPending}>閉じる</button></div><div className="device-list">{deviceActionPending&&!pendingDeviceId&&<div className="empty compact" role="status">端末情報を読み込んでいます…</div>}{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||deviceActionPending} onClick={()=>void revokeDevice(device.id)}>{pendingDeviceId===device.id?"ログアウト中…":"ログアウト"}</button></div>)}{!deviceActionPending&&!devices.length&&<EmptyAction title="端末情報がありません" body="通信状態を確認して、最新の端末情報をもう一度読み込んでください。" action="もう一度読み込む" onAction={()=>void loadDevices()}/>}</div></section>}
     {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite"><div className="section-heading"><div><h2>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<div className="diagnostic-actions">{diagnosticReport&&<><button onClick={()=>void shareDiagnostics()}>結果を共有</button><button className="secondary" onClick={()=>void copyDiagnostics()}>コピー</button></>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>setShowDiagnostics(false)}>閉じる</button></div></section>}
     {view==="home"&&<>
       <section className={`panel push-panel ${pushEnabled?"enabled":""}`} aria-busy={pushActionPending}><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><div className="push-summary-actions"><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span>{pushEnabled&&<button className="ghost push-settings-toggle" aria-expanded={showPushActions} aria-controls="push-enabled-actions" onClick={()=>setShowPushActions(value=>!value)} disabled={pushActionPending}>{showPushActions?"閉じる":"設定"}</button>}</div></div>{!pushEnabled?<div className="push-actions"><button onClick={()=>void enablePush()} disabled={pushActionPending}>{pendingPushAction==="enable"?"処理中…":"通知を有効にする"}</button></div>:showPushActions&&<div id="push-enabled-actions" className="push-actions"><button className="secondary" onClick={()=>void requestPushTest()} disabled={pushActionPending}>{pendingPushAction==="test"?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={pushActionPending}>{pendingPushAction==="disable"?"処理中…":"通知OFF"}</button></div>}</section>

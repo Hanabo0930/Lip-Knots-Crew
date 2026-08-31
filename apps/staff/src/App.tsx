@@ -140,6 +140,7 @@ export default function App(){
   const [view,setView]=useState<View>("home"); const [openJobs,setOpenJobs]=useState<Job[]>(firebaseConfigured?[]:demoJobs);
   const [expandedOpenJobId,setExpandedOpenJobId]=useState("");
   const [pendingApplicationJobId,setPendingApplicationJobId]=useState("");
+  const [pendingShiftAction,setPendingShiftAction]=useState("");
   const [myJobs,setMyJobs]=useState<Job[]>(firebaseConfigured?[]:demoJobs); const [tasks,setTasks]=useState<StaffTask[]>(firebaseConfigured?[]:demoTasks);
   const [selectedJob,setSelectedJob]=useState<Job|null>(firebaseConfigured?null:(demoJobs[0]??null)); const [temperature,setTemperature]=useState("36.2"); const [arrivalTime,setArrivalTime]=useState("9:30");
   const [submissionType,setSubmissionType]=useState<SubmissionType>("report"); const [requestId,setRequestId]=useState("");
@@ -640,30 +641,36 @@ export default function App(){
   }
 
   async function submitPreContact(){
-    if(!selectedJob||isPending("preContact"))return;
-    await run("preContact",async()=>{
-      if(!firebaseConfigured){setMessage("デモ：事前連絡を送信しました。");return;}
-      if(!functions)return;
-      await httpsCallable(functions,"submitPreContact")({jobId:selectedJob.id,temperature:Number(temperature),arrivalTime});
-      setMessage("事前連絡を送信しました。");
-      await refreshSelectedJob(selectedJob.id);
-      await loadTasks();
+    if(!selectedJob||isPending("shift-action"))return;
+    await run("shift-action",async()=>{
+      setPendingShiftAction("preContact");
+      try{
+        if(!firebaseConfigured){setMessage("デモ：事前連絡を送信しました。");return;}
+        if(!functions)return;
+        await httpsCallable(functions,"submitPreContact")({jobId:selectedJob.id,temperature:Number(temperature),arrivalTime});
+        setMessage("事前連絡を送信しました。");
+        await refreshSelectedJob(selectedJob.id);
+        await loadTasks();
+      }finally{setPendingShiftAction("");}
     },{setMessage});
   }
 
   async function markPrinted(item:NetPrintItem){
-    if(!selectedJob||isPending(`print-${item.id}`))return;
-    await run(`print-${item.id}`,async()=>{
-      if(!firebaseConfigured){setMessage("デモ：印刷済みにしました。");return;}
-      if(!functions)return;
-      await httpsCallable(functions,"markNetPrintPrinted")({jobId:selectedJob.id,itemId:item.id});
-      setMessage("印刷済みにしました。");
-      await Promise.all([refreshSelectedJob(selectedJob.id),loadTasks()]);
+    if(!selectedJob||isPending("shift-action"))return;
+    await run("shift-action",async()=>{
+      setPendingShiftAction(`print-${item.id}`);
+      try{
+        if(!firebaseConfigured){setMessage("デモ：印刷済みにしました。");return;}
+        if(!functions)return;
+        await httpsCallable(functions,"markNetPrintPrinted")({jobId:selectedJob.id,itemId:item.id});
+        setMessage("印刷済みにしました。");
+        await Promise.all([refreshSelectedJob(selectedJob.id),loadTasks()]);
+      }finally{setPendingShiftAction("");}
     },{setMessage});
   }
 
   async function setClientSubmitted(value:boolean){
-    if(!selectedJob||isPending("clientSubmitted"))return;
+    if(!selectedJob||isPending("shift-action"))return;
     const previous=selectedJob;
     const optimistic:Job={
       ...selectedJob,
@@ -675,15 +682,18 @@ export default function App(){
         },
       },
     };
-    setSelectedJob(optimistic);
-    setMyJobs(jobs=>jobs.map(job=>job.id===selectedJob.id?optimistic:job));
     try{
-      await run("clientSubmitted",async()=>{
-        if(!firebaseConfigured){setMessage(value?"デモ：クライアント提出済みにしました。":"デモ：クライアント提出を解除しました。");return;}
-        if(!functions)return;
-        await httpsCallable(functions,"setSalesFloorClientSubmitted")({jobId:selectedJob.id,submitted:value});
-        setMessage(value?"クライアント提出済みにしました。":"クライアント提出を解除しました。");
-        await Promise.all([refreshSelectedJob(selectedJob.id),loadTasks()]);
+      await run("shift-action",async()=>{
+        setPendingShiftAction("clientSubmitted");
+        setSelectedJob(optimistic);
+        setMyJobs(jobs=>jobs.map(job=>job.id===selectedJob.id?optimistic:job));
+        try{
+          if(!firebaseConfigured){setMessage(value?"デモ：クライアント提出済みにしました。":"デモ：クライアント提出を解除しました。");return;}
+          if(!functions)return;
+          await httpsCallable(functions,"setSalesFloorClientSubmitted")({jobId:selectedJob.id,submitted:value});
+          setMessage(value?"クライアント提出済みにしました。":"クライアント提出を解除しました。");
+          await Promise.all([refreshSelectedJob(selectedJob.id),loadTasks()]);
+        }finally{setPendingShiftAction("");}
       },{setMessage});
     }catch{
       setSelectedJob(previous);
@@ -910,6 +920,7 @@ export default function App(){
       : null;
   const diagnosticSummaryLabel=diagnosticReport?.summary==="pass"?"すべて正常":diagnosticReport?.summary==="warn"?"確認あり":diagnosticReport?"エラーあり":"診断中";
   const applicationPending=isPending("apply-action");
+  const shiftActionPending=isPending("shift-action");
   const deviceActionPending=isPending("device-action");
   const pushActionPending=isPending("push-action");
   const currentMessageTone=messageTone(message);
@@ -939,7 +950,7 @@ export default function App(){
           {upcomingShifts.length>0?<button className="secondary past-shifts-toggle" aria-expanded={showPastShifts} aria-controls="past-shifts-list" onClick={()=>setShowPastShifts(value=>!value)}>{showPastShifts?"過去のシフトを閉じる":`過去のシフトを見る（${pastShifts.length}件）`}</button>:<div className="shift-list-heading past"><h3>過去のシフト</h3><span>{pastShifts.length}件</span></div>}
           {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list" className="grid past-shift-grid">{pastShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>}
         </div>}
-        {selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)}/></label></div><button onClick={()=>void submitPreContact()} disabled={isPending("preContact")}>{isPending("preContact")?"処理中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||isPending(`print-${item.id}`)} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":isPending(`print-${item.id}`)?"処理中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)}>📝 報告書を提出</button></div></section>}
+        {selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)} disabled={shiftActionPending}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)} disabled={shiftActionPending}/></label></div><button onClick={()=>void submitPreContact()} disabled={shiftActionPending}>{pendingShiftAction==="preContact"?"送信中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||shiftActionPending} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)}>📝 報告書を提出</button></div></section>}
       </>}
     </section>}
     {view==="submit"&&!selectedAssignedJob&&<section className="panel">{businessDataFallback??(myJobs.length?<EmptyAction title="提出するシフトを選んでください" body="提出は、本人に割り当てられた確定シフトからだけ受け付けます。" action="シフトを選ぶ" onAction={()=>navigate("shifts")}/>:<EmptyAction title="提出できる確定シフトはありません" body="シフトが確定すると、売場画像や報告書をここから提出できます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>)}</section>}
@@ -951,7 +962,7 @@ export default function App(){
       </div>
       <div className={`submission-identity ${submissionType}`}><span>{submissionType==="report"?"📝 報告書":"🖼️ 売場画像"}</span><strong>{submissionType==="report"?"報告内容が読める画像・PDF":"売場全体や陳列が分かる写真"}</strong></div><h2>{submissionType==="report"?"報告書":"売場画像"}を提出</h2><p className="submission-target-summary">{selectedAssignedJob.workDate||selectedAssignedJob.dateKey} / {selectedAssignedJob.storeName} / {selectedAssignedJob.workTime}{requestId&&" / 再提出依頼への対応"}</p>
       {resubmissionDetail&&<div className="resubmission-guide"><div><strong>再送理由</strong><p>{resubmissionDetail.request.reasons.join(" / ")}</p>{resubmissionDetail.request.note&&<p>{resubmissionDetail.request.note}</p>}</div><div className="source-preview"><span>撮り直す元画像</span>{resubmissionDetail.source?<SubmissionPreviewImage file={resubmissionDetail.source} onRefreshPreview={refreshFilePreview} className="source-preview-frame"/>:<div className="preview-placeholder">対象画像</div>}</div><small>この画像だけを撮り直し、1ファイル選んで再送してください。</small></div>}
-      {submissionType==="sales_floor"&&<button className="secondary" onClick={()=>void setClientSubmitted(!selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted)} disabled={isPending("clientSubmitted")}>{isPending("clientSubmitted")?"処理中…":selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted?"クライアント提出を解除":"クライアントへ提出済み"}</button>}
+      {submissionType==="sales_floor"&&<button className="secondary" onClick={()=>void setClientSubmitted(!selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted)} disabled={shiftActionPending}>{pendingShiftAction==="clientSubmitted"?"更新中…":selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted?"クライアント提出を解除":"クライアントへ提出済み"}</button>}
       <div className="upload-box"><span className="submission-step-label">3. 写真・PDFを選ぶ</span><div className="file-picker-actions"><label className="file-picker-button camera">📷 カメラで撮影<input className="file-picker-input" type="file" accept="image/*" capture="environment" onChange={e=>{addSubmissionFiles(Array.from(e.target.files??[]));e.currentTarget.value="";}}/></label><label className="file-picker-button library">🖼️ 写真・PDFを選ぶ<input className="file-picker-input" type="file" multiple={!requestId} accept="image/*,.pdf" onChange={e=>{addSubmissionFiles(Array.from(e.target.files??[]));e.currentTarget.value="";}}/></label></div><small>{requestId?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB。選択後も追加できます。`}</small></div>
       {files.length>0&&<><div className="file-list-toolbar"><div><strong>選択中：{files.length}件</strong><small>送信前に画像を確認してください</small></div><button className="ghost" onClick={()=>void clearSubmissionFiles()} disabled={isPending("uploadSubmission")||processingSubmission}>すべて解除</button></div><div className="file-list">{files.map(file=><SelectedSubmissionFile key={fileStateKey(file)} file={file} status={uploadState[fileStateKey(file)]??"下書き保存済み"} disabled={isPending("uploadSubmission")||processingSubmission} onRemove={()=>removeSubmissionFile(file)}/>)}</div></>}
       <label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><button className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission} aria-busy={isPending("uploadSubmission")||processingSubmission}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?"この画像を再送する":`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className={`${messageClassName(submissionMessage)} submission-message`} role={messageTone(submissionMessage)==="error"?"alert":"status"}>{submissionMessage}</div>}

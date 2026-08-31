@@ -542,6 +542,12 @@ assert.match(
   "Device loading and logout must share one exclusive action while preserving per-device progress.",
 );
 
+assert.match(
+  app,
+  /async function apply\(job:Job\)\{[\s\S]*await run\("apply-action"[\s\S]*setPendingApplicationJobId\(job\.id\)[\s\S]*finally\{setPendingApplicationJobId\(""\);\}[\s\S]*aria-busy=\{applicationPending\}[\s\S]*disabled=\{applicationPending\}[\s\S]*pendingApplicationJobId===job\.id\?"応募中…"/u,
+  "Staff job applications must share one exclusive action while keeping the selected job visibly in progress.",
+);
+
 assert.equal(
   app.match(/setView\(/gu)?.length,
   1,
@@ -554,4 +560,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (102 assertions).");
+console.log("Staff UX and performance checks passed (103 assertions).");

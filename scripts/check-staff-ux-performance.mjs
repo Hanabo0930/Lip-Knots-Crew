@@ -554,6 +554,18 @@ assert.match(
   "Staff shift mutations must share one exclusive action while preserving target-specific progress.",
 );
 
+assert.match(
+  app,
+  /function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isPending\("submission-context"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isPending\("submission-context"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isPending\("submission-context"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;/u,
+  "Submission file mutations must synchronously stop while context, upload, or processing work is active.",
+);
+
+assert.match(
+  app,
+  /const submissionEditPending=isPending\("submission-context"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission;[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\}/u,
+  "Submission context, file pickers, removal, confirmation, and send controls must share one visible edit lock.",
+);
+
 assert.equal(
   app.match(/setView\(/gu)?.length,
   1,
@@ -566,4 +578,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (104 assertions).");
+console.log("Staff UX and performance checks passed (106 assertions).");

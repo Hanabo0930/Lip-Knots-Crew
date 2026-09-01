@@ -556,14 +556,20 @@ assert.match(
 
 assert.match(
   app,
-  /function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isPending\("submission-context"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isPending\("submission-context"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isPending\("submission-context"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;/u,
+  /function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;/u,
   "Submission file mutations must synchronously stop while context, upload, or processing work is active.",
 );
 
 assert.match(
   app,
-  /const submissionEditPending=isPending\("submission-context"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission;[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\}/u,
+  /const submissionEditPending=isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission;[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\}/u,
   "Submission context, file pickers, removal, confirmation, and send controls must share one visible edit lock.",
+);
+
+assert.match(
+  app,
+  /async function clearSubmissionFiles\(\)\{[\s\S]*await run\("submission-files"[\s\S]*await clearDraft\(draftKey\)[\s\S]*aria-busy=\{isPending\("submission-files"\)\}[\s\S]*isPending\("submission-files"\)\?"解除中…":"すべて解除"/u,
+  "Clearing all submission files must block duplicate taps and keep visible progress until the saved draft is removed.",
 );
 
 assert.equal(
@@ -578,4 +584,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (106 assertions).");
+console.log("Staff UX and performance checks passed (107 assertions).");

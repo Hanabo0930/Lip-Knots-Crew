@@ -864,7 +864,7 @@ export default function App(){
   }
 
   function removeSubmissionFile(target:File){
-    if(isPending("submission-context")||isPending("uploadSubmission")||processingSubmission)return;
+    if(isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
     const targetKey=fileStateKey(target);
     setFiles(current=>current.filter(file=>fileStateKey(file)!==targetKey));
     setUploadState(current=>{const next={...current};delete next[targetKey];return next;});
@@ -873,7 +873,7 @@ export default function App(){
   }
 
   function addSubmissionFiles(selected:File[]){
-    if(isPending("submission-context")||isPending("uploadSubmission")||processingSubmission)return;
+    if(isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
     const accepted=selected.filter(file=>file.type.startsWith("image/")||file.type==="application/pdf"||file.name.toLowerCase().endsWith(".pdf"));
     const withinSize=accepted.filter(file=>file.size<=MAX_SUBMISSION_FILE_SIZE);
     const limit=requestId?1:MAX_SUBMISSION_FILES;
@@ -892,13 +892,15 @@ export default function App(){
   }
 
   async function clearSubmissionFiles(){
-    if(isPending("submission-context")||isPending("uploadSubmission")||processingSubmission)return;
+    if(isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
     if(!files.length||!confirm("選択中のファイルをすべて外しますか？"))return;
-    try{if(draftKey)await clearDraft(draftKey);}catch{showSubmissionMessage("選択中のファイルを解除できませんでした。もう一度お試しください。");return;}
-    setFiles([]);
-    setUploadState({});
-    setSubmissionConfirmed(false);
-    setSubmissionMessage("");
+    await run("submission-files",async()=>{
+      try{if(draftKey)await clearDraft(draftKey);}catch{showSubmissionMessage("選択中のファイルを解除できませんでした。もう一度お試しください。");return;}
+      setFiles([]);
+      setUploadState({});
+      setSubmissionConfirmed(false);
+      setSubmissionMessage("");
+    },{setMessage:showSubmissionMessage});
   }
 
   async function chooseSubmission(type:SubmissionType,job:Job,req=""){const assignedJob=myJobs.find(candidate=>candidate.id===job.id);if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");navigate("shifts");return;}await prepareSubmission(type,assignedJob,req);}
@@ -926,7 +928,7 @@ export default function App(){
   const shiftActionPending=isPending("shift-action");
   const deviceActionPending=isPending("device-action");
   const pushActionPending=isPending("push-action");
-  const submissionEditPending=isPending("submission-context")||isPending("uploadSubmission")||processingSubmission;
+  const submissionEditPending=isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission;
   const currentMessageTone=messageTone(message);
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message working">処理中…</div></section></main>;
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
@@ -968,7 +970,7 @@ export default function App(){
       {resubmissionDetail&&<div className="resubmission-guide"><div><strong>再送理由</strong><p>{resubmissionDetail.request.reasons.join(" / ")}</p>{resubmissionDetail.request.note&&<p>{resubmissionDetail.request.note}</p>}</div><div className="source-preview"><span>撮り直す元画像</span>{resubmissionDetail.source?<SubmissionPreviewImage file={resubmissionDetail.source} onRefreshPreview={refreshFilePreview} className="source-preview-frame"/>:<div className="preview-placeholder">対象画像</div>}</div><small>この画像だけを撮り直し、1ファイル選んで再送してください。</small></div>}
       {submissionType==="sales_floor"&&<button className="secondary" onClick={()=>void setClientSubmitted(!selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted)} disabled={shiftActionPending}>{pendingShiftAction==="clientSubmitted"?"更新中…":selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted?"クライアント提出を解除":"クライアントへ提出済み"}</button>}
       <div className="upload-box"><span className="submission-step-label">3. 写真・PDFを選ぶ</span><div className="file-picker-actions"><label className="file-picker-button camera">📷 カメラで撮影<input className="file-picker-input" type="file" accept="image/*" capture="environment" disabled={submissionEditPending} onChange={e=>{addSubmissionFiles(Array.from(e.target.files??[]));e.currentTarget.value="";}}/></label><label className="file-picker-button library">🖼️ 写真・PDFを選ぶ<input className="file-picker-input" type="file" multiple={!requestId} accept="image/*,.pdf" disabled={submissionEditPending} onChange={e=>{addSubmissionFiles(Array.from(e.target.files??[]));e.currentTarget.value="";}}/></label></div><small>{requestId?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB。選択後も追加できます。`}</small></div>
-      {files.length>0&&<><div className="file-list-toolbar"><div><strong>選択中：{files.length}件</strong><small>送信前に画像を確認してください</small></div><button className="ghost" onClick={()=>void clearSubmissionFiles()} disabled={submissionEditPending}>すべて解除</button></div><div className="file-list">{files.map(file=><SelectedSubmissionFile key={fileStateKey(file)} file={file} status={uploadState[fileStateKey(file)]??"下書き保存済み"} disabled={submissionEditPending} onRemove={()=>removeSubmissionFile(file)}/>)}</div></>}
+      {files.length>0&&<><div className="file-list-toolbar"><div><strong>選択中：{files.length}件</strong><small>送信前に画像を確認してください</small></div><button className="ghost" onClick={()=>void clearSubmissionFiles()} disabled={submissionEditPending} aria-busy={isPending("submission-files")}>{isPending("submission-files")?"解除中…":"すべて解除"}</button></div><div className="file-list">{files.map(file=><SelectedSubmissionFile key={fileStateKey(file)} file={file} status={uploadState[fileStateKey(file)]??"下書き保存済み"} disabled={submissionEditPending} onRemove={()=>removeSubmissionFile(file)}/>)}</div></>}
       <label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} disabled={submissionEditPending} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><button className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||submissionEditPending} aria-busy={submissionEditPending}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?"この画像を再送する":`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className={`${messageClassName(submissionMessage)} submission-message`} role={messageTone(submissionMessage)==="error"?"alert":"status"}>{submissionMessage}</div>}
       <hr/><h3>提出履歴</h3>{submissionHistoryStatus==="loading"?<div className="history-loading" role="status">提出画面は操作できます。履歴を自動で読み込んでいます…</div>:submissionHistoryStatus==="error"?<div className="empty history-error">提出履歴を読み込めませんでした。<button className="secondary" onClick={()=>void loadSubmissionHistory(selectedAssignedJob.id,submissionType).catch(()=>undefined)}>履歴を再読み込み</button></div>:<div className="history-grid">{submissionHistory.flatMap(group=>group.files).map(file=><article key={`${file.submissionId}_${file.id}`}><SubmissionPreviewImage file={file} onRefreshPreview={refreshFilePreview}/><strong>{file.driveName||file.originalName}</strong><small>{file.purpose==="replacement"?"再送":"提出済み"}</small></article>)}{!submissionHistory.length&&<div className="empty">提出履歴はありません。</div>}</div>}
     </section>}

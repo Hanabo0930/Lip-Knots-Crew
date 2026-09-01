@@ -670,7 +670,7 @@ export default function App(){
   }
 
   async function setClientSubmitted(value:boolean){
-    if(!selectedJob||isPending("shift-action"))return;
+    if(!selectedJob||isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
     const previous=selectedJob;
     const optimistic:Job={
       ...selectedJob,
@@ -734,7 +734,7 @@ export default function App(){
   }
 
   async function uploadSubmission(){
-    if(!files.length||!submissionConfirmed||isPending("uploadSubmission")||processingSubmission)return;
+    if(!files.length||!submissionConfirmed||isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
     const assignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id):undefined;
     if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");return;}
     const typeLabel=submissionType==="report"?"報告書":"売場画像";
@@ -848,7 +848,7 @@ export default function App(){
 
   async function changeSubmissionJob(jobId:string){
     const job=myJobs.find(candidate=>candidate.id===jobId);
-    if(!job||job.id===selectedAssignedJob?.id)return;
+    if(!job||job.id===selectedAssignedJob?.id||isPending("shift-action"))return;
     await run("submission-context",async()=>{
       if(!await discardFilesBeforeContextChange("選択中のファイルを外して提出先を変更しますか？"))return;
       await prepareSubmission(submissionType,job);
@@ -856,7 +856,7 @@ export default function App(){
   }
 
   async function changeSubmissionType(type:SubmissionType){
-    if(!selectedAssignedJob||type===submissionType)return;
+    if(!selectedAssignedJob||type===submissionType||isPending("shift-action"))return;
     await run("submission-context",async()=>{
       if(!await discardFilesBeforeContextChange("選択中のファイルを外して提出種類を変更しますか？"))return;
       await prepareSubmission(type,selectedAssignedJob);
@@ -864,7 +864,7 @@ export default function App(){
   }
 
   function removeSubmissionFile(target:File){
-    if(isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
+    if(isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
     const targetKey=fileStateKey(target);
     setFiles(current=>current.filter(file=>fileStateKey(file)!==targetKey));
     setUploadState(current=>{const next={...current};delete next[targetKey];return next;});
@@ -873,7 +873,7 @@ export default function App(){
   }
 
   function addSubmissionFiles(selected:File[]){
-    if(isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
+    if(isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
     const accepted=selected.filter(file=>file.type.startsWith("image/")||file.type==="application/pdf"||file.name.toLowerCase().endsWith(".pdf"));
     const withinSize=accepted.filter(file=>file.size<=MAX_SUBMISSION_FILE_SIZE);
     const limit=requestId?1:MAX_SUBMISSION_FILES;
@@ -892,7 +892,7 @@ export default function App(){
   }
 
   async function clearSubmissionFiles(){
-    if(isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
+    if(isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
     if(!files.length||!confirm("選択中のファイルをすべて外しますか？"))return;
     await run("submission-files",async()=>{
       try{if(draftKey)await clearDraft(draftKey);}catch{showSubmissionMessage("選択中のファイルを解除できませんでした。もう一度お試しください。");return;}
@@ -903,7 +903,7 @@ export default function App(){
     },{setMessage:showSubmissionMessage});
   }
 
-  async function chooseSubmission(type:SubmissionType,job:Job,req=""){const assignedJob=myJobs.find(candidate=>candidate.id===job.id);if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");navigate("shifts");return;}await prepareSubmission(type,assignedJob,req);}
+  async function chooseSubmission(type:SubmissionType,job:Job,req=""){if(isPending("shift-action"))return;const assignedJob=myJobs.find(candidate=>candidate.id===job.id);if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");navigate("shifts");return;}await prepareSubmission(type,assignedJob,req);}
 
   const nextShift=nextShiftJob(myJobs);
   const visibleTasks=showAllTasks?tasks:tasks.slice(0,5);
@@ -928,7 +928,7 @@ export default function App(){
   const shiftActionPending=isPending("shift-action");
   const deviceActionPending=isPending("device-action");
   const pushActionPending=isPending("push-action");
-  const submissionEditPending=isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission;
+  const submissionEditPending=shiftActionPending||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission;
   const currentMessageTone=messageTone(message);
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message working">処理中…</div></section></main>;
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
@@ -956,7 +956,7 @@ export default function App(){
           {upcomingShifts.length>0?<button className="secondary past-shifts-toggle" aria-expanded={showPastShifts} aria-controls="past-shifts-list" onClick={()=>setShowPastShifts(value=>!value)}>{showPastShifts?"過去のシフトを閉じる":`過去のシフトを見る（${pastShifts.length}件）`}</button>:<div className="shift-list-heading past"><h3>過去のシフト</h3><span>{pastShifts.length}件</span></div>}
           {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list" className="grid past-shift-grid">{pastShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>}
         </div>}
-        {selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)} disabled={shiftActionPending}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)} disabled={shiftActionPending}/></label></div><button onClick={()=>void submitPreContact()} disabled={shiftActionPending}>{pendingShiftAction==="preContact"?"送信中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||shiftActionPending} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)}>📝 報告書を提出</button></div></section>}
+        {selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)} disabled={shiftActionPending}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)} disabled={shiftActionPending}/></label></div><button onClick={()=>void submitPreContact()} disabled={shiftActionPending}>{pendingShiftAction==="preContact"?"送信中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||shiftActionPending} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)} disabled={shiftActionPending}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)} disabled={shiftActionPending}>📝 報告書を提出</button></div></section>}
       </>}
     </section>}
     {view==="submit"&&!selectedAssignedJob&&<section className="panel">{businessDataFallback??(myJobs.length?<EmptyAction title="提出するシフトを選んでください" body="提出は、本人に割り当てられた確定シフトからだけ受け付けます。" action="シフトを選ぶ" onAction={()=>navigate("shifts")}/>:<EmptyAction title="提出できる確定シフトはありません" body="シフトが確定すると、売場画像や報告書をここから提出できます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>)}</section>}
@@ -968,7 +968,7 @@ export default function App(){
       </div>
       <div className={`submission-identity ${submissionType}`}><span>{submissionType==="report"?"📝 報告書":"🖼️ 売場画像"}</span><strong>{submissionType==="report"?"報告内容が読める画像・PDF":"売場全体や陳列が分かる写真"}</strong></div><h2>{submissionType==="report"?"報告書":"売場画像"}を提出</h2><p className="submission-target-summary">{selectedAssignedJob.workDate||selectedAssignedJob.dateKey} / {selectedAssignedJob.storeName} / {selectedAssignedJob.workTime}{requestId&&" / 再提出依頼への対応"}</p>
       {resubmissionDetail&&<div className="resubmission-guide"><div><strong>再送理由</strong><p>{resubmissionDetail.request.reasons.join(" / ")}</p>{resubmissionDetail.request.note&&<p>{resubmissionDetail.request.note}</p>}</div><div className="source-preview"><span>撮り直す元画像</span>{resubmissionDetail.source?<SubmissionPreviewImage file={resubmissionDetail.source} onRefreshPreview={refreshFilePreview} className="source-preview-frame"/>:<div className="preview-placeholder">対象画像</div>}</div><small>この画像だけを撮り直し、1ファイル選んで再送してください。</small></div>}
-      {submissionType==="sales_floor"&&<button className="secondary" onClick={()=>void setClientSubmitted(!selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted)} disabled={shiftActionPending}>{pendingShiftAction==="clientSubmitted"?"更新中…":selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted?"クライアント提出を解除":"クライアントへ提出済み"}</button>}
+      {submissionType==="sales_floor"&&<button className="secondary" onClick={()=>void setClientSubmitted(!selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted)} disabled={submissionEditPending} aria-busy={shiftActionPending}>{pendingShiftAction==="clientSubmitted"?"更新中…":selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted?"クライアント提出を解除":"クライアントへ提出済み"}</button>}
       <div className="upload-box"><span className="submission-step-label">3. 写真・PDFを選ぶ</span><div className="file-picker-actions"><label className="file-picker-button camera">📷 カメラで撮影<input className="file-picker-input" type="file" accept="image/*" capture="environment" disabled={submissionEditPending} onChange={e=>{addSubmissionFiles(Array.from(e.target.files??[]));e.currentTarget.value="";}}/></label><label className="file-picker-button library">🖼️ 写真・PDFを選ぶ<input className="file-picker-input" type="file" multiple={!requestId} accept="image/*,.pdf" disabled={submissionEditPending} onChange={e=>{addSubmissionFiles(Array.from(e.target.files??[]));e.currentTarget.value="";}}/></label></div><small>{requestId?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB。選択後も追加できます。`}</small></div>
       {files.length>0&&<><div className="file-list-toolbar"><div><strong>選択中：{files.length}件</strong><small>送信前に画像を確認してください</small></div><button className="ghost" onClick={()=>void clearSubmissionFiles()} disabled={submissionEditPending} aria-busy={isPending("submission-files")}>{isPending("submission-files")?"解除中…":"すべて解除"}</button></div><div className="file-list">{files.map(file=><SelectedSubmissionFile key={fileStateKey(file)} file={file} status={uploadState[fileStateKey(file)]??"下書き保存済み"} disabled={submissionEditPending} onRemove={()=>removeSubmissionFile(file)}/>)}</div></>}
       <label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} disabled={submissionEditPending} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><button className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||submissionEditPending} aria-busy={submissionEditPending}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?"この画像を再送する":`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className={`${messageClassName(submissionMessage)} submission-message`} role={messageTone(submissionMessage)==="error"?"alert":"status"}>{submissionMessage}</div>}

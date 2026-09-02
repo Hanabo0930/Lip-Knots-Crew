@@ -122,7 +122,37 @@ assert.match(
   /^    environment: lkc-staging-hosting$/mu,
   "Hosting promotion must keep the protected approval environment",
 );
-cases += 7;
+assert.match(
+  promoteWorkflow,
+  /workflow_run:\n    workflows: \[Staging Hosting Preview\]\n    types: \[completed\]/u,
+  "A successful canonical Hosting preview must trigger promotion automatically",
+);
+assert.match(
+  promoteWorkflow,
+  /github\.event\.workflow_run\.conclusion == 'success'[\s\S]*github\.event\.workflow_run\.event == 'workflow_run'[\s\S]*github\.event\.workflow_run\.head_branch == 'main'/u,
+  "Automatic promotion must accept only a successful main Preview workflow run",
+);
+assert.match(
+  promoteWorkflow,
+  /LKC_REQUESTED_SHA: \$\{\{ github\.event_name == 'workflow_run' && github\.event\.workflow_run\.head_sha \|\| inputs\.source_sha \}\}[\s\S]*LKC_CONFIRMATION: \$\{\{ github\.event_name == 'workflow_run' && 'PROMOTE_LKC_STAGING_HOSTING' \|\| inputs\.confirmation \}\}/u,
+  "Automatic promotion must pin the triggering Preview SHA and preserve the required confirmation",
+);
+assert.match(
+  promoteWorkflow,
+  /CANONICAL_PREVIEW_NOT_SUCCESSFUL[\s\S]*TRIGGER_PREVIEW_MISMATCH/u,
+  "Promotion must re-check both canonical and triggering Preview evidence",
+);
+assert.match(
+  promoteWorkflow,
+  /HOSTING_PROMOTION_RESULT=ALREADY_PROMOTED[\s\S]*should_promote=false[\s\S]*echo "should_promote=true"/u,
+  "Promotion must skip an exact SHA that was already promoted successfully",
+);
+assert.match(
+  promoteWorkflow,
+  /promote:\n    needs: guard\n    if: needs\.guard\.outputs\.should_promote == 'true'\n    environment: lkc-staging-hosting/u,
+  "Only a new validated SHA may enter the protected promotion environment",
+);
+cases += 13;
 assert.match(
   promoteWorkflow,
   /node scripts\/automation\/restore-staging-hosting\.mjs/u,

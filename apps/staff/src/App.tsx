@@ -84,9 +84,11 @@ const CONTACT_PHONE="08037906064";
 const CONTACT_PHONE_LABEL="080-3790-6064";
 const CONTACT_FORM_URL="https://lipknots.com/contact/";
 const CONTACT_EMAIL_SUBJECT="Lip Knots Crewからのお問い合わせ";
+const STAGING_ADMIN_APP_URL="https://lip-knots-crew-staging-admin.web.app";
 let emailLinkSignInAttempt:{url:string;task:Promise<void>}|null=null;
 let lastPushStatusRefreshAt=0;
 let lastBusinessDataRefreshAt=0;
+function stagingAdminLoginUrl(){const host=window.location.hostname;return host==="lip-knots-crew-staging.web.app"||host.startsWith("lip-knots-crew-staging--")?STAGING_ADMIN_APP_URL:"";}
 function jobAccent(menuName:string){let hash=0;for(const char of menuName||"案件")hash=((hash*31)+char.codePointAt(0)!)|0;return JOB_ACCENTS[Math.abs(hash)%JOB_ACCENTS.length]??JOB_ACCENTS[0];}
 function jobKind(menuName:string){return menuName.replace(/[（(].*$/u,"").trim()||"案件";}
 function mapDestination(job:Job){return [job.storeName,job.storeAddress].filter(Boolean).join(" ");}
@@ -135,6 +137,7 @@ function completeEmailLinkSignIn(url:string,email:string):Promise<void>{
 
 export default function App(){
   const { isPending, run } = useAsyncAction();
+  const adminLoginUrl=useMemo(stagingAdminLoginUrl,[]);
   const [user,setUser]=useState<User|null>(null); const [companyId,setCompanyId]=useState(""); const [staffId,setStaffId]=useState("");
   const [email,setEmail]=useState(localStorage.getItem("lkcEmail")??""); const [loginCode,setLoginCode]=useState(""); const [message,setMessage]=useState("");
   const [view,setView]=useState<View>("home"); const [openJobs,setOpenJobs]=useState<Job[]>(firebaseConfigured?[]:demoJobs);
@@ -976,7 +979,7 @@ export default function App(){
   const submissionEditPending=isSubmissionActionPending();
   const currentMessageTone=messageTone(message);
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message working">処理中…</div></section></main>;
-  if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
+  if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>スタッフとして登録済みのメールへ、ログインボタンと6桁の確認コードを送ります。管理者アカウントには確認コードは届きません。{adminLoginUrl&&<><br/><a href={adminLoginUrl}>管理者はAdmin画面からGoogleでログイン</a></>}</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="スタッフのメールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
 
   return <main className="app-shell">
     <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button className="ghost account-menu-toggle" onClick={toggleAccountMenu} aria-expanded={showAccountMenu} aria-controls="account-menu" disabled={isPending("logout")||deviceActionPending}>{showAccountMenu?"閉じる":"メニュー"}</button>}</header>

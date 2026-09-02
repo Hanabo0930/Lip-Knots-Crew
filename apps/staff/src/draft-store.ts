@@ -9,6 +9,20 @@ export type DraftFile = {
 
 const DB_NAME = "lkc-submission-drafts";
 const STORE = "drafts";
+const draftMutations = new Map<string, Promise<void>>();
+
+function enqueueDraftMutation(key: string, mutation: () => Promise<void>): Promise<void> {
+  const previous = draftMutations.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(mutation);
+  draftMutations.set(key, current);
+  return current.finally(() => {
+    if (draftMutations.get(key) === current) draftMutations.delete(key);
+  });
+}
+
+async function waitForDraftMutation(key: string): Promise<void> {
+  await draftMutations.get(key)?.catch(() => undefined);
+}
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -22,33 +36,48 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-export async function saveDraft(key: string, files: File[]): Promise<void> {
-  const db = await openDb();
+export function saveDraft(key: string, files: File[]): Promise<void> {
   const records: DraftFile[] = files.map((file) => ({
     id: crypto.randomUUID(), name: file.name, type: file.type,
     size: file.size, lastModified: file.lastModified, blob: file,
   }));
-  await tx(db, "readwrite", (store) => store.put(records, key));
-  db.close();
+  return enqueueDraftMutation(key, async () => {
+    const db = await openDb();
+    try {
+      await tx(db, "readwrite", (store) => store.put(records, key));
+    } finally {
+      db.close();
+    }
+  });
 }
 
 export async function loadDraft(key: string): Promise<File[]> {
+  await waitForDraftMutation(key);
   const db = await openDb();
-  const records = await new Promise<DraftFile[]>((resolve, reject) => {
-    const request = db.transaction(STORE, "readonly").objectStore(STORE).get(key);
-    request.onsuccess = () => resolve((request.result as DraftFile[] | undefined) ?? []);
-    request.onerror = () => reject(request.error);
-  });
-  db.close();
+  let records: DraftFile[];
+  try {
+    records = await new Promise<DraftFile[]>((resolve, reject) => {
+      const request = db.transaction(STORE, "readonly").objectStore(STORE).get(key);
+      request.onsuccess = () => resolve((request.result as DraftFile[] | undefined) ?? []);
+      request.onerror = () => reject(request.error);
+    });
+  } finally {
+    db.close();
+  }
   return records.map((record) => new File([record.blob], record.name, {
     type: record.type, lastModified: record.lastModified,
   }));
 }
 
-export async function clearDraft(key: string): Promise<void> {
-  const db = await openDb();
-  await tx(db, "readwrite", (store) => store.delete(key));
-  db.close();
+export function clearDraft(key: string): Promise<void> {
+  return enqueueDraftMutation(key, async () => {
+    const db = await openDb();
+    try {
+      await tx(db, "readwrite", (store) => store.delete(key));
+    } finally {
+      db.close();
+    }
+  });
 }
 
 function tx(db: IDBDatabase, mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest): Promise<void> {

@@ -10,7 +10,7 @@ export function useAsyncAction() {
   const pendingRef = useRef(pendingKeys);
   pendingRef.current = pendingKeys;
 
-  const isPending = useCallback((key: string) => pendingKeys.has(key), [pendingKeys]);
+  const isPending = useCallback((key: string) => pendingRef.current.has(key), []);
 
   const run = useCallback(async (key: string, action: () => Promise<void>, options?: RunOptions) => {
     if (pendingRef.current.has(key)) return;

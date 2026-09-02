@@ -120,6 +120,11 @@ assert.match(
   "Cross-action guards must read the synchronous pending ref instead of waiting for a React render.",
 );
 assert.match(
+  app,
+  /const hydratedDraftKeyRef=useRef\(""\);[\s\S]*const skipNextDraftSaveRef=useRef\(false\);[\s\S]*hydratedDraftKeyRef\.current="";[\s\S]*setDraftHydrating\(Boolean\(draftKey\)\);[\s\S]*let active=true;[\s\S]*loadDraft\(draftKey\)\.then\(draftFiles=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(draftFiles\);[\s\S]*hydratedDraftKeyRef\.current=draftKey;[\s\S]*skipNextDraftSaveRef\.current=true;[\s\S]*setDraftHydrating\(false\);[\s\S]*return\(\)=>\{active=false;\};[\s\S]*if\(!draftKey\|\|draftHydrating\|\|hydratedDraftKeyRef\.current!==draftKey\)return;[\s\S]*if\(skipNextDraftSaveRef\.current\)\{skipNextDraftSaveRef\.current=false;return;\}/u,
+  "Submission drafts must ignore stale context loads and must not save before the active draft is hydrated.",
+);
+assert.match(
   styles,
   /touch-action:\s*manipulation/u,
   "Touch controls must avoid delayed tap handling.",
@@ -555,7 +560,7 @@ assert.match(
 
 assert.match(
   app,
-  /async function submitPreContact\(\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\("preContact"\)[\s\S]*async function markPrinted\(item:NetPrintItem\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\(`print-\$\{item\.id\}`\)[\s\S]*async function setClientSubmitted\(value:boolean\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\("clientSubmitted"\)[\s\S]*const shiftActionPending=isPending\("shift-action"\)[\s\S]*aria-busy=\{shiftActionPending\}[\s\S]*pendingShiftAction==="preContact"\?"送信中…"[\s\S]*pendingShiftAction===`print-\$\{item\.id\}`\?"反映中…"[\s\S]*pendingShiftAction==="clientSubmitted"\?"更新中…"/u,
+  /async function submitPreContact\(\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\("preContact"\)[\s\S]*async function markPrinted\(item:NetPrintItem\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\(`print-\$\{item\.id\}`\)[\s\S]*async function setClientSubmitted\(value:boolean\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\("clientSubmitted"\)[\s\S]*const shiftActionPending=isPending\("shift-action"\)[\s\S]*aria-busy=\{shiftActionPending\|\|submissionContextPending\}[\s\S]*pendingShiftAction==="preContact"\?"送信中…"[\s\S]*pendingShiftAction===`print-\$\{item\.id\}`\?"反映中…"[\s\S]*pendingShiftAction==="clientSubmitted"\?"更新中…"/u,
   "Staff shift mutations must share one exclusive action while preserving target-specific progress.",
 );
 
@@ -567,14 +572,14 @@ assert.match(
 
 assert.match(
   app,
-  /const submissionEditPending=shiftActionPending\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission;[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*setClientSubmitted[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\}/u,
+  /const submissionEditPending=shiftActionPending\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\|\|draftHydrating;[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*setClientSubmitted[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\}/u,
   "Client-submission updates, context, file pickers, removal, confirmation, and send controls must share one visible edit lock.",
 );
 
 assert.match(
   app,
-  /async function setClientSubmitted\(value:boolean\)\{[\s\S]*isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*async function uploadSubmission\(\)\{[\s\S]*isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*async function chooseSubmission[\s\S]*if\(isPending\("shift-action"\)\)return;[\s\S]*className="submission-actions"[\s\S]*disabled=\{shiftActionPending\}/u,
-  "Shift updates and submission work must not overlap or allow navigation into a changing shift.",
+  /async function setClientSubmitted\(value:boolean\)\{[\s\S]*isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*async function uploadSubmission\(\)\{[\s\S]*isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*async function startSubmission[\s\S]*run\("submission-context"[\s\S]*discardFilesBeforeContextChange[\s\S]*prepareSubmission\(type,job,req\)[\s\S]*async function chooseSubmission[\s\S]*startSubmission\(type,assignedJob,req\)[\s\S]*const submissionContextPending=isPending\("submission-context"\);[\s\S]*className="submission-actions"[\s\S]*disabled=\{shiftActionPending\|\|submissionContextPending\}/u,
+  "Shift updates, initial submission routing, saved drafts, and submission work must share synchronous cross-action guards.",
 );
 
 assert.match(
@@ -595,4 +600,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (109 assertions).");
+console.log("Staff UX and performance checks passed (110 assertions).");

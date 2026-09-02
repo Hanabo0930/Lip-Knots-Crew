@@ -10,6 +10,7 @@ const push = readFileSync("apps/staff/src/push.ts", "utf8");
 const asyncAction = readFileSync("apps/staff/src/useAsyncAction.ts", "utf8");
 const businessCache = readFileSync("apps/staff/src/business-cache.ts", "utf8");
 const concurrency = readFileSync("apps/staff/src/concurrency.ts", "utf8");
+const draftStore = readFileSync("apps/staff/src/draft-store.ts", "utf8");
 const jobList = readFileSync("apps/staff/src/job-list.ts", "utf8");
 const styles = readFileSync("apps/staff/src/styles.css", "utf8");
 
@@ -128,6 +129,11 @@ assert.match(
   app,
   /saveDraft\(draftKey,files\)\.catch\(\(\)=>\{if\(hydratedDraftKeyRef\.current===draftKey\)showSubmissionMessage\("下書きを保存できませんでした/u,
   "Draft persistence failures must be handled without an unhandled rejection or a silent data-loss state.",
+);
+assert.match(
+  draftStore,
+  /const draftMutations = new Map<string, Promise<void>>\(\);[\s\S]*function enqueueDraftMutation[\s\S]*previous\.catch\(\(\) => undefined\)\.then\(mutation\)[\s\S]*function waitForDraftMutation[\s\S]*draftMutations\.get\(key\)\?\.catch[\s\S]*export function saveDraft[\s\S]*return enqueueDraftMutation\(key[\s\S]*export async function loadDraft[\s\S]*await waitForDraftMutation\(key\)[\s\S]*export function clearDraft[\s\S]*return enqueueDraftMutation\(key/u,
+  "Draft saves, reads, and clears for one submission must remain ordered so a stale save cannot restore cleared files.",
 );
 assert.match(
   styles,
@@ -611,4 +617,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (112 assertions).");
+console.log("Staff UX and performance checks passed (113 assertions).");

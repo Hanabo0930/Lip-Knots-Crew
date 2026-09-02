@@ -173,6 +173,7 @@ export default function App(){
   const [diagnosticReport,setDiagnosticReport]=useState<DiagnosticReport|null>(null);
   const [emailLinkPending,setEmailLinkPending]=useState(()=>Boolean(auth&&isSignInWithEmailLink(auth,window.location.href)));
   const hydratedDraftKeyRef=useRef("");
+  const draftHydratingRef=useRef(false);
   const skipNextDraftSaveRef=useRef(false);
 
   const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
@@ -180,6 +181,7 @@ export default function App(){
   const draftKey=selectedAssignedJob?`${selectedAssignedJob.id}_${submissionType}_${requestId||"normal"}`:"";
   useEffect(()=>{
     hydratedDraftKeyRef.current="";
+    draftHydratingRef.current=Boolean(draftKey);
     skipNextDraftSaveRef.current=false;
     setDraftHydrating(Boolean(draftKey));
     if(!draftKey)return;
@@ -189,21 +191,29 @@ export default function App(){
       setFiles(draftFiles);
       hydratedDraftKeyRef.current=draftKey;
       skipNextDraftSaveRef.current=true;
+      draftHydratingRef.current=false;
       setDraftHydrating(false);
     }).catch(()=>{
       if(!active)return;
+      setFiles([]);
       hydratedDraftKeyRef.current=draftKey;
       skipNextDraftSaveRef.current=true;
+      draftHydratingRef.current=false;
       setDraftHydrating(false);
+      showSubmissionMessage("保存済みの下書きを読み込めませんでした。ファイルを選び直してください。");
     });
     return()=>{active=false;};
   },[draftKey]);
-  useEffect(()=>{ if(!draftKey||draftHydrating||hydratedDraftKeyRef.current!==draftKey)return; if(skipNextDraftSaveRef.current){skipNextDraftSaveRef.current=false;return;} const timer=setTimeout(()=>void saveDraft(draftKey,files),300); return()=>clearTimeout(timer); },[draftKey,draftHydrating,files]);
+  useEffect(()=>{ if(!draftKey||draftHydrating||hydratedDraftKeyRef.current!==draftKey)return; if(skipNextDraftSaveRef.current){skipNextDraftSaveRef.current=false;return;} const timer=setTimeout(()=>{void saveDraft(draftKey,files).catch(()=>{if(hydratedDraftKeyRef.current===draftKey)showSubmissionMessage("下書きを保存できませんでした。通信状態を確認して、ファイルを選び直してください。");});},300); return()=>clearTimeout(timer); },[draftKey,draftHydrating,files]);
   useEffect(()=>{ if(!pushEnabled)setShowPushActions(false); },[pushEnabled]);
   useEffect(()=>{
     if(showPastShifts||!selectedJob||!upcomingShifts.length||!pastShifts.some(job=>job.id===selectedJob.id))return;
     setSelectedJob(upcomingShifts[0]);
   },[pastShifts,selectedJob,showPastShifts,upcomingShifts]);
+
+  function isSubmissionActionPending(){
+    return draftHydratingRef.current||isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission;
+  }
 
   useEffect(()=>{ if(!auth)return; return onAuthStateChanged(auth,async current=>{
     const loadStarted=performance.now();
@@ -692,7 +702,7 @@ export default function App(){
   }
 
   async function setClientSubmitted(value:boolean){
-    if(!selectedJob||isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
+    if(!selectedJob||isSubmissionActionPending())return;
     const previous=selectedJob;
     const optimistic:Job={
       ...selectedJob,
@@ -756,7 +766,7 @@ export default function App(){
   }
 
   async function uploadSubmission(){
-    if(!files.length||!submissionConfirmed||isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
+    if(!files.length||!submissionConfirmed||isSubmissionActionPending())return;
     const assignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id):undefined;
     if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");return;}
     const typeLabel=submissionType==="report"?"報告書":"売場画像";
@@ -837,6 +847,8 @@ export default function App(){
   }
 
   async function prepareSubmission(type:SubmissionType,job:Job,req=""){
+    const nextDraftKey=`${job.id}_${type}_${req||"normal"}`;
+    if(hydratedDraftKeyRef.current!==nextDraftKey){draftHydratingRef.current=true;setDraftHydrating(true);}
     setSelectedJob(job);
     setSubmissionType(type);
     setRequestId(req);
@@ -869,7 +881,7 @@ export default function App(){
   }
 
   async function startSubmission(type:SubmissionType,job:Job,req=""){
-    if(isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
+    if(isSubmissionActionPending())return;
     await run("submission-context",async()=>{
       const sameContext=selectedAssignedJob?.id===job.id&&submissionType===type&&requestId===req;
       if(sameContext&&files.length){navigate("submit");return;}
@@ -880,7 +892,7 @@ export default function App(){
 
   async function changeSubmissionJob(jobId:string){
     const job=myJobs.find(candidate=>candidate.id===jobId);
-    if(!job||job.id===selectedAssignedJob?.id||isPending("shift-action"))return;
+    if(!job||job.id===selectedAssignedJob?.id||isSubmissionActionPending())return;
     await run("submission-context",async()=>{
       if(!await discardFilesBeforeContextChange("選択中のファイルを外して提出先を変更しますか？"))return;
       await prepareSubmission(submissionType,job);
@@ -888,7 +900,7 @@ export default function App(){
   }
 
   async function changeSubmissionType(type:SubmissionType){
-    if(!selectedAssignedJob||type===submissionType||isPending("shift-action"))return;
+    if(!selectedAssignedJob||type===submissionType||isSubmissionActionPending())return;
     await run("submission-context",async()=>{
       if(!await discardFilesBeforeContextChange("選択中のファイルを外して提出種類を変更しますか？"))return;
       await prepareSubmission(type,selectedAssignedJob);
@@ -896,7 +908,7 @@ export default function App(){
   }
 
   function removeSubmissionFile(target:File){
-    if(isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
+    if(isSubmissionActionPending())return;
     const targetKey=fileStateKey(target);
     setFiles(current=>current.filter(file=>fileStateKey(file)!==targetKey));
     setUploadState(current=>{const next={...current};delete next[targetKey];return next;});
@@ -905,7 +917,7 @@ export default function App(){
   }
 
   function addSubmissionFiles(selected:File[]){
-    if(isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
+    if(isSubmissionActionPending())return;
     const accepted=selected.filter(file=>file.type.startsWith("image/")||file.type==="application/pdf"||file.name.toLowerCase().endsWith(".pdf"));
     const withinSize=accepted.filter(file=>file.size<=MAX_SUBMISSION_FILE_SIZE);
     const limit=requestId?1:MAX_SUBMISSION_FILES;
@@ -924,7 +936,7 @@ export default function App(){
   }
 
   async function clearSubmissionFiles(){
-    if(isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission)return;
+    if(isSubmissionActionPending())return;
     if(!files.length||!confirm("選択中のファイルをすべて外しますか？"))return;
     await run("submission-files",async()=>{
       try{if(draftKey)await clearDraft(draftKey);}catch{showSubmissionMessage("選択中のファイルを解除できませんでした。もう一度お試しください。");return;}
@@ -961,7 +973,7 @@ export default function App(){
   const submissionContextPending=isPending("submission-context");
   const deviceActionPending=isPending("device-action");
   const pushActionPending=isPending("push-action");
-  const submissionEditPending=shiftActionPending||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission||draftHydrating;
+  const submissionEditPending=isSubmissionActionPending();
   const currentMessageTone=messageTone(message);
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message working">処理中…</div></section></main>;
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>登録済みメールへログインボタンと6桁の確認コードを送ります。</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="メールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
@@ -989,7 +1001,7 @@ export default function App(){
           {upcomingShifts.length>0?<button className="secondary past-shifts-toggle" aria-expanded={showPastShifts} aria-controls="past-shifts-list" onClick={()=>setShowPastShifts(value=>!value)}>{showPastShifts?"過去のシフトを閉じる":`過去のシフトを見る（${pastShifts.length}件）`}</button>:<div className="shift-list-heading past"><h3>過去のシフト</h3><span>{pastShifts.length}件</span></div>}
           {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list" className="grid past-shift-grid">{pastShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>}
         </div>}
-        {selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending||submissionContextPending}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)} disabled={shiftActionPending}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)} disabled={shiftActionPending}/></label></div><button onClick={()=>void submitPreContact()} disabled={shiftActionPending}>{pendingShiftAction==="preContact"?"送信中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||shiftActionPending} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)} disabled={shiftActionPending||submissionContextPending}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)} disabled={shiftActionPending||submissionContextPending}>📝 報告書を提出</button></div></section>}
+        {selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending||submissionContextPending||draftHydrating}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)} disabled={shiftActionPending}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)} disabled={shiftActionPending}/></label></div><button onClick={()=>void submitPreContact()} disabled={shiftActionPending}>{pendingShiftAction==="preContact"?"送信中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||shiftActionPending} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)} disabled={submissionEditPending}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)} disabled={submissionEditPending}>📝 報告書を提出</button></div></section>}
       </>}
     </section>}
     {view==="submit"&&!selectedAssignedJob&&<section className="panel">{businessDataFallback??(myJobs.length?<EmptyAction title="提出するシフトを選んでください" body="提出は、本人に割り当てられた確定シフトからだけ受け付けます。" action="シフトを選ぶ" onAction={()=>navigate("shifts")}/>:<EmptyAction title="提出できる確定シフトはありません" body="シフトが確定すると、売場画像や報告書をここから提出できます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>)}</section>}

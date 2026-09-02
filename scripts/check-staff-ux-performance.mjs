@@ -121,8 +121,13 @@ assert.match(
 );
 assert.match(
   app,
-  /const hydratedDraftKeyRef=useRef\(""\);[\s\S]*const skipNextDraftSaveRef=useRef\(false\);[\s\S]*hydratedDraftKeyRef\.current="";[\s\S]*setDraftHydrating\(Boolean\(draftKey\)\);[\s\S]*let active=true;[\s\S]*loadDraft\(draftKey\)\.then\(draftFiles=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(draftFiles\);[\s\S]*hydratedDraftKeyRef\.current=draftKey;[\s\S]*skipNextDraftSaveRef\.current=true;[\s\S]*setDraftHydrating\(false\);[\s\S]*return\(\)=>\{active=false;\};[\s\S]*if\(!draftKey\|\|draftHydrating\|\|hydratedDraftKeyRef\.current!==draftKey\)return;[\s\S]*if\(skipNextDraftSaveRef\.current\)\{skipNextDraftSaveRef\.current=false;return;\}/u,
-  "Submission drafts must ignore stale context loads and must not save before the active draft is hydrated.",
+  /const hydratedDraftKeyRef=useRef\(""\);[\s\S]*const draftHydratingRef=useRef\(false\);[\s\S]*const skipNextDraftSaveRef=useRef\(false\);[\s\S]*hydratedDraftKeyRef\.current="";[\s\S]*draftHydratingRef\.current=Boolean\(draftKey\);[\s\S]*let active=true;[\s\S]*loadDraft\(draftKey\)\.then\(draftFiles=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(draftFiles\);[\s\S]*hydratedDraftKeyRef\.current=draftKey;[\s\S]*draftHydratingRef\.current=false;[\s\S]*catch\(\(\)=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(\[\]\);[\s\S]*draftHydratingRef\.current=false;[\s\S]*return\(\)=>\{active=false;\};[\s\S]*if\(!draftKey\|\|draftHydrating\|\|hydratedDraftKeyRef\.current!==draftKey\)return;[\s\S]*if\(skipNextDraftSaveRef\.current\)\{skipNextDraftSaveRef\.current=false;return;\}/u,
+  "Submission drafts must ignore stale loads, clear stale files on failure, and never save before hydration.",
+);
+assert.match(
+  app,
+  /saveDraft\(draftKey,files\)\.catch\(\(\)=>\{if\(hydratedDraftKeyRef\.current===draftKey\)showSubmissionMessage\("下書きを保存できませんでした/u,
+  "Draft persistence failures must be handled without an unhandled rejection or a silent data-loss state.",
 );
 assert.match(
   styles,
@@ -560,26 +565,32 @@ assert.match(
 
 assert.match(
   app,
-  /async function submitPreContact\(\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\("preContact"\)[\s\S]*async function markPrinted\(item:NetPrintItem\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\(`print-\$\{item\.id\}`\)[\s\S]*async function setClientSubmitted\(value:boolean\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\("clientSubmitted"\)[\s\S]*const shiftActionPending=isPending\("shift-action"\)[\s\S]*aria-busy=\{shiftActionPending\|\|submissionContextPending\}[\s\S]*pendingShiftAction==="preContact"\?"送信中…"[\s\S]*pendingShiftAction===`print-\$\{item\.id\}`\?"反映中…"[\s\S]*pendingShiftAction==="clientSubmitted"\?"更新中…"/u,
+  /async function submitPreContact\(\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\("preContact"\)[\s\S]*async function markPrinted\(item:NetPrintItem\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\(`print-\$\{item\.id\}`\)[\s\S]*async function setClientSubmitted\(value:boolean\)\{[\s\S]*run\("shift-action"[\s\S]*setPendingShiftAction\("clientSubmitted"\)[\s\S]*const shiftActionPending=isPending\("shift-action"\)[\s\S]*aria-busy=\{shiftActionPending\|\|submissionContextPending\|\|draftHydrating\}[\s\S]*pendingShiftAction==="preContact"\?"送信中…"[\s\S]*pendingShiftAction===`print-\$\{item\.id\}`\?"反映中…"[\s\S]*pendingShiftAction==="clientSubmitted"\?"更新中…"/u,
   "Staff shift mutations must share one exclusive action while preserving target-specific progress.",
 );
 
 assert.match(
   app,
-  /function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\)return;/u,
-  "Submission file mutations must synchronously stop while shift, context, upload, or processing work is active.",
+  /function isSubmissionActionPending\(\)\{[\s\S]*draftHydratingRef\.current\|\|isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;/u,
+  "Submission file mutations must synchronously stop while draft hydration or another submission action is active.",
 );
 
 assert.match(
   app,
-  /const submissionEditPending=shiftActionPending\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission\|\|draftHydrating;[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*setClientSubmitted[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\}/u,
+  /const submissionEditPending=isSubmissionActionPending\(\);[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*setClientSubmitted[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\}/u,
   "Client-submission updates, context, file pickers, removal, confirmation, and send controls must share one visible edit lock.",
 );
 
 assert.match(
   app,
-  /async function setClientSubmitted\(value:boolean\)\{[\s\S]*isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*async function uploadSubmission\(\)\{[\s\S]*isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*async function startSubmission[\s\S]*run\("submission-context"[\s\S]*discardFilesBeforeContextChange[\s\S]*prepareSubmission\(type,job,req\)[\s\S]*async function chooseSubmission[\s\S]*startSubmission\(type,assignedJob,req\)[\s\S]*const submissionContextPending=isPending\("submission-context"\);[\s\S]*className="submission-actions"[\s\S]*disabled=\{shiftActionPending\|\|submissionContextPending\}/u,
-  "Shift updates, initial submission routing, saved drafts, and submission work must share synchronous cross-action guards.",
+  /async function setClientSubmitted\(value:boolean\)\{[\s\S]*isSubmissionActionPending\(\)[\s\S]*async function uploadSubmission\(\)\{[\s\S]*isSubmissionActionPending\(\)[\s\S]*async function prepareSubmission[\s\S]*hydratedDraftKeyRef\.current!==nextDraftKey[\s\S]*draftHydratingRef\.current=true[\s\S]*async function startSubmission[\s\S]*isSubmissionActionPending\(\)[\s\S]*run\("submission-context"[\s\S]*discardFilesBeforeContextChange[\s\S]*prepareSubmission\(type,job,req\)[\s\S]*async function chooseSubmission[\s\S]*startSubmission\(type,assignedJob,req\)/u,
+  "Shift updates, routing, draft hydration, and submission work must share one synchronous cross-action guard.",
+);
+
+assert.match(
+  app,
+  /shift-detail[\s\S]*aria-busy=\{shiftActionPending\|\|submissionContextPending\|\|draftHydrating\}[\s\S]*className="submission-actions"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*disabled=\{submissionEditPending\}/u,
+  "Shift submission entry points must visibly lock while the selected draft is still hydrating.",
 );
 
 assert.match(
@@ -600,4 +611,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (110 assertions).");
+console.log("Staff UX and performance checks passed (112 assertions).");

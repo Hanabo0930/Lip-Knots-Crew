@@ -115,6 +115,11 @@ assert.match(
   "Async actions must synchronously block duplicate taps.",
 );
 assert.match(
+  asyncAction,
+  /const isPending = useCallback\(\(key: string\) => pendingRef\.current\.has\(key\), \[\]\)/u,
+  "Cross-action guards must read the synchronous pending ref instead of waiting for a React render.",
+);
+assert.match(
   styles,
   /touch-action:\s*manipulation/u,
   "Touch controls must avoid delayed tap handling.",
@@ -590,4 +595,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (108 assertions).");
+console.log("Staff UX and performance checks passed (109 assertions).");

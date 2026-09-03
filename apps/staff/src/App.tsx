@@ -316,7 +316,7 @@ export default function App(){
       if(!restoredCachedData)setHomeDisplayMs(refreshedInMs);
       setBusinessRefreshMs(refreshedInMs);
       lastBusinessDataRefreshAt=Date.now();
-      void registerCurrentDevice().catch(()=>setMessage("端末情報を登録できませんでした。再読み込みしてください。"));
+      void registerCurrentDevice(authLoadVersion).catch(()=>{if(isCurrentAuthLoad())setMessage("端末情報を登録できませんでした。再読み込みしてください。");});
       void refreshOpenJobs(false,cid);
       void refreshPushStatus(true);
     }catch{
@@ -603,7 +603,7 @@ export default function App(){
     },{setMessage});
   }
 
-  async function registerCurrentDevice(){ if(!functions)return""; const c=httpsCallable(functions,"registerDeviceSession"); const r=await c({deviceId:currentDeviceId,label:deviceLabel(),platform:navigator.platform||"",userAgent:navigator.userAgent}); const id=String((r.data as {sessionId?:string}).sessionId??""); setDeviceSessionId(id); return id; }
+  async function registerCurrentDevice(authLoadVersion=authLoadVersionRef.current){ if(!functions)return""; const c=httpsCallable(functions,"registerDeviceSession"); const r=await c({deviceId:currentDeviceId,label:deviceLabel(),platform:navigator.platform||"",userAgent:navigator.userAgent}); const id=String((r.data as {sessionId?:string}).sessionId??""); if(authLoadVersion!==authLoadVersionRef.current)return""; setDeviceSessionId(id); return id; }
   async function logoutCurrentUser(){
     if(user)clearBusinessSnapshot(user.uid,companyId,staffId);
     if(auth)await signOut(auth);

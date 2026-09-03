@@ -87,8 +87,13 @@ assert.deepEqual(
 
 assert.match(
   app,
-  /await loadPrimaryBusinessData\(sid,cid,current\.uid\);[\s\S]*setBusinessDataStatus\("ready"\);[\s\S]*void registerCurrentDevice\(\)/u,
+  /await loadPrimaryBusinessData\(sid,cid,current\.uid\);[\s\S]*setBusinessDataStatus\("ready"\);[\s\S]*void registerCurrentDevice\(authLoadVersion\)/u,
   "The home screen must become ready before optional device registration.",
+);
+assert.match(
+  app,
+  /void registerCurrentDevice\(authLoadVersion\)\.catch\(\(\)=>\{if\(isCurrentAuthLoad\(\)\)setMessage\("端末情報を登録できませんでした。再読み込みしてください。"\);\}\);[\s\S]*async function registerCurrentDevice\(authLoadVersion=authLoadVersionRef\.current\)[\s\S]*const id=String\(\(r\.data as \{sessionId\?:string\}\)\.sessionId\?\?""\);[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return"";[\s\S]*setDeviceSessionId\(id\)/u,
+  "A delayed device registration must not attach an older account session to the current Staff screen.",
 );
 assert.match(
   app,
@@ -659,4 +664,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (121 assertions).");
+console.log("Staff UX and performance checks passed (122 assertions).");

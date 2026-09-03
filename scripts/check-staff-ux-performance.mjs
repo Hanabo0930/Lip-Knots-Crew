@@ -127,6 +127,11 @@ assert.match(
 );
 assert.match(
   app,
+  /function isLoginActionPending\(\)\{[\s\S]*isPending\("login"\)\|\|isPending\("login-code"\)[\s\S]*async function requestLogin\(\)\{[\s\S]*email\.trim\(\)\.toLowerCase\(\)[\s\S]*isLoginActionPending\(\)[\s\S]*async function verifyLoginCode\(\)\{[\s\S]*email\.trim\(\)\.toLowerCase\(\)[\s\S]*isLoginActionPending\(\)[\s\S]*<form onSubmit=\{e=>\{e\.preventDefault\(\);void requestLogin\(\);\}\} aria-busy=\{loginActionPending\}>[\s\S]*required disabled=\{loginActionPending\}[\s\S]*<form onSubmit=\{e=>\{e\.preventDefault\(\);void verifyLoginCode\(\);\}\} aria-busy=\{loginActionPending\}>[\s\S]*disabled=\{loginCode\.length!==6\|\|loginActionPending\}/u,
+  "Staff email sending and code verification must normalize the address, support keyboard submission, and share one synchronous visible lock.",
+);
+assert.match(
+  app,
   /const hydratedDraftKeyRef=useRef\(""\);[\s\S]*const draftHydratingRef=useRef\(false\);[\s\S]*const skipNextDraftSaveRef=useRef\(false\);[\s\S]*hydratedDraftKeyRef\.current="";[\s\S]*draftHydratingRef\.current=Boolean\(draftKey\);[\s\S]*let active=true;[\s\S]*loadDraft\(draftKey\)\.then\(draftFiles=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(draftFiles\);[\s\S]*hydratedDraftKeyRef\.current=draftKey;[\s\S]*draftHydratingRef\.current=false;[\s\S]*catch\(\(\)=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(\[\]\);[\s\S]*draftHydratingRef\.current=false;[\s\S]*return\(\)=>\{active=false;\};[\s\S]*if\(!draftKey\|\|draftHydrating\|\|hydratedDraftKeyRef\.current!==draftKey\)return;[\s\S]*if\(skipNextDraftSaveRef\.current\)\{skipNextDraftSaveRef\.current=false;return;\}/u,
   "Submission drafts must ignore stale loads, clear stale files on failure, and never save before hydration.",
 );
@@ -622,4 +627,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (114 assertions).");
+console.log("Staff UX and performance checks passed (115 assertions).");

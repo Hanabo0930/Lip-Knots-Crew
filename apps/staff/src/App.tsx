@@ -452,30 +452,36 @@ export default function App(){
 
   async function refreshBusinessData(showFailure:boolean){
     if(!user||!staffId||!companyId||Date.now()-lastBusinessDataRefreshAt<BUSINESS_DATA_REFRESH_INTERVAL_MS)return;
+    const authLoadVersion=authLoadVersionRef.current;
     lastBusinessDataRefreshAt=Date.now();
     setBusinessRefreshing(true);
     const started=performance.now();
     try{
-      await loadPrimaryBusinessData(staffId,companyId,user.uid);
+      const refreshed=await loadPrimaryBusinessData(staffId,companyId,user.uid);
+      if(!refreshed||authLoadVersion!==authLoadVersionRef.current)return;
       setBusinessDataStatus("ready");
       setBusinessDataSource("live");
       setBusinessRefreshMs(Math.round(performance.now()-started));
       if(openJobsStatus!=="idle")void refreshOpenJobs(false,companyId);
     }catch{
+      if(authLoadVersion!==authLoadVersionRef.current)return;
       lastBusinessDataRefreshAt=0;
       if(showFailure)setMessage("最新情報を更新できませんでした。通信状態を確認してください。");
     }finally{
-      setBusinessRefreshing(false);
+      if(authLoadVersion===authLoadVersionRef.current)setBusinessRefreshing(false);
     }
   }
 
   async function refreshPushStatus(showFailure:boolean){
     if(!functions||Date.now()-lastPushStatusRefreshAt<PUSH_STATUS_REFRESH_INTERVAL_MS)return;
+    const authLoadVersion=authLoadVersionRef.current;
     lastPushStatusRefreshAt=Date.now();
     try{
-      setPushEnabled(await loadServerPushStatusWithRetry(functions));
+      const enabled=await loadServerPushStatusWithRetry(functions);
+      if(authLoadVersion!==authLoadVersionRef.current)return;
+      setPushEnabled(enabled);
     }catch{
-      if(showFailure)setMessage("通知状態を読み込めませんでした。自動で再確認します。");
+      if(showFailure&&authLoadVersion===authLoadVersionRef.current)setMessage("通知状態を読み込めませんでした。自動で再確認します。");
     }
   }
 

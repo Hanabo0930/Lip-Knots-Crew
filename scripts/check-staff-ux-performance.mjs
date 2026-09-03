@@ -97,6 +97,11 @@ assert.match(
 );
 assert.match(
   app,
+  /async function refreshBusinessData\(showFailure:boolean\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const refreshed=await loadPrimaryBusinessData[\s\S]*if\(!refreshed\|\|authLoadVersion!==authLoadVersionRef\.current\)return;[\s\S]*catch\{[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return;[\s\S]*finally\{[\s\S]*if\(authLoadVersion===authLoadVersionRef\.current\)setBusinessRefreshing\(false\)[\s\S]*async function refreshPushStatus\(showFailure:boolean\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const enabled=await loadServerPushStatusWithRetry\(functions\);[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return;[\s\S]*setPushEnabled\(enabled\);[\s\S]*showFailure&&authLoadVersion===authLoadVersionRef\.current/u,
+  "Background business and push refreshes must not update a newer Staff session.",
+);
+assert.match(
+  app,
   /void refreshOpenJobs\(false,cid\)/u,
   "Open jobs must load through the shared background refresh lock after priority home data.",
 );
@@ -654,4 +659,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (120 assertions).");
+console.log("Staff UX and performance checks passed (121 assertions).");

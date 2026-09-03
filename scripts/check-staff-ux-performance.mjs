@@ -121,6 +121,11 @@ assert.match(
   "A foreground push listener that finishes after logout must unsubscribe immediately without leaking an unhandled rejection.",
 );
 assert.match(
+  app,
+  /const stopWatching=watchDeviceSession\(deviceSessionId,async\(\)=>\{[\s\S]*if\(stopped\)return;[\s\S]*clearBusinessSnapshot\(user\.uid,companyId,staffId\);[\s\S]*try\{await signOut\(activeAuth\);\}catch\{if\(!stopped\)setMessage\("ログアウトに失敗しました。再読み込みしてください。"\);\}[\s\S]*function watchDeviceSession\(id:string,onRevoked:\(\)=>Promise<void>\)[\s\S]*void onRevoked\(\)\.catch\(\(\)=>undefined\)/u,
+  "A revoked device listener must not sign out a newer session after its owning effect has stopped.",
+);
+assert.match(
   asyncAction,
   /pendingRef\.current = started/u,
   "Async actions must synchronously block duplicate taps.",
@@ -649,4 +654,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (119 assertions).");
+console.log("Staff UX and performance checks passed (120 assertions).");

@@ -371,7 +371,12 @@ export default function App(){
         }
       }
     };
-    const stopWatching=watchDeviceSession(deviceSessionId);
+    const stopWatching=watchDeviceSession(deviceSessionId,async()=>{
+      if(stopped)return;
+      setMessage("この端末はログアウトされました。");
+      clearBusinessSnapshot(user.uid,companyId,staffId);
+      try{await signOut(activeAuth);}catch{if(!stopped)setMessage("ログアウトに失敗しました。再読み込みしてください。");}
+    });
     void heartbeat();
     const interval=window.setInterval(()=>void heartbeat(),DEVICE_HEARTBEAT_INTERVAL_MS);
     const handleVisibility=()=>{if(document.visibilityState==="visible"){void heartbeat();void refreshPushStatus(false);void refreshBusinessData(false);}};
@@ -603,7 +608,7 @@ export default function App(){
     setMessage("ログアウト処理中です…");
     await run("logout",logoutCurrentUser,{setMessage});
   }
-  function watchDeviceSession(id:string){ if(!db||!auth)return; return onSnapshot(doc(db,"deviceSessions",id),async s=>{if(s.exists()&&s.data().active===false){setMessage("この端末はログアウトされました。");await logoutCurrentUser();}}); }
+  function watchDeviceSession(id:string,onRevoked:()=>Promise<void>){ if(!db)return; return onSnapshot(doc(db,"deviceSessions",id),s=>{if(s.exists()&&s.data().active===false)void onRevoked().catch(()=>undefined);}); }
 
   function isCurrentDevice(device:DeviceSession){
     if(device.id===deviceSessionId)return true;

@@ -218,6 +218,10 @@ export default function App(){
     return draftHydratingRef.current||isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission;
   }
 
+  function isLoginActionPending(){
+    return isPending("login")||isPending("login-code");
+  }
+
   useEffect(()=>{ if(!auth)return; return onAuthStateChanged(auth,async current=>{
     const loadStarted=performance.now();
     setUser(current);
@@ -512,35 +516,43 @@ export default function App(){
   }
 
   async function requestLogin(){
-    if(!email||isPending("login"))return;
+    const normalizedEmail=email.trim().toLowerCase();
+    if(!normalizedEmail||isLoginActionPending()){
+      if(!normalizedEmail)setMessage("スタッフのメールアドレスを入力してください。");
+      return;
+    }
     await run("login",async()=>{
-      localStorage.setItem("lkcEmail",email);
+      setEmail(normalizedEmail);
+      localStorage.setItem("lkcEmail",normalizedEmail);
       setLoginCode("");
       if(!firebaseConfigured){setMessage("デモ：ログインメールと確認コードを送りました。");return;}
       if(!functions)return;
       const c=httpsCallable(functions,"requestStaffLoginLink");
-      const r=await c({email,continueUrl:window.location.origin});
+      const r=await c({email:normalizedEmail,continueUrl:window.location.origin});
       setMessage((r.data as {message?:string}).message??"ログインメールと確認コードを送信しました。");
     },{setMessage});
   }
 
   async function verifyLoginCode(){
+    const normalizedEmail=email.trim().toLowerCase();
     const code=loginCode.replace(/\D/g,"");
-    if(!email||code.length!==6||isPending("login-code")){
-      if(code.length!==6)setMessage("メールに記載された6桁の確認コードを入力してください。");
+    if(!normalizedEmail||code.length!==6||isLoginActionPending()){
+      if(!normalizedEmail)setMessage("スタッフのメールアドレスを入力してください。");
+      else if(code.length!==6)setMessage("メールに記載された6桁の確認コードを入力してください。");
       return;
     }
     await run("login-code",async()=>{
-      localStorage.setItem("lkcEmail",email);
+      setEmail(normalizedEmail);
+      localStorage.setItem("lkcEmail",normalizedEmail);
       if(!firebaseConfigured){setMessage("デモ：確認コードでログインしました。");return;}
       if(!functions||!auth)return;
       const activeAuth=auth;
       const callable=httpsCallable<{email:string;code:string},{emailActionLink:string}>(functions,"requestStaffLoginLink");
-      const result=await callable({email,code});
+      const result=await callable({email:normalizedEmail,code});
       const emailActionLink=result.data.emailActionLink;
       if(!emailActionLink||!isSignInWithEmailLink(activeAuth,emailActionLink))throw new Error("ログイン情報を確認できません。");
       await authPersistenceReady;
-      await signInWithEmailLink(activeAuth,email,emailActionLink);
+      await signInWithEmailLink(activeAuth,normalizedEmail,emailActionLink);
       setLoginCode("");
       setMessage("ログインしました。");
     },{setMessage});
@@ -976,10 +988,11 @@ export default function App(){
   const submissionContextPending=isPending("submission-context");
   const deviceActionPending=isPending("device-action");
   const pushActionPending=isPending("push-action");
+  const loginActionPending=isLoginActionPending();
   const submissionEditPending=isSubmissionActionPending();
   const currentMessageTone=messageTone(message);
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message working">処理中…</div></section></main>;
-  if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>スタッフとして登録済みのメールへ、ログインボタンと6桁の確認コードを送ります。管理者アカウントには確認コードは届きません。{adminLoginUrl&&<><br/><a href={adminLoginUrl}>管理者はAdmin画面からGoogleでログイン</a></>}</p><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="スタッフのメールアドレス" autoComplete="email"/><button onClick={()=>void requestLogin()} disabled={isPending("login")}>{isPending("login")?"処理中…":"ログインメールを送る"}</button><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6}/><button className="secondary" onClick={()=>void verifyLoginCode()} disabled={loginCode.length!==6||isPending("login-code")}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
+  if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png"/><h1>{title}</h1><p>スタッフとして登録済みのメールへ、ログインボタンと6桁の確認コードを送ります。管理者アカウントには確認コードは届きません。{adminLoginUrl&&<><br/><a href={adminLoginUrl}>管理者はAdmin画面からGoogleでログイン</a></>}</p><form onSubmit={e=>{e.preventDefault();void requestLogin();}} aria-busy={loginActionPending}><input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="スタッフのメールアドレス" autoComplete="email" inputMode="email" autoCapitalize="none" spellCheck={false} required disabled={loginActionPending}/><button type="submit" disabled={loginActionPending}>{isPending("login")?"処理中…":"ログインメールを送る"}</button></form><p>ホーム画面版では、メールに記載された確認コードを入力してください。</p><form onSubmit={e=>{e.preventDefault();void verifyLoginCode();}} aria-busy={loginActionPending}><input value={loginCode} onChange={e=>setLoginCode(e.target.value.replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" maxLength={6} disabled={loginActionPending}/><button type="submit" className="secondary" disabled={loginCode.length!==6||loginActionPending}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button></form>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
 
   return <main className="app-shell">
     <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button className="ghost account-menu-toggle" onClick={toggleAccountMenu} aria-expanded={showAccountMenu} aria-controls="account-menu" disabled={isPending("logout")||deviceActionPending}>{showAccountMenu?"閉じる":"メニュー"}</button>}</header>

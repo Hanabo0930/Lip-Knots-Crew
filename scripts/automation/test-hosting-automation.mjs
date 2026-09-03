@@ -152,7 +152,12 @@ assert.match(
   /promote:\n    needs: guard\n    if: needs\.guard\.outputs\.should_promote == 'true'\n    environment: lkc-staging-hosting/u,
   "Only a new validated SHA may enter the protected promotion environment",
 );
-cases += 13;
+assert.match(
+  promoteWorkflow,
+  /Checkout the exact CI-passing main source[\s\S]*Re-check source is still current main after approval[\s\S]*\/git\/ref\/heads\/main[\s\S]*current_main[\s\S]*LKC_SOURCE_SHA[\s\S]*SOURCE_SHA_CHANGED_DURING_APPROVAL[\s\S]*Set up Node/u,
+  "Promotion must re-check current main after protected-environment approval and before any cloud authentication",
+);
+cases += 14;
 assert.match(
   promoteWorkflow,
   /node scripts\/automation\/restore-staging-hosting\.mjs/u,

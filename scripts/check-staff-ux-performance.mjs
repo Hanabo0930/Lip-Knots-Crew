@@ -116,6 +116,11 @@ assert.match(
   "Transient push status failures must retry automatically.",
 );
 assert.match(
+  app,
+  /if\(!user\)return;[\s\S]*let active=true;[\s\S]*listenForForegroundPush\(payload=>\{if\(active\)setMessage[\s\S]*then\(value=>\{[\s\S]*if\(!active\)\{value\?\.\(\);return;\}[\s\S]*unsub=value;[\s\S]*catch\(\(\)=>undefined\);[\s\S]*return\(\)=>\{active=false;unsub\?\.\(\);\};/u,
+  "A foreground push listener that finishes after logout must unsubscribe immediately without leaking an unhandled rejection.",
+);
+assert.match(
   asyncAction,
   /pendingRef\.current = started/u,
   "Async actions must synchronously block duplicate taps.",
@@ -644,4 +649,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (118 assertions).");
+console.log("Staff UX and performance checks passed (119 assertions).");

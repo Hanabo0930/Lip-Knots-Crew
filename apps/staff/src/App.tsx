@@ -383,7 +383,16 @@ export default function App(){
       stopWatching?.();
     };
   },[user,deviceSessionId,companyId,staffId]);
-  useEffect(()=>{ if(!user)return; let unsub:(()=>void)|null=null; void listenForForegroundPush(payload=>setMessage(`${payload.data?.title??"Lip Knots Crew"}：${payload.data?.body??"新しいお知らせがあります。"}`)).then(v=>unsub=v); return()=>unsub?.(); },[user]);
+  useEffect(()=>{
+    if(!user)return;
+    let active=true;
+    let unsub:(()=>void)|null=null;
+    void listenForForegroundPush(payload=>{if(active)setMessage(`${payload.data?.title??"Lip Knots Crew"}：${payload.data?.body??"新しいお知らせがあります。"}`);}).then(value=>{
+      if(!active){value?.();return;}
+      unsub=value;
+    }).catch(()=>undefined);
+    return()=>{active=false;unsub?.();};
+  },[user]);
   useEffect(()=>{if(tasks.length<=5)setShowAllTasks(false);},[tasks.length]);
   useEffect(()=>{
     if(!message||messageTone(message)!=="success")return;

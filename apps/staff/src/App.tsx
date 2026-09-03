@@ -178,6 +178,7 @@ export default function App(){
   const hydratedDraftKeyRef=useRef("");
   const draftHydratingRef=useRef(false);
   const skipNextDraftSaveRef=useRef(false);
+  const authLoadVersionRef=useRef(0);
   const openJobsLoadVersionRef=useRef(0);
 
   const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
@@ -225,6 +226,8 @@ export default function App(){
 
   useEffect(()=>{ if(!auth)return; return onAuthStateChanged(auth,async current=>{
     const loadStarted=performance.now();
+    const authLoadVersion=++authLoadVersionRef.current;
+    const isCurrentAuthLoad=()=>authLoadVersion===authLoadVersionRef.current;
     openJobsLoadVersionRef.current+=1;
     setUser(current);
     setAuthResolved(true);
@@ -274,6 +277,7 @@ export default function App(){
         clearBusinessSnapshot(current.uid,knownScope.companyId,knownScope.staffId);
       }
       const initialToken=await getIdTokenResult(current).catch(()=>null);
+      if(!isCurrentAuthLoad())return;
       const initialCid=String(initialToken?.claims.companyId??"");
       const initialSid=String(initialToken?.claims.staffId??"");
       if(!restoredCachedData&&initialCid&&initialSid&&restoreCachedBusinessData(initialCid,initialSid)){
@@ -281,9 +285,11 @@ export default function App(){
         restoredScope={companyId:initialCid,staffId:initialSid};
       }
       const result=await bootstrapPromise;
+      if(!isCurrentAuthLoad())return;
       const refreshToken=Boolean((result.data as {refreshToken?:boolean}).refreshToken);
-      if(refreshToken)await current.getIdToken(true);
+      if(refreshToken){await current.getIdToken(true);if(!isCurrentAuthLoad())return;}
       const token=refreshToken||!initialToken?await getIdTokenResult(current):initialToken;
+      if(!isCurrentAuthLoad())return;
       const cid=String(token.claims.companyId??""); const sid=String(token.claims.staffId??"");
       if(!cid||!sid)throw new Error("スタッフの所属情報を確認できません。");
       sessionVerified=true;
@@ -303,6 +309,7 @@ export default function App(){
         restoredScope={companyId:cid,staffId:sid};
       }
       await loadPrimaryBusinessData(sid,cid,current.uid);
+      if(!isCurrentAuthLoad())return;
       setBusinessDataStatus("ready");
       setBusinessDataSource("live");
       const refreshedInMs=Math.round(performance.now()-loadStarted);
@@ -313,6 +320,7 @@ export default function App(){
       void refreshOpenJobs(false,cid);
       void refreshPushStatus(true);
     }catch{
+      if(!isCurrentAuthLoad())return;
       if(restoredCachedData&&sessionVerified){
         setBusinessDataStatus("ready");
         setBusinessDataSource("cached");
@@ -327,7 +335,7 @@ export default function App(){
         setMessage("業務データを読み込めませんでした。再読み込みしてください。");
       }
     }finally{
-      setBusinessRefreshing(false);
+      if(isCurrentAuthLoad())setBusinessRefreshing(false);
     }
   }); },[]);
   useEffect(()=>{
@@ -383,9 +391,17 @@ export default function App(){
     return()=>window.clearTimeout(timer);
   },[message]);
 
-  async function loadPrimaryBusinessData(sid=staffId,cid=companyId,uid=user?.uid??""){
-    const [jobs,nextTasks]=await Promise.all([loadMyJobs(sid,cid),loadTasks()]);
+  async function fetchMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{ if(!db||!sid||!cid)return[]; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=orderAssignedJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); return values; }
+  async function fetchTasks():Promise<StaffTask[]>{ if(!functions)return[]; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); return (r.data as {tasks?:StaffTask[]}).tasks??[]; }
+  async function loadPrimaryBusinessData(sid=staffId,cid=companyId,uid=user?.uid??""):Promise<boolean>{
+    const authLoadVersion=authLoadVersionRef.current;
+    const [jobs,nextTasks]=await Promise.all([fetchMyJobs(sid,cid),fetchTasks()]);
+    if(authLoadVersion!==authLoadVersionRef.current)return false;
+    setMyJobs(jobs);
+    setTasks(nextTasks);
+    setSelectedJob(current=>jobs.find(job=>job.id===current?.id)??nextShiftJob(jobs)??jobs[0]??null);
     saveBusinessSnapshot(uid,cid,sid,jobs,nextTasks);
+    return true;
   }
   async function loadOpenJobs(cid=companyId):Promise<boolean>{
     const loadVersion=++openJobsLoadVersionRef.current;
@@ -417,8 +433,7 @@ export default function App(){
       if(showConfirmation)setMessage("案件を読み込めませんでした。通信状態を確認して、もう一度お試しください。");
     }
   }
-  async function loadMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{ if(!db||!sid||!cid)return[]; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=orderAssignedJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); setMyJobs(values); setSelectedJob(current=>values.find(job=>job.id===current?.id)??nextShiftJob(values)??values[0]??null); return values; }
-  async function loadTasks():Promise<StaffTask[]>{ if(!functions)return[]; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); const values=(r.data as {tasks?:StaffTask[]}).tasks??[]; setTasks(values); return values; }
+  async function loadTasks():Promise<StaffTask[]>{ const authLoadVersion=authLoadVersionRef.current; const values=await fetchTasks(); if(authLoadVersion===authLoadVersionRef.current)setTasks(values); return values; }
   function showSubmissionMessage(value:string){setMessage(value);setSubmissionMessage(value);}
 
   async function refreshBusinessData(showFailure:boolean){

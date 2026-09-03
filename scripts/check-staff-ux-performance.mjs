@@ -92,6 +92,11 @@ assert.match(
 );
 assert.match(
   app,
+  /const authLoadVersionRef=useRef\(0\);[\s\S]*const authLoadVersion=\+\+authLoadVersionRef\.current;[\s\S]*const isCurrentAuthLoad=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*const initialToken=await getIdTokenResult\(current\)\.catch\(\(\)=>null\);[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*const result=await bootstrapPromise;[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*await loadPrimaryBusinessData\(sid,cid,current\.uid\);[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*catch\{[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*finally\{[\s\S]*if\(isCurrentAuthLoad\(\)\)setBusinessRefreshing\(false\)[\s\S]*async function loadPrimaryBusinessData[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*Promise\.all\(\[fetchMyJobs\(sid,cid\),fetchTasks\(\)\]\);[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return false;[\s\S]*setMyJobs\(jobs\);[\s\S]*setTasks\(nextTasks\);[\s\S]*saveBusinessSnapshot/u,
+  "Only the latest authentication callback may update business data or loading state.",
+);
+assert.match(
+  app,
   /void refreshOpenJobs\(false,cid\)/u,
   "Open jobs must load through the shared background refresh lock after priority home data.",
 );
@@ -639,4 +644,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (117 assertions).");
+console.log("Staff UX and performance checks passed (118 assertions).");

@@ -158,6 +158,21 @@ jobs:
         with:
           ref: ${{ env.LKC_SOURCE_SHA }}
           path: source
+      - name: Re-check source is still current main after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current_main="$(
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+              --jq '.object.sha'
+          )"
+          if [[ "$current_main" != "$LKC_SOURCE_SHA" ]]; then
+            echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
+            echo "HOSTING_PROMOTION_ERROR=SOURCE_SHA_CHANGED_DURING_APPROVAL"
+            exit 1
+          fi
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:

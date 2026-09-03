@@ -92,8 +92,8 @@ assert.match(
 );
 assert.match(
   app,
-  /void loadOpenJobs\(cid\)\.catch/u,
-  "Open jobs must load in the background after priority home data.",
+  /void refreshOpenJobs\(false,cid\)/u,
+  "Open jobs must load through the shared background refresh lock after priority home data.",
 );
 assert.match(
   app,
@@ -382,7 +382,7 @@ assert.match(
 );
 assert.match(
   app,
-  /async function refreshOpenJobs\(showConfirmation=true\)[\s\S]*await loadOpenJobs\(\)[\s\S]*募集中の案件を最新情報に更新しました/u,
+  /async function refreshOpenJobs\(showConfirmation=true,cid=companyId\)[\s\S]*await loadOpenJobs\(cid\)[\s\S]*募集中の案件を最新情報に更新しました/u,
   "Open jobs must support a one-tap refresh without reloading the whole app.",
 );
 assert.match(
@@ -581,8 +581,14 @@ assert.match(
 
 assert.match(
   app,
-  /async function refreshOpenJobs\(showConfirmation=true\)\{[\s\S]*if\(isPending\("open-jobs-refresh"\)\)return;[\s\S]*await run\("open-jobs-refresh"[\s\S]*await loadOpenJobs\(\)[\s\S]*const openJobsRefreshing=isPending\("open-jobs-refresh"\);[\s\S]*view==="jobs"&&<section aria-busy=\{applicationPending\|\|openJobsRefreshing\|\|openJobsStatus==="loading"\}/u,
+  /async function refreshOpenJobs\(showConfirmation=true,cid=companyId\)\{[\s\S]*if\(isPending\("open-jobs-refresh"\)\)return;[\s\S]*await run\("open-jobs-refresh"[\s\S]*await loadOpenJobs\(cid\)[\s\S]*const openJobsRefreshing=isPending\("open-jobs-refresh"\);[\s\S]*view==="jobs"&&<section aria-busy=\{applicationPending\|\|openJobsRefreshing\|\|openJobsStatus==="loading"\}/u,
   "Open-job refreshes must synchronously reject duplicate taps and expose their loading state to the jobs screen.",
+);
+
+assert.match(
+  app,
+  /const openJobsLoadVersionRef=useRef\(0\);[\s\S]*openJobsLoadVersionRef\.current\+=1;[\s\S]*async function loadOpenJobs\(cid=companyId\):Promise<boolean>\{[\s\S]*const loadVersion=\+\+openJobsLoadVersionRef\.current;[\s\S]*const isLatestLoad=\(\)=>loadVersion===openJobsLoadVersionRef\.current;[\s\S]*if\(!isLatestLoad\(\)\)return false;[\s\S]*if\(openJobsStatus!=="idle"\)void refreshOpenJobs\(false,companyId\);[\s\S]*async function apply\(job:Job\)[\s\S]*await loadOpenJobs\(\)/u,
+  "Only the latest open-job request may update the screen, while account changes invalidate stale loads and application refreshes supersede them.",
 );
 
 assert.match(
@@ -633,4 +639,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (116 assertions).");
+console.log("Staff UX and performance checks passed (117 assertions).");

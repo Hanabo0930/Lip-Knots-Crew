@@ -178,6 +178,7 @@ export default function App(){
   const hydratedDraftKeyRef=useRef("");
   const draftHydratingRef=useRef(false);
   const skipNextDraftSaveRef=useRef(false);
+  const openJobsLoadVersionRef=useRef(0);
 
   const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
   const {upcoming:upcomingShifts,past:pastShifts}=useMemo(()=>splitAssignedJobs(myJobs),[myJobs]);
@@ -224,6 +225,7 @@ export default function App(){
 
   useEffect(()=>{ if(!auth)return; return onAuthStateChanged(auth,async current=>{
     const loadStarted=performance.now();
+    openJobsLoadVersionRef.current+=1;
     setUser(current);
     setAuthResolved(true);
     if(firebaseConfigured){
@@ -308,7 +310,7 @@ export default function App(){
       setBusinessRefreshMs(refreshedInMs);
       lastBusinessDataRefreshAt=Date.now();
       void registerCurrentDevice().catch(()=>setMessage("端末情報を登録できませんでした。再読み込みしてください。"));
-      void loadOpenJobs(cid).catch(()=>undefined);
+      void refreshOpenJobs(false,cid);
       void refreshPushStatus(true);
     }catch{
       if(restoredCachedData&&sessionVerified){
@@ -385,26 +387,31 @@ export default function App(){
     const [jobs,nextTasks]=await Promise.all([loadMyJobs(sid,cid),loadTasks()]);
     saveBusinessSnapshot(uid,cid,sid,jobs,nextTasks);
   }
-  async function loadOpenJobs(cid=companyId){
-    if(!db||!cid){setOpenJobsStatus("ready");return;}
+  async function loadOpenJobs(cid=companyId):Promise<boolean>{
+    const loadVersion=++openJobsLoadVersionRef.current;
+    const isLatestLoad=()=>loadVersion===openJobsLoadVersionRef.current;
+    if(!db||!cid){if(isLatestLoad())setOpenJobsStatus("ready");return isLatestLoad();}
     setOpenJobsStatus("loading");
     try{
       const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("status","==","open"),where("dateKey",">=",localDateKey()),orderBy("dateKey","asc"),limit(100)));
       const values=availableOpenJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job)));
+      if(!isLatestLoad())return false;
       setOpenJobs(values);
       setExpandedOpenJobId(current=>values.some(job=>job.id===current)?current:"");
       setOpenJobsStatus("ready");
+      return true;
     }catch(error){
+      if(!isLatestLoad())return false;
       setOpenJobsStatus("error");
       throw error;
     }
   }
-  async function refreshOpenJobs(showConfirmation=true){
+  async function refreshOpenJobs(showConfirmation=true,cid=companyId){
     if(isPending("open-jobs-refresh"))return;
     try{
       await run("open-jobs-refresh",async()=>{
-        await loadOpenJobs();
-        if(showConfirmation)setMessage("募集中の案件を最新情報に更新しました。");
+        const updated=await loadOpenJobs(cid);
+        if(updated&&showConfirmation)setMessage("募集中の案件を最新情報に更新しました。");
       });
     }catch{
       if(showConfirmation)setMessage("案件を読み込めませんでした。通信状態を確認して、もう一度お試しください。");
@@ -424,7 +431,7 @@ export default function App(){
       setBusinessDataStatus("ready");
       setBusinessDataSource("live");
       setBusinessRefreshMs(Math.round(performance.now()-started));
-      if(openJobsStatus!=="idle")void loadOpenJobs(companyId).catch(()=>undefined);
+      if(openJobsStatus!=="idle")void refreshOpenJobs(false,companyId);
     }catch{
       lastBusinessDataRefreshAt=0;
       if(showFailure)setMessage("最新情報を更新できませんでした。通信状態を確認してください。");

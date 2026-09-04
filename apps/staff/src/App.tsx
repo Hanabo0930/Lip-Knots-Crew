@@ -180,6 +180,7 @@ export default function App(){
   const skipNextDraftSaveRef=useRef(false);
   const authLoadVersionRef=useRef(0);
   const openJobsLoadVersionRef=useRef(0);
+  const submissionProcessingVersionRef=useRef(0);
 
   const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
   const {upcoming:upcomingShifts,past:pastShifts}=useMemo(()=>splitAssignedJobs(myJobs),[myJobs]);
@@ -229,6 +230,8 @@ export default function App(){
     const authLoadVersion=++authLoadVersionRef.current;
     const isCurrentAuthLoad=()=>authLoadVersion===authLoadVersionRef.current;
     openJobsLoadVersionRef.current+=1;
+    submissionProcessingVersionRef.current+=1;
+    setProcessingSubmission(false);
     setUser(current);
     setAuthResolved(true);
     if(firebaseConfigured){
@@ -551,13 +554,14 @@ export default function App(){
     }
   }
 
-  async function refreshSelectedJob(jobId:string){
-    if(!db)return;
+  async function refreshSelectedJob(jobId:string,authLoadVersion=authLoadVersionRef.current):Promise<boolean>{
+    if(!db)return false;
     const snap=await getDoc(doc(db,"jobs",jobId));
-    if(!snap.exists())return;
+    if(authLoadVersion!==authLoadVersionRef.current||!snap.exists())return false;
     const updated={id:snap.id,...snap.data()} as Job;
     setMyJobs(jobs=>jobs.map(job=>job.id===jobId?updated:job));
     setSelectedJob(current=>current?.id===jobId?updated:current);
+    return true;
   }
 
   async function requestLogin(){
@@ -797,6 +801,9 @@ export default function App(){
 
   async function pollSubmissionProcessing(jobId:string,submissionId:string,type:SubmissionType,resubmissionRequestId:string){
     if(!functions)return;
+    const authLoadVersion=authLoadVersionRef.current;
+    const processingVersion=++submissionProcessingVersionRef.current;
+    const isCurrentProcessing=()=>authLoadVersion===authLoadVersionRef.current&&processingVersion===submissionProcessingVersionRef.current;
     setProcessingSubmission(true);
     const callable=httpsCallable(functions,"getSubmissionProcessingStatus");
     const started=Date.now();
@@ -804,11 +811,13 @@ export default function App(){
     try{
       while(Date.now()-started<60_000){
         const response=await callable({jobId,submissionId});
+        if(!isCurrentProcessing())return;
         const data=response.data as {status:string;completedFiles:number;totalFiles:number;errorMessage:string|null};
         if(data.status==="completed"){
           showSubmissionMessage("Driveへの保存が完了しました。");
-          await Promise.all([loadSubmissionHistory(jobId,type),refreshSelectedJob(jobId),loadTasks()]);
-          if(resubmissionRequestId)await loadResubmissionDetail(resubmissionRequestId);
+          await Promise.all([loadSubmissionHistory(jobId,type,authLoadVersion),refreshSelectedJob(jobId,authLoadVersion),loadTasks()]);
+          if(!isCurrentProcessing())return;
+          if(resubmissionRequestId)await loadResubmissionDetail(resubmissionRequestId,authLoadVersion);
           return;
         }
         if(data.status==="error"){
@@ -819,9 +828,11 @@ export default function App(){
         await sleep(delay);
         delay=Math.min(Math.round(delay*1.5),3000);
       }
-      showSubmissionMessage("バックグラウンドで処理中です。完了すると提出履歴に自動で反映されます。");
+      if(isCurrentProcessing())showSubmissionMessage("バックグラウンドで処理中です。完了すると提出履歴に自動で反映されます。");
+    }catch{
+      if(isCurrentProcessing())showSubmissionMessage("提出状況を確認できませんでした。提出履歴を再読み込みしてください。");
     }finally{
-      setProcessingSubmission(false);
+      if(isCurrentProcessing())setProcessingSubmission(false);
     }
   }
 
@@ -840,48 +851,60 @@ export default function App(){
     if(!functions||!storage)return;
     const activeFunctions=functions;
     const activeStorage=storage;
+    const authLoadVersion=authLoadVersionRef.current;
+    const isCurrentUpload=()=>authLoadVersion===authLoadVersionRef.current;
     const jobId=assignedJob.id;
     const currentRequestId=requestId;
     const currentType=submissionType;
-    await run("uploadSubmission",async()=>{
-      const purpose=currentRequestId?"replacement":"additional";
-      const r=await httpsCallable(activeFunctions,"createUploadSession")({jobId,type:currentType,purpose,resubmissionRequestId:currentRequestId||undefined,files:files.map(f=>({originalName:f.name,contentType:f.type||"application/octet-stream",size:f.size}))});
-      const data=r.data as {submissionId:string;files:{storagePath:string}[]};
-      if(!data.submissionId||data.files.length!==files.length)throw new Error("送信先を正しく準備できませんでした。もう一度お試しください。");
-      const uploads=data.files.flatMap((target,index)=>{const file=files[index];return file?[{target,file}]:[];});
-      setUploadState(Object.fromEntries(uploads.map(({file})=>[fileStateKey(file),"送信待ち"])));
-      await runWithConcurrency(uploads,UPLOAD_CONCURRENCY,async({target,file})=>{
-        const key=fileStateKey(file);
-        setUploadState(current=>({...current,[key]:"送信中 0%"}));
-        await new Promise<void>((resolve,reject)=>uploadBytesResumable(ref(activeStorage,target.storagePath),file,{contentType:file.type}).on(
-          "state_changed",
-          snapshot=>setUploadState(current=>({...current,[key]:`送信中 ${Math.round(snapshot.bytesTransferred/Math.max(snapshot.totalBytes,1)*100)}%`})),
-          reject,
-          resolve,
-        ));
-        setUploadState(current=>({...current,[key]:"送信済み"}));
-      });
-      await clearDraft(draftKey);
-      setFiles([]);
-      setSubmissionConfirmed(false);
-      showSubmissionMessage(`${typeLabel}を送信しました。Drive転送を処理中です…`);
-      void pollSubmissionProcessing(jobId,data.submissionId,currentType,currentRequestId);
-    },{setMessage:showSubmissionMessage});
+    try{
+      await run("uploadSubmission",async()=>{
+        const purpose=currentRequestId?"replacement":"additional";
+        const r=await httpsCallable(activeFunctions,"createUploadSession")({jobId,type:currentType,purpose,resubmissionRequestId:currentRequestId||undefined,files:files.map(f=>({originalName:f.name,contentType:f.type||"application/octet-stream",size:f.size}))});
+        if(!isCurrentUpload())return;
+        const data=r.data as {submissionId:string;files:{storagePath:string}[]};
+        if(!data.submissionId||data.files.length!==files.length)throw new Error("送信先を正しく準備できませんでした。もう一度お試しください。");
+        const uploads=data.files.flatMap((target,index)=>{const file=files[index];return file?[{target,file}]:[];});
+        setUploadState(Object.fromEntries(uploads.map(({file})=>[fileStateKey(file),"送信待ち"])));
+        await runWithConcurrency(uploads,UPLOAD_CONCURRENCY,async({target,file})=>{
+          const key=fileStateKey(file);
+          if(isCurrentUpload())setUploadState(current=>({...current,[key]:"送信中 0%"}));
+          await new Promise<void>((resolve,reject)=>uploadBytesResumable(ref(activeStorage,target.storagePath),file,{contentType:file.type}).on(
+            "state_changed",
+            snapshot=>{if(isCurrentUpload())setUploadState(current=>({...current,[key]:`送信中 ${Math.round(snapshot.bytesTransferred/Math.max(snapshot.totalBytes,1)*100)}%`}));},
+            reject,
+            resolve,
+          ));
+          if(isCurrentUpload())setUploadState(current=>({...current,[key]:"送信済み"}));
+        });
+        if(!isCurrentUpload())return;
+        await clearDraft(draftKey);
+        if(!isCurrentUpload())return;
+        setFiles([]);
+        setSubmissionConfirmed(false);
+        showSubmissionMessage(`${typeLabel}を送信しました。Drive転送を処理中です…`);
+        void pollSubmissionProcessing(jobId,data.submissionId,currentType,currentRequestId);
+      },{setMessage:value=>{if(isCurrentUpload())showSubmissionMessage(value);}});
+    }catch{return;}
   }
 
-  async function loadSubmissionHistory(jobId:string,type:SubmissionType){
+  async function loadSubmissionHistory(jobId:string,type:SubmissionType,authLoadVersion=authLoadVersionRef.current):Promise<boolean>{
+    if(authLoadVersion!==authLoadVersionRef.current)return false;
     setSubmissionHistoryStatus("loading");
     try{
       if(!firebaseConfigured){
+        if(authLoadVersion!==authLoadVersionRef.current)return false;
         setSubmissionHistory([{id:"demo",purpose:"initial",status:"completed",createdAt:new Date().toISOString(),completedAt:new Date().toISOString(),files:[{id:"demo_file",submissionId:"demo",originalName:"report.jpg",driveName:"7.12 ベイシア成田 Aさん (1).jpg",contentType:"image/jpeg",sequence:1,purpose:"initial",status:"completed",previewUrl:null,completedAt:new Date().toISOString(),replacesFileId:null}]}]);
         setSubmissionHistoryStatus("ready");
-        return;
+        return true;
       }
-      if(!functions){setSubmissionHistoryStatus("error");return;}
+      if(!functions){setSubmissionHistoryStatus("error");return false;}
       const r=await httpsCallable(functions,"getSubmissionTimeline")({jobId,type});
+      if(authLoadVersion!==authLoadVersionRef.current)return false;
       setSubmissionHistory((r.data as {submissions?:SubmissionGroup[]}).submissions??[]);
       setSubmissionHistoryStatus("ready");
+      return true;
     }catch(error){
+      if(authLoadVersion!==authLoadVersionRef.current)return false;
       setSubmissionHistoryStatus("error");
       throw error;
     }
@@ -896,14 +919,17 @@ export default function App(){
     return refreshed?.previewUrl??null;
   }
 
-  async function loadResubmissionDetail(id:string){
+  async function loadResubmissionDetail(id:string,authLoadVersion=authLoadVersionRef.current):Promise<boolean>{
+    if(authLoadVersion!==authLoadVersionRef.current)return false;
     if(!firebaseConfigured){
       setResubmissionDetail({request:{id,jobId:selectedJob?.id??"demo_job_1",type:submissionType,reasons:["手ブレで文字が読めません"],note:"文字が読めるよう近くから撮影してください。",status:"open"},source:{id:"demo_file",submissionId:"demo",originalName:"report.jpg",driveName:"7.12 ベイシア成田 Aさん (1).jpg",contentType:"image/jpeg",sequence:1,purpose:"initial",status:"completed",previewUrl:null,completedAt:null,replacesFileId:null},replacements:[]});
-      return;
+      return true;
     }
-    if(!functions)return;
+    if(!functions)return false;
     const r=await httpsCallable(functions,"getResubmissionComparison")({requestId:id});
+    if(authLoadVersion!==authLoadVersionRef.current)return false;
     setResubmissionDetail(r.data as ResubmissionDetail);
+    return true;
   }
 
   async function prepareSubmission(type:SubmissionType,job:Job,req=""){

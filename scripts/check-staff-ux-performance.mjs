@@ -652,6 +652,24 @@ assert.match(
   "Clearing all submission files must block duplicate taps and keep visible progress until the saved draft is removed.",
 );
 
+assert.match(
+  app,
+  /const submissionProcessingVersionRef=useRef\(0\);[\s\S]*submissionProcessingVersionRef\.current\+=1;[\s\S]*setProcessingSubmission\(false\);[\s\S]*async function pollSubmissionProcessing[\s\S]*const processingVersion=\+\+submissionProcessingVersionRef\.current;[\s\S]*const isCurrentProcessing=\(\)=>authLoadVersion===authLoadVersionRef\.current&&processingVersion===submissionProcessingVersionRef\.current;[\s\S]*if\(!isCurrentProcessing\(\)\)return;[\s\S]*loadSubmissionHistory\(jobId,type,authLoadVersion\)[\s\S]*refreshSelectedJob\(jobId,authLoadVersion\)[\s\S]*catch\{[\s\S]*if\(isCurrentProcessing\(\)\)showSubmissionMessage\("提出状況を確認できませんでした。[\s\S]*finally\{[\s\S]*if\(isCurrentProcessing\(\)\)setProcessingSubmission\(false\)/u,
+  "Submission completion polling must stop at an account change, suppress stale failures, and release only its own session lock.",
+);
+
+assert.match(
+  app,
+  /async function uploadSubmission\(\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const isCurrentUpload=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*createUploadSession[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*state_changed[\s\S]*if\(isCurrentUpload\(\)\)setUploadState[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*await clearDraft\(draftKey\);[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*setMessage:value=>\{if\(isCurrentUpload\(\)\)showSubmissionMessage\(value\);\}[\s\S]*catch\{return;\}/u,
+  "Submission preparation, progress, completion, and errors must remain pinned to the account that started the upload.",
+);
+
+assert.match(
+  app,
+  /async function refreshSelectedJob\(jobId:string,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current[\s\S]*async function loadSubmissionHistory\(jobId:string,type:SubmissionType,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current[\s\S]*async function loadResubmissionDetail\(id:string,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current/u,
+  "Submission completion refreshes must not write an older account's job, history, or resubmission detail into a newer session.",
+);
+
 assert.equal(
   app.match(/setView\(/gu)?.length,
   1,
@@ -664,4 +682,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (122 assertions).");
+console.log("Staff UX and performance checks passed (125 assertions).");

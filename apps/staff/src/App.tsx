@@ -57,8 +57,10 @@ type SubmissionFileView = { id:string; submissionId:string; originalName:string;
 type SubmissionGroup = { id:string; purpose:string; status:string; createdAt:string|null; completedAt:string|null; files:SubmissionFileView[] };
 type ResubmissionDetail = { request:{id:string;jobId:string;type:SubmissionType;reasons:string[];note:string;status:string}; source:SubmissionFileView|null; replacements:SubmissionFileView[] };
 
+const demoDate=new Date();
+demoDate.setDate(demoDate.getDate()+1);
 const demoJobs: Job[] = [{
-  id:"demo_job_1", workDate:"7/20（日）", dateKey:"2026-07-20", clientName:"〇〇デモ",
+  id:"demo_job_1", workDate:demoDate.toLocaleDateString("ja-JP",{month:"numeric",day:"numeric",weekday:"short"}), dateKey:localDateKey(demoDate), clientName:"〇〇デモ",
   makerName:"〇〇乳業", menuName:"ヨーグルト試食（50代まで歓迎）", storeName:"イオン船橋店",
   workTime:"10:00〜18:00", basePay:10000, status:"assigned",
   storeAddress:"千葉県船橋市山手1丁目1-8", storeNearestStation:"新船橋駅", materialStatus:"発送準備中",
@@ -185,6 +187,8 @@ export default function App(){
   const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
   const {upcoming:upcomingShifts,past:pastShifts}=useMemo(()=>splitAssignedJobs(myJobs),[myJobs]);
   const draftKey=selectedAssignedJob?`${selectedAssignedJob.id}_${submissionType}_${requestId||"normal"}`:"";
+  const previewContextRef=useRef("");
+  previewContextRef.current=draftKey;
   useEffect(()=>{
     hydratedDraftKeyRef.current="";
     draftHydratingRef.current=Boolean(draftKey);
@@ -833,7 +837,17 @@ export default function App(){
     }
   }
 
-  async function openTask(task:StaffTask){ const job=myJobs.find(j=>j.id===task.jobId); if(!job){setMessage("対象の確定シフトを確認できません。シフト画面から案件を選び直してください。");navigate("shifts");return;} if(task.kind==="precontact"||task.kind==="netprint"){setSelectedJob(job);navigate("shifts");return;} const type=task.kind==="sales_floor"?"sales_floor":"report"; const req=String(task.metadata?.requestId??""); await startSubmission(type,job,req); }
+  async function openTask(task:StaffTask){
+    const job=myJobs.find(j=>j.id===task.jobId);
+    if(!job){setMessage("対象の確定シフトを確認できません。シフト画面から案件を選び直してください。");navigate("shifts");return;}
+    if(task.kind==="precontact"||task.kind==="netprint"){setSelectedJob(job);navigate("shifts");return;}
+    const requestedType=task.kind==="resubmission"?task.metadata?.type:task.kind;
+    const req=task.kind==="resubmission"&&typeof task.metadata?.requestId==="string"?task.metadata.requestId.trim():"";
+    if((requestedType!=="report"&&requestedType!=="sales_floor")||(task.kind==="resubmission"&&!req)){
+      setMessage("提出依頼の内容を確認できません。ホームの最新情報を確認してください。");return;
+    }
+    await startSubmission(requestedType,job,req);
+  }
 
   async function pollSubmissionProcessing(jobId:string,submissionId:string,type:SubmissionType,resubmissionRequestId:string){
     if(!functions)return;
@@ -948,7 +962,10 @@ export default function App(){
 
   async function refreshFilePreview(file:PreviewFile):Promise<string|null>{
     if(!selectedJob||!functions)return null;
+    const authLoadVersion=authLoadVersionRef.current;
+    const previewContext=previewContextRef.current;
     const r=await httpsCallable(functions,"getSubmissionTimeline")({jobId:selectedJob.id,type:submissionType});
+    if(authLoadVersion!==authLoadVersionRef.current||previewContext!==previewContextRef.current)return null;
     const groups=(r.data as {submissions?:SubmissionGroup[]}).submissions??[];
     setSubmissionHistory(groups);
     const refreshed=groups.flatMap(group=>group.files).find(entry=>entry.submissionId===file.submissionId&&entry.id===file.id);

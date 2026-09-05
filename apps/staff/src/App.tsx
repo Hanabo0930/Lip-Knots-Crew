@@ -234,6 +234,9 @@ export default function App(){
     setProcessingSubmission(false);
     setPendingApplicationJobId("");
     setPendingShiftAction("");
+    setDevices([]);
+    setShowDevices(false);
+    setPendingDeviceId("");
     setUser(current);
     setAuthResolved(true);
     if(firebaseConfigured){
@@ -627,34 +630,43 @@ export default function App(){
     return Boolean(user?.uid&&device.deviceId===currentDeviceId&&device.uid===user.uid);
   }
 
-  async function fetchDevices(){
+  async function fetchDevices(authLoadVersion=authLoadVersionRef.current){
+    if(authLoadVersion!==authLoadVersionRef.current)return;
     if(!firebaseConfigured){setDevices([{id:"current",label:deviceLabel(),active:true},{id:"old",label:"以前のiPhone",active:true}]);return;}
     if(!functions)return;
     const r=await httpsCallable(functions,"listMyDevices")({});
+    if(authLoadVersion!==authLoadVersionRef.current)return;
     setDevices((r.data as {devices?:DeviceSession[]}).devices??[]);
   }
 
   async function loadDevices(){
+    const authLoadVersion=authLoadVersionRef.current;
     setShowAccountMenu(false);
     setShowDiagnostics(false);
     setShowDevices(true);
-    await run("device-action",fetchDevices,{setMessage});
+    try{
+      await run("device-action",()=>fetchDevices(authLoadVersion),{setMessage:value=>{if(authLoadVersion===authLoadVersionRef.current)setMessage(value);}});
+    }catch{return;}
   }
 
   async function revokeDevice(id:string){
+    const authLoadVersion=authLoadVersionRef.current;
+    const isCurrentAction=()=>authLoadVersion===authLoadVersionRef.current;
     const target=devices.find(device=>device.id===id);
     const currentTarget=target?isCurrentDevice(target):id===deviceSessionId;
-    await run("device-action",async()=>{
+    try{await run("device-action",async()=>{
       if(!confirm("この端末をログアウトしますか？"))return;
       setPendingDeviceId(id);
       try{
         if(!functions){setDevices(v=>v.map(x=>x.id===id?{...x,active:false}:x));return;}
         await httpsCallable(functions,"revokeMyDevice")({sessionId:id});
-        await fetchDevices();
+        if(!isCurrentAction())return;
+        await fetchDevices(authLoadVersion);
+        if(!isCurrentAction())return;
         if(currentTarget)await logoutCurrentUser();
-        setMessage("端末をログアウトしました。");
-      }finally{setPendingDeviceId("");}
-    },{setMessage});
+        if(isCurrentAction())setMessage("端末をログアウトしました。");
+      }finally{if(isCurrentAction())setPendingDeviceId("");}
+    },{setMessage:value=>{if(isCurrentAction())setMessage(value);}});}catch{return;}
   }
 
   async function runPushAction(action:PushAction,task:()=>Promise<void>){

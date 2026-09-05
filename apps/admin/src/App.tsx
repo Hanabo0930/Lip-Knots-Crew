@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   GoogleAuthProvider,
   onAuthStateChanged,
@@ -905,6 +905,14 @@ export default function App() {
   const [selectedSourceFile, setSelectedSourceFile] = useState<SubmissionFile | null>(null);
   const [comparison, setComparison] = useState<ResubmissionComparison | null>(null);
   const [timelineBusy, setTimelineBusy] = useState(false);
+  const [timelineStatus,setTimelineStatus]=useState<"idle"|"loading"|"ready"|"error">("idle");
+  const [timelineLoadedKey,setTimelineLoadedKey]=useState("");
+  const timelineKey=JSON.stringify([user?.uid??"",selectedAdminJobId,resubmitType]);
+  const timelineKeyRef=useRef(timelineKey);
+  timelineKeyRef.current=timelineKey;
+  const timelineVersionRef=useRef(0);
+  const timelinePendingRef=useRef<string|null>(null);
+  const timelineReady=timelineStatus==="ready"&&timelineLoadedKey===timelineKey;
   const [sheetIssues, setSheetIssues] = useState<SheetWriteIssue[]>([]);
   const [issuesBusy, setIssuesBusy] = useState(false);
   const [expenseJobId, setExpenseJobId] = useState(demoJobs[0]?.id ?? "");
@@ -1107,9 +1115,14 @@ const [monthBusy, setMonthBusy] = useState(false);
     return()=>{cancelled=true;};
   },[user,adminSessionReady,operationsRequested,operationsRetry]);
 
+  // 提出履歴は案件・種類・認証ごとに応答を分離する。
   useEffect(() => {
-    if (!user || !selectedAdminJobId) return;
-    void loadSubmissionTimeline();
+    setSubmissionTimeline([]);
+    setSelectedSourceFile(null);
+    setTimelineStatus("idle");
+    setTimelineBusy(false);
+    if (selectedAdminJobId&&(!firebaseConfigured||user))void loadSubmissionTimeline();
+    return()=>{timelineVersionRef.current++;timelinePendingRef.current=null;};
   }, [user, selectedAdminJobId, resubmitType]);
 
   useEffect(() => {
@@ -2462,22 +2475,36 @@ async function previewRowCreation() {
   }
 
   async function loadSubmissionTimeline() {
-    if (!selectedAdminJobId) return;
+    if (!selectedAdminJobId||(firebaseConfigured&&(!user||!functions)))return;
+    const key=timelineKey;
+    if(timelinePendingRef.current===key)return;
+    const version=++timelineVersionRef.current;
+    const activeUser=auth?.currentUser;
+    const isCurrent=()=>timelineVersionRef.current===version&&timelineKeyRef.current===key&&(!firebaseConfigured||auth?.currentUser===activeUser);
+    timelinePendingRef.current=key;
+    setSubmissionTimeline([]);
+    setSelectedSourceFile(null);
+    setTimelineStatus("loading");
     setTimelineBusy(true);
     try {
       if (!firebaseConfigured) {
         const source: SubmissionFile = { id:"demo_source", submissionId:"demo_submission", originalName:"report.jpg", driveName:"7.12 ベイシア成田 Aさん (1).jpg", contentType:"image/jpeg", sequence:1, purpose:"initial", status:"completed", previewUrl:demoPreview("元画像（手ブレ）","#f6dce6"), completedAt:new Date().toISOString(), replacesFileId:null };
         setSubmissionTimeline([{ id:"demo_submission", purpose:"initial", status:"completed", createdAt:new Date().toISOString(), completedAt:new Date().toISOString(), files:[source] }]);
+        setTimelineLoadedKey(key);setTimelineStatus("ready");
         return;
       }
       if (!functions) return;
       const callable = httpsCallable(functions, "getSubmissionTimeline");
       const response = await callable({ jobId:selectedAdminJobId, type:resubmitType });
-      setSubmissionTimeline((response.data as { submissions?:SubmissionGroup[] }).submissions ?? []);
+      if(!isCurrent())return;
+      const groups=(response.data as {submissions?:SubmissionGroup[]}).submissions;
+      if(!Array.isArray(groups)||groups.some(group=>!Array.isArray(group?.files)))throw new Error("Invalid submission timeline");
+      setTimelineLoadedKey(key);setTimelineStatus("ready");
+      setSubmissionTimeline(groups);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      if(isCurrent())setTimelineStatus("error");
     } finally {
-      setTimelineBusy(false);
+      if(isCurrent()){setTimelineBusy(false);timelinePendingRef.current=null;}
     }
   }
 
@@ -2499,6 +2526,7 @@ async function previewRowCreation() {
   }
 
   async function createResubmission() {
+    if(!timelineReady||timelinePendingRef.current){setMessage("提出履歴を確認してから依頼してください。");return;}
     if (!selectedAdminJobId || !resubmitReasons.length) {
       setMessage("再提出理由を1つ以上選んでください。");
       return;
@@ -3823,20 +3851,21 @@ function downloadCsv(filename:string,content:string) {
         <hr />
         <h3>提出ファイルから再送対象を選択</h3>
         <div className="timeline-toolbar">
-          <span>{resubmitType === "report" ? "報告書" : "売場画像"} / {submissionTimeline.reduce((sum,group)=>sum+group.files.length,0)}件</span>
+          <span>{resubmitType === "report" ? "報告書" : "売場画像"} / {timelineReady?`${submissionTimeline.reduce((sum,group)=>sum+group.files.length,0)}件`:"未確認"}</span>
           <button className="ghost compact" onClick={loadSubmissionTimeline} disabled={timelineBusy}>{timelineBusy ? "読込中…" : "再読込"}</button>
         </div>
         <div className="file-gallery">
-          {submissionTimeline.flatMap((group)=>group.files).map((file)=>(
+          {(timelineReady?submissionTimeline:[]).flatMap((group)=>group.files).map((file)=>(
             <button type="button" className={`file-card ${selectedSourceFile?.id===file.id ? "selected" : ""}`} key={`${file.submissionId}_${file.id}`} onClick={()=>setSelectedSourceFile(file)}>
               {file.previewUrl && file.contentType.startsWith("image/") ? <img src={file.previewUrl} alt={file.driveName || file.originalName} /> : <div className="pdf-preview">{file.contentType.includes("pdf") ? "PDF" : "FILE"}</div>}
               <strong>{file.driveName || file.originalName}</strong>
               <small>{file.sequence ? `(${file.sequence})` : ""} {file.purpose}</small>
             </button>
           ))}
-          {!submissionTimeline.length && <div className="empty-inline">提出済みファイルはありません。画像を指定せず案件全体への依頼もできます。</div>}
+          {!timelineReady&&<div className="empty-inline" role={timelineStatus==="error"?"alert":"status"}>{timelineStatus==="error"?"提出履歴を取得できませんでした。再読込してください。":timelineBusy?"提出履歴を読み込んでいます…":"提出履歴は未確認です。再読込してください。"}</div>}
+          {timelineReady&&!submissionTimeline.some(group=>group.files.length>0)&&<div className="empty-inline">この案件・種類の提出済みファイルはありません。画像を指定せず案件全体への依頼もできます。</div>}
         </div>
-        {selectedSourceFile && <div className="selected-file-note">選択中：{selectedSourceFile.driveName || selectedSourceFile.originalName} <button className="ghost compact" onClick={()=>setSelectedSourceFile(null)}>選択解除</button></div>}
+        {timelineReady&&selectedSourceFile && <div className="selected-file-note">選択中：{selectedSourceFile.driveName || selectedSourceFile.originalName} <button className="ghost compact" onClick={()=>setSelectedSourceFile(null)}>選択解除</button></div>}
         <h3>再提出理由</h3>
         <div className="resubmit-options">
           <select value={resubmitType} onChange={(event) => { setResubmitType(event.target.value as "report" | "sales_floor"); setSelectedSourceFile(null); }}>
@@ -3847,7 +3876,7 @@ function downloadCsv(filename:string,content:string) {
           ))}
         </div>
         <textarea value={resubmitNote} onChange={(event) => setResubmitNote(event.target.value)} placeholder="必要なら補足を入力" />
-        <button onClick={createResubmission}>{selectedSourceFile ? "この画像の再送を依頼する" : "案件全体へ再提出を依頼する"}</button>
+        <button onClick={createResubmission} disabled={!timelineReady||timelineBusy}>{selectedSourceFile ? "この画像の再送を依頼する" : "案件全体へ再提出を依頼する"}</button>
         <div className="resubmit-list">
           {resubmissions.map((item) => (
             <div className="resubmit-row" key={item.id}>

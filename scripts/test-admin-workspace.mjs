@@ -5,7 +5,7 @@ import {runInNewContext} from "node:vm";
 import ts from "typescript";
 const source=readFileSync("apps/admin/src/App.tsx","utf8").replace(/\r\n/g,"\n");
 const start=source.indexOf('  // 運用情報は画面を開いたときだけ取得');
-const end=source.indexOf('  useEffect(() => {\n    if (!user || !selectedAdminJobId)',start);
+const end=source.indexOf('  // 提出履歴は案件・種類・認証ごとに応答を分離する。',start);
 assert.ok(start>=0&&end>start);
 const effectSource=source.slice(start,end);
 const calls=[...effectSource.matchAll(/\b(load\w+)\([^;\n]*isCurrentRun\)/g)].map(match=>match[1]);
@@ -52,6 +52,38 @@ const timings=[];
 for(let sample=0;sample<20;sample++){const start=performance.now();filterJobSearchIndex(index,'abc 2026','precontact');timings.push(performance.now()-start);}
 timings.sort((a,b)=>a-b);
 console.log(`Admin search passed: 10000 synthetic jobs, normalization/AND/status/cancellation, 200 pages without missing or duplicate rows. Node filter only: median ${timings[10].toFixed(2)}ms, p95 ${timings[18].toFixed(2)}ms (20 samples; not browser/network latency).`);
+const timelineStart=source.indexOf('  async function loadSubmissionTimeline()');
+const timelineEnd=source.indexOf('  async function openComparison(',timelineStart);
+assert.ok(timelineStart>=0&&timelineEnd>timelineStart);
+const timelineCode=ts.transpileModule(source.slice(timelineStart,timelineEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+for(const scenario of ['success','empty','failure','malformed','context','auth','newer']){
+ const gates=[],state={status:'idle',busy:false,files:['old'],selected:'old'};
+ const authUser={uid:'one'};
+ const scope={selectedAdminJobId:'job',resubmitType:'report',firebaseConfigured:true,user:authUser,auth:{currentUser:authUser},functions:{},timelineKey:'first',timelineKeyRef:{current:'first'},timelineVersionRef:{current:0},timelinePendingRef:{current:null},
+  setTimelineBusy:v=>state.busy=v,setTimelineStatus:v=>state.status=v,setSubmissionTimeline:v=>state.files=v,setSelectedSourceFile:v=>state.selected=v,setTimelineLoadedKey:v=>state.key=v,
+  httpsCallable:()=>()=>{const gate=deferred();gates.push(gate);return gate.promise;}};
+ runInNewContext(timelineCode,scope);
+ const first=scope.loadSubmissionTimeline();await scope.loadSubmissionTimeline();
+ assert.equal(gates.length,1);assert.equal(state.status,'loading');assert.equal(state.files.length,0);assert.equal(state.selected,null);
+ if(scenario==='context')scope.timelineKeyRef.current='second';
+ if(scenario==='auth')scope.auth.currentUser={uid:'two'};
+ let second;
+ if(scenario==='newer'){scope.timelineKey=scope.timelineKeyRef.current='second';second=scope.loadSubmissionTimeline();gates[1].resolve({data:{submissions:[{id:'new',files:[]}]}});await second;}
+ if(scenario==='failure')gates[0].reject(new Error('offline'));
+ else gates[0].resolve({data:scenario==='malformed'?{}:{submissions:scenario==='empty'?[]:[{id:'old',files:[]}]}});
+ await first;
+ if(['success','empty'].includes(scenario)){assert.equal(state.status,'ready');assert.equal(state.files.length,scenario==='empty'?0:1);assert.equal(state.busy,false);}
+ if(['failure','malformed'].includes(scenario)){
+  assert.equal(state.status,'error');assert.equal(state.busy,false);
+  const retry=scope.loadSubmissionTimeline();gates[1].resolve({data:{submissions:[]}});await retry;
+  assert.equal(state.status,'ready');assert.equal(state.files.length,0);
+ }
+ if(['context','auth'].includes(scenario)){assert.equal(state.status,'loading');assert.equal(state.files.length,0);assert.equal(state.key,undefined);}
+ if(scenario==='newer'){assert.equal(state.files[0].id,'new');assert.equal(state.key,'second');assert.equal(state.busy,false);}
+}
+assert.match(source,/disabled=\{!timelineReady\|\|timelineBusy\}/);
+assert.match(source,/if\(!timelineReady\|\|timelinePendingRef.current\)/);
+console.log('Admin timeline passed: success/empty/error/malformed separation, retry, synchronous double click, stale job/auth response, and reverse response order.');
 if(!process.argv.includes('--browser'))process.exit(0);
 const {preview}=await import('vite');
 const {chromium}=await import('@playwright/test');
@@ -115,6 +147,15 @@ try{
   await page.getByRole('button',{name:'経費',exact:true}).click();
   await page.getByRole('heading',{name:'報告書確認・経費入力',exact:true}).waitFor();
   assert.equal(await nav.getByRole('button',{name:'報告書・再提出',exact:true}).getAttribute('aria-pressed'),'true');
+  const materials=page.locator('section.panel').filter({has:page.getByRole('heading',{name:'案件の資料・再提出',exact:true})});
+  await materials.locator('.file-card').first().click();
+  assert.equal(await materials.locator('.selected-file-note').count(),1);
+  await materials.locator('.resubmit-options select').selectOption('sales_floor');
+  await materials.getByRole('button',{name:'案件全体へ再提出を依頼する',exact:true}).waitFor();
+  assert.equal(await materials.locator('.selected-file-note').count(),0);
+  assert.equal(await materials.getByRole('button',{name:'案件全体へ再提出を依頼する',exact:true}).isEnabled(),true);
+  await materials.getByRole('button',{name:'再読込',exact:true}).click();
+  assert.equal(await materials.locator('.file-card').count(),1);
   await nav.getByRole('button',{name:'スタッフ',exact:true}).focus();await page.keyboard.press('Enter');
   assert.equal(await nav.getByRole('button',{name:'スタッフ',exact:true}).getAttribute('aria-pressed'),'true');
   assert.deepEqual(errors,[]);

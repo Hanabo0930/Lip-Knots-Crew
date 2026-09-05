@@ -232,6 +232,8 @@ export default function App(){
     openJobsLoadVersionRef.current+=1;
     submissionProcessingVersionRef.current+=1;
     setProcessingSubmission(false);
+    setPendingApplicationJobId("");
+    setPendingShiftAction("");
     setUser(current);
     setAuthResolved(true);
     if(firebaseConfigured){
@@ -723,46 +725,63 @@ export default function App(){
   }
 
   async function apply(job:Job){
-    await run("apply-action",async()=>{
-      setPendingApplicationJobId(job.id);
-      try{
-        if(!firebaseConfigured){setMessage("デモ：応募が確定しました。");setOpenJobs(v=>v.filter(x=>x.id!==job.id));return;}
-        if(!functions)return;
-        await httpsCallable(functions,"applyToJob")({jobId:job.id,requestId:crypto.randomUUID()});
-        setMessage("応募が確定しました。");
-        setExpandedOpenJobId("");
-        await loadOpenJobs();
-      }finally{setPendingApplicationJobId("");}
-    },{setMessage});
+    const authLoadVersion=authLoadVersionRef.current;
+    const isCurrentAction=()=>authLoadVersion===authLoadVersionRef.current;
+    try{
+      await run("apply-action",async()=>{
+        setPendingApplicationJobId(job.id);
+        try{
+          if(!firebaseConfigured){setMessage("デモ：応募が確定しました。");setOpenJobs(v=>v.filter(x=>x.id!==job.id));return;}
+          if(!functions)return;
+          await httpsCallable(functions,"applyToJob")({jobId:job.id,requestId:crypto.randomUUID()});
+          if(!isCurrentAction())return;
+          setMessage("応募が確定しました。");
+          setExpandedOpenJobId("");
+          await loadOpenJobs();
+        }finally{if(isCurrentAction())setPendingApplicationJobId("");}
+      },{setMessage:value=>{if(isCurrentAction())setMessage(value);}});
+    }catch{return;}
   }
 
   async function submitPreContact(){
     if(!selectedJob||isPending("shift-action"))return;
-    await run("shift-action",async()=>{
-      setPendingShiftAction("preContact");
-      try{
-        if(!firebaseConfigured){setMessage("デモ：事前連絡を送信しました。");return;}
-        if(!functions)return;
-        await httpsCallable(functions,"submitPreContact")({jobId:selectedJob.id,temperature:Number(temperature),arrivalTime});
-        setMessage("事前連絡を送信しました。");
-        await refreshSelectedJob(selectedJob.id);
-        await loadTasks();
-      }finally{setPendingShiftAction("");}
-    },{setMessage});
+    const jobId=selectedJob.id;
+    const authLoadVersion=authLoadVersionRef.current;
+    const isCurrentAction=()=>authLoadVersion===authLoadVersionRef.current;
+    try{
+      await run("shift-action",async()=>{
+        setPendingShiftAction("preContact");
+        try{
+          if(!firebaseConfigured){setMessage("デモ：事前連絡を送信しました。");return;}
+          if(!functions)return;
+          await httpsCallable(functions,"submitPreContact")({jobId,temperature:Number(temperature),arrivalTime});
+          if(!isCurrentAction())return;
+          setMessage("事前連絡を送信しました。");
+          await refreshSelectedJob(jobId,authLoadVersion);
+          if(isCurrentAction())await loadTasks();
+        }finally{if(isCurrentAction())setPendingShiftAction("");}
+      },{setMessage:value=>{if(isCurrentAction())setMessage(value);}});
+    }catch{return;}
   }
 
   async function markPrinted(item:NetPrintItem){
     if(!selectedJob||isPending("shift-action"))return;
-    await run("shift-action",async()=>{
-      setPendingShiftAction(`print-${item.id}`);
-      try{
-        if(!firebaseConfigured){setMessage("デモ：印刷済みにしました。");return;}
-        if(!functions)return;
-        await httpsCallable(functions,"markNetPrintPrinted")({jobId:selectedJob.id,itemId:item.id});
-        setMessage("印刷済みにしました。");
-        await Promise.all([refreshSelectedJob(selectedJob.id),loadTasks()]);
-      }finally{setPendingShiftAction("");}
-    },{setMessage});
+    const jobId=selectedJob.id;
+    const authLoadVersion=authLoadVersionRef.current;
+    const isCurrentAction=()=>authLoadVersion===authLoadVersionRef.current;
+    try{
+      await run("shift-action",async()=>{
+        setPendingShiftAction(`print-${item.id}`);
+        try{
+          if(!firebaseConfigured){setMessage("デモ：印刷済みにしました。");return;}
+          if(!functions)return;
+          await httpsCallable(functions,"markNetPrintPrinted")({jobId,itemId:item.id});
+          if(!isCurrentAction())return;
+          setMessage("印刷済みにしました。");
+          await Promise.all([refreshSelectedJob(jobId,authLoadVersion),loadTasks()]);
+        }finally{if(isCurrentAction())setPendingShiftAction("");}
+      },{setMessage:value=>{if(isCurrentAction())setMessage(value);}});
+    }catch{return;}
   }
 
   async function setClientSubmitted(value:boolean){
@@ -778,20 +797,25 @@ export default function App(){
         },
       },
     };
+    const jobId=selectedJob.id;
+    const authLoadVersion=authLoadVersionRef.current;
+    const isCurrentAction=()=>authLoadVersion===authLoadVersionRef.current;
     try{
       await run("shift-action",async()=>{
         setPendingShiftAction("clientSubmitted");
         setSelectedJob(optimistic);
-        setMyJobs(jobs=>jobs.map(job=>job.id===selectedJob.id?optimistic:job));
+        setMyJobs(jobs=>jobs.map(job=>job.id===jobId?optimistic:job));
         try{
           if(!firebaseConfigured){setMessage(value?"デモ：クライアント提出済みにしました。":"デモ：クライアント提出を解除しました。");return;}
           if(!functions)return;
-          await httpsCallable(functions,"setSalesFloorClientSubmitted")({jobId:selectedJob.id,submitted:value});
+          await httpsCallable(functions,"setSalesFloorClientSubmitted")({jobId,submitted:value});
+          if(!isCurrentAction())return;
           setMessage(value?"クライアント提出済みにしました。":"クライアント提出を解除しました。");
-          await Promise.all([refreshSelectedJob(selectedJob.id),loadTasks()]);
-        }finally{setPendingShiftAction("");}
-      },{setMessage});
+          await Promise.all([refreshSelectedJob(jobId,authLoadVersion),loadTasks()]);
+        }finally{if(isCurrentAction())setPendingShiftAction("");}
+      },{setMessage:value=>{if(isCurrentAction())setMessage(value);}});
     }catch{
+      if(!isCurrentAction())return;
       setSelectedJob(previous);
       setMyJobs(jobs=>jobs.map(job=>job.id===previous.id?previous:job));
     }

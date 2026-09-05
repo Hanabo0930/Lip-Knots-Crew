@@ -1070,3 +1070,10 @@ button.compact { padding:7px 9px; font-size:11px; white-space:nowrap; }
 .job-pagination { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:16px; }
 .job-pagination button { min-height:48px; }
 .job-pagination button:focus-visible { outline:3px solid #356f9e; outline-offset:3px; }
+
+.job-directory-actions { display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:16px; }
+.job-directory-actions button { min-height:48px; }
+
+.admin-preview-error { display:grid;place-items:center;min-height:140px;background:#f5f3f2;padding:12px;border-radius:10px; }
+.file-card button { min-height:48px;margin-top:8px; }
+section[aria-labelledby='submission-materials-heading']:focus { outline:3px solid #356f9e;outline-offset:3px; }

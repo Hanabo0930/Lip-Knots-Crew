@@ -7,11 +7,13 @@ import {
   User,
 } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
-import { auth, firebaseConfigured, functions } from "./firebase";
+import { auth, db, firebaseConfigured, functions } from "./firebase";
 import { expectedFirebaseProjectId } from "./firebase-config";
 import type { ProductionEvidenceView } from "./ProductionAcceptanceRollbackConsole";
 
-import { reportCompletionLabel, submissionStatusLabel, buildJobSearchIndex, filterJobSearchIndex, jobListPage, ADMIN_JOB_PAGE_SIZE, type JobListFilter } from "./job-search";
+import { reportCompletionLabel, submissionStatusLabel, buildJobSearchIndex, filterJobSearchIndex, jobListPage, type JobListFilter } from "./job-search";
+
+import type { QueryDocumentSnapshot } from "firebase/firestore";
 
 type AuthRunGuard = () => boolean;
 
@@ -24,6 +26,9 @@ function canApplyAuthResult(guard?:AuthRunGuard):boolean {
   return guard?.() ?? true;
 }
 
+const AdminJobPagingControls=lazy(()=>import("./AdminJobPagingControls"));
+const AdminJobSearchControls=lazy(()=>import("./AdminJobSearchControls"));
+const AdminSubmissionPreview=lazy(()=>import("./AdminSubmissionPreview"));
 const ProductionAcceptanceRollbackConsole = lazy(() => import("./ProductionAcceptanceRollbackConsole"));
 const StoreLocationFields = lazy(() => import("./StoreLocationFields"));
 const JobSafeEditPanel = lazy(() => import("./JobSafeEditPanel"));
@@ -825,6 +830,23 @@ export default function App() {
   const [queryText, setQueryText] = useState("");
   const [jobListFilter,setJobListFilter]=useState<JobListFilter>("all");
   const [jobPage,setJobPage]=useState(0);
+  const [hasMoreJobs,setHasMoreJobs]=useState(false);
+  const [jobDirectoryBusy,setJobDirectoryBusy]=useState(false);
+  const [jobDirectoryMessage,setJobDirectoryMessage]=useState("");
+  const jobCursorRef=useRef<QueryDocumentSnapshot|null>(null);
+  const jobAnchorRef=useRef("");
+  const jobDirectoryVersionRef=useRef(0);
+  const jobDirectoryPendingRef=useRef(false);
+  function resetJobPaging(incoming:Job[]){
+    jobDirectoryVersionRef.current++;
+    jobDirectoryPendingRef.current=false;
+    jobCursorRef.current=null;
+    jobAnchorRef.current=incoming.at(-1)?.id??"";
+    setHasMoreJobs(incoming.length>=100);
+    setJobDirectoryBusy(false);
+    setJobDirectoryMessage("");
+    setJobPage(0);
+  }
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncSummary, setSyncSummary] = useState<string>("未実行");
   const [staff, setStaff] = useState<StaffProfile[]>(
@@ -905,6 +927,15 @@ export default function App() {
   const [selectedSourceFile, setSelectedSourceFile] = useState<SubmissionFile | null>(null);
   const [comparison, setComparison] = useState<ResubmissionComparison | null>(null);
   const [timelineBusy, setTimelineBusy] = useState(false);
+  const resubmissionPendingRef=useRef(false);
+  const [resubmissionBusy,setResubmissionBusy]=useState(false);
+  const reviewPanelRef=useRef<HTMLElement|null>(null);
+  const [reviewFocusRequest,setReviewFocusRequest]=useState(0);
+  useEffect(()=>{
+    if(!reviewFocusRequest||workspace!=="submissions")return;
+    reviewPanelRef.current?.focus({preventScroll:true});
+    reviewPanelRef.current?.scrollIntoView({block:"start"});
+  },[reviewFocusRequest,workspace]);
   const [timelineStatus,setTimelineStatus]=useState<"idle"|"loading"|"ready"|"error">("idle");
   const [timelineLoadedKey,setTimelineLoadedKey]=useState("");
   const timelineKey=JSON.stringify([user?.uid??"",selectedAdminJobId,resubmitType]);
@@ -1018,6 +1049,7 @@ const [monthBusy, setMonthBusy] = useState(false);
         setProductionEvidenceBusy(false);
         setProductionEvidenceStatus({configured:!firebaseConfigured,environment:"production",releaseId:"v5.6.0",evidence:null});
         setProductionControl(null);
+        resetJobPaging([]);
         setJobs([]);
         setStaff([]);
         setSheetIssues([]);
@@ -1046,6 +1078,7 @@ const [monthBusy, setMonthBusy] = useState(false);
           if(!isCurrentRun())return;
           if(Array.isArray(bootstrapData.jobs)){
             if(!canApplyAuthResult(isCurrentRun))return;
+            resetJobPaging(bootstrapData.jobs);
             setJobs(bootstrapData.jobs);
             setSelectedAdminJobId((current)=>current||bootstrapData.jobs![0]?.id||"");
           }
@@ -1609,19 +1642,61 @@ async function previewRowCreation() {
   }
 
   async function loadAdminDirectory(guard?:AuthRunGuard) {
-    if (!functions) return;
-    const callable = httpsCallable(functions, "bootstrapSession");
-    const response = await callable({ refreshDirectory: true });
-    const data = response.data as AdminDirectoryPayload;
-    if (Array.isArray(data.jobs) && canApplyAuthResult(guard)) {
-      setJobs(data.jobs);
-      setSelectedAdminJobId((current) => current || data.jobs![0]?.id || "");
-    }
-    if (Array.isArray(data.staff) && canApplyAuthResult(guard)) {
-      setStaff(data.staff);
+    if (!functions||!auth?.currentUser) return;
+    const activeUser=auth.currentUser;
+    const version=++jobDirectoryVersionRef.current;
+    const isCurrent=()=>auth?.currentUser===activeUser&&jobDirectoryVersionRef.current===version&&canApplyAuthResult(guard);
+    jobDirectoryPendingRef.current=true;setJobDirectoryBusy(true);
+    try{
+      const callable = httpsCallable(functions, "bootstrapSession");
+      const response = await callable({ refreshDirectory: true });
+      if(!isCurrent())return;
+      const data = response.data as AdminDirectoryPayload;
+      if (Array.isArray(data.jobs) && canApplyAuthResult(guard)) {
+        resetJobPaging(data.jobs);
+        setJobs(data.jobs);
+        setSelectedAdminJobId((current) => current || data.jobs![0]?.id || "");
+      }
+      if (Array.isArray(data.staff) && canApplyAuthResult(guard))setStaff(data.staff);
+    }finally{
+      if(isCurrent()){jobDirectoryPendingRef.current=false;setJobDirectoryBusy(false);}
     }
   }
 
+  async function loadMoreAdminJobs(){
+    if(!db||!auth?.currentUser||!adminSessionReady||!hasMoreJobs||jobDirectoryPendingRef.current)return;
+    const activeUser=auth.currentUser;
+    const version=jobDirectoryVersionRef.current;
+    const isCurrent=()=>auth?.currentUser===activeUser&&jobDirectoryVersionRef.current===version;
+    jobDirectoryPendingRef.current=true;setJobDirectoryBusy(true);setJobDirectoryMessage("");
+    try{
+      const token=await activeUser.getIdTokenResult();
+      if(!isCurrent())return;
+      const companyId=typeof token.claims.companyId==="string"?token.claims.companyId:"";
+      if(token.claims.role!=="admin"||!companyId)throw new Error("管理者の所属を確認できません。ログインし直してください。");
+      const {readAdminJobPage}=await import("./job-directory-page");
+      if(!isCurrent())return;
+      const page=await readAdminJobPage(db,companyId,jobAnchorRef.current,jobCursorRef.current);
+      if(!isCurrent())return;
+      setJobs(current=>{
+        const merged=new Map(current.map(job=>[job.id,job]));
+        for(const job of page.jobs)merged.set(job.id,job as Job);
+        return [...merged.values()];
+      });
+      jobCursorRef.current=page.cursor;
+      setHasMoreJobs(page.hasMore);
+      setJobDirectoryMessage(`${page.jobs.length}件を追加取得しました。現在の検索条件で表示しています。`);
+    }catch(error){if(isCurrent())setJobDirectoryMessage(error instanceof Error?error.message:"追加取得できませんでした。再試行してください。");}
+    finally{if(isCurrent()){jobDirectoryPendingRef.current=false;setJobDirectoryBusy(false);}}
+  }
+
+  async function refreshAdminJobs(){
+    if(jobDirectoryPendingRef.current)return;
+    const activeUser=auth?.currentUser;
+    const request=loadAdminDirectory();
+    const version=jobDirectoryVersionRef.current;
+    try{await request;}catch{if(auth?.currentUser===activeUser&&version===jobDirectoryVersionRef.current)setJobDirectoryMessage("一覧を再読込できませんでした。現在の一覧を保持しています。");}
+  }
   async function loadJobs(guard?:AuthRunGuard) {
     if (!firebaseConfigured || !functions) return;
     await loadAdminDirectory(guard);
@@ -2449,14 +2524,39 @@ async function previewRowCreation() {
 
 
   function selectAdminJob(jobId: string) {
+    if(resubmissionPendingRef.current)return false;
+    if(jobId===selectedAdminJobId)return true;
+    if(jobId!==selectedAdminJobId){
+      const previous=jobs.find(job=>job.id===selectedAdminJobId);
+      const saved=(previous?.netPrint?.items??[]).map(item=>item.number);
+      const edited=resubmitNote.trim()||resubmitReasons.length!==1||resubmitReasons[0]!=="手ブレで文字が読めません"||netPrintNumbers.some((number,index)=>number!==(saved[index]??""));
+      if(edited&&!window.confirm("入力中の再提出理由・補足・資料番号を破棄して案件を切り替えますか？"))return false;
+      setResubmitNote("");setResubmitReasons(["手ブレで文字が読めません"]);
+    }
     setSelectedAdminJobId(jobId);
     const job = jobs.find((item) => item.id === jobId);
     const values = (job?.netPrint?.items ?? []).map((item) => item.number);
     setNetPrintNumbers([values[0] ?? "", values[1] ?? "", values[2] ?? ""]);
     setSelectedSourceFile(null);
     setComparison(null);
+    return true;
   }
 
+  function changeReviewType(type:"report"|"sales_floor"){
+    if(resubmissionPendingRef.current)return false;
+    if(type===resubmitType)return true;
+    const edited=resubmitNote.trim()||resubmitReasons.length!==1||resubmitReasons[0]!=="手ブレで文字が読めません";
+    if(edited&&!window.confirm("入力中の再提出理由・補足を破棄して提出種類を切り替えますか？"))return false;
+    setResubmitType(type);setResubmitNote("");setResubmitReasons(["手ブレで文字が読めません"]);setSelectedSourceFile(null);setComparison(null);
+    return true;
+  }
+
+  function openReportReview(job:Job){
+    if(job.id===selectedAdminJobId){if(!changeReviewType("report"))return;}
+    else{if(!selectAdminJob(job.id))return;setResubmitType("report");}
+    openWorkspace("submissions");
+    setReviewFocusRequest(value=>value+1);
+  }
   async function saveNetPrint() {
     if (!selectedAdminJobId) return;
     if (!firebaseConfigured) {
@@ -2526,24 +2626,34 @@ async function previewRowCreation() {
   }
 
   async function createResubmission() {
+    if(resubmissionPendingRef.current)return;
     if(!timelineReady||timelinePendingRef.current){setMessage("提出履歴を確認してから依頼してください。");return;}
-    if (!selectedAdminJobId || !resubmitReasons.length) {
-      setMessage("再提出理由を1つ以上選んでください。");
-      return;
-    }
-    if (!firebaseConfigured) {
-      setResubmissions((current) => [{ id:crypto.randomUUID(), jobId:selectedAdminJobId, staffId:"s1", type:resubmitType, reasons:resubmitReasons, note:resubmitNote, status:"open", sourceSubmissionId:selectedSourceFile?.submissionId, sourceFileId:selectedSourceFile?.id }, ...current]);
-      setMessage("デモ：再提出依頼を送りました。");
-      return;
-    }
-    if (!functions) return;
-    await httpsCallable(functions, "createResubmissionRequest")({
-      jobId:selectedAdminJobId, type:resubmitType, reasons:resubmitReasons, note:resubmitNote,
-      sourceSubmissionId:selectedSourceFile?.submissionId,
-      sourceFileId:selectedSourceFile?.id,
-    });
-    setMessage("再提出依頼を送りました。");
-    await loadResubmissions();
+    if(!selectedAdminJobId||!resubmitReasons.length){setMessage("再提出理由を1つ以上選んでください。");return;}
+    if(selectedSourceFile&&!submissionTimeline.some(group=>group.files.some(file=>file.id===selectedSourceFile.id&&file.submissionId===selectedSourceFile.submissionId&&file.status==="completed"))){setMessage("処理完了した画像を選び直してください。");return;}
+    if(firebaseConfigured&&(!functions||!auth?.currentUser))return;
+    const activeUser=auth?.currentUser,key=timelineKey;
+    const isCurrent=()=>timelineKeyRef.current===key&&(!firebaseConfigured||auth?.currentUser===activeUser);
+    resubmissionPendingRef.current=true;setResubmissionBusy(true);
+    let accepted=false;
+    try{
+      if(!firebaseConfigured){
+        setResubmissions(current=>[{id:crypto.randomUUID(),jobId:selectedAdminJobId,staffId:"s1",type:resubmitType,reasons:resubmitReasons,note:resubmitNote,status:"open",sourceSubmissionId:selectedSourceFile?.submissionId,sourceFileId:selectedSourceFile?.id},...current]);
+        setMessage("デモ：再提出依頼を送りました。");return;
+      }
+      await httpsCallable(functions!,"createResubmissionRequest")({jobId:selectedAdminJobId,type:resubmitType,reasons:resubmitReasons,note:resubmitNote,sourceSubmissionId:selectedSourceFile?.submissionId,sourceFileId:selectedSourceFile?.id});
+      accepted=true;
+      if(!isCurrent())return;
+      setMessage("再提出依頼を送りました。");
+      await loadResubmissions(isCurrent);
+    }catch{
+      if(isCurrent())setMessage(accepted?"依頼は受付済みですが一覧を更新できませんでした。再送せず依頼一覧を再読込してください。":"依頼の結果を確認できませんでした。再送する前に依頼一覧を再読込して確認してください。");
+    }finally{resubmissionPendingRef.current=false;setResubmissionBusy(false);}
+  }
+  async function refreshResubmissionList(){
+    if(resubmissionPendingRef.current)return;
+    const activeUser=auth?.currentUser;
+    const isCurrent=()=>auth?.currentUser===activeUser;
+    try{await loadResubmissions(isCurrent);}catch{if(isCurrent())setMessage("依頼一覧を取得できませんでした。もう一度お試しください。");}
   }
 
   async function loadResubmissions(guard?:AuthRunGuard) {
@@ -3673,16 +3783,8 @@ function downloadCsv(filename:string,content:string) {
 </section></WorkspacePanel>
 
       <WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel">
-        <div className="toolbar">
-          <input value={queryText} aria-label="案件を検索" onChange={(event) => {setQueryText(event.target.value);setJobPage(0);}} placeholder="スタッフ名・店舗・メーカー・クライアントを検索" />
-          <select aria-label="案件の絞り込み" value={jobListFilter} onChange={event=>{setJobListFilter(event.target.value as JobListFilter);setJobPage(0);}}>
-            <option value="all">すべて</option><option value="precontact">事前連絡待ち</option><option value="assigned">担当確定</option><option value="cancelled">キャンセル</option><option value="report-completed">報告書：完了記録あり</option><option value="report-unconfirmed">報告書：完了未確認</option>
-          </select>
-          <button className="ghost" onClick={()=>{setQueryText("");setJobListFilter("all");setJobPage(0);}}>条件をクリア</button>
-        </div>
         <h2>案件一覧</h2>
-        <p>初回読込は最大100件です。絞り込みは読込済み案件が対象です。「完了未確認」には未提出・処理中・記録不足が含まれます。完了記録があっても、再提出依頼の完了とは別です。</p>
-        <p className="job-search-summary" role="status">読込済み{jobs.length}件のうち{filtered.length}件。{filtered.length?`${jobPageView.page*ADMIN_JOB_PAGE_SIZE+1}〜${Math.min((jobPageView.page+1)*ADMIN_JOB_PAGE_SIZE,filtered.length)}件を表示`:"該当する案件はありません"}。スペースで区切ると複数の条件で検索できます（日付も検索可）。</p>
+        <Suspense fallback={<p>検索を準備中…</p>}><AdminJobSearchControls queryText={queryText} jobListFilter={jobListFilter} total={jobs.length} count={filtered.length} page={jobPageView.page} onQuery={value=>{setQueryText(value);setJobPage(0);}} onFilter={value=>{setJobListFilter(value);setJobPage(0);}} onClear={()=>{setQueryText("");setJobListFilter("all");setJobPage(0);}}/></Suspense>
         <div className="table-wrap">
           <table>
             <thead><tr><th>日付</th><th>スタッフ</th><th>店舗</th><th>メーカー</th><th>状態</th><th>報告書</th><th>公開</th><th>操作</th></tr></thead>
@@ -3706,6 +3808,7 @@ function downloadCsv(filename:string,content:string) {
                     )}
                     {job.status==="assigned" && !job.applicationAdminConfirmed && <button className="ghost compact" onClick={()=>confirmJobApplication(job)}>応募確認</button>}
                     {job.applicationAdminConfirmed && <span className="mini-tag">確認済み</span>}
+                    <button className="ghost compact" disabled={resubmissionBusy} onClick={()=>openReportReview(job)}>報告書を確認</button>
                     <button className="ghost compact" onClick={()=>loadExpenseReview(job.id)}>経費</button>
                     <button className="ghost compact" onClick={()=>openJobSheet(job)}>スプシ</button>
                     {job.status === "cancelled" ? (
@@ -3719,11 +3822,7 @@ function downloadCsv(filename:string,content:string) {
             </tbody>
           </table>
         </div>
-        <nav className="job-pagination" aria-label="案件一覧のページ">
-          <button className="ghost" disabled={jobPageView.page===0} onClick={()=>setJobPage(jobPageView.page-1)}>前の50件</button>
-          <span>{jobPageView.page+1} / {jobPageView.pageCount}ページ</span>
-          <button className="ghost" disabled={jobPageView.page+1>=jobPageView.pageCount} onClick={()=>setJobPage(jobPageView.page+1)}>次の50件</button>
-        </nav>
+        <Suspense fallback={null}><AdminJobPagingControls hasMoreJobs={hasMoreJobs} jobDirectoryBusy={jobDirectoryBusy} firebaseConfigured={firebaseConfigured} total={jobs.length} jobDirectoryMessage={jobDirectoryMessage} page={jobPageView.page} pageCount={jobPageView.pageCount} onMore={()=>void loadMoreAdminJobs()} onRefresh={()=>void refreshAdminJobs()} onPage={setJobPage}/></Suspense>
       </section></WorkspacePanel>
 
 
@@ -3833,13 +3932,14 @@ function downloadCsv(filename:string,content:string) {
         </div>
       </section></WorkspacePanel>
 
-      <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel">
+      <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel" ref={reviewPanelRef} tabIndex={-1} aria-labelledby="submission-materials-heading">
         <div className="section-heading">
           <div>
-            <h2>案件の資料・再提出</h2>
+            <h2 id="submission-materials-heading">案件の資料・再提出</h2>
             <p>ネットプリント最大3件と、報告書・売場画像の再提出依頼を管理します。</p>
           </div>
-          <select value={selectedAdminJobId} onChange={(event) => selectAdminJob(event.target.value)}>
+          <select aria-label="資料・再提出の対象案件" disabled={resubmissionBusy} value={selectedAdminJobId} onChange={(event) => selectAdminJob(event.target.value)}>
+            {selectedAdminJobId&&!jobs.some(job=>job.id===selectedAdminJobId)&&<option value={selectedAdminJobId}>確認中の案件（一覧の読込範囲外）</option>}
             {jobs.map((job) => <option value={job.id} key={job.id}>{job.workDate} {job.storeName} {job.assignedStaffName ?? "募集中"}</option>)}
           </select>
         </div>
@@ -3859,11 +3959,12 @@ function downloadCsv(filename:string,content:string) {
         {timelineReady&&submissionTimeline.length>0&&<div className="timeline-status-list" aria-label="提出ごとの処理状態">{submissionTimeline.map(group=><p key={group.id}>{group.purpose==="replacement"?"再提出":"提出"}：{submissionStatusLabel(group.status)}（{group.files.length}ファイル）</p>)}</div>}
         <div className="file-gallery">
           {(timelineReady?submissionTimeline:[]).flatMap((group)=>group.files).map((file)=>(
-            <button type="button" className={`file-card ${selectedSourceFile?.id===file.id ? "selected" : ""}`} key={`${file.submissionId}_${file.id}`} onClick={()=>setSelectedSourceFile(file)}>
-              {file.previewUrl && file.contentType.startsWith("image/") ? <img src={file.previewUrl} alt={file.driveName || file.originalName} /> : <div className="pdf-preview">{file.contentType.includes("pdf") ? "PDF" : "FILE"}</div>}
+            <article className={`file-card ${selectedSourceFile?.id===file.id ? "selected" : ""}`} key={`${file.submissionId}_${file.id}`}>
+              <Suspense fallback={<div className="pdf-preview">画像を準備中…</div>}><AdminSubmissionPreview file={file} busy={timelineBusy||resubmissionBusy} onReload={loadSubmissionTimeline}/></Suspense>
               <strong>{file.driveName || file.originalName}</strong>
               <small>{file.sequence ? `(${file.sequence})` : ""} {file.purpose==="replacement"?"再提出":"提出"} / {submissionStatusLabel(file.status)}</small>
-            </button>
+              <button type="button" className="ghost" disabled={resubmissionBusy||file.status!=="completed"} aria-pressed={selectedSourceFile?.id===file.id&&selectedSourceFile?.submissionId===file.submissionId} onClick={()=>setSelectedSourceFile(file)}>再送対象に選ぶ</button>
+            </article>
           ))}
           {!timelineReady&&<div className="empty-inline" role={timelineStatus==="error"?"alert":"status"}>{timelineStatus==="error"?"提出履歴を取得できませんでした。再読込してください。":timelineBusy?"提出履歴を読み込んでいます…":"提出履歴は未確認です。再読込してください。"}</div>}
           {timelineReady&&!submissionTimeline.some(group=>group.files.length>0)&&<div className="empty-inline">この履歴で確認できるファイルは0件です。処理状態も確認してください。</div>}
@@ -3871,15 +3972,16 @@ function downloadCsv(filename:string,content:string) {
         {timelineReady&&selectedSourceFile && <div className="selected-file-note">選択中：{selectedSourceFile.driveName || selectedSourceFile.originalName} <button className="ghost compact" onClick={()=>setSelectedSourceFile(null)}>選択解除</button></div>}
         <h3>再提出理由</h3>
         <div className="resubmit-options">
-          <select value={resubmitType} onChange={(event) => { setResubmitType(event.target.value as "report" | "sales_floor"); setSelectedSourceFile(null); }}>
+          <select disabled={resubmissionBusy} value={resubmitType} onChange={(event) => changeReviewType(event.target.value as "report" | "sales_floor")}>
             <option value="report">報告書</option><option value="sales_floor">売場画像</option>
           </select>
           {["手ブレで文字が読めません","画像が暗い・反射しています","一部が切れています","レシート全体が写っていません","金額・日付が確認できません","その他"].map((reason) => (
-            <label className="reason-check" key={reason}><input type="checkbox" checked={resubmitReasons.includes(reason)} onChange={() => toggleReason(reason)} />{reason}</label>
+            <label className="reason-check" key={reason}><input type="checkbox" disabled={resubmissionBusy} checked={resubmitReasons.includes(reason)} onChange={() => toggleReason(reason)} />{reason}</label>
           ))}
         </div>
-        <textarea value={resubmitNote} onChange={(event) => setResubmitNote(event.target.value)} placeholder="必要なら補足を入力" />
-        <button onClick={createResubmission} disabled={!timelineReady||timelineBusy}>{selectedSourceFile ? "この画像の再送を依頼する" : "案件全体へ再提出を依頼する"}</button>
+        <textarea disabled={resubmissionBusy} value={resubmitNote} onChange={(event) => setResubmitNote(event.target.value)} placeholder="必要なら補足を入力" />
+        <button onClick={createResubmission} disabled={!timelineReady||timelineBusy||resubmissionBusy}>{resubmissionBusy?"依頼中…":selectedSourceFile ? "この画像の再送を依頼する" : "案件全体へ再提出を依頼する"}</button>
+        <button className="ghost" disabled={resubmissionBusy} onClick={()=>void loadResubmissions(()=>auth?.currentUser===user).catch(()=>setMessage("依頼一覧を取得できませんでした。もう一度お試しください。"))}>依頼一覧を再読込</button>
         <div className="resubmit-list">
           {resubmissions.map((item) => (
             <div className="resubmit-row" key={item.id}>

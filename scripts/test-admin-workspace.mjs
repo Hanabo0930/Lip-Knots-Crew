@@ -56,6 +56,10 @@ const timelineStart=source.indexOf('  async function loadSubmissionTimeline()');
 const timelineEnd=source.indexOf('  async function openComparison(',timelineStart);
 assert.ok(timelineStart>=0&&timelineEnd>timelineStart);
 const timelineCode=ts.transpileModule(source.slice(timelineStart,timelineEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+for(const missing of ['user','selectedAdminJobId','functions']){
+ const context={selectedAdminJobId:'job',firebaseConfigured:true,user:{uid:'one'},functions:{},httpsCallable:()=>assert.fail('Unauthenticated or unselected timeline must not call an API')};
+ context[missing]=null;runInNewContext(timelineCode,context);await context.loadSubmissionTimeline();
+}
 for(const scenario of ['success','empty','failure','malformed','context','auth','newer']){
  const gates=[],state={status:'idle',busy:false,files:['old'],selected:'old'};
  const authUser={uid:'one'};

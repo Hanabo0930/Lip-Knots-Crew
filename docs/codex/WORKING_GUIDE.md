@@ -1,5 +1,14 @@
 # Codex作業・検証手順
 
+## Windowsでの再開結果
+
+- Google Drive上でnpmの展開にUNKNOWN/EBADFが出る場合、通常のローカルディスクへ独立cloneして検証する。配布版へ上書きしない。
+- Windowsの `core.autocrlf` がシェルスクリプトをCRLFにすると、一部の既存安全検査が失敗する。新しいcloneでは `git -c core.autocrlf=false clone ...` を使う。検査を弱めて回避しない。
+- `node scripts/test-staff-submission-recovery.mjs` をローカル検査に追加。ブラウザ検査はfixture配信を修正済みで、Chromium取得後に完走確認済み。
+- `LKC_VISUAL_EVIDENCE_DIR` を指定した実行はホーム、シフト、提出（320/390/1280px）、文字拡大のPNGを保存する。
+- PR #95のCIにはStaff UX、会社分離、提出回復と `--browser` を追加した。以下の「未完了」は再開前の記録。
+
+
 ## 作業フォルダ
 
 このフォルダにはアプリ全ソース、既存設計書、検証スクリプト、新しい引継ぎ資料があります。GitHubを正本にします。ChatGPT側の作業フォルダが自動的に利用者のPCへ配置されるわけではありません。

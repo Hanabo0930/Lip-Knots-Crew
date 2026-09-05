@@ -127,11 +127,22 @@ function Fixture(){
 }
 createRoot(document.getElementById('root')).render(React.createElement(Fixture));
 </script></body></html>`;
-const server = await createServer({root:resolve("apps/staff"),configFile:resolve("apps/staff/vite.config.ts"),server:{host:"127.0.0.1",port:0}});
-server.middlewares.use(async (req,res,next)=>{
-  if(req.url!=="/__preview_test.html")return next();
-  res.setHeader("Content-Type","text/html");
-  res.end(await server.transformIndexHtml(req.url,fixture));
+const server = await createServer({
+  root:resolve("apps/staff"),configFile:resolve("apps/staff/vite.config.ts"),
+  server:{host:"127.0.0.1",port:0},
+  plugins:[{
+    name:"submission-browser-fixture",
+    configureServer(devServer){
+      // SPAのフォールバックより先に検証用ページを配信する。
+      devServer.middlewares.use(async(req,res,next)=>{
+        if(req.url!=="/__preview_test.html")return next();
+        try{
+          res.setHeader("Content-Type","text/html");
+          res.end(await devServer.transformIndexHtml(req.url,fixture));
+        }catch(error){next(error);}
+      });
+    },
+  }],
 });
 let browser;
 try {
@@ -170,21 +181,52 @@ try {
   assert.equal(await retry.isEnabled(),true);
   assert.deepEqual(errors,[]);
 
+  const draftCheck=await page.evaluate(async()=>{
+    const {saveDraft,loadDraft,clearDraft}=await import('/src/draft-store.ts');
+    const {submissionDraftKey}=await import('/src/submission-draft-key.ts');
+    const a=submissionDraftKey('company/user-a','fixture-job','report');
+    const b=submissionDraftKey('company/user-b','fixture-job','report');
+    await saveDraft(a,[new File(['draft-a'],'fixture.txt',{type:'text/plain'})]);
+    const own=await loadDraft(a), other=await loadDraft(b);
+    await clearDraft(a);
+    return {own:own.length,body:await own[0].text(),other:other.length,cleared:(await loadDraft(a)).length};
+  });
+  assert.deepEqual(draftCheck,{own:1,body:'draft-a',other:0,cleared:0});
+
   // The ordinary demo remains usable at phone and desktop widths.
   await page.goto(`http://127.0.0.1:${port}/`);
   await page.getByRole("button",{name:"シフトを開く",exact:true}).waitFor();
+  assert.deepEqual(await page.getByRole("heading",{level:2}).allTextContents(),["今日やること","次回シフト","プッシュ通知"]);
   const output=process.env.LKC_VISUAL_EVIDENCE_DIR;
   if(output){mkdirSync(output,{recursive:true});await page.screenshot({path:resolve(output,"staff-home-mobile.png"),fullPage:true});}
-  for(const width of [390,1280]){
+  for(const width of [320,390,1280]){
     await page.setViewportSize({width,height:844});
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,`Home overflows at ${width}px`);
     await page.getByRole("button",{name:"シフトを開く",exact:true}).click();
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,`Shifts overflow at ${width}px`);
     if(output)await page.screenshot({path:resolve(output,`staff-shifts-${width}.png`),fullPage:true});
+    await page.getByRole("button",{name:"🖼️ 売場画像を提出",exact:true}).click();
+    await page.getByRole("heading",{name:"売場画像を提出",exact:true}).waitFor();
+    await page.getByRole("button",{name:"画像を再読み込み",exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,`Submission overflows at ${width}px`);
+    if(output)await page.screenshot({path:resolve(output,`staff-submission-${width}.png`),fullPage:true});
     await page.locator(".bottom-nav").getByRole("button",{name:"ホーム"}).click();
   }
   assert.deepEqual(errors,[]);
-  console.log("Browser preview recovery/session isolation and mobile/desktop layout passed.");
+  await page.setViewportSize({width:320,height:844});
+  await page.locator('.bottom-nav').getByRole('button',{name:/提出/}).click();
+  await page.addStyleTag({content:':root { font-size:32px; }'});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,'Enlarged submission text must not overflow at 320px');
+  await page.emulateMedia({reducedMotion:'reduce'});
+  const reloadButton=page.getByRole('button',{name:'画像を再読み込み',exact:true});
+  await reloadButton.focus();
+  assert.equal(await reloadButton.evaluate(element=>element===document.activeElement),true);
+  await page.keyboard.press('Enter');
+  await reloadButton.waitFor();
+  assert.equal(await reloadButton.isEnabled(),true);
+  if(output)await page.screenshot({path:resolve(output,'staff-submission-large-text.png'),fullPage:true});
+  assert.deepEqual(errors,[]);
+  console.log("Browser preview recovery, IndexedDB owner isolation, 320/390/1280px layout, enlarged text and keyboard recovery passed.");
 } finally {
   await browser?.close();
   await server.close();

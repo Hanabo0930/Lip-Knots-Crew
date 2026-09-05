@@ -3,7 +3,7 @@ import {
   getIdTokenResult, isSignInWithEmailLink, onAuthStateChanged,
   signInWithEmailLink, signOut, User,
 } from "firebase/auth";
-import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where, startAfter, QueryDocumentSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytesResumable } from "firebase/storage";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, storage } from "./firebase";
@@ -48,7 +48,7 @@ type Job = {
   menuName: string; storeName: string; workTime: string; basePay: number; status: string;
   cancelled?: boolean;
   storeAddress?: string; storeNearestStation?: string; materialStatus?: string;
-  assignedStaffId?: string; preContact?: { temperature?: string; arrivalTime?: string };
+  companyId?: string; assignedStaffId?: string; preContact?: { temperature?: string; arrivalTime?: string };
   netPrint?: { items?: NetPrintItem[] };
   submissionStatus?: { report?: { completed?: boolean }; salesFloor?: { completed?: boolean; clientSubmitted?: boolean; lipKnotsSubmitted?: boolean } };
 };
@@ -163,6 +163,11 @@ export default function App(){
   const [showPushActions,setShowPushActions]=useState(false);
   const [showAllTasks,setShowAllTasks]=useState(false);
   const [showPastShifts,setShowPastShifts]=useState(false);
+  const [hasMorePastShifts,setHasMorePastShifts]=useState(false);
+  const [pastShiftMessage,setPastShiftMessage]=useState("");
+  const pastShiftCursorRef=useRef<QueryDocumentSnapshot|null>(null);
+  const pastShiftDateRef=useRef("");
+  const pastShiftVersionRef=useRef(0);
   const [submissionHistory,setSubmissionHistory]=useState<SubmissionGroup[]>([]);
   const [submissionHistoryStatus,setSubmissionHistoryStatus]=useState<SubmissionHistoryStatus>("idle");
   const [resubmissionDetail,setResubmissionDetail]=useState<ResubmissionDetail|null>(null);
@@ -224,7 +229,7 @@ export default function App(){
   },[pastShifts,selectedJob,showPastShifts,upcomingShifts]);
 
   function isSubmissionActionPending(){
-    return draftHydratingRef.current||isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||processingSubmission;
+    return draftHydratingRef.current||isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("task-job")||isPending("uploadSubmission")||processingSubmission;
   }
 
   function isLoginActionPending(){
@@ -236,6 +241,10 @@ export default function App(){
     const authLoadVersion=++authLoadVersionRef.current;
     const isCurrentAuthLoad=()=>authLoadVersion===authLoadVersionRef.current;
     openJobsLoadVersionRef.current+=1;
+    pastShiftVersionRef.current+=1;
+    pastShiftCursorRef.current=null;
+    setHasMorePastShifts(false);
+    setPastShiftMessage("");
     submissionProcessingVersionRef.current+=1;
     setProcessingSubmission(false);
     setPendingApplicationJobId("");
@@ -422,12 +431,55 @@ export default function App(){
   async function fetchMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{
     if(!db||!sid||!cid)return[];
     const today=localDateKey();
+    const version=++pastShiftVersionRef.current;
+    const authVersion=authLoadVersionRef.current;
     // 過去の件数が増えても今後のシフトが取得上限から押し出されないようにする。
     const [upcoming,history]=await Promise.all([
       getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(300))),
-      getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey","<",today),orderBy("dateKey","asc"),limit(300))),
+      getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey","<",today),orderBy("dateKey","asc"),limit(51))),
     ]);
-    return orderAssignedJobs([...upcoming.docs,...history.docs].map(d=>({id:d.id,...d.data()} as Job)));
+    if(authVersion===authLoadVersionRef.current&&version===pastShiftVersionRef.current){
+      pastShiftCursorRef.current=history.docs.slice(0,50).at(-1)??null;
+      pastShiftDateRef.current=today;
+      setHasMorePastShifts(history.docs.length>50);
+      setPastShiftMessage("");
+    }
+    return orderAssignedJobs([...upcoming.docs,...history.docs.slice(0,50)].map(d=>({id:d.id,...d.data()} as Job)));
+  }
+  async function loadMorePastShifts(){
+    if(!db||!companyId||!staffId||!hasMorePastShifts||!pastShiftCursorRef.current||businessRefreshing||isPending("past-shifts"))return;
+    const cursor=pastShiftCursorRef.current;
+    const today=pastShiftDateRef.current;
+    const version=pastShiftVersionRef.current;
+    const authVersion=authLoadVersionRef.current;
+    const isCurrent=()=>authVersion===authLoadVersionRef.current&&version===pastShiftVersionRef.current;
+    setPastShiftMessage("");
+    try{
+      await run("past-shifts",async()=>{
+        const page=await getDocs(query(collection(db!,"jobs"),where("companyId","==",companyId),where("assignedStaffId","==",staffId),where("dateKey","<",today),orderBy("dateKey","asc"),startAfter(cursor),limit(51)));
+        if(!isCurrent())return;
+        const rows=page.docs.slice(0,50);
+        const additions=rows.map(d=>({id:d.id,...d.data()} as Job));
+        setMyJobs(current=>orderAssignedJobs([...new Map([...current,...additions].map(job=>[job.id,job])).values()]));
+        pastShiftCursorRef.current=rows.at(-1)??cursor;
+        setHasMorePastShifts(page.docs.length>50);
+      });
+    }catch{if(isCurrent())setPastShiftMessage("過去のシフトを読み込めませんでした。続きを読み込むボタンで再試行できます。");}
+  }
+
+  async function loadTaskJob(jobId:string):Promise<Job|null>{
+    if(!db||!companyId||!staffId||!jobId||jobId.includes("/")||isPending("task-job"))return null;
+    const authVersion=authLoadVersionRef.current;
+    let job:Job|null=null;
+    await run("task-job",async()=>{
+      const snapshot=await getDoc(doc(db!,"jobs",jobId));
+      if(authVersion!==authLoadVersionRef.current||!snapshot.exists())return;
+      const candidate={...snapshot.data(),id:snapshot.id} as Job;
+      if(candidate.companyId!==companyId||candidate.assignedStaffId!==staffId||candidate.status!=="assigned"||candidate.cancelled===true)return;
+      job=candidate;
+      setMyJobs(current=>orderAssignedJobs([...current.filter(item=>item.id!==candidate.id),candidate]));
+    });
+    return job;
   }
   async function fetchTasks():Promise<StaffTask[]>{ if(!functions)return[]; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); return (r.data as {tasks?:StaffTask[]}).tasks??[]; }
   async function loadPrimaryBusinessData(sid=staffId,cid=companyId,uid=user?.uid??""):Promise<boolean>{
@@ -849,7 +901,14 @@ export default function App(){
   }
 
   async function openTask(task:StaffTask){
-    const job=myJobs.find(j=>j.id===task.jobId);
+    if(isSubmissionActionPending()||isPending("task-job"))return;
+    const authVersion=authLoadVersionRef.current;
+    let job=myJobs.find(j=>j.id===task.jobId);
+    if(!job){
+      try{job=await loadTaskJob(task.jobId)??undefined;}
+      catch{if(authVersion===authLoadVersionRef.current)setMessage("対象のシフトを読み込めませんでした。タスクを押して再試行してください。");return;}
+    }
+    if(authVersion!==authLoadVersionRef.current)return;
     if(!job){setMessage("対象の確定シフトを確認できません。シフト画面から案件を選び直してください。");navigate("shifts");return;}
     if(task.kind==="precontact"||task.kind==="netprint"){setSelectedJob(job);navigate("shifts");return;}
     const requestedType=task.kind==="resubmission"?task.metadata?.type:task.kind;
@@ -1138,7 +1197,7 @@ export default function App(){
     {showDevices&&<section className="panel device-panel" aria-busy={deviceActionPending}><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)} disabled={deviceActionPending}>閉じる</button></div><div className="device-list">{deviceActionPending&&!pendingDeviceId&&<div className="empty compact" role="status">端末情報を読み込んでいます…</div>}{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||deviceActionPending} onClick={()=>void revokeDevice(device.id)}>{pendingDeviceId===device.id?"ログアウト中…":"ログアウト"}</button></div>)}{!deviceActionPending&&!devices.length&&<EmptyAction title="端末情報がありません" body="通信状態を確認して、最新の端末情報をもう一度読み込んでください。" action="もう一度読み込む" onAction={()=>void loadDevices()}/>}</div></section>}
     {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite"><div className="section-heading"><div><h2>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<div className="diagnostic-actions">{diagnosticReport&&<><button onClick={()=>void shareDiagnostics()}>結果を共有</button><button className="secondary" onClick={()=>void copyDiagnostics()}>コピー</button></>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>setShowDiagnostics(false)}>閉じる</button></div></section>}
     {view==="home"&&<>
-      <section className="hero-card"><div className="section-heading compact-heading"><h2>今日やること</h2><span className={`refresh-status ${businessDataSource}`}>{businessRefreshing?"自動更新中…":businessDataSource==="cached"?"前回データ":businessDataSource==="live"?"最新":"確認中"}</span></div>{businessDataFallback??(tasks.length?<><p>{taskSummary}</p><div className="task-list">{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)}><strong>{task.title}</strong><span>{task.body}</span></button>)}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</div></>:<div className="task-clear" role="status"><span aria-hidden="true">✓</span><div><strong>今日の対応はすべて完了しています</strong><small>新しい対応が届くと、ここに表示されます。</small></div></div>)}</section>
+      <section className="hero-card"><div className="section-heading compact-heading"><h2>今日やること</h2><span className={`refresh-status ${businessDataSource}`}>{businessRefreshing?"自動更新中…":businessDataSource==="cached"?"前回データ":businessDataSource==="live"?"最新":"確認中"}</span></div>{businessDataFallback??(tasks.length?<><p>{taskSummary}</p><div className="task-list">{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)} disabled={submissionEditPending} aria-busy={isPending("task-job")}><strong>{task.title}</strong><span>{task.body}</span></button>)}{tasks.length>5&&<button className="secondary task-list-toggle" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</div></>:<div className="task-clear" role="status"><span aria-hidden="true">✓</span><div><strong>今日の対応はすべて完了しています</strong><small>新しい対応が届くと、ここに表示されます。</small></div></div>)}</section>
       <section><h2>次回シフト</h2>{businessDataFallback??(nextShift?<article className="job shift-job" style={{"--job-accent":jobAccent(nextShift.menuName)} as CSSProperties}><span className="date">{nextShift.workDate||nextShift.dateKey}</span><span className="job-kind">{jobKind(nextShift.menuName)}</span><h3>{nextShift.storeName}</h3><p>{nextShift.makerName} / {nextShift.menuName}</p><span className="prep-chip">{prepSummary(nextShift)}</span><button onClick={()=>{setSelectedJob(nextShift);navigate("shifts")}}>シフトを開く</button></article>:<div className="home-shift-empty"><strong>確定シフトはありません</strong><button className="secondary" onClick={()=>navigate("jobs")}>募集案件を見る</button></div>)}</section>
       <section className={`panel push-panel ${pushEnabled?"enabled":""}`} aria-busy={pushActionPending}><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><div className="push-summary-actions"><span className={pushEnabled?"push-status enabled":"push-status"}>{pushEnabled?"通知ON":currentPushPermission()==="denied"?"端末で拒否中":"通知OFF"}</span>{pushEnabled&&<button className="ghost push-settings-toggle" aria-expanded={showPushActions} aria-controls="push-enabled-actions" onClick={()=>setShowPushActions(value=>!value)} disabled={pushActionPending}>{showPushActions?"閉じる":"設定"}</button>}</div></div>{!pushEnabled?<div className="push-actions"><button onClick={()=>void enablePush()} disabled={pushActionPending}>{pendingPushAction==="enable"?"処理中…":"通知を有効にする"}</button></div>:showPushActions&&<div id="push-enabled-actions" className="push-actions"><button className="secondary" onClick={()=>void requestPushTest()} disabled={pushActionPending}>{pendingPushAction==="test"?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={pushActionPending}>{pendingPushAction==="disable"?"処理中…":"通知OFF"}</button></div>}</section>
     </>}
@@ -1150,9 +1209,13 @@ export default function App(){
         {upcomingShifts.length
           ? <div className="grid">{upcomingShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>
           : <EmptyAction title="今後の確定シフトはありません" body="募集中の案件を確認すると、次の仕事へすぐ進めます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>}
-        {pastShifts.length>0&&<div className="past-shifts">
+        {(pastShifts.length>0||hasMorePastShifts)&&<div className="past-shifts">
           {upcomingShifts.length>0?<button className="secondary past-shifts-toggle" aria-expanded={showPastShifts} aria-controls="past-shifts-list" onClick={()=>setShowPastShifts(value=>!value)}>{showPastShifts?"過去のシフトを閉じる":`過去のシフトを見る（${pastShifts.length}件）`}</button>:<div className="shift-list-heading past"><h3>過去のシフト</h3><span>{pastShifts.length}件</span></div>}
           {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list" className="grid past-shift-grid">{pastShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>}
+        </div>}
+        {(showPastShifts||!upcomingShifts.length)&&<div className="past-shift-pagination">
+          {hasMorePastShifts&&<><p>過去のシフトは古い順に50件ずつ追加します。</p><button className="secondary" onClick={()=>void loadMorePastShifts()} disabled={isPending("past-shifts")||businessRefreshing} aria-busy={isPending("past-shifts")}>{isPending("past-shifts")?"読み込み中…":"過去のシフトを続きを読み込む"}</button></>}
+          {pastShiftMessage&&<p role="alert">{pastShiftMessage}</p>}
         </div>}
         {selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending||submissionContextPending||draftHydrating}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)} disabled={shiftActionPending}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)} disabled={shiftActionPending}/></label></div><button onClick={()=>void submitPreContact()} disabled={shiftActionPending}>{pendingShiftAction==="preContact"?"送信中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||shiftActionPending} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)} disabled={submissionEditPending}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)} disabled={submissionEditPending}>📝 報告書を提出</button></div></section>}
       </>}

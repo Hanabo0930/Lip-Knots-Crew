@@ -240,3 +240,7 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 @media(max-width:420px){ .submission-type-picker>div{grid-template-columns:1fr;} .history-grid{grid-template-columns:minmax(0,1fr);} .submission-identity{align-items:flex-start;flex-direction:column;} .submission-identity strong{text-align:left;} }
 .preview-placeholder button,.preview-error button { max-width:100%; white-space:normal; overflow-wrap:anywhere; }
 @media(prefers-reduced-motion:reduce){ button,.shift-job,.preview-image.loaded{transition:none;} .preview-skeleton{animation:none;} }
+
+.past-shift-pagination { margin:16px 0; }
+.past-shift-pagination p { color:#65545f; font-size:14px; }
+.past-shift-pagination button { min-height:48px; white-space:normal; }

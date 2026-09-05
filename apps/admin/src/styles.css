@@ -1052,3 +1052,16 @@ button.compact { padding:7px 9px; font-size:11px; white-space:nowrap; }
 .risk-medium { background:#f1c453; color:#57420c; }
 .risk-low { background:#d9ead3; color:#38761d; }
 @media(max-width:650px) { .gas-upload-zone { flex-direction:column; align-items:stretch; } .gas-score { flex-wrap:wrap; } .gas-score small { margin-left:0; width:100%; } }
+
+/* 業務切替は狭幅でも操作を隠さず、非表示パネルを読み上げ対象から外す。 */
+.workspace-panel[hidden] { display:none; }
+.workspace-panel { min-width:0; }
+.workspace-nav { display:flex; flex-wrap:wrap; gap:8px; padding:12px; margin-bottom:12px; border:1px solid #e5ded8; border-radius:16px; background:white; }
+.workspace-nav button { flex:1 1 130px; min-height:48px; background:#f6f0f2; color:#5f4b44; }
+.workspace-nav button[aria-pressed="true"] { background:#88516a; color:white; }
+.workspace-nav button:focus-visible,.workspace-shortcuts button:focus-visible { outline:3px solid #356f9e; outline-offset:3px; }
+.workspace-description { color:#695850; line-height:1.6; margin:12px 0 18px; }
+.workspace-shortcuts { display:flex; flex-wrap:wrap; gap:8px; }
+.workspace-shortcuts button { min-height:48px; }
+@media(max-width:600px){ .workspace-nav button{flex-basis:110px;} .workspace-panel .section-heading{flex-wrap:wrap;} .workspace-panel input,.workspace-panel select,.workspace-panel textarea{max-width:100%;min-width:0;} }
+.analytics-split>div,.performance-split>div { min-width:0; }

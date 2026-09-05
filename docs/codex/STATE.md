@@ -1,5 +1,17 @@
 # 現在地・履歴・承認
 
+## Hドライブへの集約とAdmin改善（最新・2026-09-05）
+
+ユーザーの明示指示により、開発の正本は `H:/マイドライブ/アプリ開発/Lip-Knots-Crew-Codex/Lip-Knots-Crew-git` に統一。下記の「Cドライブを開発checkoutとする」という過去の案内は撤回する。
+
+- 最新ソース・Git履歴・引継ぎ・前回と今回の画像証跡・依存一式はH内に保存。入口は親フォルダの `CODEX_START_HERE.md`。
+- `release-evidence/environment` に固定依存のアーカイブとlockfile照合情報を保存。Drive上での大量ファイル展開を避け、`scripts/test-windows-local.ps1` がHのソースから一時検証キャッシュを生成する。編集・commit・pushはHで行い、キャッシュからソースを戻さない。
+- `release-evidence/batch49` に検証ログ、変更前後の測定JSON、画面PNG、ビルド成果物を保存。旧Cフォルダを開く必要はない。元の配布版とZIPは削除していない。
+- Adminの20パネルを5業務へ整理。入力保持、案件→経費の導線、運用情報11件の必要時読込、認証変更後の応答破棄・取得データ消去、部分失敗からの再試行を追加。全体停止判定の取得は起動時に残した。
+- ローカル型・ビルド・起動・容量・Staff回帰・Staff/Adminブラウザ検査成功。最新PR CIはPR #95を確認。この記録時点では今回分をまだpushしていない。
+- mainマージ・デプロイ・クラウドデータ変更は未実施。以前のPR #94承認をPR #95へ流用しない。
+
+
 ## 2026-09-05 Codex再開後の更新（以下の旧スナップショットより優先）
 
 - PR [#95](https://github.com/Hanabo0930/Lip-Knots-Crew/pull/95) はDraft・未マージ。再開時Headは `cb980b6b3b833e3a9c4622bd68dd3973c09640b7`、mainは従来の `94e9fb9c73f8be47c30da2c0335f853cfd0bd2b4`。既存PR CIの3ジョブ成功を再確認。

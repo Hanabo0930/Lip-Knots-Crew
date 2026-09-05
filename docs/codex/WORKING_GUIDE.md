@@ -1,5 +1,14 @@
 # Codex作業・検証手順
 
+## 正本と検証場所（最新）
+
+- 正本はHドライブの `アプリ開発/Lip-Knots-Crew-Codex/Lip-Knots-Crew-git`。Cドライブの旧checkoutを開発元にしない。
+- Windowsでは `pwsh -File scripts/test-windows-local.ps1` をHの正本から実行する。Hに保存した固定依存とlockfileを照合し、一時キャッシュでStaff/Adminをビルド・ブラウザ検査して、Hの `release-evidence/batch49` へ結果を保存する。
+- キャッシュは再生成可能な実行用コピー。ソース変更・Git操作・資料更新はH側だけで行う。依存アーカイブはWindows/Node22用で、GitHubへはアップロードしない。
+- `node scripts/test-admin-workspace.mjs --browser` はビルド済みAdminのデモを検査する。実設定があれば停止し、ブラウザからの外部通信も遮断する。
+- GitHub CIはクリーンなLinux環境で固定lockfileから依存を導入し、StaffとAdminの両ブラウザ検査を実行する。
+
+
 ## Windowsでの再開結果
 
 - Google Drive上でnpmの展開にUNKNOWN/EBADFが出る場合、通常のローカルディスクへ独立cloneして検証する。配布版へ上書きしない。

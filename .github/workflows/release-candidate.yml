@@ -45,7 +45,9 @@ jobs:
       - name: Install browser for local-only Staff demo checks
         run: npx playwright install --with-deps chromium --only-shell
       - name: Validate Staff browser recovery and layout
-        run: node scripts/test-staff-submission-flow.mjs --browser
+        run: |
+          node scripts/test-staff-submission-flow.mjs --browser
+          node scripts/test-admin-workspace.mjs --browser
       - name: Run release orchestration regressions
         run: |
           npm run test:preview-demo

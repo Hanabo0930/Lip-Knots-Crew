@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import {
   GoogleAuthProvider,
   onAuthStateChanged,
@@ -792,8 +792,32 @@ const demoDashboard: DashboardData = {
   ],
 };
 
+type AdminWorkspace = "overview" | "jobs" | "submissions" | "staff" | "operations";
+const adminWorkspaces: {id:AdminWorkspace;label:string;description:string}[] = [
+  {id:"overview",label:"概要",description:"未対応の業務と今月の状況を確認します。"},
+  {id:"jobs",label:"案件",description:"募集・編集・キャンセルと資料の出力を行います。"},
+  {id:"submissions",label:"報告書・再提出",description:"提出画像の確認、経費入力、再提出依頼を行います。"},
+  {id:"staff",label:"スタッフ",description:"登録情報・稼働実績・ログイン端末を確認します。"},
+  {id:"operations",label:"通知・運用",description:"通知・同期・導入・公開の設定を確認します。"},
+];
+function WorkspacePanel({group,active,visited,ready,children}:{group:AdminWorkspace;active:AdminWorkspace;visited:AdminWorkspace[];ready:boolean;children:ReactNode}) {
+  // 初回表示までマウントせず、切替後は入力内容と選択状態を保持する。
+  if(!visited.includes(group)||!ready)return null;
+  return <div className="workspace-panel" hidden={active!==group}>{children}</div>;
+}
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [workspace,setWorkspace]=useState<AdminWorkspace>("overview");
+  const [visitedWorkspaces,setVisitedWorkspaces]=useState<AdminWorkspace[]>(["overview"]);
+  const [adminSessionReady,setAdminSessionReady]=useState(!firebaseConfigured);
+  const [operationsLoadState,setOperationsLoadState]=useState<"idle"|"loading"|"ready"|"error">("idle");
+  const [operationsRetry,setOperationsRetry]=useState(0);
+  const operationsRequested=visitedWorkspaces.includes("operations");
+  function openWorkspace(next:AdminWorkspace){
+    setVisitedWorkspaces(current=>current.includes(next)?current:[...current,next]);
+    setWorkspace(next);
+  }
   const [jobs, setJobs] = useState<Job[]>(firebaseConfigured ? [] : demoJobs);
   const [message, setMessage] = useState("");
   const [queryText, setQueryText] = useState("");
@@ -946,6 +970,7 @@ const [monthBusy, setMonthBusy] = useState(false);
     let cancelDeferredLoads:(()=>void)|null=null;
     const unsubscribe=onAuthStateChanged(activeAuth, (current) => {
       const currentRun=++authRun;
+      setAdminSessionReady(false);
       const nextUid=current?.uid??null;
       const isCurrentRun=()=>(
         !cancelled &&
@@ -954,6 +979,33 @@ const [monthBusy, setMonthBusy] = useState(false);
       );
       if(activeUid!==nextUid){
         activeUid=nextUid;
+        setWorkspace("overview");
+        setVisitedWorkspaces(["overview"]);
+        setOperationsLoadState("idle");
+        setMonthHistory([]);
+        setPilotReadiness(firebaseConfigured ? { ...demoPilotReadiness, checks:[] } : demoPilotReadiness);
+        setPilotBusy(false);
+        setPilotRolloutStatus(null);
+        setPilotExpansion(null);
+        setStagedRollout(null);
+        setProductionRehearsal(null);
+        setRehearsalMetrics(blankRehearsalMetrics);
+        setProductionCutover(firebaseConfigured?null:demoProductionCutover);
+        setCutoverReadiness(blankCutoverReadiness);
+        setCutoverReadinessEvidence("evidence/change-freeze.md\nevidence/rollback-owner.md\nevidence/monitoring-dashboard.url");
+        setCutoverObservation(blankCutoverObservation);
+        setProductionSlo(firebaseConfigured?null:demoProductionSlo);
+        setSloPolicy(defaultSloPolicy);
+        setIncidentOwner("");
+        setTelemetryStatus(firebaseConfigured?null:demoTelemetryStatus);
+        setTelemetryProjectId(firebaseConfigured?"":"lip-knots-production");
+        setTelemetryEnabled(!firebaseConfigured);
+        setTelemetryMetrics(defaultTelemetryMetrics);
+        setDeploymentReadinessBusy(false);
+        setDeploymentReadiness(firebaseConfigured?null:demoDeploymentReadiness);
+        setProductionEvidenceBusy(false);
+        setProductionEvidenceStatus({configured:!firebaseConfigured,environment:"production",releaseId:"v5.6.0",evidence:null});
+        setProductionControl(null);
         setJobs([]);
         setStaff([]);
         setSheetIssues([]);
@@ -999,24 +1051,14 @@ const [monthBusy, setMonthBusy] = useState(false);
           if(primaryFailure?.status==="rejected"){
             setMessage(primaryFailure.reason instanceof Error?primaryFailure.reason.message:String(primaryFailure.reason));
           }
+          setAdminSessionReady(true);
           cancelDeferredLoads=scheduleWhenIdle(()=>{
             if(!isCurrentRun())return;
             void Promise.allSettled([
               import("./push")
                 .then(({loadServerPushStatus})=>loadServerPushStatus(activeFunctions))
                 .then((enabled)=>{if(isCurrentRun())setPushEnabled(enabled);}),
-              loadPilotReadiness(isCurrentRun),
-              loadPilotRolloutStatus(isCurrentRun),
-              loadPilotExpansionReview(undefined,isCurrentRun),
-              loadStagedRolloutStatus(undefined,isCurrentRun),
               loadProductionControlStatus(isCurrentRun),
-              loadProductionRehearsalStatus(undefined,isCurrentRun),
-              loadProductionCutoverStatus(undefined,isCurrentRun),
-              loadProductionSloDashboard(isCurrentRun),
-              loadProductionTelemetryStatus(isCurrentRun),
-              loadProductionDeploymentReadiness(isCurrentRun),
-              loadProductionReleaseEvidenceStatus(true,isCurrentRun),
-              loadMonthHistory(isCurrentRun),
             ]);
           });
         }catch(error){
@@ -1032,6 +1074,34 @@ const [monthBusy, setMonthBusy] = useState(false);
     };
   }, []);
 
+
+  // 運用情報は画面を開いたときだけ取得し、認証が変わった応答を破棄する。
+  useEffect(()=>{
+    if(!operationsRequested||!adminSessionReady)return;
+    if(!firebaseConfigured){setOperationsLoadState("ready");return;}
+    if(!user||!functions)return;
+    let cancelled=false;
+    const currentUid=user.uid;
+    const isCurrentRun=()=>!cancelled&&auth?.currentUser?.uid===currentUid;
+    setOperationsLoadState("loading");
+    void Promise.allSettled([
+      loadPilotReadiness(isCurrentRun),
+      loadPilotRolloutStatus(isCurrentRun),
+      loadPilotExpansionReview(undefined,isCurrentRun),
+      loadStagedRolloutStatus(undefined,isCurrentRun),
+      loadProductionRehearsalStatus(undefined,isCurrentRun),
+      loadProductionCutoverStatus(undefined,isCurrentRun),
+      loadProductionSloDashboard(isCurrentRun),
+      loadProductionTelemetryStatus(isCurrentRun),
+      loadProductionDeploymentReadiness(isCurrentRun),
+      loadProductionReleaseEvidenceStatus(true,isCurrentRun),
+      loadMonthHistory(isCurrentRun),
+    ]).then(results=>{
+      if(!isCurrentRun())return;
+      setOperationsLoadState(results.some(result=>result.status==="rejected")?"error":"ready");
+    });
+    return()=>{cancelled=true;};
+  },[user,adminSessionReady,operationsRequested,operationsRetry]);
 
   useEffect(() => {
     if (!user || !selectedAdminJobId) return;
@@ -1248,7 +1318,7 @@ async function loadMonthHistory(guard?:AuthRunGuard) {
     const response=await callable({});
     if(!canApplyAuthResult(guard))return;
     setMonthHistory((response.data as {runs?:MonthHistoryRun[]}).runs ?? []);
-  } catch(error) {
+  } catch(error) {if(guard)throw error;
     if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
   }
 }
@@ -1419,7 +1489,7 @@ async function loadPilotReadiness(guard?:AuthRunGuard) {
     const response = await callable({});
     if(!canApplyAuthResult(guard))return;
     setPilotReadiness(response.data as PilotReadiness);
-  } catch (error) {
+  } catch (error) {if(guard)throw error;
     if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
   } finally {
     if(!guard)setPilotBusy(false);
@@ -1622,7 +1692,7 @@ async function previewRowCreation() {
       const response = await callable({});
       if(!canApplyAuthResult(guard))return;
       setPilotRolloutStatus((response.data as { rollout?:PilotRolloutStatus|null }).rollout ?? null);
-    } catch (error) {
+    } catch (error) {if(guard)throw error;
       if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
     }
   }
@@ -1634,7 +1704,7 @@ async function previewRowCreation() {
       const response = await callable(rolloutId ? {rolloutId} : {});
       if(!canApplyAuthResult(guard))return;
       setPilotExpansion(response.data as PilotExpansionData);
-    } catch (error) {
+    } catch (error) {if(guard)throw error;
       if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
     }
   }
@@ -1646,7 +1716,7 @@ async function previewRowCreation() {
       const response = await callable(stagedRolloutId ? {stagedRolloutId} : {});
       if(!canApplyAuthResult(guard))return;
       setStagedRollout((response.data as {rollout?:StagedRolloutData|null}).rollout ?? null);
-    } catch (error) {
+    } catch (error) {if(guard)throw error;
       if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
     }
   }
@@ -1676,7 +1746,7 @@ async function previewRowCreation() {
       if(!canApplyAuthResult(guard))return;
       setProductionRehearsal(rehearsal);
       if(rehearsal?.metrics)setRehearsalMetrics(rehearsal.metrics);
-    }catch(error){if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
+    }catch(error){if(guard)throw error;if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
   }
 
   async function loadProductionCutoverStatus(runId?:string,guard?:AuthRunGuard) {
@@ -1685,7 +1755,7 @@ async function previewRowCreation() {
       const callable=httpsCallable(functions,"getProductionCutoverStatus");
       const response=await callable(runId?{runId}:{});const cutover=(response.data as {cutover?:ProductionCutoverData|null}).cutover??null;if(!canApplyAuthResult(guard))return;setProductionCutover(cutover);
       if(cutover){const{signedApprovalReady:_,...manual}=cutover.readiness;setCutoverReadiness(manual);if(cutover.readinessEvidenceRefs.length)setCutoverReadinessEvidence(cutover.readinessEvidenceRefs.join("\n"));if(cutover.lastObservation){const{observedAtMs:__,...observation}=cutover.lastObservation;setCutoverObservation(observation);}}
-    }catch(error){if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
+    }catch(error){if(guard)throw error;if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
   }
 
   async function createCutover() {
@@ -1722,22 +1792,22 @@ async function previewRowCreation() {
 
   async function loadProductionSloDashboard(guard?:AuthRunGuard) {
     if(!firebaseConfigured||!functions)return;
-    try{const callable=httpsCallable(functions,"getProductionSloDashboard");const response=await callable({});const data=response.data as ProductionSloDashboard;if(!canApplyAuthResult(guard))return;setProductionSlo(data);if(data.policy)setSloPolicy(data.policy);if(data.openIncident?.ownerName)setIncidentOwner(data.openIncident.ownerName);}catch(error){if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
+    try{const callable=httpsCallable(functions,"getProductionSloDashboard");const response=await callable({});const data=response.data as ProductionSloDashboard;if(!canApplyAuthResult(guard))return;setProductionSlo(data);if(data.policy)setSloPolicy(data.policy);if(data.openIncident?.ownerName)setIncidentOwner(data.openIncident.ownerName);}catch(error){if(guard)throw error;if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
   }
 
   async function loadProductionTelemetryStatus(guard?:AuthRunGuard) {
     if(!firebaseConfigured||!functions)return;
-    try{const callable=httpsCallable(functions,"getProductionTelemetryStatus");const response=await callable({});const data=response.data as ProductionTelemetryStatus;if(!canApplyAuthResult(guard))return;setTelemetryStatus(data);setTelemetryProjectId(data.projectId);setTelemetryEnabled(data.enabled);setTelemetryMetrics(data.metrics);}catch(error){if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
+    try{const callable=httpsCallable(functions,"getProductionTelemetryStatus");const response=await callable({});const data=response.data as ProductionTelemetryStatus;if(!canApplyAuthResult(guard))return;setTelemetryStatus(data);setTelemetryProjectId(data.projectId);setTelemetryEnabled(data.enabled);setTelemetryMetrics(data.metrics);}catch(error){if(guard)throw error;if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}
   }
 
   async function loadProductionDeploymentReadiness(guard?:AuthRunGuard) {
     if(!firebaseConfigured||!functions)return;if(!guard)setDeploymentReadinessBusy(true);
-    try{const callable=httpsCallable(functions,"getProductionDeploymentReadiness");const response=await callable({});if(!canApplyAuthResult(guard))return;setDeploymentReadiness(response.data as ProductionDeploymentReadiness);}catch(error){if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}finally{if(!guard)setDeploymentReadinessBusy(false);}
+    try{const callable=httpsCallable(functions,"getProductionDeploymentReadiness");const response=await callable({});if(!canApplyAuthResult(guard))return;setDeploymentReadiness(response.data as ProductionDeploymentReadiness);}catch(error){if(guard)throw error;if(canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}finally{if(!guard)setDeploymentReadinessBusy(false);}
   }
 
   async function loadProductionReleaseEvidenceStatus(silent=false,guard?:AuthRunGuard) {
     if(!firebaseConfigured||!functions)return;if(!silent)setProductionEvidenceBusy(true);
-    try{const callable=httpsCallable(functions,"getProductionReleaseEvidenceStatus");const response=await callable({});if(!canApplyAuthResult(guard))return;setProductionEvidenceStatus(response.data as ProductionEvidenceView);}catch(error){if(!silent&&canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}finally{if(!silent&&!guard)setProductionEvidenceBusy(false);}
+    try{const callable=httpsCallable(functions,"getProductionReleaseEvidenceStatus");const response=await callable({});if(!canApplyAuthResult(guard))return;setProductionEvidenceStatus(response.data as ProductionEvidenceView);}catch(error){if(guard)throw error;if(!silent&&canApplyAuthResult(guard))setMessage(error instanceof Error?error.message:String(error));}finally{if(!silent&&!guard)setProductionEvidenceBusy(false);}
   }
 
   async function importProductionEvidencePackage(file:File) {
@@ -2561,6 +2631,7 @@ async function previewRowCreation() {
   }
 
   async function loadExpenseReview(jobId:string) {
+    openWorkspace("submissions");
     setExpenseJobId(jobId);
     if (!jobId) return;
     if (!firebaseConfigured) {
@@ -3052,7 +3123,7 @@ function downloadCsv(filename:string,content:string) {
           </div>
         )}
       </header>
-      {!firebaseConfigured&&<div className="demo-mode-banner"><strong>LIVE DEMO v5.6</strong><span>実データ送信なし。最新の本番監視・SLO・切替画面をそのまま確認できます。</span></div>}
+      {!firebaseConfigured&&<div className="demo-mode-banner"><strong>LIVE DEMO v5.6</strong><span>実データ送信なし。案件・報告書・スタッフの業務画面を確認できます。</span></div>}
       {message && <div className="message">{message}</div>}
       {productionBlocked && (
         <div className={`production-stop-banner ${productionControl?.control.emergencyLock ? "locked" : "waiting"}`}>
@@ -3060,7 +3131,29 @@ function downloadCsv(filename:string,content:string) {
           <span>{productionControl?.control.emergencyLock ? "アプリから解除できません。復旧リリースが必要です。" : "社長承認と別管理者による有効化が完了するまで業務処理は停止します。"}</span>
         </div>
       )}
-      <section className="panel production-control-panel">
+      <nav className="workspace-nav" aria-label="管理業務">
+        {adminWorkspaces.map(item=><button type="button" key={item.id} aria-pressed={workspace===item.id} onClick={()=>openWorkspace(item.id)}>{item.label}</button>)}
+      </nav>
+      <p className="workspace-description" role="status">{adminWorkspaces.find(item=>item.id===workspace)?.description}</p>
+      {workspace==="operations"&&firebaseConfigured&&operationsLoadState!=="ready"&&<section className="panel" role="status">
+        {operationsLoadState==="error"?<><p>一部の運用情報を読み込めませんでした。取得できた情報だけ表示しています。通信状態を確認して、もう一度お試しください。</p><button onClick={()=>setOperationsRetry(value=>value+1)}>もう一度読み込む</button></>:<p>運用情報を読み込んでいます…</p>}
+      </section>}
+<WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="two">
+        <article className="panel">
+          <h2>今すぐ確認</h2>
+          <p>事前連絡 未確認 <strong>{unresolved}件</strong></p>
+          <p>再提出 確認待ち <strong>{pendingResubmissions}件</strong></p>
+          <p>スプシ書込 要確認 <strong>{actionableSheetIssues}件</strong></p>
+          <div className="workspace-shortcuts"><button onClick={()=>openWorkspace("jobs")}>案件を確認</button><button onClick={()=>openWorkspace("submissions")}>報告書・再提出を確認</button></div>
+        </article>
+        <article className="panel">
+          <h2>{dashboardMonth}の概算</h2>
+          <p>請求予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedInvoice):"集計待ち"}</strong></p>
+          <p>支払予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedPayment):"集計待ち"}</strong></p>
+          <p>粗利予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedGrossProfit):"集計待ち"}</strong></p>
+        </article>
+      </section></WorkspacePanel>
+      <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel production-control-panel">
         <div className="production-control-head">
           <div>
             <h2>本番公開承認・全体停止</h2>
@@ -3304,8 +3397,8 @@ function downloadCsv(filename:string,content:string) {
           <button className="danger kill-switch" onClick={activateKillSwitch} disabled={productionBusy||productionControl?.control.emergencyLock}>全体停止を作動</button>
         </div>
         <div className="production-actions"><button className="ghost" onClick={()=>loadProductionControlStatus()} disabled={productionBusy}>状態を再読込</button><small>環境：{productionControl?.environment??"demo"} / generation {productionControl?.control.generation??0}</small></div>
-      </section>
-      <section className="panel push-panel">
+      </section></WorkspacePanel>
+      <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel push-panel">
         <div className="sync-head">
           <div>
             <h2>管理者プッシュ通知</h2>
@@ -3325,9 +3418,9 @@ function downloadCsv(filename:string,content:string) {
             </>
           )}
         </div>
-      </section>
+      </section></WorkspacePanel>
 
-<section className="panel pilot-panel">
+<WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel pilot-panel">
   <div className="sync-head">
     <div>
       <h2>本番導入チェック</h2>
@@ -3381,9 +3474,9 @@ function downloadCsv(filename:string,content:string) {
       本番ONの前にすべて解消してください。
     </div>
   )}
-</section>
+</section></WorkspacePanel>
 
-      <section className="panel analytics-panel">
+      <WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel analytics-panel">
         <div className="section-heading">
           <div>
             <h2>経営ダッシュボード</h2>
@@ -3424,18 +3517,18 @@ function downloadCsv(filename:string,content:string) {
           </div>
         </div>
         <p className="analytics-note">概算です。S～Z合計、AK～AN、AW～AYを請求側、ARまたはBBを支払側として集計し、税・源泉等は含みません。</p>
-      </section>
+      </section></WorkspacePanel>
 
-      <section className="kpis">
+      <WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="kpis">
         <article><small>今日の案件</small><strong>{jobs.length}件</strong></article>
         <article><small>事前連絡 未送信</small><strong>{unresolved}件</strong></article>
         <article><small>今月売上（概算）</small><strong>{yen(monthly.finance.bookedInvoice)}</strong></article>
         <article><small>粗利率（概算）</small><strong>{percent(monthly.finance.bookedGrossMargin)}</strong></article>
         <article><small>現役スタッフ</small><strong>{staff.filter((profile) => profile.active !== false).length}名</strong></article>
         <article><small>書込エラー</small><strong>{sheetIssues.length}件</strong></article>
-      </section>
+      </section></WorkspacePanel>
 
-      <section className="panel issue-panel">
+      <WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel issue-panel">
         <div className="sync-head">
           <div>
             <h2>スプシ書込エラー・競合</h2>
@@ -3463,9 +3556,9 @@ function downloadCsv(filename:string,content:string) {
           ))}
           {!sheetIssues.length && <div className="empty-inline">書込エラーはありません。</div>}
         </div>
-      </section>
+      </section></WorkspacePanel>
 
-      <section className="panel sync-panel">
+      <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel sync-panel">
         <div className="sync-head">
           <div>
             <h2>スプシ同期</h2>
@@ -3481,9 +3574,9 @@ function downloadCsv(filename:string,content:string) {
             Firestoreへ同期
           </button>
         </div>
-      </section>
+      </section></WorkspacePanel>
 
-      <section className="panel sync-panel">
+      <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel sync-panel">
         <div className="sync-head">
           <div>
             <h2>スタッフ名簿同期</h2>
@@ -3499,10 +3592,10 @@ function downloadCsv(filename:string,content:string) {
             スタッフ名簿を同期
           </button>
         </div>
-      </section>
+      </section></WorkspacePanel>
 
 
-<section className="panel job-create-panel">
+<WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel job-create-panel">
   <div className="section-heading">
     <div>
       <h2>案件を追加</h2>
@@ -3533,9 +3626,9 @@ function downloadCsv(filename:string,content:string) {
   <div className="locked-note">📍 住所と最寄駅はアプリで管理し、スタッフ画面の地図・公共交通経路に自動反映します。
   </div>
   <div className="sync-actions"><button onClick={createJobGroup} disabled={jobCreateBusy}>{jobCreateBusy?"作成中…":"案件を作成"}</button></div>
-</section>
+</section></WorkspacePanel>
 
-<section className="panel export-panel">
+<WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel export-panel">
   <div className="section-heading">
     <div><h2>メーカー・クライアント別資料</h2><p>期間と対象を選び、案件・請求・支払・粗利のCSVを出力します。</p></div>
   </div>
@@ -3547,9 +3640,9 @@ function downloadCsv(filename:string,content:string) {
     <label className="check-line"><input type="checkbox" checked={exportIncludeCancelled} onChange={(e)=>setExportIncludeCancelled(e.target.checked)} />キャンセルを含む</label>
     <button onClick={exportJobs} disabled={exportBusy}>{exportBusy?"作成中…":"CSVを出力"}</button>
   </div>
-</section>
+</section></WorkspacePanel>
 
-      <section className="panel">
+      <WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel">
         <div className="toolbar">
           <input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder="スタッフ名・店舗・メーカー・クライアントを検索" />
           <button onClick={() => setMessage(`${filtered.length}件見つかりました。`)}>検索</button>
@@ -3590,10 +3683,10 @@ function downloadCsv(filename:string,content:string) {
             </tbody>
           </table>
         </div>
-      </section>
+      </section></WorkspacePanel>
 
 
-<Suspense fallback={null}><JobSafeEditPanel
+<WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={null}><JobSafeEditPanel
   jobs={jobs}
   staff={staff}
   jobEditId={jobEditId}
@@ -3605,9 +3698,9 @@ function downloadCsv(filename:string,content:string) {
   onSelectJob={(jobId)=>{const job=jobs.find((item)=>item.id===jobId);if(job)loadJobEdit(job);}}
   onUpdate={(key,value)=>updateJobEdit(key as keyof JobEditForm,value)}
   onSave={saveJobEdit}
-/></Suspense>
+/></Suspense></WorkspacePanel>
 
-      <section className="panel cancellation-panel" id="cancellation-management">
+      <WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel cancellation-panel" id="cancellation-management">
         <div className="section-heading">
           <div>
             <h2>案件キャンセル管理</h2>
@@ -3655,9 +3748,9 @@ function downloadCsv(filename:string,content:string) {
             </article>)}
           </div>
         )}
-      </section>
+      </section></WorkspacePanel>
 
-      <section className="panel expense-panel">
+      <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel expense-panel">
         <div className="section-heading">
           <div>
             <h2>報告書確認・経費入力</h2>
@@ -3697,9 +3790,9 @@ function downloadCsv(filename:string,content:string) {
           <button onClick={completeExpense} disabled={expenseBusy}>確認完了・書込待ちへ</button>
           <button className="ghost" onClick={()=>{const job=jobs.find((item)=>item.id===expenseJobId);if(job)openJobSheet(job);}}>スプシ該当行</button>
         </div>
-      </section>
+      </section></WorkspacePanel>
 
-      <section className="panel">
+      <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel">
         <div className="section-heading">
           <div>
             <h2>案件の資料・再提出</h2>
@@ -3765,9 +3858,9 @@ function downloadCsv(filename:string,content:string) {
             </div>
           </div>
         )}
-      </section>
+      </section></WorkspacePanel>
 
-      <section className="panel">
+      <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel">
         <div className="sync-head">
           <div>
             <h2>未ログイン者への案内</h2>
@@ -3939,9 +4032,9 @@ function downloadCsv(filename:string,content:string) {
             ))}
           </div>
         )}
-      </section>
+      </section></WorkspacePanel>
 
-      <section className="panel">
+      <WorkspacePanel group="staff" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel">
         <div className="toolbar">
           <input
             value={staffQuery}
@@ -3981,10 +4074,10 @@ function downloadCsv(filename:string,content:string) {
             </tbody>
           </table>
         </div>
-      </section>
+      </section></WorkspacePanel>
 
 
-      {performance && (
+      <WorkspacePanel group="staff" active={workspace} visited={visitedWorkspaces} ready={true}>{performance && (
         <section className="panel performance-panel" id="staff-performance">
           <div className="section-heading">
             <div>
@@ -4011,9 +4104,9 @@ function downloadCsv(filename:string,content:string) {
             <tbody>{performance.performance.recentJobs.slice(0,20).map((job)=><tr key={job.id}><td>{job.dateKey}</td><td>{job.clientName}</td><td>{job.storeName}</td><td>{job.makerName}</td><td>{job.cancelled?"キャンセル":"有効"}</td></tr>)}</tbody></table>
           </div>
         </section>
-      )}
+      )}</WorkspacePanel>
 
-      {!!deviceStaffName && (
+      <WorkspacePanel group="staff" active={workspace} visited={visitedWorkspaces} ready={true}>{!!deviceStaffName && (
         <section className="panel">
           <div className="section-heading">
             <div>
@@ -4032,22 +4125,9 @@ function downloadCsv(filename:string,content:string) {
             {!staffDevices.length && <div>登録端末はありません。</div>}
           </div>
         </section>
-      )}
+      )}</WorkspacePanel>
 
-      <section className="two">
-        <article className="panel">
-          <h2>今すぐ確認</h2>
-          <p>事前連絡 未確認 <strong>{unresolved}件</strong></p>
-          <p>再提出 確認待ち <strong>{pendingResubmissions}件</strong></p>
-          <p>スプシ書込 要確認 <strong>{actionableSheetIssues}件</strong></p>
-        </article>
-        <article className="panel">
-          <h2>{dashboardMonth}の概算</h2>
-          <p>請求予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedInvoice):"集計待ち"}</strong></p>
-          <p>支払予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedPayment):"集計待ち"}</strong></p>
-          <p>粗利予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedGrossProfit):"集計待ち"}</strong></p>
-        </article>
-      </section>
+
     </main>
   );
 }

@@ -39,6 +39,21 @@ assert.equal(filterJobSearchIndex(index,'存在しない','all').length,0);
 assert.equal(filterJobSearchIndex(index,'  ','cancelled').length,2000);
 assert.equal(filterJobSearchIndex(index,'','assigned').length,8000);
 assert.equal(filterJobSearchIndex(index,'','precontact').length,4000);
+const {reportCompletionLabel,submissionStatusLabel}=searchScope.exports;
+const reports=buildJobSearchIndex([
+ {...synthetic[1],id:'done',submissionStatus:{report:{completed:true,lateFirstSubmission:true}}},
+ {...synthetic[1],id:'false',submissionStatus:{report:{completed:false}}},
+ {...synthetic[1],id:'missing'},
+ {...synthetic[1],id:'late-only',submissionStatus:{report:{lateFirstSubmission:true}}},
+ {...synthetic[1],id:'cancelled',cancelled:true,submissionStatus:{report:{completed:true}}},
+ {...synthetic[1],id:'unassigned',status:'open',submissionStatus:{report:{completed:true}}},
+]);
+assert.equal(filterJobSearchIndex(reports,'','report-completed').length,1);
+assert.equal(filterJobSearchIndex(reports,'','report-unconfirmed').length,3);
+assert.equal(reportCompletionLabel(reports[0].job),'完了記録あり');
+assert.equal(reportCompletionLabel(reports[3].job),'完了未確認');
+assert.equal(reportCompletionLabel(reports[4].job),'対象外');
+for(const [status,label] of Object.entries({completed:'処理完了',uploading:'アップロード中',waiting_upload:'アップロード待ち',processing:'保存処理中',error:'処理失敗',security_error:'安全確認で停止',paused_global:'運用停止中',future:'状態未確認',constructor:'状態未確認',toString:'状態未確認'}))assert.equal(submissionStatusLabel(status),label);
 const special=buildJobSearchIndex([{...synthetic[1],cancelled:true},{...synthetic[1],status:'open',preContact:undefined}]);
 assert.equal(filterJobSearchIndex(special,'','precontact').length,0);
 assert.equal(filterJobSearchIndex(special,'','cancelled').length,1);
@@ -143,6 +158,13 @@ try{
   await nav.getByRole('button',{name:'案件',exact:true}).click();
   assert.equal(await page.getByLabel('案件の絞り込み',{exact:true}).inputValue(),'precontact');
   await list.getByRole('button',{name:'条件をクリア',exact:true}).click();
+  await page.getByLabel('案件の絞り込み',{exact:true}).selectOption('report-completed');
+  assert.equal(await list.locator('tbody tr').count(),1);
+  assert.match(await list.locator('tbody').innerText(),/完了記録あり/);
+  await page.getByLabel('案件の絞り込み',{exact:true}).selectOption('report-unconfirmed');
+  assert.equal(await list.locator('tbody tr').count(),2);
+  assert.match(await list.locator('tbody').innerText(),/完了未確認/);
+  await list.getByRole('button',{name:'条件をクリア',exact:true}).click();
   await search.fill('ａさん ２０２６-０７');
   assert.equal(await list.locator('tbody tr').count(),2);
   assert.equal(await list.getByRole('button',{name:'次の50件',exact:true}).isDisabled(),true);
@@ -152,6 +174,7 @@ try{
   await page.getByRole('heading',{name:'報告書確認・経費入力',exact:true}).waitFor();
   assert.equal(await nav.getByRole('button',{name:'報告書・再提出',exact:true}).getAttribute('aria-pressed'),'true');
   const materials=page.locator('section.panel').filter({has:page.getByRole('heading',{name:'案件の資料・再提出',exact:true})});
+  assert.match(await materials.getByLabel('提出ごとの処理状態').innerText(),/処理完了/);
   await materials.locator('.file-card').first().click();
   assert.equal(await materials.locator('.selected-file-note').count(),1);
   await materials.locator('.resubmit-options select').selectOption('sales_floor');

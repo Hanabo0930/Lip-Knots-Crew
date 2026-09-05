@@ -11,7 +11,7 @@ import { auth, db, firebaseConfigured, functions } from "./firebase";
 import { expectedFirebaseProjectId } from "./firebase-config";
 import type { ProductionEvidenceView } from "./ProductionAcceptanceRollbackConsole";
 
-import { reportCompletionLabel, submissionStatusLabel, buildJobSearchIndex, filterJobSearchIndex, jobListPage, type JobListFilter } from "./job-search";
+import { reportCompletionLabel, buildJobSearchIndex, filterJobSearchIndex, jobListPage, type JobListFilter } from "./job-search";
 
 import type { QueryDocumentSnapshot } from "firebase/firestore";
 
@@ -28,7 +28,7 @@ function canApplyAuthResult(guard?:AuthRunGuard):boolean {
 
 const AdminJobPagingControls=lazy(()=>import("./AdminJobPagingControls"));
 const AdminJobSearchControls=lazy(()=>import("./AdminJobSearchControls"));
-const AdminSubmissionPreview=lazy(()=>import("./AdminSubmissionPreview"));
+const AdminSubmissionTimeline=lazy(()=>import("./AdminSubmissionTimeline"));
 const ProductionAcceptanceRollbackConsole = lazy(() => import("./ProductionAcceptanceRollbackConsole"));
 const StoreLocationFields = lazy(() => import("./StoreLocationFields"));
 const JobSafeEditPanel = lazy(() => import("./JobSafeEditPanel"));
@@ -116,11 +116,11 @@ type ResubmissionRequest = {
   reasons:string[]; note?:string; status:string; submittedAt?:string;
 };
 
-type SubmissionFile = {
+export type SubmissionFile = {
   id:string; submissionId:string; originalName:string; driveName:string; contentType:string;
   sequence:number|null; purpose:string; status:string; previewUrl:string|null; completedAt:string|null; replacesFileId:string|null;
 };
-type SubmissionGroup = { id:string; purpose:string; status:string; createdAt:string|null; completedAt:string|null; files:SubmissionFile[] };
+export type SubmissionGroup = { id:string; purpose:string; status:string; createdAt:string|null; completedAt:string|null; files:SubmissionFile[] };
 type ResubmissionComparison = {
   request:{id:string;jobId:string;type:"report"|"sales_floor";reasons:string[];note:string;status:string};
   source:SubmissionFile|null; replacements:SubmissionFile[];
@@ -3952,24 +3952,7 @@ function downloadCsv(filename:string,content:string) {
         </div>
         <hr />
         <h3>提出ファイルから再送対象を選択</h3>
-        <div className="timeline-toolbar">
-          <span>{resubmitType === "report" ? "報告書" : "売場画像"} / {timelineReady?`${submissionTimeline.reduce((sum,group)=>sum+group.files.length,0)}件`:"未確認"}</span>
-          <button className="ghost compact" onClick={loadSubmissionTimeline} disabled={timelineBusy}>{timelineBusy ? "読込中…" : "再読込"}</button>
-        </div>
-        {timelineReady&&submissionTimeline.length>0&&<div className="timeline-status-list" aria-label="提出ごとの処理状態">{submissionTimeline.map(group=><p key={group.id}>{group.purpose==="replacement"?"再提出":"提出"}：{submissionStatusLabel(group.status)}（{group.files.length}ファイル）</p>)}</div>}
-        <div className="file-gallery">
-          {(timelineReady?submissionTimeline:[]).flatMap((group)=>group.files).map((file)=>(
-            <article className={`file-card ${selectedSourceFile?.id===file.id ? "selected" : ""}`} key={`${file.submissionId}_${file.id}`}>
-              <Suspense fallback={<div className="pdf-preview">画像を準備中…</div>}><AdminSubmissionPreview file={file} busy={timelineBusy||resubmissionBusy} onReload={loadSubmissionTimeline}/></Suspense>
-              <strong>{file.driveName || file.originalName}</strong>
-              <small>{file.sequence ? `(${file.sequence})` : ""} {file.purpose==="replacement"?"再提出":"提出"} / {submissionStatusLabel(file.status)}</small>
-              <button type="button" className="ghost" disabled={resubmissionBusy||file.status!=="completed"} aria-pressed={selectedSourceFile?.id===file.id&&selectedSourceFile?.submissionId===file.submissionId} onClick={()=>setSelectedSourceFile(file)}>再送対象に選ぶ</button>
-            </article>
-          ))}
-          {!timelineReady&&<div className="empty-inline" role={timelineStatus==="error"?"alert":"status"}>{timelineStatus==="error"?"提出履歴を取得できませんでした。再読込してください。":timelineBusy?"提出履歴を読み込んでいます…":"提出履歴は未確認です。再読込してください。"}</div>}
-          {timelineReady&&!submissionTimeline.some(group=>group.files.length>0)&&<div className="empty-inline">この履歴で確認できるファイルは0件です。処理状態も確認してください。</div>}
-        </div>
-        {timelineReady&&selectedSourceFile && <div className="selected-file-note">選択中：{selectedSourceFile.driveName || selectedSourceFile.originalName} <button className="ghost compact" onClick={()=>setSelectedSourceFile(null)}>選択解除</button></div>}
+        <Suspense fallback={<p role="status">提出履歴の表示を準備中…</p>}><AdminSubmissionTimeline resubmitType={resubmitType} timelineReady={timelineReady} timelineBusy={timelineBusy} timelineStatus={timelineStatus} submissionTimeline={submissionTimeline} selectedSourceFile={selectedSourceFile} resubmissionBusy={resubmissionBusy} setSelectedSourceFile={setSelectedSourceFile} loadSubmissionTimeline={loadSubmissionTimeline}/></Suspense>
         <h3>再提出理由</h3>
         <div className="resubmit-options">
           <select disabled={resubmissionBusy} value={resubmitType} onChange={(event) => changeReviewType(event.target.value as "report" | "sales_floor")}>
@@ -3981,7 +3964,7 @@ function downloadCsv(filename:string,content:string) {
         </div>
         <textarea disabled={resubmissionBusy} value={resubmitNote} onChange={(event) => setResubmitNote(event.target.value)} placeholder="必要なら補足を入力" />
         <button onClick={createResubmission} disabled={!timelineReady||timelineBusy||resubmissionBusy}>{resubmissionBusy?"依頼中…":selectedSourceFile ? "この画像の再送を依頼する" : "案件全体へ再提出を依頼する"}</button>
-        <button className="ghost" disabled={resubmissionBusy} onClick={()=>void loadResubmissions(()=>auth?.currentUser===user).catch(()=>setMessage("依頼一覧を取得できませんでした。もう一度お試しください。"))}>依頼一覧を再読込</button>
+        <button className="ghost" disabled={resubmissionBusy} onClick={()=>void refreshResubmissionList()}>依頼一覧を再読込</button>
         <div className="resubmit-list">
           {resubmissions.map((item) => (
             <div className="resubmit-row" key={item.id}>

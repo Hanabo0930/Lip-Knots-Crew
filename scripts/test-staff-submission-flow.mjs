@@ -268,6 +268,13 @@ try {
     await page.locator(".bottom-nav").getByRole("button",{name:"ホーム"}).click();
   }
   assert.deepEqual(errors,[]);
+  if(output){
+    await page.setViewportSize({width:390,height:844});
+    for(const [label,file] of [['案件','staff-jobs-390.png'],['連絡','staff-contact-390.png']]){
+      await page.locator('.bottom-nav').getByRole('button',{name:new RegExp(label)}).click();
+      await page.screenshot({path:resolve(output,file),fullPage:true});
+    }
+  }
   await page.setViewportSize({width:320,height:844});
   await page.locator('.bottom-nav').getByRole('button',{name:/提出/}).click();
   await page.addStyleTag({content:':root { font-size:32px; }'});

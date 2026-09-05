@@ -7,7 +7,7 @@ import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, wh
 import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytesResumable } from "firebase/storage";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, storage } from "./firebase";
-import { clearDraft, loadDraft, saveDraft } from "./draft-store";
+import { clearDraft, loadDraft, saveDraft, markDraftSubmitted } from "./draft-store";
 import { submissionDraftKey } from "./submission-draft-key";
 import {
   clearBusinessSnapshot,
@@ -151,7 +151,8 @@ export default function App(){
   const [selectedJob,setSelectedJob]=useState<Job|null>(firebaseConfigured?null:(demoJobs[0]??null)); const [temperature,setTemperature]=useState("36.2"); const [arrivalTime,setArrivalTime]=useState("9:30");
   const [submissionType,setSubmissionType]=useState<SubmissionType>("report"); const [requestId,setRequestId]=useState("");
   const [submissionConfirmed,setSubmissionConfirmed]=useState(false);
-  const [submissionMessage,setSubmissionMessage]=useState("");
+  const [submissionMessage,setSubmissionMessage]=useState("" );
+  const [draftCleanup,setDraftCleanup]=useState<{key:string;durable:boolean}|null>(null);
   const [files,setFiles]=useState<File[]>([]); const [uploadState,setUploadState]=useState<Record<string,string>>({});
   const [draftHydrating,setDraftHydrating]=useState(false);
   const [deviceSessionId,setDeviceSessionId]=useState(""); const [devices,setDevices]=useState<DeviceSession[]>([]); const [showDevices,setShowDevices]=useState(false);
@@ -256,6 +257,7 @@ export default function App(){
     setAuthResolved(true);
     if(firebaseConfigured){
       setCompanyId(""); setStaffId(""); setOpenJobs([]); setMyJobs([]); setTasks([]); setSelectedJob(null);
+      setDraftCleanup(null);
       setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionHistoryStatus("idle"); setSubmissionMessage("");
       setBusinessDataStatus(current?"loading":"idle");
       setBusinessDataSource("none");
@@ -998,16 +1000,35 @@ export default function App(){
           if(isCurrentUpload())setUploadState(current=>({...current,[key]:"送信済み"}));
         });
         if(!isCurrentUpload())return;
-        await clearDraft(draftKey);
-        if(!isCurrentUpload())return;
+        const durable=markDraftSubmitted(draftKey);
+        skipNextDraftSaveRef.current=true;
         setFiles([]);
         setSubmissionConfirmed(false);
+        setDraftCleanup({key:draftKey,durable});
         showSubmissionMessage(`${typeLabel}を送信しました。Drive転送を処理中です…`);
         void pollSubmissionProcessing(jobId,data.submissionId,currentType,currentRequestId);
+        try{
+          await clearDraft(draftKey);
+          if(!isCurrentUpload())return;
+          setDraftCleanup(null);
+        }catch{
+          // 送信済み。端末の後片付け失敗をアップロード失敗として扱わない。
+        }
       },{setMessage:value=>{if(isCurrentUpload())showSubmissionMessage(value);}});
     }catch{return;}
   }
 
+  async function retryDraftCleanup(){
+    if(!draftCleanup||isPending("draft-cleanup")||isPending("uploadSubmission"))return;
+    const target=draftCleanup;
+    const authVersion=authLoadVersionRef.current;
+    try{
+      await run("draft-cleanup",async()=>{
+        await clearDraft(target.key);
+        if(authVersion===authLoadVersionRef.current)setDraftCleanup(current=>current===target?null:current);
+      });
+    }catch{ /* 警告を残して、後から同じ操作を再試行できるようにする。 */ }
+  }
   async function loadSubmissionHistory(jobId:string,type:SubmissionType,authLoadVersion=authLoadVersionRef.current):Promise<boolean>{
     if(authLoadVersion!==authLoadVersionRef.current)return false;
     setSubmissionHistoryStatus("loading");
@@ -1193,6 +1214,7 @@ export default function App(){
   return <main className="app-shell">
     <header><img src="/logo.png"/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button className="ghost account-menu-toggle" onClick={toggleAccountMenu} aria-expanded={showAccountMenu} aria-controls="account-menu" disabled={isPending("logout")||deviceActionPending}>{showAccountMenu?"閉じる":"メニュー"}</button>}</header>
     {showAccountMenu&&<section id="account-menu" className="panel account-menu-panel"><div className="section-heading"><div><h2>アカウント</h2><p>状態確認・端末管理・ログアウトはこちらです。</p></div></div><div className="account-menu-actions"><button className="secondary" onClick={()=>{setShowAccountMenu(false);void openQuickDiagnostics();}} disabled={isPending("diagnostics")||isPending("logout")||deviceActionPending} aria-busy={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"状態確認"}</button><button className="secondary" onClick={()=>{setShowAccountMenu(false);void loadDevices();}} disabled={deviceActionPending||isPending("logout")}>{deviceActionPending?"処理中…":"端末管理"}</button><button className="ghost logout-button" onClick={()=>void requestLogout()} disabled={isPending("logout")||deviceActionPending} aria-busy={isPending("logout")}>{isPending("logout")?"ログアウト中…":"ログアウト"}</button></div></section>}
+    {draftCleanup&&<section className="panel" role="status"><strong>ファイルの送信は済んでいます</strong><p>端末の下書きの後片付けを確認しています。同じファイルを送り直す必要はありません。{!draftCleanup.durable&&"端末に送信済みの記録も保存できませんでした。画面を閉じた後は、再送する前に提出履歴を確認してください。"}</p><button className="secondary" onClick={()=>void retryDraftCleanup()} disabled={isPending("draft-cleanup")||isPending("uploadSubmission")} aria-busy={isPending("draft-cleanup")}>{isPending("draft-cleanup")?"確認中…":"端末の後片付けを再試行"}</button></section>}
     {message&&<div className={messageClassName(message)} role={currentMessageTone==="error"?"alert":"status"}><span>{message}</span>{currentMessageTone!=="working"&&<button className="message-dismiss" onClick={()=>setMessage("")} aria-label="お知らせを閉じる">閉じる</button>}</div>}
     {showDevices&&<section className="panel device-panel" aria-busy={deviceActionPending}><div className="section-heading"><div><h2>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="ghost" onClick={()=>setShowDevices(false)} disabled={deviceActionPending}>閉じる</button></div><div className="device-list">{deviceActionPending&&!pendingDeviceId&&<div className="empty compact" role="status">端末情報を読み込んでいます…</div>}{devices.map(device=><div className="device-row" key={device.id}><div><strong>{device.label||device.platform||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===false?"ログアウト済み":"利用中"}</small></div><button className="secondary" disabled={device.active===false||deviceActionPending} onClick={()=>void revokeDevice(device.id)}>{pendingDeviceId===device.id?"ログアウト中…":"ログアウト"}</button></div>)}{!deviceActionPending&&!devices.length&&<EmptyAction title="端末情報がありません" body="通信状態を確認して、最新の端末情報をもう一度読み込んでください。" action="もう一度読み込む" onAction={()=>void loadDevices()}/>}</div></section>}
     {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite"><div className="section-heading"><div><h2>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}<div className="diagnostic-actions">{diagnosticReport&&<><button onClick={()=>void shareDiagnostics()}>結果を共有</button><button className="secondary" onClick={()=>void copyDiagnostics()}>コピー</button></>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isPending("diagnostics")}>{isPending("diagnostics")?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>setShowDiagnostics(false)}>閉じる</button></div></section>}

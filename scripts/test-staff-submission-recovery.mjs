@@ -137,3 +137,24 @@ await assert.rejects(queryScope.fetchMyJobs(),/offline/);
 console.log('Future shifts passed: 1000 historical jobs do not hide today/tomorrow; independent caps, date boundary, ownership and error propagation.');
 
 assert.match(app,/isPending\("task-job"\)\|\|isPending\("uploadSubmission"\)/);
+
+// 転送が済んだ後は、端末の後片付け失敗でも完了確認を開始して再送用ファイルを残さない。
+const receiptStart=app.indexOf('        const durable=markDraftSubmitted(draftKey);');
+const receiptEnd=app.indexOf('      },{setMessage:value',receiptStart);
+assert.ok(receiptStart>=0&&receiptEnd>receiptStart);
+for(const scenario of ['success','cleanup-failure','receipt-unavailable','auth-changed']){
+ const events=[];
+ const state={draftKey:'owner/job',typeLabel:'報告書',jobId:'job',data:{submissionId:'sent-id'},currentType:'report',currentRequestId:'',skipNextDraftSaveRef:{current:false},
+ markDraftSubmitted:()=>{events.push('receipt');return scenario!=='receipt-unavailable';},setFiles:files=>events.push(['files',files.length]),setSubmissionConfirmed:value=>events.push(['confirmed',value]),
+ setDraftCleanup:value=>events.push(['cleanup',value]),showSubmissionMessage:()=>events.push('message'),pollSubmissionProcessing:(...args)=>events.push(['poll',...args]),
+ clearDraft:async()=>{events.push('clear');if(scenario!=='success'&&scenario!=='auth-changed')throw new Error('disk');},isCurrentUpload:()=>scenario!=='auth-changed',
+ };
+ runInNewContext(ts.transpileModule(`async function finish(){${app.slice(receiptStart,receiptEnd)}}`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,state);
+ await state.finish();
+ assert.equal(state.skipNextDraftSaveRef.current,true);
+ assert.ok(events.some(event=>Array.isArray(event)&&event[0]==='files'&&event[1]===0));
+ assert.ok(events.some(event=>Array.isArray(event)&&event[0]==='confirmed'&&event[1]===false));
+ assert.ok(events.some(event=>Array.isArray(event)&&event[0]==='poll'&&event[2]==='sent-id'));
+ assert.equal(events.filter(event=>Array.isArray(event)&&event[0]==='cleanup'&&event[1]===null).length,scenario==='success'?1:0);
+}
+console.log('Post-transfer cleanup passed: completion polling continues after local failure; files/confirmation cleared and old auth cannot dismiss recovery.');

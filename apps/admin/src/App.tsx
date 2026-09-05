@@ -11,7 +11,7 @@ import { auth, firebaseConfigured, functions } from "./firebase";
 import { expectedFirebaseProjectId } from "./firebase-config";
 import type { ProductionEvidenceView } from "./ProductionAcceptanceRollbackConsole";
 
-import { buildJobSearchIndex, filterJobSearchIndex, jobListPage, ADMIN_JOB_PAGE_SIZE, type JobListFilter } from "./job-search";
+import { reportCompletionLabel, submissionStatusLabel, buildJobSearchIndex, filterJobSearchIndex, jobListPage, ADMIN_JOB_PAGE_SIZE, type JobListFilter } from "./job-search";
 
 type AuthRunGuard = () => boolean;
 
@@ -76,7 +76,7 @@ type Job = {
   cancelled?: boolean;
   preContactLate?: boolean;
   submissionStatus?: {
-    report?: { lateFirstSubmission?: boolean };
+    report?: { completed?:boolean; lateFirstSubmission?: boolean };
     salesFloor?: { lateFirstSubmission?: boolean };
   };
   sheetRef?: { spreadsheetId?:string; sheetId?:number; currentRow?:number; sheetName?:string };
@@ -777,7 +777,7 @@ const demoStaff: StaffProfile[] = [
 
 const demoJobs: Job[] = [
   { id:"1", workDate:"2026-07-15", clientName:"〇〇デモ", storeName:"イオン津田沼", storeAddress:"千葉県習志野市津田沼1丁目23-1", storeNearestStation:"新津田沼駅", makerName:"〇〇食品", menuName:"試食販売", entryTime:"9:45", workTime:"10:00～18:00", basePay:10000, revision:0, assignedStaffName:"Aさん", assignedStaffId:"s1", status:"assigned", financials:{clientChargeTotal:15000,clientChargeAdditionsTotal:1200,staffPaymentTotal:10000,subcontractorTotal:0} },
-  { id:"2", workDate:"2026-07-15", clientName:"〇〇デモ", storeName:"イオン船橋", storeAddress:"千葉県船橋市山手1丁目1-8", storeNearestStation:"新船橋駅", makerName:"〇〇乳業", menuName:"ヨーグルト試食", entryTime:"9:45", workTime:"10:00～18:00", basePay:10500, revision:0, assignedStaffName:"Bさん", assignedStaffId:"s2", status:"assigned", preContact:{}, financials:{clientChargeTotal:15000,clientChargeAdditionsTotal:800,staffPaymentTotal:10500,subcontractorTotal:0} },
+  { id:"2", workDate:"2026-07-15", clientName:"〇〇デモ", storeName:"イオン船橋", storeAddress:"千葉県船橋市山手1丁目1-8", storeNearestStation:"新船橋駅", makerName:"〇〇乳業", menuName:"ヨーグルト試食", entryTime:"9:45", workTime:"10:00～18:00", basePay:10500, revision:0, assignedStaffName:"Bさん", assignedStaffId:"s2", status:"assigned", preContact:{}, submissionStatus:{report:{completed:true}}, financials:{clientChargeTotal:15000,clientChargeAdditionsTotal:800,staffPaymentTotal:10500,subcontractorTotal:0} },
   { id:"3", workDate:"2026-07-12", clientName:"△△企画", storeName:"ベイシア成田", makerName:"△△菓子", menuName:"菓子試食", entryTime:"10:45", workTime:"11:00～19:00", basePay:11000, revision:0, assignedStaffName:"Cさん", assignedStaffId:"s3", status:"assigned", financials:{clientChargeTotal:16000,clientChargeAdditionsTotal:1500,staffPaymentTotal:11000,subcontractorTotal:0}, preContactLate:true, submissionStatus:{report:{lateFirstSubmission:true}} },
   { id:"4", workDate:"2026-07-08", clientName:"〇〇デモ", storeName:"イオン幕張", makerName:"〇〇食品", assignedStaffName:"Aさん", assignedStaffId:"s1", status:"cancelled", cancelled:true, cancellationReason:"メーカー都合", cancellationReasonCategory:"maker", cancellationFinancialTreatment:"invoice_only", financials:{clientChargeTotal:15000,clientChargeAdditionsTotal:0,staffPaymentTotal:10000,subcontractorTotal:0} },
  ];
@@ -3676,15 +3676,16 @@ function downloadCsv(filename:string,content:string) {
         <div className="toolbar">
           <input value={queryText} aria-label="案件を検索" onChange={(event) => {setQueryText(event.target.value);setJobPage(0);}} placeholder="スタッフ名・店舗・メーカー・クライアントを検索" />
           <select aria-label="案件の絞り込み" value={jobListFilter} onChange={event=>{setJobListFilter(event.target.value as JobListFilter);setJobPage(0);}}>
-            <option value="all">すべて</option><option value="precontact">事前連絡待ち</option><option value="assigned">担当確定</option><option value="cancelled">キャンセル</option>
+            <option value="all">すべて</option><option value="precontact">事前連絡待ち</option><option value="assigned">担当確定</option><option value="cancelled">キャンセル</option><option value="report-completed">報告書：完了記録あり</option><option value="report-unconfirmed">報告書：完了未確認</option>
           </select>
           <button className="ghost" onClick={()=>{setQueryText("");setJobListFilter("all");setJobPage(0);}}>条件をクリア</button>
         </div>
         <h2>案件一覧</h2>
+        <p>初回読込は最大100件です。絞り込みは読込済み案件が対象です。「完了未確認」には未提出・処理中・記録不足が含まれます。完了記録があっても、再提出依頼の完了とは別です。</p>
         <p className="job-search-summary" role="status">読込済み{jobs.length}件のうち{filtered.length}件。{filtered.length?`${jobPageView.page*ADMIN_JOB_PAGE_SIZE+1}〜${Math.min((jobPageView.page+1)*ADMIN_JOB_PAGE_SIZE,filtered.length)}件を表示`:"該当する案件はありません"}。スペースで区切ると複数の条件で検索できます（日付も検索可）。</p>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>日付</th><th>スタッフ</th><th>店舗</th><th>メーカー</th><th>状態</th><th>公開</th><th>操作</th></tr></thead>
+            <thead><tr><th>日付</th><th>スタッフ</th><th>店舗</th><th>メーカー</th><th>状態</th><th>報告書</th><th>公開</th><th>操作</th></tr></thead>
             <tbody>
               {jobPageView.rows.map((job) => (
                 <tr key={job.id} className={job.status === "cancelled" ? "cancelled" : ""}>
@@ -3693,6 +3694,7 @@ function downloadCsv(filename:string,content:string) {
                   <td>{job.storeName}</td>
                   <td>{job.makerName}</td>
                   <td>{job.status === "cancelled" ? "キャンセル" : job.status==="draft"?"下書き":job.status==="scheduled"?"公開予約":job.status==="stopped"?"募集停止":job.preContact ? "正常" : "事前連絡待ち"}</td>
+                  <td>{reportCompletionLabel(job)}</td>
                   <td>{job.publishable ? <span className="mini-tag">募集中</span> : <span className="mini-tag muted-tag">非公開</span>}</td>
                   <td className="row-actions">
                     <button className="ghost compact" onClick={()=>loadJobEdit(job)}>編集</button>
@@ -3854,16 +3856,17 @@ function downloadCsv(filename:string,content:string) {
           <span>{resubmitType === "report" ? "報告書" : "売場画像"} / {timelineReady?`${submissionTimeline.reduce((sum,group)=>sum+group.files.length,0)}件`:"未確認"}</span>
           <button className="ghost compact" onClick={loadSubmissionTimeline} disabled={timelineBusy}>{timelineBusy ? "読込中…" : "再読込"}</button>
         </div>
+        {timelineReady&&submissionTimeline.length>0&&<div className="timeline-status-list" aria-label="提出ごとの処理状態">{submissionTimeline.map(group=><p key={group.id}>{group.purpose==="replacement"?"再提出":"提出"}：{submissionStatusLabel(group.status)}（{group.files.length}ファイル）</p>)}</div>}
         <div className="file-gallery">
           {(timelineReady?submissionTimeline:[]).flatMap((group)=>group.files).map((file)=>(
             <button type="button" className={`file-card ${selectedSourceFile?.id===file.id ? "selected" : ""}`} key={`${file.submissionId}_${file.id}`} onClick={()=>setSelectedSourceFile(file)}>
               {file.previewUrl && file.contentType.startsWith("image/") ? <img src={file.previewUrl} alt={file.driveName || file.originalName} /> : <div className="pdf-preview">{file.contentType.includes("pdf") ? "PDF" : "FILE"}</div>}
               <strong>{file.driveName || file.originalName}</strong>
-              <small>{file.sequence ? `(${file.sequence})` : ""} {file.purpose}</small>
+              <small>{file.sequence ? `(${file.sequence})` : ""} {file.purpose==="replacement"?"再提出":"提出"} / {submissionStatusLabel(file.status)}</small>
             </button>
           ))}
           {!timelineReady&&<div className="empty-inline" role={timelineStatus==="error"?"alert":"status"}>{timelineStatus==="error"?"提出履歴を取得できませんでした。再読込してください。":timelineBusy?"提出履歴を読み込んでいます…":"提出履歴は未確認です。再読込してください。"}</div>}
-          {timelineReady&&!submissionTimeline.some(group=>group.files.length>0)&&<div className="empty-inline">この案件・種類の提出済みファイルはありません。画像を指定せず案件全体への依頼もできます。</div>}
+          {timelineReady&&!submissionTimeline.some(group=>group.files.length>0)&&<div className="empty-inline">この履歴で確認できるファイルは0件です。処理状態も確認してください。</div>}
         </div>
         {timelineReady&&selectedSourceFile && <div className="selected-file-note">選択中：{selectedSourceFile.driveName || selectedSourceFile.originalName} <button className="ghost compact" onClick={()=>setSelectedSourceFile(null)}>選択解除</button></div>}
         <h3>再提出理由</h3>

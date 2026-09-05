@@ -13,7 +13,7 @@ const checks = [
   },
   {
     label: "submission timeline waits for an authenticated user",
-    ok: source.includes("if (!user || !selectedAdminJobId) return;"),
+    ok: source.includes("if (selectedAdminJobId&&(!firebaseConfigured||user))void loadSubmissionTimeline();") && source.includes("if (!selectedAdminJobId||(firebaseConfigured&&(!user||!functions)))return;"),
   },
   {
     label: "primary startup work is isolated with allSettled",

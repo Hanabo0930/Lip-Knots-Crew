@@ -164,6 +164,9 @@ export default function App(){
   const [showPushActions,setShowPushActions]=useState(false);
   const [showAllTasks,setShowAllTasks]=useState(false);
   const [showPastShifts,setShowPastShifts]=useState(false);
+  const [hasMoreUpcomingShifts,setHasMoreUpcomingShifts]=useState(false);
+  const [upcomingShiftMessage,setUpcomingShiftMessage]=useState("" );
+  const upcomingShiftCursorRef=useRef<QueryDocumentSnapshot|null>(null);
   const [hasMorePastShifts,setHasMorePastShifts]=useState(false);
   const [pastShiftMessage,setPastShiftMessage]=useState("");
   const pastShiftCursorRef=useRef<QueryDocumentSnapshot|null>(null);
@@ -246,6 +249,9 @@ export default function App(){
     openJobsLoadVersionRef.current+=1;
     pastShiftVersionRef.current+=1;
     pastShiftCursorRef.current=null;
+    upcomingShiftCursorRef.current=null;
+    setHasMoreUpcomingShifts(false);
+    setUpcomingShiftMessage("" );
     setHasMorePastShifts(false);
     setPastShiftMessage("");
     submissionProcessingVersionRef.current+=1;
@@ -439,16 +445,19 @@ export default function App(){
     const authVersion=authLoadVersionRef.current;
     // 過去の件数が増えても今後のシフトが取得上限から押し出されないようにする。
     const [upcoming,history]=await Promise.all([
-      getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(300))),
+      getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(301))),
       getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey","<",today),orderBy("dateKey","asc"),limit(51))),
     ]);
     if(authVersion===authLoadVersionRef.current&&version===pastShiftVersionRef.current){
+      upcomingShiftCursorRef.current=upcoming.docs.slice(0,300).at(-1)??null;
+      setHasMoreUpcomingShifts(upcoming.docs.length>300);
+      setUpcomingShiftMessage("" );
       pastShiftCursorRef.current=history.docs.slice(0,50).at(-1)??null;
       pastShiftDateRef.current=today;
       setHasMorePastShifts(history.docs.length>50);
       setPastShiftMessage("");
     }
-    return orderAssignedJobs([...upcoming.docs,...history.docs.slice(0,50)].map(d=>({id:d.id,...d.data()} as Job)));
+    return orderAssignedJobs([...upcoming.docs.slice(0,300),...history.docs.slice(0,50)].map(d=>({id:d.id,...d.data()} as Job)));
   }
   async function loadMorePastShifts(){
     if(!db||!companyId||!staffId||!hasMorePastShifts||!pastShiftCursorRef.current||businessRefreshing||isPending("past-shifts"))return;
@@ -469,6 +478,27 @@ export default function App(){
         setHasMorePastShifts(page.docs.length>50);
       });
     }catch{if(isCurrent())setPastShiftMessage("過去のシフトを読み込めませんでした。続きを読み込むボタンで再試行できます。");}
+  }
+
+  async function loadMoreUpcomingShifts(){
+    if(!db||!companyId||!staffId||!hasMoreUpcomingShifts||!upcomingShiftCursorRef.current||businessRefreshing||isPending("upcoming-shifts"))return;
+    const cursor=upcomingShiftCursorRef.current;
+    const today=pastShiftDateRef.current;
+    const version=pastShiftVersionRef.current;
+    const authVersion=authLoadVersionRef.current;
+    const isCurrent=()=>authVersion===authLoadVersionRef.current&&version===pastShiftVersionRef.current;
+    setUpcomingShiftMessage("");
+    try{
+      await run("upcoming-shifts",async()=>{
+        const page=await getDocs(query(collection(db!,"jobs"),where("companyId","==",companyId),where("assignedStaffId","==",staffId),where("dateKey",">=",today),orderBy("dateKey","asc"),startAfter(cursor),limit(51)));
+        if(!isCurrent())return;
+        const rows=page.docs.slice(0,50);
+        const additions=rows.map(d=>({id:d.id,...d.data()} as Job));
+        setMyJobs(current=>orderAssignedJobs([...new Map([...current,...additions].map(job=>[job.id,job])).values()]));
+        upcomingShiftCursorRef.current=rows.at(-1)??cursor;
+        setHasMoreUpcomingShifts(page.docs.length>50);
+      });
+    }catch{if(isCurrent())setUpcomingShiftMessage("これからのシフトを読み込めませんでした。続きを読み込むボタンで再試行できます。");}
   }
 
   async function loadTaskJob(jobId:string):Promise<Job|null>{
@@ -1237,6 +1267,10 @@ export default function App(){
         {upcomingShifts.length
           ? <div className="grid">{upcomingShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>
           : <EmptyAction title="今後の確定シフトはありません" body="募集中の案件を確認すると、次の仕事へすぐ進めます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>}
+        <div className="past-shift-pagination">
+          {hasMoreUpcomingShifts&&<><p>これからのシフトには続きがあります。日付順に50件ずつ追加できます。</p><button className="secondary" onClick={()=>void loadMoreUpcomingShifts()} disabled={isPending("upcoming-shifts")||businessRefreshing} aria-busy={isPending("upcoming-shifts")}>{isPending("upcoming-shifts")?"読み込み中…":"これからのシフトを続きを読み込む"}</button></>}
+          {upcomingShiftMessage&&<p role="alert">{upcomingShiftMessage}</p>}
+        </div>
         {(pastShifts.length>0||hasMorePastShifts)&&<div className="past-shifts">
           {upcomingShifts.length>0?<button className="secondary past-shifts-toggle" aria-expanded={showPastShifts} aria-controls="past-shifts-list" onClick={()=>setShowPastShifts(value=>!value)}>{showPastShifts?"過去のシフトを閉じる":`過去のシフトを見る（${pastShifts.length}件）`}</button>:<div className="shift-list-heading past"><h3>過去のシフト</h3><span>{pastShifts.length}件</span></div>}
           {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list" className="grid past-shift-grid">{pastShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>}

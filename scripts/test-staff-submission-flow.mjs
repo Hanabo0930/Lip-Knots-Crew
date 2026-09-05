@@ -127,6 +127,24 @@ function Fixture(){
 }
 createRoot(document.getElementById('root')).render(React.createElement(Fixture));
 </script></body></html>`;
+const upcomingControls=section(app,'        <div className="past-shift-pagination">','        {(pastShifts.length>0||hasMorePastShifts)');
+const upcomingFixtureCode=ts.transpileModule(`
+import React from 'react';import {createRoot} from 'react-dom/client';import '/src/styles.css';
+function Fixture(){
+ const [hasMoreUpcomingShifts,setMore]=React.useState(true);
+ const [upcomingShiftMessage,setMessage]=React.useState('');
+ const [busy,setBusy]=React.useState(false);const businessRefreshing=false;
+ const isPending=()=>busy;
+ window.pagingControl??={calls:0};
+ async function loadMoreUpcomingShifts(){
+  window.pagingControl.calls++;setBusy(true);setMessage('');
+  await new Promise(resolve=>{window.pagingControl.finish=(success)=>{setBusy(false);if(success)setMore(false);else setMessage('これからのシフトを読み込めませんでした。再試行できます。');resolve();};});
+ }
+ return <main>${upcomingControls}</main>;
+}
+createRoot(document.getElementById('root')).render(<Fixture/>);
+`,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext,jsx:ts.JsxEmit.React}}).outputText;
+const upcomingFixture=`<!doctype html><html><body><div id="root"></div><script type="module">${upcomingFixtureCode}</script></body></html>`;
 const server = await createServer({
   root:resolve("apps/staff"),configFile:resolve("apps/staff/vite.config.ts"),
   server:{host:"127.0.0.1",port:0},
@@ -135,10 +153,10 @@ const server = await createServer({
     configureServer(devServer){
       // SPAのフォールバックより先に検証用ページを配信する。
       devServer.middlewares.use(async(req,res,next)=>{
-        if(req.url!=="/__preview_test.html")return next();
+        if(!["/__preview_test.html","/__upcoming_test.html"].includes(req.url))return next();
         try{
           res.setHeader("Content-Type","text/html");
-          res.end(await devServer.transformIndexHtml(req.url,fixture));
+          res.end(await devServer.transformIndexHtml(req.url,req.url==="/__upcoming_test.html"?upcomingFixture:fixture));
         }catch(error){next(error);}
       });
     },
@@ -344,6 +362,25 @@ try {
   assert.equal(await page.locator('.selected-file-row').count(),0);
   assert.deepEqual(errors,[]);
   console.log('Browser selection recovery passed: decoded lazy preview, rejected replacement retained, cancellation, PDF replacement, confirmation reset, and removal.');
+  // 実画面の追加取得コントロールを使い、狭幅・処理中・失敗・再試行を確認する。
+  await page.goto(`http://127.0.0.1:${port}/__upcoming_test.html`);
+  for(const width of [320,390,1280]){
+    await page.setViewportSize({width,height:844});
+    const button=page.getByRole('button',{name:'これからのシフトを続きを読み込む',exact:true});
+    await button.waitFor();
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  }
+  const more=page.getByRole('button',{name:'これからのシフトを続きを読み込む',exact:true});
+  await more.focus();await page.keyboard.press('Enter');
+  assert.equal(await page.getByRole('button',{name:'読み込み中…',exact:true}).isDisabled(),true);
+  assert.equal(await page.getByRole('button',{name:'読み込み中…',exact:true}).getAttribute('aria-busy'),'true');
+  await page.evaluate(()=>window.pagingControl.finish(false));
+  await page.getByRole('alert').waitFor();await more.click();
+  assert.equal(await page.evaluate(()=>window.pagingControl.calls),2);
+  await page.evaluate(()=>window.pagingControl.finish(true));
+  await more.waitFor({state:'detached'});
+  assert.deepEqual(errors,[]);
+  console.log('Upcoming controls passed: responsive widths, keyboard, busy lock, error and retry, final-page removal.');
   console.log("Browser preview recovery, IndexedDB owner isolation/transaction abort recovery/50MB persistence, 320/390/1280px layout, enlarged text and keyboard recovery passed.");
 } finally {
   await browser?.close();

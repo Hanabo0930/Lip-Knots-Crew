@@ -58,7 +58,7 @@ const jobs=[
  {id:'other-staff',dateKey:today,status:'assigned',companyId:'a',assignedStaffId:'other'},
 ];
 let requests=[],dateReads=0;
-const queryScope={authLoadVersionRef:{current:0},pastShiftVersionRef:{current:0},pastShiftCursorRef:{current:null},pastShiftDateRef:{current:""},hasMorePastShifts:false,businessRefreshing:false,isPending:()=>false,run:async(key,fn)=>fn(),setPastShiftMessage:value=>{queryScope.message=value;},setHasMorePastShifts:value=>{queryScope.hasMorePastShifts=value;},setMyJobs:fn=>{queryScope.myJobs=fn(queryScope.myJobs);},db:{},staffId:'staff',companyId:'a',localDateKey:()=>{dateReads++;return today;},orderAssignedJobs:items=>orderAssignedJobs(items,today),
+const queryScope={upcomingShiftCursorRef:{current:null},hasMoreUpcomingShifts:false,setHasMoreUpcomingShifts:value=>{queryScope.hasMoreUpcomingShifts=value;},setUpcomingShiftMessage:value=>{queryScope.upcomingMessage=value;},authLoadVersionRef:{current:0},pastShiftVersionRef:{current:0},pastShiftCursorRef:{current:null},pastShiftDateRef:{current:""},hasMorePastShifts:false,businessRefreshing:false,isPending:()=>false,run:async(key,fn)=>fn(),setPastShiftMessage:value=>{queryScope.message=value;},setHasMorePastShifts:value=>{queryScope.hasMorePastShifts=value;},setMyJobs:fn=>{queryScope.myJobs=fn(queryScope.myJobs);},db:{},staffId:'staff',companyId:'a',localDateKey:()=>{dateReads++;return today;},orderAssignedJobs:items=>orderAssignedJobs(items,today),
  collection:()=>null,where:(field,op,value)=>({field,op,value}),orderBy:(field,direction)=>({sort:field,direction}),startAfter:cursor=>({cursor}),limit:value=>({limit:value}),query:(_, ...filters)=>filters,
  getDocs:async filters=>{
   requests.push(filters);
@@ -132,6 +132,54 @@ for(const scenario of ['own','company','staff','cancelled','open','missing','aut
  if(scenario!=='own')assert.equal(queryScope.myJobs,previous);
 }
 console.log('History paging passed: 1000 equal-date rows, 50-row pages, retry without skipping, auth/refresh isolation, double-click lock, and task ownership checks.');
+// 初回300件を超える将来シフトも、同日の文書を飛ばさず必要時だけ取得する。
+queryScope.getDocs=readPage;
+jobs.push(...Array.from({length:1000},(_,index)=>({id:`future-${String(index).padStart(4,'0')}`,dateKey:'2027-01-01',status:'assigned',companyId:'a',assignedStaffId:'staff'})));
+queryScope.myJobs=await queryScope.fetchMyJobs();
+assert.equal(queryScope.myJobs.filter(job=>job.dateKey>=today).length,300);
+assert.equal(queryScope.hasMoreUpcomingShifts,true);
+let futurePages=0;
+while(queryScope.hasMoreUpcomingShifts){
+ await queryScope.loadMoreUpcomingShifts();
+ if(++futurePages>20)assert.fail('Future paging did not terminate');
+}
+assert.equal(futurePages,15);
+assert.equal(queryScope.myJobs.filter(job=>job.dateKey>=today).length,1002);
+assert.equal(new Set(queryScope.myJobs.map(job=>job.id)).size,1052);
+assert.ok(requests.filter(filters=>filters.some(f=>f.cursor)).every(filters=>filters.some(f=>f.limit===51)));
+for(const count of [0,299,300,301]){
+ const saved=jobs.splice(0);
+ jobs.push(...Array.from({length:count},(_,i)=>({id:`boundary-${i}`,dateKey:today,status:'assigned',companyId:'a',assignedStaffId:'staff'})));
+ const initial=await queryScope.fetchMyJobs();
+ assert.equal(initial.length,Math.min(count,300));
+ assert.equal(queryScope.hasMoreUpcomingShifts,count>300);
+ jobs.splice(0,jobs.length,...saved);
+}
+queryScope.myJobs=await queryScope.fetchMyJobs();
+const futureCursor=queryScope.upcomingShiftCursorRef.current;
+queryScope.getDocs=async()=>{throw new Error('offline');};
+await queryScope.loadMoreUpcomingShifts();
+assert.equal(queryScope.upcomingShiftCursorRef.current,futureCursor);
+assert.match(queryScope.upcomingMessage,/再試行/);
+queryScope.getDocs=readPage;
+await queryScope.loadMoreUpcomingShifts();
+assert.equal(queryScope.myJobs.length,400);
+for(const change of ['auth','refresh']){
+ const gate=deferred();queryScope.getDocs=()=>gate.promise;
+ const before=queryScope.myJobs,cursor=queryScope.upcomingShiftCursorRef.current;
+ const pending=queryScope.loadMoreUpcomingShifts();
+ if(change==='auth')queryScope.authLoadVersionRef.current++;else queryScope.pastShiftVersionRef.current++;
+ gate.resolve({docs:[]});await pending;
+ assert.equal(queryScope.myJobs,before);assert.equal(queryScope.upcomingShiftCursorRef.current,cursor);
+}
+let futureLocked=false,futureCalls=0;const futureGate=deferred();
+queryScope.isPending=()=>futureLocked;
+queryScope.run=async(key,fn)=>{futureLocked=true;try{await fn();}finally{futureLocked=false;}};
+queryScope.getDocs=()=>{futureCalls++;return futureGate.promise;};
+const futurePending=queryScope.loadMoreUpcomingShifts();await queryScope.loadMoreUpcomingShifts();
+assert.equal(futureCalls,1);futureGate.resolve({docs:[]});await futurePending;
+queryScope.isPending=()=>false;queryScope.run=async(key,fn)=>fn();
+console.log('Upcoming paging passed: 0/299/300/301 boundaries, 1002 future rows, cursor retries, auth/refresh races, and double-click lock.');
 queryScope.getDocs=async()=>{throw new Error('offline');};
 await assert.rejects(queryScope.fetchMyJobs(),/offline/);
 console.log('Future shifts passed: 1000 historical jobs do not hide today/tomorrow; independent caps, date boundary, ownership and error propagation.');

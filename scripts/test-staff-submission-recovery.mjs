@@ -158,3 +158,36 @@ for(const scenario of ['success','cleanup-failure','receipt-unavailable','auth-c
  assert.equal(events.filter(event=>Array.isArray(event)&&event[0]==='cleanup'&&event[1]===null).length,scenario==='success'?1:0);
 }
 console.log('Post-transfer cleanup passed: completion polling continues after local failure; files/confirmation cleared and old auth cannot dismiss recovery.');
+
+// 実選択ハンドラーで、再提出の無効な選び直しと通常追加の無変更を検査する。
+const selectionStart=app.indexOf('  function addSubmissionFiles(');
+const selectionEnd=app.indexOf('  async function clearSubmissionFiles(',selectionStart);
+assert.ok(selectionStart>=0&&selectionEnd>selectionStart);
+const selectionCode=ts.transpileModule(app.slice(selectionStart,selectionEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+const photo=(name,size=100,type='image/png')=>({name,size,type,lastModified:1});
+const original=photo('original.png'), replacement=photo('replacement.png');
+function selectFiles(selected,{requestId='request',files=[original],locked=false}={}){
+ const state={files,confirmed:true,uploadState:{original:'ready'},message:'existing',writes:0};
+ const context={files,requestId,MAX_SUBMISSION_FILES:20,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,
+  isSubmissionActionPending:()=>locked,fileStateKey:file=>`${file.name}_${file.lastModified}_${file.size}`,
+  setFiles:value=>{state.files=value;state.writes++;},setUploadState:value=>{state.uploadState=value;},
+  setSubmissionConfirmed:value=>{state.confirmed=value;},setSubmissionMessage:value=>{state.message=value;}};
+ runInNewContext(selectionCode,context);context.addSubmissionFiles(selected);return state;
+}
+for(const selected of [[],[photo('bad.txt',1,'text/plain')],[photo('large.png',50*1024*1024+1)]]){
+ const result=selectFiles(selected);
+ assert.equal(result.files[0],original);assert.equal(result.writes,0);assert.equal(result.confirmed,true);
+ assert.equal(result.uploadState.original,'ready');
+ if(!selected.length)assert.equal(result.message,'existing');else assert.match(result.message,/選択できません/);
+}
+for(const options of [{requestId:'',files:[original]},{requestId:'request',files:[original]}]){
+ const result=selectFiles([original],options);assert.equal(result.writes,0);assert.equal(result.confirmed,true);
+}
+const full=Array.from({length:20},(_,i)=>photo(`file-${i}.png`));
+assert.equal(selectFiles([replacement],{requestId:'',files:full}).writes,0);
+const replaced=selectFiles([replacement]);assert.equal(replaced.files.length,1);assert.equal(replaced.files[0],replacement);assert.equal(replaced.confirmed,false);
+const mixed=selectFiles([photo('bad.txt',1,'text/plain'),replacement]);assert.equal(mixed.files[0],replacement);assert.match(mixed.message,/選択できません/);
+const appended=selectFiles([replacement,replacement],{requestId:''});assert.equal(appended.files.length,2);assert.equal(appended.confirmed,false);
+assert.equal(selectFiles([replacement],{locked:true}).writes,0);
+assert.equal(selectFiles([photo('boundary.pdf',50*1024*1024,'application/pdf')]).files[0].size,50*1024*1024);
+console.log('File selection recovery passed: cancel, invalid replacement, size boundary, duplicate, full list, valid replacement, mixed input, append, and action lock.');

@@ -13,9 +13,13 @@ const draftMutations = new Map<string, Promise<void>>();
 const submittedDrafts = new Map<string, number>();
 const receiptKey = (key: string) => `lkc-submitted-draft:${key}`;
 
+export function getSubmittedDraftReceipt(key: string): { durable: boolean } | null {
+  try { if (localStorage.getItem(receiptKey(key)) === "1") return { durable: true }; } catch { /* メモリの記録を確認する。 */ }
+  return submittedDrafts.has(key) ? { durable: false } : null;
+}
+
 function isSubmittedDraft(key: string): boolean {
-  if (submittedDrafts.has(key)) return true;
-  try { return localStorage.getItem(receiptKey(key)) === "1"; } catch { return false; }
+  return getSubmittedDraftReceipt(key) !== null;
 }
 
 // IndexedDBの後片付けが失敗しても、送信済みの下書きを自動復元しない。

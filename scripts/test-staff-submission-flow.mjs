@@ -249,6 +249,7 @@ try {
     // 新しいモジュールはメモリ状態を共有せず、永続した送信済み印だけで復元を抑止する。
     const fresh=await import('/src/draft-store.ts?submitted-reload');
     const restored=(await fresh.loadDraft(key)).length;
+    const recoverable=fresh.getSubmittedDraftReceipt(key)?.durable===true;
     let staleSaveRejected=false;
     try{await store.saveDraft(key,[new File(['sent'],'sent.pdf')]);}catch{staleSaveRejected=true;}
     await store.clearDraft(key);
@@ -256,9 +257,9 @@ try {
     const [next]=await store.loadDraft(key);
     const nextBody=await next.text();
     await store.clearDraft(key);
-    return {durable,failed,current,restored,staleSaveRejected,nextBody};
+    return {durable,failed,current,restored,recoverable,staleSaveRejected,nextBody};
   });
-  assert.deepEqual(submittedDraft,{durable:true,failed:true,current:0,restored:0,staleSaveRejected:true,nextBody:'new'});
+  assert.deepEqual(submittedDraft,{durable:true,failed:true,current:0,restored:0,recoverable:true,staleSaveRejected:true,nextBody:'new'});
   const largeDraft=await page.evaluate(async()=>{
     const {saveDraft,loadDraft,clearDraft}=await import('/src/draft-store.ts');
     const key='browser-50mb-draft';

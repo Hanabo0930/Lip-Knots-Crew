@@ -7,7 +7,7 @@ import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, wh
 import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytesResumable } from "firebase/storage";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, storage } from "./firebase";
-import { clearDraft, loadDraft, saveDraft, markDraftSubmitted } from "./draft-store";
+import { clearDraft, loadDraft, saveDraft, markDraftSubmitted, getSubmittedDraftReceipt } from "./draft-store";
 import { submissionDraftKey } from "./submission-draft-key";
 import {
   clearBusinessSnapshot,
@@ -203,6 +203,8 @@ export default function App(){
     skipNextDraftSaveRef.current=false;
     setDraftHydrating(Boolean(draftKey));
     if(!draftKey)return;
+    const submittedReceipt=getSubmittedDraftReceipt(draftKey);
+    if(submittedReceipt)setDraftCleanup({key:draftKey,durable:submittedReceipt.durable});
     let active=true;
     void loadDraft(draftKey).then(draftFiles=>{
       if(!active)return;

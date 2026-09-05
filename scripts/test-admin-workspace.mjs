@@ -105,6 +105,7 @@ assert.match(source,/if\(!timelineReady\|\|timelinePendingRef.current\)/);
 console.log('Admin timeline passed: success/empty/error/malformed separation, retry, synchronous double click, stale job/auth response, and reverse response order.');
 await import('./test-admin-review-flow.mjs');
 if(!process.argv.includes('--browser'))process.exit(0);
+await import('./check-admin-configured-budget.mjs');
 const {preview}=await import('vite');
 const {chromium}=await import('@playwright/test');
 const server=await preview({root:resolve('apps/admin'),configFile:resolve('apps/admin/vite.config.ts'),build:{outDir:process.env.LKC_ADMIN_DIST||'dist'},preview:{host:'127.0.0.1',port:0}});

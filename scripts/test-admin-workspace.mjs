@@ -100,9 +100,10 @@ for(const scenario of ['success','empty','failure','malformed','context','auth',
  if(['context','auth'].includes(scenario)){assert.equal(state.status,'loading');assert.equal(state.files.length,0);assert.equal(state.key,undefined);}
  if(scenario==='newer'){assert.equal(state.files[0].id,'new');assert.equal(state.key,'second');assert.equal(state.busy,false);}
 }
-assert.match(source,/disabled=\{!timelineReady\|\|timelineBusy\}/);
+assert.match(source,/disabled=\{!timelineReady\|\|timelineBusy\|\|resubmissionBusy\}/);
 assert.match(source,/if\(!timelineReady\|\|timelinePendingRef.current\)/);
 console.log('Admin timeline passed: success/empty/error/malformed separation, retry, synchronous double click, stale job/auth response, and reverse response order.');
+await import('./test-admin-review-flow.mjs');
 if(!process.argv.includes('--browser'))process.exit(0);
 const {preview}=await import('vite');
 const {chromium}=await import('@playwright/test');
@@ -170,12 +171,17 @@ try{
   assert.equal(await list.getByRole('button',{name:'次の50件',exact:true}).isDisabled(),true);
   await list.getByRole('button',{name:'条件をクリア',exact:true}).click();
   await search.fill('船橋');
+  if(output)await list.screenshot({path:resolve(output,'admin-job-review-list.png')});
+  await list.getByRole('button',{name:'報告書を確認',exact:true}).click();
+  assert.equal(await page.getByLabel('資料・再提出の対象案件',{exact:true}).inputValue(),'2');
+  assert.equal(await page.locator('[aria-labelledby="submission-materials-heading"]').evaluate(el=>el===document.activeElement),true);
+  await nav.getByRole('button',{name:'案件',exact:true}).click();
   await page.getByRole('button',{name:'経費',exact:true}).click();
   await page.getByRole('heading',{name:'報告書確認・経費入力',exact:true}).waitFor();
   assert.equal(await nav.getByRole('button',{name:'報告書・再提出',exact:true}).getAttribute('aria-pressed'),'true');
   const materials=page.locator('section.panel').filter({has:page.getByRole('heading',{name:'案件の資料・再提出',exact:true})});
   assert.match(await materials.getByLabel('提出ごとの処理状態').innerText(),/処理完了/);
-  await materials.locator('.file-card').first().click();
+  await materials.getByRole('button',{name:'再送対象に選ぶ',exact:true}).first().click();
   assert.equal(await materials.locator('.selected-file-note').count(),1);
   await materials.locator('.resubmit-options select').selectOption('sales_floor');
   await materials.getByRole('button',{name:'案件全体へ再提出を依頼する',exact:true}).waitFor();
@@ -183,6 +189,18 @@ try{
   assert.equal(await materials.getByRole('button',{name:'案件全体へ再提出を依頼する',exact:true}).isEnabled(),true);
   await materials.getByRole('button',{name:'再読込',exact:true}).click();
   assert.equal(await materials.locator('.file-card').count(),1);
+  await materials.locator('.file-card img').evaluate(image=>image.dispatchEvent(new Event('error')));
+  await materials.getByRole('button',{name:'画像を再取得',exact:true}).click();
+  await materials.locator('.file-card img').waitFor();
+  await materials.locator('textarea').fill('未送信の補足');
+  page.once('dialog',dialog=>dialog.dismiss());
+  await page.getByLabel('資料・再提出の対象案件',{exact:true}).selectOption('1');
+  assert.equal(await page.getByLabel('資料・再提出の対象案件',{exact:true}).inputValue(),'2');
+  assert.equal(await materials.locator('textarea').inputValue(),'未送信の補足');
+  page.once('dialog',dialog=>dialog.accept());
+  await page.getByLabel('資料・再提出の対象案件',{exact:true}).selectOption('1');
+  assert.equal(await materials.locator('textarea').inputValue(),'');
+  if(output)await materials.screenshot({path:resolve(output,'admin-submission-review.png')});
   await nav.getByRole('button',{name:'スタッフ',exact:true}).focus();await page.keyboard.press('Enter');
   assert.equal(await nav.getByRole('button',{name:'スタッフ',exact:true}).getAttribute('aria-pressed'),'true');
   assert.deepEqual(errors,[]);

@@ -62,7 +62,7 @@
 - boot循環なし、Admin startup 15項目、会社スコープ、demo 16ケース成功。
 - 自動化安全検査: staging 26、source integrity 8、Functions automation、Gmail 23、bootstrap 18、Hosting 44ケース成功。すべてローカル検査でクラウド変更なし。
 - Playwright: ブラウザ取得先の接続タイムアウトで実画面検査は未完了。`--browser` の追加検査もまだ完走を確認していない。操作成功・スクリーンショット検証済みとは報告しない。
-- PR CIと以後のSHA検証はGitHub PRで追跡する。main承認を受ける前にマージしない。
+- PR CIと以後のSHA検証はGitHub PRで追跡する。通常開発PRのマージは2026-09-05の包括承認に従い、現Headの必須CI成功確認後に自律実行する。
 
 ## 変更境界
 

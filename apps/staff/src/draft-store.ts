@@ -10,6 +10,23 @@ export type DraftFile = {
 const DB_NAME = "lkc-submission-drafts";
 const STORE = "drafts";
 const draftMutations = new Map<string, Promise<void>>();
+const submittedDrafts = new Map<string, number>();
+const receiptKey = (key: string) => `lkc-submitted-draft:${key}`;
+
+export function getSubmittedDraftReceipt(key: string): { durable: boolean } | null {
+  try { if (localStorage.getItem(receiptKey(key)) === "1") return { durable: true }; } catch { /* メモリの記録を確認する。 */ }
+  return submittedDrafts.has(key) ? { durable: false } : null;
+}
+
+function isSubmittedDraft(key: string): boolean {
+  return getSubmittedDraftReceipt(key) !== null;
+}
+
+// IndexedDBの後片付けが失敗しても、送信済みの下書きを自動復元しない。
+export function markDraftSubmitted(key: string): boolean {
+  submittedDrafts.set(key, (submittedDrafts.get(key) ?? 0) + 1);
+  try { localStorage.setItem(receiptKey(key), "1"); return true; } catch { return false; }
+}
 
 function enqueueDraftMutation(key: string, mutation: () => Promise<void>): Promise<void> {
   const previous = draftMutations.get(key) ?? Promise.resolve();
@@ -37,11 +54,13 @@ function openDb(): Promise<IDBDatabase> {
 }
 
 export function saveDraft(key: string, files: File[]): Promise<void> {
+  if (isSubmittedDraft(key)) return Promise.reject(new Error("送信済み下書きの後片付けを先に再試行してください。"));
   const records: DraftFile[] = files.map((file) => ({
     id: crypto.randomUUID(), name: file.name, type: file.type,
     size: file.size, lastModified: file.lastModified, blob: file,
   }));
   return enqueueDraftMutation(key, async () => {
+    if (isSubmittedDraft(key)) throw new Error("送信済み下書きは保存し直しません。" );
     const db = await openDb();
     try {
       await tx(db, "readwrite", (store) => store.put(records, key));
@@ -52,7 +71,9 @@ export function saveDraft(key: string, files: File[]): Promise<void> {
 }
 
 export async function loadDraft(key: string): Promise<File[]> {
+  if (isSubmittedDraft(key)) return [];
   await waitForDraftMutation(key);
+  if (isSubmittedDraft(key)) return [];
   const db = await openDb();
   let records: DraftFile[];
   try {
@@ -68,16 +89,23 @@ export async function loadDraft(key: string): Promise<File[]> {
   } finally {
     db.close();
   }
+  if (isSubmittedDraft(key)) return [];
   return records.map((record) => new File([record.blob], record.name, {
     type: record.type, lastModified: record.lastModified,
   }));
 }
 
 export function clearDraft(key: string): Promise<void> {
+  const receiptVersion = submittedDrafts.get(key);
   return enqueueDraftMutation(key, async () => {
     const db = await openDb();
     try {
       await tx(db, "readwrite", (store) => store.delete(key));
+      if (submittedDrafts.get(key) === receiptVersion && isSubmittedDraft(key)) {
+        // 消去できた後にだけ送信済み印を外す。失敗時は再試行できる状態を保つ。
+        localStorage.removeItem(receiptKey(key));
+        submittedDrafts.delete(key);
+      }
     } finally {
       db.close();
     }

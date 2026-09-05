@@ -232,6 +232,34 @@ try {
   });
   assert.deepEqual(interruptedDrafts,{outcomes:['AbortError','AbortError','AbortError'],remaining:0});
 
+  const submittedDraft=await page.evaluate(async()=>{
+    const store=await import('/src/draft-store.ts');
+    const key='browser-submitted-cleanup';
+    await store.saveDraft(key,[new File(['sent'],'sent.pdf')]);
+    const durable=store.markDraftSubmitted(key);
+    const original=IDBObjectStore.prototype.delete;
+    IDBObjectStore.prototype.delete=function(...args){
+      const request=original.apply(this,args);
+      request.addEventListener('success',()=>request.transaction.abort(),{once:true});
+      return request;
+    };
+    let failed=false;
+    try{await store.clearDraft(key);}catch{failed=true;}finally{IDBObjectStore.prototype.delete=original;}
+    const current=(await store.loadDraft(key)).length;
+    // 新しいモジュールはメモリ状態を共有せず、永続した送信済み印だけで復元を抑止する。
+    const fresh=await import('/src/draft-store.ts?submitted-reload');
+    const restored=(await fresh.loadDraft(key)).length;
+    const recoverable=fresh.getSubmittedDraftReceipt(key)?.durable===true;
+    let staleSaveRejected=false;
+    try{await store.saveDraft(key,[new File(['sent'],'sent.pdf')]);}catch{staleSaveRejected=true;}
+    await store.clearDraft(key);
+    await store.saveDraft(key,[new File(['new'],'new.pdf')]);
+    const [next]=await store.loadDraft(key);
+    const nextBody=await next.text();
+    await store.clearDraft(key);
+    return {durable,failed,current,restored,recoverable,staleSaveRejected,nextBody};
+  });
+  assert.deepEqual(submittedDraft,{durable:true,failed:true,current:0,restored:0,recoverable:true,staleSaveRejected:true,nextBody:'new'});
   const largeDraft=await page.evaluate(async()=>{
     const {saveDraft,loadDraft,clearDraft}=await import('/src/draft-store.ts');
     const key='browser-50mb-draft';

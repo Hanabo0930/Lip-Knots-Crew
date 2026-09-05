@@ -1,5 +1,10 @@
 # 現在地・履歴・承認
 
+## STAGINGのシフト参照元確認（2026-09-05）
+
+STAGING FirestoreのsheetImportConfigsを設定項目だけ読み取り、1件・enabled=true・scheduleEnabled=false・spreadsheetId設定ありを確認。最新sheetImportRunsはmode=commit/status=completed、2026-07-17T23:48:19.670Z完了（日本時間7月18日8:48）。シート名称メタデータは403で取得不能。テスト専用表か業務用表かは未確定で、デモ画像をそのシートから撮ったとは扱わない。シート本文・個人情報・シートIDは出力せず、権限変更・再取込・データ書込は行っていない。証跡はrelease-evidence/staging-sheet-source-check.jsonとstaging-sheet-last-run.json。
+
+
 ## 最新の承認と公開状況（2026-09-05）
 
 ユーザーがSTAGINGも自動実行するよう追加承認。対象は既定のStaff/Admin Hostingの検証・正規の保護環境承認・反映・復旧・後片付け。Functions・実メール・実データ・Rules・IAM・Productionの承認範囲は拡大しない。以前のSTAGING本人操作必須の記述はこの更新で置き換える。

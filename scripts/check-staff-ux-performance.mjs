@@ -600,7 +600,7 @@ assert.match(
 
 assert.match(
   app,
-  /async function apply\(job:Job\)\{[\s\S]*await run\("apply-action"[\s\S]*setPendingApplicationJobId\(job\.id\)[\s\S]*finally\{setPendingApplicationJobId\(""\);\}[\s\S]*aria-busy=\{applicationPending\|\|openJobsRefreshing\|\|openJobsStatus==="loading"\}[\s\S]*disabled=\{applicationPending\}[\s\S]*pendingApplicationJobId===job\.id\?"応募中…"/u,
+  /async function apply\(job:Job\)\{[\s\S]*await run\("apply-action"[\s\S]*setPendingApplicationJobId\(job\.id\)[\s\S]*finally\{if\(isCurrentAction\(\)\)setPendingApplicationJobId\(""\);\}[\s\S]*aria-busy=\{applicationPending\|\|openJobsRefreshing\|\|openJobsStatus==="loading"\}[\s\S]*disabled=\{applicationPending\}[\s\S]*pendingApplicationJobId===job\.id\?"応募中…"/u,
   "Staff job applications must share one exclusive action while keeping the selected job visibly in progress.",
 );
 
@@ -666,6 +666,18 @@ assert.match(
 
 assert.match(
   app,
+  /submissionProcessingVersionRef\.current\+=1;[\s\S]*setProcessingSubmission\(false\);[\s\S]*setPendingApplicationJobId\(""\);[\s\S]*setPendingShiftAction\(""\);/u,
+  "Every account change must immediately clear visible application, shift, and submission progress from the previous session.",
+);
+
+assert.match(
+  app,
+  /async function apply\(job:Job\)\{[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*applyToJob[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*async function submitPreContact\(\)[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*submitPreContact[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*refreshSelectedJob\(jobId,authLoadVersion\)[\s\S]*async function markPrinted[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*markNetPrintPrinted[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*async function setClientSubmitted[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*setSalesFloorClientSubmitted[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*catch\{[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*setSelectedJob\(previous\)/u,
+  "Job applications and all shift mutations must suppress stale success, refresh, failure, and optimistic rollback after an account change.",
+);
+
+assert.match(
+  app,
   /async function refreshSelectedJob\(jobId:string,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current[\s\S]*async function loadSubmissionHistory\(jobId:string,type:SubmissionType,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current[\s\S]*async function loadResubmissionDetail\(id:string,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current/u,
   "Submission completion refreshes must not write an older account's job, history, or resubmission detail into a newer session.",
 );
@@ -682,4 +694,4 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (125 assertions).");
+console.log("Staff UX and performance checks passed (127 assertions).");

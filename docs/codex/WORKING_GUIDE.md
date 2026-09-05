@@ -79,7 +79,7 @@ Batch 48作成環境ではブラウザ取得がタイムアウトしました。
 2. 変更をまとまりごとに実装し、検証結果・制限を記録。生成された `tsconfig.tsbuildinfo` などを無関係な変更として混ぜない。
 3. `automation/*` または `cursor/*` へコミットし、Draft PRを作成。接続経路でcommit SHAが変わる場合は親SHAとtree SHAの一致も検証。
 4. PR CIの全ジョブを追跡。ローカルだけで実施した検査をCI実施済みと記載しない。
-5. PRごとの明示承認を受けたらHead SHAが承認対象と一致することを再確認し、Ready化・Merge commitを実行。自動マージ機能の有効化やDraft制約の迂回をしない。
+5. 通常の開発PRは包括承認済み。現在のHead SHAの必須CI成功・差分・対象範囲を再確認し、Ready化後、`--merge --match-head-commit <SHA>` でマージする。都度承認は求めず、チェック失敗・予期しない変更・競合では止める。Draft・ブランチ・保護環境の制約を迂回しない。
 6. 最新main SHAを確定し、そのSHAのmain CI→自動Preview→Promoteを追跡。
 7. 保護環境の本人承認が必要なら、実行URLと「Review deployments → lkc-staging-hosting → Approve and deploy」を一度に案内。
 8. 事前検査、両サイトのバックアップ、反映、事後検査、ロールバック要否、一時チャンネル削除、artifactを確認。

@@ -13,7 +13,7 @@ These rules apply to every automated coding agent working in this repository.
 
 - Work on a dedicated `cursor/*` or `automation/*` branch.
 - Never push directly to `main`.
-- Never merge a pull request automatically.
+- Standing user authorization (2026-09-05): merge ordinary development PRs in the requested scope without asking for per-PR approval, only after all required checks succeed for the exact current Head SHA. Mark Draft PRs ready, then use a Merge commit with an exact-head guard. Stop on failed checks, unexpected changes, or conflicts; never bypass branch or environment protections. This does not authorize production access, real messages/data changes, or cloud changes beyond the existing explicit scope.
 - Never rewrite shared history or use destructive Git commands.
 - Keep unrelated changes out of the current task.
 
@@ -32,7 +32,7 @@ These rules apply to every automated coding agent working in this repository.
 - Do not ask the operator to paste or run commands when an existing connector
   or an allowlisted GitHub workflow can perform the same task safely.
 - Reserve operator action for interactive login, permission grants, protected
-  environment approval, `main` merge approval, billing/legal decisions, and
+  environment approval, billing/legal decisions, and
   production approval.
 
 ## Cloud safety

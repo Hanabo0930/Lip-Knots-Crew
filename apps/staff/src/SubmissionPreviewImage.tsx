@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export type PreviewFile = {
   id: string;
@@ -19,11 +19,17 @@ export default function SubmissionPreviewImage({ file, onRefreshPreview, classNa
   const [loadState, setLoadState] = useState<"idle" | "loading" | "loaded" | "error">("idle");
   const [src, setSrc] = useState<string | null>(file.previewUrl);
   const [refreshing, setRefreshing] = useState(false);
+  const refreshVersion = useRef(0);
+  const refreshPending = useRef(false);
 
   useEffect(() => {
+    refreshVersion.current += 1;
+    refreshPending.current = false;
+    setRefreshing(false);
     setSrc(file.previewUrl);
     setLoadState(file.previewUrl ? "loading" : "error");
-  }, [file.previewUrl, file.id]);
+    return () => { refreshVersion.current += 1; };
+  }, [file.previewUrl, file.id, file.submissionId]);
 
   if (!file.contentType.startsWith("image/")) {
     return (
@@ -34,26 +40,36 @@ export default function SubmissionPreviewImage({ file, onRefreshPreview, classNa
   }
 
   async function retryPreview() {
+    if (refreshPending.current) return;
+    refreshPending.current = true;
+    const version = refreshVersion.current;
     setRefreshing(true);
     setLoadState("loading");
     try {
       const nextUrl = await onRefreshPreview(file);
+      if (version !== refreshVersion.current) return;
       if (!nextUrl) {
         setLoadState("error");
         return;
       }
       setSrc(nextUrl);
     } catch {
-      setLoadState("error");
+      if (version === refreshVersion.current) setLoadState("error");
     } finally {
-      setRefreshing(false);
+      if (version === refreshVersion.current) {
+        refreshPending.current = false;
+        setRefreshing(false);
+      }
     }
   }
 
   if (!src) {
     return (
-      <div className={`${className} preview-placeholder`}>
-        <span>プレビュー準備中</span>
+      <div className={`${className} preview-placeholder`} aria-busy={refreshing}>
+        <span role="status">{refreshing ? "画像を確認しています…" : "プレビューを取得できません"}</span>
+        <button type="button" className="secondary" disabled={refreshing} onClick={() => void retryPreview()}>
+          {refreshing ? "再取得中…" : "画像を再読み込み"}
+        </button>
       </div>
     );
   }

@@ -37,6 +37,17 @@ jobs:
             node scripts/check-web-boot-bundles.mjs
           fi
           npm run test:admin-startup
+      - name: Validate Staff workflows and company isolation
+        run: |
+          npm run test:staff-company-scope
+          npm run test:staff-ux-performance
+          node scripts/test-staff-submission-recovery.mjs
+      - name: Install browser for local-only Staff demo checks
+        run: npx playwright install --with-deps chromium --only-shell
+      - name: Validate Staff browser recovery and layout
+        run: |
+          node scripts/test-staff-submission-flow.mjs --browser
+          node scripts/test-admin-workspace.mjs --browser
       - name: Run release orchestration regressions
         run: |
           npm run test:preview-demo

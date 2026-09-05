@@ -6,14 +6,21 @@ export async function runWithConcurrency<Item>(
   if (!items.length) return;
   const workerCount = Math.max(1, Math.min(items.length, Math.floor(concurrency) || 1));
   let nextIndex = 0;
+  let stopped = false;
 
   const workers = Array.from({ length: workerCount }, async () => {
-    while (nextIndex < items.length) {
+    while (!stopped && nextIndex < items.length) {
       const index = nextIndex;
       nextIndex += 1;
       const item = items[index];
       if (item === undefined) return;
-      await worker(item, index);
+      try {
+        await worker(item, index);
+      } catch (error) {
+        // 実行中の転送は待ち、失敗後は未開始のファイルを送らない。
+        stopped = true;
+        throw error;
+      }
     }
   });
 

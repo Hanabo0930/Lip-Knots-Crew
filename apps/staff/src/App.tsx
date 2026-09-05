@@ -114,7 +114,7 @@ function SelectedSubmissionFile({file,status,disabled,onRemove}:{file:File;statu
     return()=>URL.revokeObjectURL(url);
   },[file,isImage]);
   return <div className="selected-file-row">
-    <div className="selected-file-preview">{previewUrl?<img src={previewUrl} alt={`${file.name}の送信前確認`}/>:<span>{isPdf?"PDF":"FILE"}</span>}</div>
+    <div className="selected-file-preview">{previewUrl?<img src={previewUrl} loading="lazy" decoding="async" alt={`${file.name}の送信前確認`}/>:<span>{isPdf?"PDF":"FILE"}</span>}</div>
     <div className="file-copy"><span>{file.name}</span><small>{formatFileSize(file.size)}</small><em>{status}</em></div>
     <button className="file-remove" onClick={onRemove} disabled={disabled}>外す</button>
   </div>;
@@ -1151,6 +1151,7 @@ export default function App(){
 
   function addSubmissionFiles(selected:File[]){
     if(isSubmissionActionPending())return;
+    if(!selected.length)return;
     const accepted=selected.filter(file=>file.type.startsWith("image/")||file.type==="application/pdf"||file.name.toLowerCase().endsWith(".pdf"));
     const withinSize=accepted.filter(file=>file.size<=MAX_SUBMISSION_FILE_SIZE);
     const limit=requestId?1:MAX_SUBMISSION_FILES;
@@ -1158,9 +1159,12 @@ export default function App(){
     const seen=new Set(base.map(fileStateKey));
     const additions=withinSize.filter(file=>{const key=fileStateKey(file);if(seen.has(key))return false;seen.add(key);return true;});
     const next=[...base,...additions].slice(0,limit);
-    setFiles(next);
-    setUploadState({});
-    setSubmissionConfirmed(false);
+    // 無効な追加や上限到達では、既存の選択と確認状態を保持する。
+    if(additions.length&&(next.length!==files.length||next.some((file,index)=>fileStateKey(file)!==fileStateKey(files[index])))){
+      setFiles(next);
+      setUploadState({});
+      setSubmissionConfirmed(false);
+    }
     if(accepted.length<selected.length)setSubmissionMessage("画像またはPDF以外のファイルは選択できませんでした。");
     else if(withinSize.length<accepted.length)setSubmissionMessage("50MBを超えるファイルは選択できませんでした。");
     else if(base.length+additions.length>limit)setSubmissionMessage(`最大${limit}件までです。先頭から${limit}件を選択しました。`);

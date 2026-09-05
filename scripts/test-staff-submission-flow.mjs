@@ -316,6 +316,34 @@ try {
   assert.equal(await reloadButton.isEnabled(),true);
   if(output)await page.screenshot({path:resolve(output,'staff-submission-large-text.png'),fullPage:true});
   assert.deepEqual(errors,[]);
+  // 実デモ画面で再提出の選び直しを検証。端末内だけで、送信は行わない。
+  await page.addStyleTag({content:':root { font-size:16px; }'});
+  await page.locator('.bottom-nav').getByRole('button',{name:'ホーム'}).click();
+  await page.getByRole('button',{name:/報告書を再送してください/}).click();
+  const picker=page.locator('.file-picker-button.library input');
+  const png=Buffer.from(imageUrl.split(',')[1],'base64');
+  await picker.setInputFiles({name:'selected.png',mimeType:'image/png',buffer:png});
+  const thumbnail=page.locator('.selected-file-preview img');
+  await thumbnail.scrollIntoViewIfNeeded();
+  await page.waitForFunction(()=>document.querySelector('.selected-file-preview img')?.naturalWidth>0);
+  assert.equal(await thumbnail.getAttribute('loading'),'lazy');
+  assert.equal(await thumbnail.getAttribute('decoding'),'async');
+  const confirmSelection=page.locator('.submission-confirmation input');
+  await confirmSelection.check();
+  await picker.setInputFiles({name:'unsupported.txt',mimeType:'text/plain',buffer:Buffer.from('invalid')});
+  assert.equal(await page.locator('.selected-file-row').count(),1);
+  assert.match(await page.locator('.selected-file-row').innerText(),/selected.png/);
+  assert.equal(await confirmSelection.isChecked(),true);
+  await picker.setInputFiles([]);
+  assert.equal(await confirmSelection.isChecked(),true);
+  await picker.setInputFiles({name:'replacement.pdf',mimeType:'application/pdf',buffer:Buffer.from('%PDF-1.4 fixture')});
+  assert.match(await page.locator('.selected-file-row').innerText(),/replacement.pdf/);
+  assert.equal(await confirmSelection.isChecked(),false);
+  assert.equal(await page.locator('.selected-file-preview img').count(),0);
+  await page.getByRole('button',{name:'外す',exact:true}).click();
+  assert.equal(await page.locator('.selected-file-row').count(),0);
+  assert.deepEqual(errors,[]);
+  console.log('Browser selection recovery passed: decoded lazy preview, rejected replacement retained, cancellation, PDF replacement, confirmation reset, and removal.');
   console.log("Browser preview recovery, IndexedDB owner isolation/transaction abort recovery/50MB persistence, 320/390/1280px layout, enlarged text and keyboard recovery passed.");
 } finally {
   await browser?.close();

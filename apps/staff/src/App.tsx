@@ -216,7 +216,7 @@ export default function App(){
     });
     return()=>{active=false;};
   },[draftKey]);
-  useEffect(()=>{ if(!draftKey||draftHydrating||hydratedDraftKeyRef.current!==draftKey)return; if(skipNextDraftSaveRef.current){skipNextDraftSaveRef.current=false;return;} const timer=setTimeout(()=>{void saveDraft(draftKey,files).catch(()=>{if(hydratedDraftKeyRef.current===draftKey)showSubmissionMessage("下書きを保存できませんでした。通信状態を確認して、ファイルを選び直してください。");});},300); return()=>clearTimeout(timer); },[draftKey,draftHydrating,files]);
+  useEffect(()=>{ if(!draftKey||draftHydrating||hydratedDraftKeyRef.current!==draftKey)return; if(skipNextDraftSaveRef.current){skipNextDraftSaveRef.current=false;return;} const timer=setTimeout(()=>{void saveDraft(draftKey,files).catch(()=>{if(hydratedDraftKeyRef.current===draftKey)showSubmissionMessage("下書きを保存できませんでした。選択中のファイルはこの画面から送信できます。画面を閉じる前に送信するか、端末の空き容量・保存設定を確認してください。");});},300); return()=>clearTimeout(timer); },[draftKey,draftHydrating,files]);
   useEffect(()=>{ if(!pushEnabled)setShowPushActions(false); },[pushEnabled]);
   useEffect(()=>{
     if(showPastShifts||!selectedJob||!upcomingShifts.length||!pastShifts.some(job=>job.id===selectedJob.id))return;

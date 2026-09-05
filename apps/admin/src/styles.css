@@ -1065,3 +1065,8 @@ button.compact { padding:7px 9px; font-size:11px; white-space:nowrap; }
 .workspace-shortcuts button { min-height:48px; }
 @media(max-width:600px){ .workspace-nav button{flex-basis:110px;} .workspace-panel .section-heading{flex-wrap:wrap;} .workspace-panel input,.workspace-panel select,.workspace-panel textarea{max-width:100%;min-width:0;} }
 .analytics-split>div,.performance-split>div { min-width:0; }
+
+.job-search-summary { color:#695850; line-height:1.6; }
+.job-pagination { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:16px; }
+.job-pagination button { min-height:48px; }
+.job-pagination button:focus-visible { outline:3px solid #356f9e; outline-offset:3px; }

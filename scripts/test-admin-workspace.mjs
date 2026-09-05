@@ -28,6 +28,30 @@ for(const scenario of ['closed','not-ready','success','failure','cancelled','acc
  assert.deepEqual(states,['cancelled','account-changed'].includes(scenario)?['loading']:['loading',scenario==='failure'?'error':'ready']);
 }
 console.log('Admin workspace logic passed: 11 deferred loaders, global control retained, closed/not-ready/success/failure/cancel/account cases.');
+// 大量の合成案件でも、絞込漏れ・重複・ページ境界の欠落を防ぐ。
+const searchScope={exports:{}};
+runInNewContext(ts.transpileModule(readFileSync('apps/admin/src/job-search.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,searchScope);
+const {buildJobSearchIndex,filterJobSearchIndex,jobListPage}=searchScope.exports;
+const synthetic=Array.from({length:10000},(_,id)=>({id,workDate:'2026-09-05',storeName:'店舗 ＡＢＣ',makerName:'メーカー',clientName:'取引先',assignedStaffName:`担当${id}`,status:id%5===0?'cancelled':'assigned',preContact:id%2?{}:undefined}));
+const index=buildJobSearchIndex(synthetic);
+assert.equal(filterJobSearchIndex(index,' abc　２０２６-０９ ','all').length,10000);
+assert.equal(filterJobSearchIndex(index,'存在しない','all').length,0);
+assert.equal(filterJobSearchIndex(index,'  ','cancelled').length,2000);
+assert.equal(filterJobSearchIndex(index,'','assigned').length,8000);
+assert.equal(filterJobSearchIndex(index,'','precontact').length,4000);
+const special=buildJobSearchIndex([{...synthetic[1],cancelled:true},{...synthetic[1],status:'open',preContact:undefined}]);
+assert.equal(filterJobSearchIndex(special,'','precontact').length,0);
+assert.equal(filterJobSearchIndex(special,'','cancelled').length,1);
+const ids=[];
+for(let page=0;page<200;page++){const view=jobListPage(synthetic,page);assert.equal(view.rows.length,50);ids.push(...view.rows.map(job=>job.id));}
+assert.equal(ids.length,10000);assert.equal(new Set(ids).size,10000);assert.equal(ids[9999],9999);
+assert.equal(jobListPage(synthetic.slice(0,51),999).rows[0].id,50);
+assert.equal(jobListPage([],5).page,0);assert.equal(jobListPage([],5).rows.length,0);
+assert.match(source,/jobPageView\.rows\.map/);
+const timings=[];
+for(let sample=0;sample<20;sample++){const start=performance.now();filterJobSearchIndex(index,'abc 2026','precontact');timings.push(performance.now()-start);}
+timings.sort((a,b)=>a-b);
+console.log(`Admin search passed: 10000 synthetic jobs, normalization/AND/status/cancellation, 200 pages without missing or duplicate rows. Node filter only: median ${timings[10].toFixed(2)}ms, p95 ${timings[18].toFixed(2)}ms (20 samples; not browser/network latency).`);
 if(!process.argv.includes('--browser'))process.exit(0);
 const {preview}=await import('vite');
 const {chromium}=await import('@playwright/test');
@@ -69,6 +93,25 @@ try{
   await nav.getByRole('button',{name:'スタッフ',exact:true}).click();
   await nav.getByRole('button',{name:'案件',exact:true}).click();
   assert.equal(await search.inputValue(),'船橋');
+  const list=page.locator('section.panel').filter({has:page.getByRole('heading',{name:'案件一覧',exact:true})});
+  await search.fill('船橋　乳業');
+  assert.equal(await list.locator('tbody tr').count(),1);
+  await page.getByLabel('案件の絞り込み',{exact:true}).selectOption('precontact');
+  assert.equal(await list.locator('tbody tr').count(),0);
+  assert.match(await list.getByRole('status').innerText(),/該当する案件はありません/);
+  await list.getByRole('button',{name:'条件をクリア',exact:true}).click();
+  assert.equal(await list.locator('tbody tr').count(),4);
+  await page.getByLabel('案件の絞り込み',{exact:true}).selectOption('precontact');
+  assert.equal(await list.locator('tbody tr').count(),2);
+  await nav.getByRole('button',{name:'スタッフ',exact:true}).click();
+  await nav.getByRole('button',{name:'案件',exact:true}).click();
+  assert.equal(await page.getByLabel('案件の絞り込み',{exact:true}).inputValue(),'precontact');
+  await list.getByRole('button',{name:'条件をクリア',exact:true}).click();
+  await search.fill('ａさん ２０２６-０７');
+  assert.equal(await list.locator('tbody tr').count(),2);
+  assert.equal(await list.getByRole('button',{name:'次の50件',exact:true}).isDisabled(),true);
+  await list.getByRole('button',{name:'条件をクリア',exact:true}).click();
+  await search.fill('船橋');
   await page.getByRole('button',{name:'経費',exact:true}).click();
   await page.getByRole('heading',{name:'報告書確認・経費入力',exact:true}).waitFor();
   assert.equal(await nav.getByRole('button',{name:'報告書・再提出',exact:true}).getAttribute('aria-pressed'),'true');

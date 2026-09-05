@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   GoogleAuthProvider,
   onAuthStateChanged,
@@ -10,6 +10,8 @@ import { httpsCallable } from "firebase/functions";
 import { auth, firebaseConfigured, functions } from "./firebase";
 import { expectedFirebaseProjectId } from "./firebase-config";
 import type { ProductionEvidenceView } from "./ProductionAcceptanceRollbackConsole";
+
+import { buildJobSearchIndex, filterJobSearchIndex, jobListPage, ADMIN_JOB_PAGE_SIZE, type JobListFilter } from "./job-search";
 
 type AuthRunGuard = () => boolean;
 
@@ -821,6 +823,8 @@ export default function App() {
   const [jobs, setJobs] = useState<Job[]>(firebaseConfigured ? [] : demoJobs);
   const [message, setMessage] = useState("");
   const [queryText, setQueryText] = useState("");
+  const [jobListFilter,setJobListFilter]=useState<JobListFilter>("all");
+  const [jobPage,setJobPage]=useState(0);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncSummary, setSyncSummary] = useState<string>("未実行");
   const [staff, setStaff] = useState<StaffProfile[]>(
@@ -3072,11 +3076,9 @@ function downloadCsv(filename:string,content:string) {
 }
 
 
-  const filtered = jobs.filter((job) => {
-    const haystack = `${job.assignedStaffName ?? ""} ${job.storeName} ${job.makerName} ${job.clientName}`;
-    return haystack.includes(queryText);
-  });
-
+  const jobSearchIndex=useMemo(()=>buildJobSearchIndex(jobs),[jobs]);
+  const filtered=useMemo(()=>filterJobSearchIndex(jobSearchIndex,queryText,jobListFilter),[jobSearchIndex,queryText,jobListFilter]);
+  const jobPageView=jobListPage(filtered,jobPage);
   const filteredStaff = staff.filter((profile) => {
     const haystack = [
       profile.displayName,
@@ -3644,15 +3646,19 @@ function downloadCsv(filename:string,content:string) {
 
       <WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel">
         <div className="toolbar">
-          <input value={queryText} onChange={(event) => setQueryText(event.target.value)} placeholder="スタッフ名・店舗・メーカー・クライアントを検索" />
-          <button onClick={() => setMessage(`${filtered.length}件見つかりました。`)}>検索</button>
+          <input value={queryText} aria-label="案件を検索" onChange={(event) => {setQueryText(event.target.value);setJobPage(0);}} placeholder="スタッフ名・店舗・メーカー・クライアントを検索" />
+          <select aria-label="案件の絞り込み" value={jobListFilter} onChange={event=>{setJobListFilter(event.target.value as JobListFilter);setJobPage(0);}}>
+            <option value="all">すべて</option><option value="precontact">事前連絡待ち</option><option value="assigned">担当確定</option><option value="cancelled">キャンセル</option>
+          </select>
+          <button className="ghost" onClick={()=>{setQueryText("");setJobListFilter("all");setJobPage(0);}}>条件をクリア</button>
         </div>
         <h2>案件一覧</h2>
+        <p className="job-search-summary" role="status">読込済み{jobs.length}件のうち{filtered.length}件。{filtered.length?`${jobPageView.page*ADMIN_JOB_PAGE_SIZE+1}〜${Math.min((jobPageView.page+1)*ADMIN_JOB_PAGE_SIZE,filtered.length)}件を表示`:"該当する案件はありません"}。スペースで区切ると複数の条件で検索できます（日付も検索可）。</p>
         <div className="table-wrap">
           <table>
             <thead><tr><th>日付</th><th>スタッフ</th><th>店舗</th><th>メーカー</th><th>状態</th><th>公開</th><th>操作</th></tr></thead>
             <tbody>
-              {filtered.map((job) => (
+              {jobPageView.rows.map((job) => (
                 <tr key={job.id} className={job.status === "cancelled" ? "cancelled" : ""}>
                   <td>{job.workDate}</td>
                   <td>{job.assignedStaffName ?? "募集中"}</td>
@@ -3683,6 +3689,11 @@ function downloadCsv(filename:string,content:string) {
             </tbody>
           </table>
         </div>
+        <nav className="job-pagination" aria-label="案件一覧のページ">
+          <button className="ghost" disabled={jobPageView.page===0} onClick={()=>setJobPage(jobPageView.page-1)}>前の50件</button>
+          <span>{jobPageView.page+1} / {jobPageView.pageCount}ページ</span>
+          <button className="ghost" disabled={jobPageView.page+1>=jobPageView.pageCount} onClick={()=>setJobPage(jobPageView.page+1)}>次の50件</button>
+        </nav>
       </section></WorkspacePanel>
 
 

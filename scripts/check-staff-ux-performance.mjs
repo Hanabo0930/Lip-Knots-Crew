@@ -594,7 +594,7 @@ assert.match(
 
 assert.match(
   app,
-  /async function revokeDevice\(id:string\)\{[\s\S]*await run\("device-action"[\s\S]*confirm\("この端末をログアウトしますか？"\)[\s\S]*setPendingDeviceId\(id\)[\s\S]*await fetchDevices\(\)[\s\S]*finally\{setPendingDeviceId\(""\);\}[\s\S]*deviceActionPending&&!pendingDeviceId[\s\S]*disabled=\{device\.active===false\|\|deviceActionPending\}[\s\S]*pendingDeviceId===device\.id\?"ログアウト中…"/u,
+  /async function revokeDevice\(id:string\)\{[\s\S]*await run\("device-action"[\s\S]*confirm\("この端末をログアウトしますか？"\)[\s\S]*setPendingDeviceId\(id\)[\s\S]*await fetchDevices\(authLoadVersion\)[\s\S]*finally\{if\(isCurrentAction\(\)\)setPendingDeviceId\(""\);\}[\s\S]*deviceActionPending&&!pendingDeviceId[\s\S]*disabled=\{device\.active===false\|\|deviceActionPending\}[\s\S]*pendingDeviceId===device\.id\?"ログアウト中…"/u,
   "Device loading and logout must share one exclusive action while preserving per-device progress.",
 );
 
@@ -694,4 +694,35 @@ assert.match(
   "The bottom navigation must identify the current page and keep re-tap scroll-to-top behavior.",
 );
 
-console.log("Staff UX and performance checks passed (127 assertions).");
+// Execute the real handlers with delayed responses and an account switch.
+const deviceHandlers=app.slice(app.indexOf("  async function fetchDevices("),app.indexOf("  async function runPushAction("));
+for(const switchAt of ["none","list","revoke","refresh","failure"]){
+  const version={current:1};
+  const events=[];
+  const scope={
+    authLoadVersionRef:version,firebaseConfigured:true,functions:{},
+    devices:[{id:"current"}],deviceSessionId:"current",isCurrentDevice:()=>true,
+    confirm:()=>true,setDevices:()=>events.push("devices"),
+    setPendingDeviceId:value=>events.push(`pending:${value}`),
+    setMessage:()=>events.push("message"),setShowAccountMenu:()=>{},
+    setShowDiagnostics:()=>{},setShowDevices:()=>{},
+    logoutCurrentUser:async()=>events.push("logout"),
+    run:async(_key,action,options)=>{try{await action();}catch(error){options.setMessage(error.message);throw error;}},
+    httpsCallable:(_functions,name)=>async()=>{
+      if((name==="listMyDevices"&&(switchAt==="list"||switchAt==="refresh"))||
+         (name==="revokeMyDevice"&&(switchAt==="revoke"||switchAt==="failure")))version.current++;
+      if(switchAt==="failure")throw new Error("Delayed failure from old account");
+      return {data:{devices:[]}};
+    },
+  };
+  runInNewContext(ts.transpileModule(deviceHandlers,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,scope);
+  if(switchAt==="list"){
+    await scope.loadDevices();
+    assert.deepEqual(events,[],"A stale device list must not update the new account.");
+  }else{
+    await scope.revokeDevice("current");
+    assert.deepEqual(events,switchAt==="none"?["pending:current","devices","logout","message","pending:"]:["pending:current"],
+      `Device revocation must isolate the originating session (${switchAt}).`);
+  }
+}
+console.log("Staff UX and performance checks passed (127 existing assertions + 5 device-session scenarios).");

@@ -18,7 +18,7 @@ function section(source, start, end) {
 const handler = section(app, "  async function openTask(", "  async function pollSubmissionProcessing(");
 const events = [];
 const scope = {
-  myJobs: [{ id: "assigned" }],
+  myJobs: [{ id: "assigned" }], authLoadVersionRef:{current:0}, isSubmissionActionPending:()=>false, isPending:()=>false, loadTaskJob:async()=>null,
   setMessage: () => events.push("error"), navigate: value => events.push(value),
   setSelectedJob: () => events.push("selected"),
   startSubmission: async (type, job, request) => events.push([type, job.id, request]),

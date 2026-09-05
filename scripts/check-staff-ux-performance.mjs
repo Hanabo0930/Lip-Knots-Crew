@@ -522,7 +522,7 @@ assert.match(
 );
 assert.match(
   app,
-  /const jobs=orderAssignedJobs\(snapshot\.jobs\);[\s\S]*setMyJobs\(jobs\)[\s\S]*return orderAssignedJobs\(\[\.\.\.upcoming\.docs,\.\.\.history\.docs\]\.map/u,
+  /const jobs=orderAssignedJobs\(snapshot\.jobs\);[\s\S]*setMyJobs\(jobs\)[\s\S]*return orderAssignedJobs\(\[\.\.\.upcoming\.docs,\.\.\.history\.docs\.slice\(0,50\)\]\.map/u,
   "Both cached and live staff shift lists must apply the same daily-use ordering and assignment filter.",
 );
 
@@ -624,7 +624,7 @@ assert.match(
 
 assert.match(
   app,
-  /function isSubmissionActionPending\(\)\{[\s\S]*draftHydratingRef\.current\|\|isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;/u,
+  /function isSubmissionActionPending\(\)\{[\s\S]*draftHydratingRef\.current\|\|isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("task-job"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;/u,
   "Submission file mutations must synchronously stop while draft hydration or another submission action is active.",
 );
 

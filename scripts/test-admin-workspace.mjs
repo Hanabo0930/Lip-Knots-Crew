@@ -3,7 +3,7 @@ import {readFileSync,mkdirSync,writeFileSync} from "node:fs";
 import {resolve} from "node:path";
 import {runInNewContext} from "node:vm";
 import ts from "typescript";
-const source=readFileSync("apps/admin/src/App.tsx","utf8");
+const source=readFileSync("apps/admin/src/App.tsx","utf8").replace(/\r\n/g,"\n");
 const start=source.indexOf('  // 運用情報は画面を開いたときだけ取得');
 const end=source.indexOf('  useEffect(() => {\n    if (!user || !selectedAdminJobId)',start);
 assert.ok(start>=0&&end>start);
@@ -59,7 +59,7 @@ try{
     await page.getByRole('heading',{name:heading,exact:true}).waitFor();
     assert.equal(await nav.getByRole('button',{name:label,exact:true}).getAttribute('aria-pressed'),'true');
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${label} overflows at ${width}px`);
-    if(output&&['案件','報告書・再提出','スタッフ'].includes(label))await page.screenshot({path:resolve(output,`admin-${label}-${width}.png`)});
+    if(output)await page.screenshot({path:resolve(output,`admin-${label}-${width}.png`)});
    }
   }
   assert.ok([...scripts].some(path=>path.includes('ProductionAcceptanceRollbackConsole')),'Operational console must become available on demand');

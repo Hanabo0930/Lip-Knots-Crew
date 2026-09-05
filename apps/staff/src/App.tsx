@@ -419,7 +419,16 @@ export default function App(){
     return()=>window.clearTimeout(timer);
   },[message]);
 
-  async function fetchMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{ if(!db||!sid||!cid)return[]; const snap=await getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),orderBy("dateKey","asc"),limit(300))); const values=orderAssignedJobs(snap.docs.map(d=>({id:d.id,...d.data()} as Job))); return values; }
+  async function fetchMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{
+    if(!db||!sid||!cid)return[];
+    const today=localDateKey();
+    // 過去の件数が増えても今後のシフトが取得上限から押し出されないようにする。
+    const [upcoming,history]=await Promise.all([
+      getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(300))),
+      getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey","<",today),orderBy("dateKey","asc"),limit(300))),
+    ]);
+    return orderAssignedJobs([...upcoming.docs,...history.docs].map(d=>({id:d.id,...d.data()} as Job)));
+  }
   async function fetchTasks():Promise<StaffTask[]>{ if(!functions)return[]; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); return (r.data as {tasks?:StaffTask[]}).tasks??[]; }
   async function loadPrimaryBusinessData(sid=staffId,cid=companyId,uid=user?.uid??""):Promise<boolean>{
     const authLoadVersion=authLoadVersionRef.current;

@@ -522,7 +522,7 @@ assert.match(
 );
 assert.match(
   app,
-  /const jobs=orderAssignedJobs\(snapshot\.jobs\);[\s\S]*setMyJobs\(jobs\)[\s\S]*const values=orderAssignedJobs\(snap\.docs\.map/u,
+  /const jobs=orderAssignedJobs\(snapshot\.jobs\);[\s\S]*setMyJobs\(jobs\)[\s\S]*return orderAssignedJobs\(\[\.\.\.upcoming\.docs,\.\.\.history\.docs\]\.map/u,
   "Both cached and live staff shift lists must apply the same daily-use ordering and assignment filter.",
 );
 

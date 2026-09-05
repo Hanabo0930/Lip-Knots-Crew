@@ -81,7 +81,7 @@ Batch 48作成環境ではブラウザ取得がタイムアウトしました。
 4. PR CIの全ジョブを追跡。ローカルだけで実施した検査をCI実施済みと記載しない。
 5. 通常の開発PRは包括承認済み。現在のHead SHAの必須CI成功・差分・対象範囲を再確認し、Ready化後、`--merge --match-head-commit <SHA>` でマージする。都度承認は求めず、チェック失敗・予期しない変更・競合では止める。Draft・ブランチ・保護環境の制約を迂回しない。
 6. 最新main SHAを確定し、そのSHAのmain CI→自動Preview→Promoteを追跡。
-7. 保護環境の本人承認が必要なら、実行URLと「Review deployments → lkc-staging-hosting → Approve and deploy」を一度に案内。
+7. STAGING Hostingは包括承認済み。Promote実行のworkflow path、mainブランチ・最新SHA、成功済みの同一SHA CI/Preview、guard成功を照合する。pending_deploymentsがlkc-staging-hostingだけでcurrent_user_can_approve=trueなら、返されたenvironment IDを使って正規のPOST pending_deployments APIにstate=approvedと照合根拠のcommentを送る。保護設定を変更せず、権限不足・対象不一致の場合は停止して本人操作を番号付きで案内する。
 8. 事前検査、両サイトのバックアップ、反映、事後検査、ロールバック要否、一時チャンネル削除、artifactを確認。
 
 直接の `firebase deploy`、Production操作、Functionsやデータ・IAMの変更をこの手順に追加しません。

@@ -20,7 +20,7 @@
 Batch 48の未完了検証とPR状態から再開し、完了済みの作業を繰り返さないでください。
 要件、操作性、速度、安全性、デザインを業務の一連の流れで監査し、根拠のある改善を適切な大きさにまとめて実装・検証・Draft PR・PR CI追跡まで進めてください。
 通常の開発PRは2026-09-05の包括承認により都度確認せずマージしてください。現在のHead SHAに対する必須CI成功を確認し、Ready化後、Head SHAを固定したMerge commit方式で実行します。失敗・予期しない差分・競合では停止し、保護規則を迂回しません。
-デプロイは同一SHA検証済みのSTAGING Staff/Admin Hostingのみ。保護環境承認を迂回しないでください。
+STAGING Staff/Admin Hostingは包括承認済みです。同一の最新main SHAのCI・Preview成功とPromote guardを確認し、既存接続権限でlkc-staging-hostingの正規承認APIを実行して、反映・事後検証・後片付けまで自律的に進めてください。保護設定の変更や迂回はしません。既存権限で承認できない場合だけ本人操作を求めます。
 Production、Functions、Firestore、Storage、Rules、IAMを明示承認なしに変更しないでください。
 途中報告は簡潔にし、本人の確認や承認が必要なときだけ「社長がやること」を先頭に具体的に示してください。
 画面確認には有効なStaff URLを提示し、Admin Previewのログイン確認を社長に求めないでください。

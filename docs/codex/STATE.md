@@ -2,6 +2,8 @@
 
 ## 最新の承認と公開状況（2026-09-05）
 
+ユーザーがSTAGINGも自動実行するよう追加承認。対象は既定のStaff/Admin Hostingの検証・正規の保護環境承認・反映・復旧・後片付け。Functions・実メール・実データ・Rules・IAM・Productionの承認範囲は拡大しない。以前のSTAGING本人操作必須の記述はこの更新で置き換える。
+
 通常の開発PRは都度承認なしでマージまで進める。詳細は下記の承認表とAGENTS.mdを参照。以下の過去記録にあるPRごとの承認要件より、この最新承認を優先する。
 
 PR #95は承認Head 5a75a1990b38b0c0666b56fe3410fe5de1795fddをMerge commit c57f200e6185a91fde8fe3a770fe248981c22432で取り込み済み。PR CI全3ジョブ成功。main CIとSTAGINGはGitHubの同一SHAの実行結果で確認する。
@@ -76,8 +78,8 @@ Promoteログでは反映前Staff 259ms / Admin 214ms、反映後Staff 527ms / A
 | 専用ブランチへのアップロード、Draft PR、PR CI追跡 | 依頼範囲内で自律実行。通常の都度確認は不要 |
 | mainへのマージ | 通常の開発PRは包括承認済み（2026-09-05）。必須CI成功の現Head SHAを固定し、Ready化・Merge commitを自律実行 |
 | PR #94 | 上記Headに対して明示承認済み、既に完了。新PRへ流用しない |
-| STAGING Hosting | 同一SHAのmain CIとPreviewを確認し、既定のPromoteを使用 |
-| GitHub保護環境 | 必須の本人承認を維持。代行不能なら具体的な操作を一度に案内 |
+| STAGING Hosting | 包括承認済み（2026-09-05）。最新mainと同一SHAのCI・Preview・Promote guard成功を確認し、既定のPromoteから反映・事後検証・後片付けまで自律実行 |
+| GitHub保護環境 | lkc-staging-hostingのみ、既存接続権限で正規のpending-deployments承認APIを自律実行可能。保護設定を変更・迂回しない。権限不足の場合のみ本人操作を案内 |
 | Production / Functions / Firestore / Storage / Rules / IAMの変更 | 個別の明示承認なしに実施しない |
 | メール・通知の実送信、実ユーザーデータ操作 | フロントエンド検証のために勝手に実施しない |
 

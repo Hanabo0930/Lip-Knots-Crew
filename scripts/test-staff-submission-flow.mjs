@@ -193,6 +193,61 @@ try {
   });
   assert.deepEqual(draftCheck,{own:1,body:'draft-a',other:0,cleared:0});
 
+  const interruptedDrafts=await page.evaluate(async()=>{
+    const {saveDraft,loadDraft,clearDraft}=await import('/src/draft-store.ts');
+    const key='browser-abort-recovery';
+    const file=new File(['retained'],'retained.pdf',{type:'application/pdf',lastModified:1234});
+    await saveDraft(key,[file]);
+    const outcomes=[];
+    for(const [method,operation] of [
+      ['put',()=>saveDraft(key,[new File(['replacement'],'replacement.pdf')])],
+      ['delete',()=>clearDraft(key)],
+      ['get',()=>loadDraft(key)],
+    ]){
+      const original=IDBObjectStore.prototype[method];
+      let timer;
+      IDBObjectStore.prototype[method]=function(...args){
+        const request=original.apply(this,args);
+        request.addEventListener('success',()=>request.transaction.abort(),{once:true});
+        return request;
+      };
+      try{
+        const outcome=await Promise.race([
+          operation().then(()=>'unexpected-success',error=>error?.name),
+          new Promise(resolve=>{timer=setTimeout(()=>resolve('timeout'),2000);}),
+        ]);
+        if(outcome!=='AbortError')throw new Error(`${method}: expected AbortError, got ${outcome}`);
+        outcomes.push(outcome);
+      }finally{
+        clearTimeout(timer);
+        IDBObjectStore.prototype[method]=original;
+      }
+      const retained=await loadDraft(key);
+      if(retained.length!==1||await retained[0].text()!=='retained')throw new Error('Aborted transaction changed the saved draft');
+    }
+    // 中断したキーでも次の保存・解除が待機し続けないことを実DBで確認。
+    await saveDraft(key,[file]);
+    await clearDraft(key);
+    return {outcomes,remaining:(await loadDraft(key)).length};
+  });
+  assert.deepEqual(interruptedDrafts,{outcomes:['AbortError','AbortError','AbortError'],remaining:0});
+
+  const largeDraft=await page.evaluate(async()=>{
+    const {saveDraft,loadDraft,clearDraft}=await import('/src/draft-store.ts');
+    const key='browser-50mb-draft';
+    const bytes=new Uint8Array(50*1024*1024);
+    bytes[0]=37;bytes[bytes.length-1]=91;
+    const file=new File([bytes],'large-report.pdf',{type:'application/pdf',lastModified:1234});
+    try{
+      await saveDraft(key,[file]);
+      const [restored]=await loadDraft(key);
+      return {size:restored.size,name:restored.name,type:restored.type,lastModified:restored.lastModified,
+        first:new Uint8Array(await restored.slice(0,1).arrayBuffer())[0],
+        last:new Uint8Array(await restored.slice(-1).arrayBuffer())[0]};
+    }finally{await clearDraft(key);}
+  });
+  assert.deepEqual(largeDraft,{size:50*1024*1024,name:'large-report.pdf',type:'application/pdf',lastModified:1234,first:37,last:91});
+
   // The ordinary demo remains usable at phone and desktop widths.
   await page.goto(`http://127.0.0.1:${port}/`);
   await page.getByRole("button",{name:"シフトを開く",exact:true}).waitFor();
@@ -226,7 +281,7 @@ try {
   assert.equal(await reloadButton.isEnabled(),true);
   if(output)await page.screenshot({path:resolve(output,'staff-submission-large-text.png'),fullPage:true});
   assert.deepEqual(errors,[]);
-  console.log("Browser preview recovery, IndexedDB owner isolation, 320/390/1280px layout, enlarged text and keyboard recovery passed.");
+  console.log("Browser preview recovery, IndexedDB owner isolation/transaction abort recovery/50MB persistence, 320/390/1280px layout, enlarged text and keyboard recovery passed.");
 } finally {
   await browser?.close();
   await server.close();

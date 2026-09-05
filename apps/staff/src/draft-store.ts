@@ -57,8 +57,12 @@ export async function loadDraft(key: string): Promise<File[]> {
   let records: DraftFile[];
   try {
     records = await new Promise<DraftFile[]>((resolve, reject) => {
-      const request = db.transaction(STORE, "readonly").objectStore(STORE).get(key);
-      request.onsuccess = () => resolve((request.result as DraftFile[] | undefined) ?? []);
+      const transaction = db.transaction(STORE, "readonly");
+      const request = transaction.objectStore(STORE).get(key);
+      // リクエスト成功後でもトランザクションが中断されることがある。
+      transaction.oncomplete = () => resolve((request.result as DraftFile[] | undefined) ?? []);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error ?? new DOMException("下書きの読み込みが中断されました。", "AbortError"));
       request.onerror = () => reject(request.error);
     });
   } finally {
@@ -86,5 +90,6 @@ function tx(db: IDBDatabase, mode: IDBTransactionMode, action: (store: IDBObject
     action(transaction.objectStore(STORE));
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error ?? new DOMException("下書きの保存処理が中断されました。", "AbortError"));
   });
 }

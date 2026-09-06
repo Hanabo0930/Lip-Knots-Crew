@@ -83,3 +83,24 @@ assert.equal(parsed.jobs[0]?.materialStatus, "発送準備中");
 assert.equal(parsed.jobs[2]?.assignedStaffName, "佐藤花子");
 
 console.log("shift parser tests passed");
+
+// 実業務要件の合成検査。BCは試験専用の仮列で、実シートの採用列ではない。
+const checkboxConfig: ShiftImportConfig = {...config,readRangeEndColumn:"BC",columns:{...config.columns,cancelled:"BC"}};
+for(const scenario of [
+  {b:"",f:"別用途の入力",checked:false,status:"open"},
+  {b:"合成担当者",f:"",checked:false,status:"assigned"},
+  {b:"　 ",f:"",checked:false,status:"open"},
+  {b:"",f:"",checked:true,status:"cancelled"},
+  {b:"合成担当者",f:"",checked:"TRUE",status:"cancelled"},
+  {b:"",f:"",checked:"FALSE",status:"open"},
+]){
+  const row=[...rows[1]];row[1]=scenario.b;row[5]=scenario.f;row[44]=true;row[54]=scenario.checked;
+  const result=parseShiftSheet(config.spreadsheetId,"2026.7",[rows[0],row],checkboxConfig);
+  assert.equal(result.jobs[0]?.status,scenario.status,"B列と専用キャンセル列だけを判定元とする");
+  assert.equal(result.jobs[0]?.publishable,scenario.status==="open");
+}
+const incomplete=[...rows[1]];incomplete[10]="";incomplete[54]=false;
+assert.equal(parseShiftSheet(config.spreadsheetId,"2026.7",[rows[0],incomplete],checkboxConfig).jobs[0]?.status,"draft");
+incomplete[54]=true;
+assert.equal(parseShiftSheet(config.spreadsheetId,"2026.7",[rows[0],incomplete],checkboxConfig).jobs[0]?.status,"cancelled");
+console.log("Live-sheet synthetic mapping passed: B/F distinction, whitespace, TRUE/FALSE checkbox, unrelated AS checkbox and cancellation priority.");

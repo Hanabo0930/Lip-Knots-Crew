@@ -42,11 +42,13 @@ jobs:
           npm run test:staff-company-scope
           npm run test:staff-ux-performance
           node scripts/test-staff-submission-recovery.mjs
+          node scripts/test-staff-shift-cards.mjs
       - name: Install browser for local-only Staff demo checks
         run: npx playwright install --with-deps chromium --only-shell
       - name: Validate Staff browser recovery and layout
         run: |
           node scripts/test-staff-submission-flow.mjs --browser
+          node scripts/test-staff-shift-rendering.mjs
           node scripts/test-admin-workspace.mjs --browser
       - name: Run release orchestration regressions
         run: |

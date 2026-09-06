@@ -1,3 +1,4 @@
+import ShiftJobCards from './ShiftJobCards';
 import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
   getIdTokenResult, isSignInWithEmailLink, onAuthStateChanged,
@@ -164,6 +165,12 @@ export default function App(){
   const [showPushActions,setShowPushActions]=useState(false);
   const [showAllTasks,setShowAllTasks]=useState(false);
   const [showPastShifts,setShowPastShifts]=useState(false);
+  const [upcomingPage,setUpcomingPage]=useState(0);
+  const [pastPage,setPastPage]=useState(0);
+  const [shiftFocusRequest,setShiftFocusRequest]=useState(0);
+  const shiftDetailRef=useRef<HTMLElement>(null);
+  useEffect(()=>{if(shiftFocusRequest){shiftDetailRef.current?.focus({preventScroll:true});shiftDetailRef.current?.scrollIntoView({block:'start'});}},[shiftFocusRequest]);
+  function openShiftJob(job:Job){setSelectedJob(job);setShiftFocusRequest(value=>value+1);}
   const [hasMoreUpcomingShifts,setHasMoreUpcomingShifts]=useState(false);
   const [upcomingShiftMessage,setUpcomingShiftMessage]=useState("" );
   const upcomingShiftCursorRef=useRef<QueryDocumentSnapshot|null>(null);
@@ -196,6 +203,7 @@ export default function App(){
 
   const selectedAssignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id)??null:null;
   const {upcoming:upcomingShifts,past:pastShifts}=useMemo(()=>splitAssignedJobs(myJobs),[myJobs]);
+  useEffect(()=>{const upcomingIndex=upcomingShifts.findIndex(job=>job.id===selectedJob?.id);const pastIndex=pastShifts.findIndex(job=>job.id===selectedJob?.id);if(upcomingIndex>=0)setUpcomingPage(Math.floor(upcomingIndex/50));if(pastIndex>=0)setPastPage(Math.floor(pastIndex/50));},[selectedJob?.id]);
   const draftOwner=firebaseConfigured?(user&&companyId?JSON.stringify([companyId,user.uid]):""):"demo";
   const draftKey=selectedAssignedJob?submissionDraftKey(draftOwner,selectedAssignedJob.id,submissionType,requestId):"";
   const previewContextRef=useRef("");
@@ -250,6 +258,7 @@ export default function App(){
     pastShiftVersionRef.current+=1;
     pastShiftCursorRef.current=null;
     upcomingShiftCursorRef.current=null;
+    setUpcomingPage(0);setPastPage(0);
     setHasMoreUpcomingShifts(false);
     setUpcomingShiftMessage("" );
     setHasMorePastShifts(false);
@@ -1265,7 +1274,7 @@ export default function App(){
       {businessDataFallback??<>
         <div className="shift-list-heading"><h3>これからのシフト</h3><span>{upcomingShifts.length}件</span></div>
         {upcomingShifts.length
-          ? <div className="grid">{upcomingShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>
+          ? <ShiftJobCards jobs={upcomingShifts} page={upcomingPage} onPageChange={setUpcomingPage} selectedId={selectedJob?.id} onSelect={openShiftJob} label="これからのシフト" accent={jobAccent} kind={jobKind} summary={prepSummary}/>
           : <EmptyAction title="今後の確定シフトはありません" body="募集中の案件を確認すると、次の仕事へすぐ進めます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>}
         <div className="past-shift-pagination">
           {hasMoreUpcomingShifts&&<><p>これからのシフトには続きがあります。日付順に50件ずつ追加できます。</p><button className="secondary" onClick={()=>void loadMoreUpcomingShifts()} disabled={isPending("upcoming-shifts")||businessRefreshing} aria-busy={isPending("upcoming-shifts")}>{isPending("upcoming-shifts")?"読み込み中…":"これからのシフトを続きを読み込む"}</button></>}
@@ -1273,13 +1282,13 @@ export default function App(){
         </div>
         {(pastShifts.length>0||hasMorePastShifts)&&<div className="past-shifts">
           {upcomingShifts.length>0?<button className="secondary past-shifts-toggle" aria-expanded={showPastShifts} aria-controls="past-shifts-list" onClick={()=>setShowPastShifts(value=>!value)}>{showPastShifts?"過去のシフトを閉じる":`過去のシフトを見る（${pastShifts.length}件）`}</button>:<div className="shift-list-heading past"><h3>過去のシフト</h3><span>{pastShifts.length}件</span></div>}
-          {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list" className="grid past-shift-grid">{pastShifts.map(job=><article className={`job shift-job ${selectedJob?.id===job.id?"selected":""}`} style={{"--job-accent":jobAccent(job.menuName)} as CSSProperties} key={job.id} onClick={()=>setSelectedJob(job)}><span className="date">{job.workDate||job.dateKey}</span><span className="job-kind">{jobKind(job.menuName)}</span><h3>{job.storeName}</h3><p>{job.workTime}</p><span className="prep-chip">{prepSummary(job)}</span></article>)}</div>}
+          {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list" className="past-shift-grid"><ShiftJobCards jobs={pastShifts} page={pastPage} onPageChange={setPastPage} selectedId={selectedJob?.id} onSelect={openShiftJob} label="過去のシフト" accent={jobAccent} kind={jobKind} summary={prepSummary}/></div>}
         </div>}
         {(showPastShifts||!upcomingShifts.length)&&<div className="past-shift-pagination">
           {hasMorePastShifts&&<><p>過去のシフトは古い順に50件ずつ追加します。</p><button className="secondary" onClick={()=>void loadMorePastShifts()} disabled={isPending("past-shifts")||businessRefreshing} aria-busy={isPending("past-shifts")}>{isPending("past-shifts")?"読み込み中…":"過去のシフトを続きを読み込む"}</button></>}
           {pastShiftMessage&&<p role="alert">{pastShiftMessage}</p>}
         </div>}
-        {selectedJob&&<section className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending||submissionContextPending||draftHydrating}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)} disabled={shiftActionPending}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)} disabled={shiftActionPending}/></label></div><button onClick={()=>void submitPreContact()} disabled={shiftActionPending}>{pendingShiftAction==="preContact"?"送信中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||shiftActionPending} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)} disabled={submissionEditPending}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)} disabled={submissionEditPending}>📝 報告書を提出</button></div></section>}
+        {selectedJob&&<section ref={shiftDetailRef} tabIndex={-1} aria-label="選択したシフトの詳細" className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending||submissionContextPending||draftHydrating}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{selectedJob.storeName}</h2><p>{selectedJob.storeAddress||selectedJob.menuName}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions"><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a>{selectedJob.storeNearestStation&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{selectedJob.storeNearestStation}</a>}</div></div><div className="form-grid"><label>体温<input value={temperature} onChange={e=>setTemperature(e.target.value)} disabled={shiftActionPending}/></label><label>到着予定時刻<input value={arrivalTime} onChange={e=>setArrivalTime(e.target.value)} disabled={shiftActionPending}/></label></div><button onClick={()=>void submitPreContact()} disabled={shiftActionPending}>{pendingShiftAction==="preContact"?"送信中…":"事前連絡を送信"}</button><hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{selectedJob.materialStatus||"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(selectedJob.netPrint?.items??[]).map(item=><div className="netprint-row" key={item.id}><strong>{item.number}</strong><button className={item.printed?"secondary":""} disabled={item.printed||shiftActionPending} onClick={()=>void markPrinted(item)}>{item.printed?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>)}{!(selectedJob.netPrint?.items??[]).length&&<div className="empty compact">ネットプリント番号はまだ届いていません。</div>}<hr/><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)} disabled={submissionEditPending}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)} disabled={submissionEditPending}>📝 報告書を提出</button></div></section>}
       </>}
     </section>}
     {view==="submit"&&!selectedAssignedJob&&<section className="panel">{businessDataFallback??(myJobs.length?<EmptyAction title="提出するシフトを選んでください" body="提出は、本人に割り当てられた確定シフトからだけ受け付けます。" action="シフトを選ぶ" onAction={()=>navigate("shifts")}/>:<EmptyAction title="提出できる確定シフトはありません" body="シフトが確定すると、売場画像や報告書をここから提出できます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>)}</section>}

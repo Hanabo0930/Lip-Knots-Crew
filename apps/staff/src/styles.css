@@ -244,3 +244,11 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .past-shift-pagination { margin:16px 0; }
 .past-shift-pagination p { color:#65545f; font-size:14px; }
 .past-shift-pagination button { min-height:48px; white-space:normal; }
+
+.shift-card-button { color:inherit; text-align:left; font-weight:400; display:flex; flex-direction:column; align-items:flex-start; }
+.shift-card-store { display:block; font-size:1.17em; margin-bottom:16px; overflow-wrap:anywhere; }
+.shift-card-time { display:block; color:#77665f; line-height:1.55; margin-bottom:16px; }
+.shift-page-controls { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin:12px 0; }
+.shift-page-controls span { flex:1 1 150px; text-align:center; font-size:13px; }
+.shift-card-list,.shift-detail { scroll-margin-top:16px; }
+.shift-card-list:focus-visible,.shift-detail:focus-visible { outline:3px solid #c97f98; outline-offset:3px; }

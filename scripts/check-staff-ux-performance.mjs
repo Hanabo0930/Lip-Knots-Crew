@@ -546,7 +546,7 @@ assert.match(
 
 assert.match(
   app,
-  /これからのシフト[\s\S]*upcomingShifts\.map[\s\S]*className="secondary past-shifts-toggle" aria-expanded=\{showPastShifts\} aria-controls="past-shifts-list"[\s\S]*過去のシフトを見る/u,
+  /これからのシフト[\s\S]*ShiftJobCards jobs=\{upcomingShifts\}[\s\S]*className="secondary past-shifts-toggle" aria-expanded=\{showPastShifts\} aria-controls="past-shifts-list"[\s\S]*過去のシフトを見る/u,
   "Upcoming shifts must stay first while past shifts remain behind one accessible toggle.",
 );
 

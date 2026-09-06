@@ -165,3 +165,7 @@ Every agent result must state:
 - `CLOUD_RESOURCES_CHANGED`
 - `BLOCKERS`
 - `NEXT_SAFE_ACTION`
+
+## 実業務シフト表の保護（2026-09-06のユーザー明示指示）
+
+ユーザーが共有したGoogle Sheets「シフト表」は最重要の実業務原本であり、現時点では読取専用。セル値・数式・背景色・タブ・共有設定の変更、アプリからの書戻し、実表を使う取込commit・同期起動を実行しない。通常PR/マージ/STAGING Hostingの包括承認を、この原本や実データの変更許可と解釈しない。検証はローカル合成データで行う。本人がこの原本の操作を別途明示的に許可するまで維持する。

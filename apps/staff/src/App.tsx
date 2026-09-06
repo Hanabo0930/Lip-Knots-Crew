@@ -858,8 +858,10 @@ export default function App(){
           await httpsCallable(functions,"applyToJob")({jobId:job.id,requestId:crypto.randomUUID()});
           if(!isCurrentAction())return;
           setMessage("応募が確定しました。");
+          setOpenJobs(current=>current.filter(item=>item.id!==job.id));
           setExpandedOpenJobId("");
-          await loadOpenJobs();
+          try{await loadOpenJobs();}
+          catch{if(isCurrentAction())setMessage("応募は確定しています。一覧を更新できませんでした。「もう一度試す」から最新情報を確認してください。");}
         }finally{if(isCurrentAction())setPendingApplicationJobId("");}
       },{setMessage:value=>{if(isCurrentAction())setMessage(value);}});
     }catch{return;}

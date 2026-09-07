@@ -96,4 +96,40 @@ for (const [revision, role] of [[0, 'admin'], [1, 'staff']]) {
   const test = setup(ownLock, { job: { dateKey: undefined, workDate: dateKey } });
   await test.run({ assignedStaffId: null }); assert.equal(test.records.get(oldPath).active, false); passed++;
 }
+const targetLock = { ...ownLock, staffId: 'staff-b' };
+for (const active of [true, false]) {
+  for (const mismatch of [{ companyId: 'other' }, { staffId: 'other' }, { dateKey: '2099-01-01' }]) {
+    const newLock = { ...targetLock, ...mismatch, active };
+    const test = setup(ownLock, { newLock });
+    await assert.rejects(test.run({ assignedStaffId: 'staff-b' }), { code: 'failed-precondition' });
+    assert.equal(test.commits.length, 0); assert.equal(test.audits.length, 0);
+    assert.deepEqual(test.records.get(newPath), newLock); assert.deepEqual(test.records.get(oldPath), ownLock);
+    assert.equal(test.records.get('jobs/job-a').assignedStaffId, 'staff-a'); passed++;
+  }
+}
+for (const active of [undefined, null, 'false', 0]) {
+  const test = setup(ownLock, { newLock: { ...targetLock, active } });
+  await assert.rejects(test.run({ assignedStaffId: 'staff-b' }), { code: 'failed-precondition' });
+  assert.equal(test.commits.length, 0); passed++;
+}
+for (const newLock of [targetLock, { ...targetLock, active: false, jobId: 'previous-job' }]) {
+  const test = setup(ownLock, { newLock }); await test.run({ assignedStaffId: 'staff-b' });
+  assert.equal(test.records.get(newPath).jobId, 'job-a'); assert.equal(test.records.get(newPath).active, true);
+  assert.equal(test.records.get(oldPath).active, false); passed++;
+}
+for (const dateKey of [undefined, '', '2026-02-30', '2026-9-20', 20260920]) {
+  const test = setup(ownLock, { job: { dateKey } });
+  await assert.rejects(test.run({ assignedStaffId: 'staff-b' }), { code: 'failed-precondition' });
+  assert.equal(test.commits.length, 0); passed++;
+}
+{
+  const test = setup(ownLock, { job: { dateKey: undefined, workDate: dateKey } });
+  await test.run({ assignedStaffId: 'staff-b' }); assert.equal(test.records.get(newPath).dateKey, dateKey); passed++;
+}
+for (const newLock of [{ ...targetLock, jobId: 'concurrent-job' }, { ...targetLock, companyId: 'other' }]) {
+  const test = setup(ownLock, { retry: records => records.set(newPath, newLock) });
+  await assert.rejects(test.run({ assignedStaffId: 'staff-b' }), { code: 'failed-precondition' });
+  assert.equal(test.attempts.length, 2); assert.equal(test.commits.length, 0);
+  assert.deepEqual(test.records.get(oldPath), ownLock); assert.deepEqual(test.records.get(newPath), newLock); passed++;
+}
 console.log(`Admin reassignment lock ownership: ${passed} cases passed (SDK mocks; no external writes).`);

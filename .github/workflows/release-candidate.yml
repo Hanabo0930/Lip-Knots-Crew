@@ -99,6 +99,7 @@ jobs:
           node scripts/test-shift-import-transactions.mjs
           node scripts/test-shift-import-lease.mjs
           node scripts/test-shift-integrity-diagnostics.mjs
+          node scripts/test-staging-shift-integrity-reader.mjs
           node scripts/test-admin-reassignment-locks.mjs
           npm test
       - name: Publish Functions summary

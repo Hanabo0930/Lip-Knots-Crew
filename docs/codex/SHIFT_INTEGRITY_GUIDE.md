@@ -36,3 +36,15 @@ node scripts/diagnose-shift-integrity.mjs --input config-samples/shift-integrity
 
 ## 未完了の業務判断
 取消後の精算・写真の新規受付、取消済案件への再手配、原本の専用取消列、GASへの伝播は別途確認が必要です。通常の継続指示を原本変更やFunctions対象拡張の許可とは扱いません。
+## STAGINGからの取得（2026-09-07追加）
+`scripts/read-staging-shift-integrity.mjs`は、接続先をlip-knots-crew-stagingの(default)へ固定し、指定したcompanyIdのjobs/staffDayLocksだけを読取専用transactionで取得します。Google SheetsやGASへのアクセス、書込、同期、通知、権限変更はありません。
+
+両コレクションは同じtransactionを使います。取得するのは本ガイド冒頭の照合項目だけです。各コレクションの上限は10000件で、10001件目が見つかれば部分データを診断せず失敗します。取得エラー・不正応答・会社混在・重複ID・終了処理失敗でも正常レポートを出しません。会社条件に一致しない文書（companyId欠落を含む）は範囲外です。両方0件の場合も会社設定や投入状況が未確認なのでunverifiedとします。
+
+CLIは`--company <companyId> --output <新規ファイル>`を受け取り、既存認証の短期アクセストークンを標準入力からのみ受け取ります。トークンを引数・ソース・ファイル・ログへ保存しないでください。既存出力は上書きしません。取得失敗時は予約済みの空ファイルが残る場合がありますが、それは診断結果ではありません。認証や権限が不足した時に自動ログイン・権限追加・別環境への切替はしません。
+
+標準出力は状態・件数のみ。保存するのも生スナップショットではなく診断レポートで、指摘対象のIDが含まれるためrelease-evidenceなどGit除外済みの非公開場所で管理します。APIの読取課金と取得時間は発生し得ます。取得は自動スケジュール化していません。
+
+根拠: [beginTransaction](https://firebase.google.com/docs/firestore/reference/rest/v1/projects.databases.documents/beginTransaction)のreadOnly指定、[runQuery](https://firebase.google.com/docs/firestore/reference/rest/v1/projects.databases.documents/runQuery)の既存transaction指定。トランザクションの終了はrollbackのみでcommitは使いません。
+
+2026-09-07のSTAGING読取確認: 設定サンプルで使用されるcompanyId=lipknotsについてjobs=0、staffDayLocks=0。結果unverified。これは指定会社の2コレクションの結果であり、他社・別コレクション・原本の空判定ではありません。実業務データに対する診断受入は未完了です。証跡release-evidence/staging-integrity-read-20260907.json。

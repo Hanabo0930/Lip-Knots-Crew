@@ -217,3 +217,8 @@ adminEditJobInputsは担当者解除/変更で旧枠のjobIdを検査せずactiv
 取込: 最大540秒に対しリース480秒だった不一致を600秒へ修正。取得transactionの再試行時点で期限を再計算。各25案件transactionでリースを読取り、会社/token/Timestamp期限を照合し、期限切れ/交代/欠落時はabortedでその単位を停止。リース文書もtransactionで読むので交代と競合時に再検証される。自分のtoken以外の解放は従来どおり禁止。更新単位最大読取75→76、失敗時の先行正常単位保持は継続。リース判定は各単位の開始時点。実行上限変更/新規トリガー/スケジュール有効化はしない。
 検証: 型ビルド、取込48・リース6・診断24・担当者変更23・取消24の計125ケース成功。合成1万件ずつの診断を含む。実SDKの負荷/競合/実原本取込の受入ではない。benchmark-shift-integrity.mjsで1000/10000件を各20回測定、正本release-evidence/shift-integrity-benchmark.jsonに全標本・ソースSHA256を保存。数値はメモリ上照合のみでI/O/クラウドを含まない。
 操作資料docs/codex/SHIFT_INTEGRITY_GUIDE.md、合成入力config-samples/shift-integrity.synthetic.json、診断例release-evidence/shift-integrity-example.json（3指摘）を保存。Functions未反映。原本/GAS/Rules/IAM/Production/実データ/実送信変更なし。手動/定期取込両方のFunctionsを同版に揃える反映は現在の範囲外で未実施。
+## STAGING読取診断と反映準備（2026-09-07）
+read-staging-shift-integrity.mjsを追加。固定STAGING/(default)、明示companyId、jobs/staffDayLocksの必要項目のみを同一readOnly transactionで照合。上限10000/種、超過時は失敗。会社/文書範囲/重複/応答不足/型/取得失敗を拒否しrollbackで終了。標準入力の短期トークンは保存/出力しない。レポートのみ保存し原データを残さない。両方0件はunverified。会社条件に一致しない文書は範囲外であり全DBの整合を保証しない。
+実読取: 既存gcloud認証を使いlipknots会社のjobs=0/locks=0、unverifiedを確認。実原本/GAS/実同期/データ書込/送信/権限変更なし。証跡release-evidence/staging-integrity-read-20260907.json。空の範囲なので実業務データの診断受入は未完了。認証操作は既存短期トークン取得のみ、新規ログイン/鍵/権限なし。
+検証: 取得側30ケース（API形状・固定接続先・同transaction・projection・欠落枠・0件・会社混在・上限・異常応答・途中失敗・rollback失敗・個人項目除外・トークン秘匿・CLI上書き拒否/失敗出力/接続先追加拒否）、既存診断24ケース成功。取得検査をCI追加。Firestore実接続は空範囲の受入のみ、非空の競合/大量データは合成検査。
+SHIFT_INTEGRITY_GUIDEを更新、SERVER_ROLLOUT_READINESSへPR #113〜#116の未反映関数・同版/定期実行/限定合成データ・復旧条件を整理。Functions許可リストやデプロイワークフローの権限範囲は変更しない。Hostingの反映はFunctions稼働証跡にしない。

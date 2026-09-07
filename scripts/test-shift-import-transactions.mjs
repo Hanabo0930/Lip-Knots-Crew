@@ -11,6 +11,9 @@ const end = source.indexOf('async function acquireSyncLock(', start);
 assert.ok(start >= 0 && end > start);
 const code = ts.transpileModule(source.slice(start, end) + '\nexports.writeJobsAndLocks = writeJobsAndLocks;', { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 class HttpsError extends Error { constructor(code, message) { super(message); this.code = code; } }
+class MockTimestamp { constructor(value) { this.value = value; } toMillis() { return this.value; } static now() { return new MockTimestamp(12345); } }
+const leasePath = 'syncLocks/synthetic-company_shift_import';
+const leaseRef = { id: 'synthetic-company_shift_import', path: leasePath };
 const deleted = '__synthetic_delete__';
 const companyId = 'synthetic-company', staffId = 'staff-a', dateKey = '2026-09-20';
 const lockPath = (staff = staffId, date = dateKey) => `staffDayLocks/${companyId}_${staff}_${date}`;
@@ -27,9 +30,13 @@ const incoming = (patch = {}) => ({
 const names = new Map([['StaffA', staffId], ['StaffB', 'staff-b']]);
 function harness(entries = [], options = {}) {
   const records = new Map(entries.map(([key, value]) => [key, structuredClone(value)]));
+  records.set(leasePath, { companyId: 'synthetic-company', token: 'synthetic-token', expires: 99999 });
   const commits = [], attempts = [];
   let retried = false;
-  const snapshot = (ref) => ({ id: ref.id, exists: records.has(ref.path), data: () => structuredClone(records.get(ref.path)) });
+  const snapshot = (ref) => ({ id: ref.id, exists: records.has(ref.path), data: () => {
+    const value = structuredClone(records.get(ref.path));
+    return ref.path === leasePath && value ? { ...value, leaseUntil: new MockTimestamp(value.expires) } : value;
+  } });
   const validate = (value) => { assert.notEqual(value, undefined, 'undefined Firestore field'); if (value && typeof value === 'object') for (const child of Object.values(value)) validate(child); };
   const apply = (pending) => {
     for (const item of pending) validate(item.data);
@@ -62,8 +69,8 @@ function harness(entries = [], options = {}) {
     },
   };
   const exports = {};
-  runInNewContext(code, { exports, db, HttpsError, Timestamp: { now: () => 12345 }, FieldValue: { delete: () => deleted }, normalizeName: name => name.normalize('NFKC').replace(/[\s　]+/g, '').trim() }, { timeout: 3000 });
-  return { records, commits, attempts, run: (jobs, index = names) => exports.writeJobsAndLocks(jobs, index, 'synthetic-run') };
+  runInNewContext(code, { exports, db, HttpsError, Timestamp: MockTimestamp, FieldValue: { delete: () => deleted }, normalizeName: name => name.normalize('NFKC').replace(/[\s　]+/g, '').trim() }, { timeout: 3000 });
+  return { records, commits, attempts, run: (jobs, index = names) => exports.writeJobsAndLocks(jobs, index, 'synthetic-run', { ref: leaseRef, token: 'synthetic-token' }) };
 }
 const baseEntries = () => [['jobs/job-a', oldJob()], [lockPath(), ownLock()]];
 let passed = 0;
@@ -100,7 +107,7 @@ await test('new lock collision preserves job and old lock', async () => {
   const entries = [...baseEntries(), [lockPath('staff-b'), ownLock({ staffId: 'staff-b', jobId: 'job-b' })]];
   const h = harness(entries);
   await assert.rejects(h.run([incoming({ assignedStaffName: 'Staff B' })]), { code: 'failed-precondition' });
-  assert.equal(h.commits.length, 0); assert.deepEqual([...h.records], entries);
+  assert.equal(h.commits.length, 0); assert.deepEqual([...h.records].filter(([id]) => id !== leasePath), entries);
 });
 await test('inactive matching-tenant lock can be reused', async () => {
   const h = harness([[lockPath(), ownLock({ jobId: 'job-b', active: false })]]);
@@ -172,7 +179,7 @@ await test('successful retry counts committed writes only', async () => {
 });
 await test('failed commit leaves all three documents unchanged', async () => {
   const entries = baseEntries(); const h = harness(entries, { failCommit: true });
-  await assert.rejects(h.run([incoming({ dateKey: '2026-09-21' })]), /synthetic commit failure/); assert.deepEqual([...h.records], entries);
+  await assert.rejects(h.run([incoming({ dateKey: '2026-09-21' })]), /synthetic commit failure/); assert.deepEqual([...h.records].filter(([id]) => id !== leasePath), entries);
 });
 await test('duplicate job IDs fail before any write', async () => {
   const h = harness(); await assert.rejects(h.run([incoming(), incoming()]), { code: 'failed-precondition' }); assert.equal(h.commits.length, 0);
@@ -200,7 +207,7 @@ for (const collection of ['jobs', 'staffDayLocks']) {
     const entries = baseEntries();
     const h = harness(entries, { missingReadCollection: collection });
     await assert.rejects(h.run([incoming()]), { code: 'internal' });
-    assert.equal(h.commits.length, 0); assert.deepEqual([...h.records], entries);
+    assert.equal(h.commits.length, 0); assert.deepEqual([...h.records].filter(([id]) => id !== leasePath), entries);
   });
 }
 const configStart = source.indexOf('const ColumnSchema =');
@@ -228,4 +235,18 @@ for (const [label, saved, shouldReject] of [
     else assert.equal((await exports.loadConfig(companyId)).companyId, companyId);
   });
 }
+for (const kind of ['missing', 'expired', 'owner', 'company']) {
+  await test(`lease ${kind} stops the first chunk`, async () => {
+    const h = harness(baseEntries());
+    if (kind === 'missing') h.records.delete(leasePath);
+    else Object.assign(h.records.get(leasePath), kind === 'expired' ? {expires:12345} : kind === 'owner' ? {token:'other'} : {companyId:'other'});
+    await assert.rejects(h.run([incoming()]), {code:'aborted'});
+    assert.equal(h.commits.length,0);
+  });
+}
+await test('lease takeover during retry prevents stale commit', async () => {
+  const h = harness(baseEntries(), {beforeRetry:records => records.set(leasePath,{companyId:'synthetic-company',token:'other',expires:99999})});
+  await assert.rejects(h.run([incoming()]), {code:'aborted'});
+  assert.equal(h.commits.length,0); assert.equal(h.attempts.length,2);
+});
 console.log(`Shift import transaction: ${passed} cases passed (SDK boundary mocks; no external writes).`);

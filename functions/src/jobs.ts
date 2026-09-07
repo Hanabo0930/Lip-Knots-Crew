@@ -172,6 +172,18 @@ export const adminCancelJob = onCall(async (request) => {
       throw new HttpsError("permission-denied", "会社情報が一致しません。");
     }
 
+    // 取消対象の枠だけを解除する。別案件への再応募後の再取消でも、その勤務枠を保持する。
+    const lockRef = typeof job.assignedStaffId === "string" && job.assignedStaffId
+      ? db.collection("staffDayLocks").doc(`${companyId}_${job.assignedStaffId}_${job.dateKey}`)
+      : null;
+    const lockSnap = lockRef ? await tx.get(lockRef) : null;
+    const lock = lockSnap?.data();
+    const ownsActiveLock = lock?.active === true &&
+      lock.jobId === input.jobId &&
+      lock.companyId === companyId &&
+      lock.staffId === job.assignedStaffId &&
+      lock.dateKey === job.dateKey;
+
     const now = Timestamp.now();
     tx.update(jobRef, {
       status: "cancelled",
@@ -181,9 +193,8 @@ export const adminCancelJob = onCall(async (request) => {
       updatedAt: now,
     });
 
-    if (typeof job.assignedStaffId === "string" && job.assignedStaffId) {
-      const lockId = `${companyId}_${job.assignedStaffId}_${job.dateKey}`;
-      tx.set(db.collection("staffDayLocks").doc(lockId), {
+    if (lockRef && ownsActiveLock) {
+      tx.set(lockRef, {
         active: false,
         releasedAt: now,
         releaseReason: "job.cancelled",

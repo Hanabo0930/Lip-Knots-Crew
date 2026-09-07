@@ -186,3 +186,11 @@ applyToJobはuid/requestIdで成功結果を保存しているが、画面が再
 共有の同期refで手動/自動更新の多重実行を抑止、認証変更でリセット。古い応答で新認証のロック/表示を解除しない。手動更新は初期読込/応募/提出・ファイル処理中は抑止する。下書きが存在するだけでは停止しない。デモでは実応募結果でないと表示しAPIを呼ばない。
 検証: 手動更新実ハンドラーのサーバー指定・自動間隔・連打・失敗/再試行・認証競合・操作中/未認証ガード・デモ。実fetchMyJobsのサーバー分岐2読取と会社/担当者条件・offline伝播。型ビルド、UX127+5、応募12ケース、取得競合回帰、実ブラウザ320/390/1280pxの手動更新/キーボードと既存提出復旧に成功。新規検査をCIへ追加。Firebase公式API仕様 https://firebase.google.com/docs/reference/js/firestore を照合。
 制限: 結果不明だった応募を自動特定する機能やrequestId永続保存ではない。初回取得範囲外は追加読込が必要。更新で追加読込分は初回範囲へ戻る。手動操作により既存の2シフトクエリとタスク取得（募集一覧が起動済みならその更新）を実行する。実アカウントの読取/通信断は未受入。Functions/GAS/実原本/データ書込なし。この記録時点でPR/公開は未実行。
+## 取消時の勤務枠所有者検証（2026-09-07）
+
+再現: adminCancelJobと現行管理画面のadminSetJobCancellationは取消対象のassignedStaffId/dateKeyから勤務枠を組み立て、jobIdを読まずactive=falseを書いていた。旧案件を取消→同日別案件へ確定→旧案件を再取消すると新案件の枠を解除する。SDK模擬の実ハンドラー検査で修正前にanother job lockが失敗した。
+修正: 全書込より前に同一transactionでstaffDayLocksを読み、active=trueかつjobId/companyId/staffId/dateKeyの一致時だけ解除。別案件・所属欠落/不一致・欠落/無効枠は変更しない。担当者なしは追加読取なし。取消本体と既存キューの意味は変更しない。取消時最大1読取増。整合しない旧枠は自動修復せず保持する。
+検証: scripts/test-cancellation-lock-ownership.mjsは実jobs.ts/analytics.tsをTypeScript変換しSDK境界をmock化。所有枠/別案件/欠落/所有者欠落/会社・担当者・日付不一致/無効/再取消/会社・role拒否/未割当を両APIで計24ケース。読取前書込を拒否するmockでtransaction順序も確認。実Firestore競合・実応募・実送信を検証した証明ではない。functions CIへ追加。
+範囲: Functionsソース・回帰・CI・本記録のみ。Functions反映、Rules/IAM/原本/GAS/実データ/実送信は実施しない。Hosting反映だけではこの修正は有効にならない。
+残事項: shift-import.tsの勤務枠更新は別経路で、取消再取込時の所有者と日付変更の扱いを引き続き監査する。新規提出の取消後ポリシーは本人へ質問中。今回の修正を全取消経路の解決と扱わない。
+現行AdminのApp.tsxはadminSetJobCancellationを呼ぶことを確認。analytics.tsでも同じ不具合を修正前の検査で再現してから修正。通知・取消理由/金銭区分・auditLogs・appOverrideの書込は保持。旧APIのみの修正ではなく両取消APIが対象。管理者担当者編集の旧枠解除は別経路として監査に残す。

@@ -4,7 +4,7 @@ import {
   getIdTokenResult, isSignInWithEmailLink, onAuthStateChanged,
   signInWithEmailLink, signOut, User,
 } from "firebase/auth";
-import { collection, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, where, startAfter, QueryDocumentSnapshot } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, getDocsFromServer, limit, onSnapshot, orderBy, query, where, startAfter, QueryDocumentSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 import { ref, uploadBytesResumable } from "firebase/storage";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, storage } from "./firebase";
@@ -198,6 +198,7 @@ export default function App(){
   const draftHydratingRef=useRef(false);
   const skipNextDraftSaveRef=useRef(false);
   const authLoadVersionRef=useRef(0);
+  const businessRefreshInFlightRef=useRef(false);
   const applicationAttemptsRef=useRef(new Map<string,{requestId:string;startedAt:number}>());
   const openJobsLoadVersionRef=useRef(0);
   const submissionProcessingVersionRef=useRef(0);
@@ -255,6 +256,7 @@ export default function App(){
     const loadStarted=performance.now();
     const authLoadVersion=++authLoadVersionRef.current;
     applicationAttemptsRef.current.clear();
+    businessRefreshInFlightRef.current=false;
     const isCurrentAuthLoad=()=>authLoadVersion===authLoadVersionRef.current;
     openJobsLoadVersionRef.current+=1;
     pastShiftVersionRef.current+=1;
@@ -449,15 +451,16 @@ export default function App(){
     return()=>window.clearTimeout(timer);
   },[message]);
 
-  async function fetchMyJobs(sid=staffId,cid=companyId):Promise<Job[]>{
+  async function fetchMyJobs(sid=staffId,cid=companyId,serverOnly=false):Promise<Job[]>{
     if(!db||!sid||!cid)return[];
     const today=localDateKey();
+    const readJobs=serverOnly?getDocsFromServer:getDocs;
     const version=++pastShiftVersionRef.current;
     const authVersion=authLoadVersionRef.current;
     // 過去の件数が増えても今後のシフトが取得上限から押し出されないようにする。
     const [upcoming,history]=await Promise.all([
-      getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(301))),
-      getDocs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey","<",today),orderBy("dateKey","asc"),limit(51))),
+      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(301))),
+      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey","<",today),orderBy("dateKey","asc"),limit(51))),
     ]);
     if(authVersion===authLoadVersionRef.current&&version===pastShiftVersionRef.current){
       upcomingShiftCursorRef.current=upcoming.docs.slice(0,300).at(-1)??null;
@@ -527,9 +530,9 @@ export default function App(){
     return job;
   }
   async function fetchTasks():Promise<StaffTask[]>{ if(!functions)return[]; const c=httpsCallable(functions,"getMyTasks"); const r=await c({}); return (r.data as {tasks?:StaffTask[]}).tasks??[]; }
-  async function loadPrimaryBusinessData(sid=staffId,cid=companyId,uid=user?.uid??""):Promise<boolean>{
+  async function loadPrimaryBusinessData(sid=staffId,cid=companyId,uid=user?.uid??"",serverOnly=false):Promise<boolean>{
     const authLoadVersion=authLoadVersionRef.current;
-    const [jobs,nextTasks]=await Promise.all([fetchMyJobs(sid,cid),fetchTasks()]);
+    const [jobs,nextTasks]=await Promise.all([fetchMyJobs(sid,cid,serverOnly),fetchTasks()]);
     if(authLoadVersion!==authLoadVersionRef.current)return false;
     setMyJobs(jobs);
     setTasks(nextTasks);
@@ -571,24 +574,28 @@ export default function App(){
   function showSubmissionMessage(value:string){setMessage(value);setSubmissionMessage(value);}
 
   async function refreshBusinessData(showFailure:boolean){
-    if(!user||!staffId||!companyId||Date.now()-lastBusinessDataRefreshAt<BUSINESS_DATA_REFRESH_INTERVAL_MS)return;
+    if(businessRefreshInFlightRef.current||submissionEditPending||isPending("apply-action")||businessDataStatus==="loading")return;
+    if(!firebaseConfigured){if(showFailure)setMessage("デモ：シフトを確認しました。実際の応募結果ではありません。");return;}
+    if(!user||!staffId||!companyId||(!showFailure&&Date.now()-lastBusinessDataRefreshAt<BUSINESS_DATA_REFRESH_INTERVAL_MS))return;
+    businessRefreshInFlightRef.current=true;
     const authLoadVersion=authLoadVersionRef.current;
     lastBusinessDataRefreshAt=Date.now();
     setBusinessRefreshing(true);
     const started=performance.now();
     try{
-      const refreshed=await loadPrimaryBusinessData(staffId,companyId,user.uid);
+      const refreshed=await loadPrimaryBusinessData(staffId,companyId,user.uid,showFailure);
       if(!refreshed||authLoadVersion!==authLoadVersionRef.current)return;
       setBusinessDataStatus("ready");
       setBusinessDataSource("live");
       setBusinessRefreshMs(Math.round(performance.now()-started));
+      if(showFailure)setMessage("シフトを更新しました。応募した日付と店舗を確認してください。");
       if(openJobsStatus!=="idle")void refreshOpenJobs(false,companyId);
     }catch{
       if(authLoadVersion!==authLoadVersionRef.current)return;
       lastBusinessDataRefreshAt=0;
-      if(showFailure)setMessage("最新情報を更新できませんでした。通信状態を確認してください。");
+      if(showFailure)setMessage("シフトの最新情報を確認できませんでした。前の一覧を表示しています。応募結果は未確認です。通信状態を確認して、もう一度更新してください。");
     }finally{
-      if(authLoadVersion===authLoadVersionRef.current)setBusinessRefreshing(false);
+      if(authLoadVersion===authLoadVersionRef.current){businessRefreshInFlightRef.current=false;setBusinessRefreshing(false);}
     }
   }
 
@@ -1285,7 +1292,8 @@ export default function App(){
     </>}
     {view==="jobs"&&<section aria-busy={applicationPending||openJobsRefreshing||openJobsStatus==="loading"}><h2>募集中の案件</h2>{openJobsFallback??<div className="grid">{openJobs.map(job=>{const expanded=expandedOpenJobId===job.id;return <article className="job open-job" key={job.id}><span className="date">{job.workDate||job.dateKey}</span><h3>{job.storeName}</h3><p>{job.makerName} / {job.menuName}</p><p>{job.workTime}</p><strong>{Number(job.basePay||0).toLocaleString()}円</strong>{expanded&&<dl className="job-details" id={`job-details-${job.id}`}><div><dt>実施日</dt><dd>{job.workDate||job.dateKey}</dd></div><div><dt>勤務時間</dt><dd>{job.workTime||"確認中"}</dd></div>{job.storeAddress&&<div><dt>店舗住所</dt><dd>{job.storeAddress}</dd></div>}{job.clientName&&<div><dt>依頼元</dt><dd>{job.clientName}</dd></div>}</dl>}<div className="actions"><button className="secondary" aria-expanded={expanded} aria-controls={`job-details-${job.id}`} onClick={()=>setExpandedOpenJobId(current=>current===job.id?"":job.id)}>{expanded?"詳細を閉じる":"詳細を見る"}</button><button onClick={()=>void apply(job)} disabled={applicationPending}>{pendingApplicationJobId===job.id?"応募中…":"この案件に応募する"}</button></div></article>})}{!openJobs.length&&<EmptyAction title="現在募集中の案件はありません" body="新しい案件が公開されると、この画面に表示されます。ここからいつでも最新情報を確認できます。" action="最新情報を確認" onAction={()=>void refreshOpenJobs()} secondaryAction="ホームへ戻る" onSecondaryAction={()=>navigate("home")}/>}</div>}</section>}
     {view==="shifts"&&<section>
-      <h2>自分のシフト</h2>
+      <div className="section-heading"><h2>自分のシフト</h2><button className="secondary" onClick={()=>void refreshBusinessData(true)} disabled={businessRefreshing||businessDataStatus==="loading"||submissionEditPending||applicationPending} aria-busy={businessRefreshing}>{businessRefreshing?"更新中…":"シフトを更新"}</button></div>
+      <p className="muted">応募結果が分からないときは、更新して日付と店舗を確認してください。表示に続きがある場合は、追加で読み込めます。</p>
       {businessDataFallback??<>
         <div className="shift-list-heading"><h3>これからのシフト</h3><span>{upcomingShifts.length}件</span></div>
         {upcomingShifts.length

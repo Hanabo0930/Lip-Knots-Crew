@@ -381,6 +381,18 @@ try {
   await more.waitFor({state:'detached'});
   assert.deepEqual(errors,[]);
   console.log('Upcoming controls passed: responsive widths, keyboard, busy lock, error and retry, final-page removal.');
+  await page.goto(`http://127.0.0.1:${port}/`);
+  await page.locator('.bottom-nav').getByRole('button',{name:/シフト/}).click();
+  for(const width of [320,390,1280]){
+    await page.setViewportSize({width,height:844});
+    const refresh=page.getByRole('button',{name:'シフトを更新',exact:true});
+    await refresh.waitFor();
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await refresh.focus();await page.keyboard.press('Enter');
+    await page.getByText('デモ：シフトを確認しました。実際の応募結果ではありません。',{exact:true}).waitFor();
+  }
+  console.log('Manual shift refresh button passed: real demo, 320/390/1280px and keyboard; no backend.');
+
   console.log("Browser preview recovery, IndexedDB owner isolation/transaction abort recovery/50MB persistence, 320/390/1280px layout, enlarged text and keyboard recovery passed.");
 } finally {
   await browser?.close();

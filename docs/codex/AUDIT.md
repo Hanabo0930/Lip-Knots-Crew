@@ -205,3 +205,9 @@ applyToJobはuid/requestIdで成功結果を保存しているが、画面が再
 反映: Functionsソースの準備のみ。原本/GAS/Functions/Rules/IAM/実データ/実送信は変更しない。Hosting反映はFunctionsの有効化ではない。
 公式仕様: https://firebase.google.com/docs/firestore/manage-data/transactions （全読取を全書込より先に行い、競合時はcallbackが再実行される）。
 設定会社の固定: loadConfigのcompanyIdの後に保存データをspreadしていたため保存された他会社IDが優先される問題も、実ConfigSchema/loadConfigの合成検査で再現して修正。保存companyIdが存在して不一致ならfailed-precondition、欠落は呼出元会社に固定、既存一致/欠落設定/不正設定/旧設定を5ケースで検査。実設定・権限は変更しない。
+
+## 管理者担当者変更の旧勤務枠保護（2026-09-07）
+adminEditJobInputsは担当者解除/変更で旧枠のjobIdを検査せずactive=falseを書いていた。別案件で使われている旧担当者の同日枠を解除するケースを、実EditSchemaとハンドラーの境界抽出・SDK模擬で修正前に再現した。
+修正: 担当者を実際に解除/変更する時だけ同transaction内で旧枠を読取り、有効状態・会社・担当者・日付・案件が一致する場合だけ解除。欠落/不整合/別案件の旧枠は保持。全読取は書込より先。新担当者側の既存チェック、revision、編集内容、書戻し保留/キュー、監査の意味は変更しない。
+検証: scripts/test-admin-reassignment-locks.mjsの23ケース成功（解除/変更それぞれ8条件、同担当者・非担当者項目、revision/role拒否、変更先競合、旧枠変更後の再試行、workDate fallback）。Functions型ビルド、既存取込43・取消24ケース成功。Functions CIへ追加。実DB/シート/送信は使っていない。
+担当者変更時最大1読取増、通常項目編集/同担当者なら追加なし。既存破損枠の修復・取消済み案件の再手配方針・新枠の不正メタデータ・監査書込失敗時の再試行は今回の対象外。Functions未反映。Hosting反映だけでは本修正は有効にならない。

@@ -535,6 +535,21 @@ export const adminEditJobInputs = onCall(async (request) => {
       }
     }
 
+    const oldStaffId = typeof job.assignedStaffId === "string"
+      ? job.assignedStaffId
+      : null;
+    const lockDateKey = String(job.dateKey ?? job.workDate);
+    const oldLockRef = oldStaffId && input.fields.assignedStaffId !== undefined &&
+      oldStaffId !== input.fields.assignedStaffId
+      ? db.collection("staffDayLocks").doc(`${companyId}_${oldStaffId}_${lockDateKey}`)
+      : null;
+    // 担当者解除・変更の再試行でも、別案件の有効な勤務枠は解除しない。
+    const oldLockSnap = oldLockRef ? await tx.get(oldLockRef) : null;
+    const oldLock = oldLockSnap?.data();
+    const ownsOldLock = oldLock?.active === true && oldLock.jobId === input.jobId &&
+      oldLock.companyId === companyId && oldLock.staffId === oldStaffId &&
+      oldLock.dateKey === lockDateKey;
+
     const update: FirebaseFirestore.DocumentData = {
       updatedAt: Timestamp.now(),
       revision: currentRevision + 1,
@@ -566,15 +581,10 @@ export const adminEditJobInputs = onCall(async (request) => {
       Object.assign(sheetUpdates, moneyStaff.values);
     }
 
-    const oldStaffId = typeof job.assignedStaffId === "string"
-      ? job.assignedStaffId
-      : null;
     if (input.fields.assignedStaffId !== undefined) {
       const newStaffId = input.fields.assignedStaffId;
-      if (oldStaffId && oldStaffId !== newStaffId) {
-        tx.set(db.collection("staffDayLocks").doc(
-          `${companyId}_${oldStaffId}_${String(job.dateKey ?? job.workDate)}`
-        ), {
+      if (oldLockRef && ownsOldLock) {
+        tx.set(oldLockRef, {
           active: false,
           releasedAt: Timestamp.now(),
           releaseReason: "admin.job.edit",

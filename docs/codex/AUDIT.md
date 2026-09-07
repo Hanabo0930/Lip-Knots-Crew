@@ -222,3 +222,8 @@ read-staging-shift-integrity.mjsを追加。固定STAGING/(default)、明示comp
 実読取: 既存gcloud認証を使いlipknots会社のjobs=0/locks=0、unverifiedを確認。実原本/GAS/実同期/データ書込/送信/権限変更なし。証跡release-evidence/staging-integrity-read-20260907.json。空の範囲なので実業務データの診断受入は未完了。認証操作は既存短期トークン取得のみ、新規ログイン/鍵/権限なし。
 検証: 取得側30ケース（API形状・固定接続先・同transaction・projection・欠落枠・0件・会社混在・上限・異常応答・途中失敗・rollback失敗・個人項目除外・トークン秘匿・CLI上書き拒否/失敗出力/接続先追加拒否）、既存診断24ケース成功。取得検査をCI追加。Firestore実接続は空範囲の受入のみ、非空の競合/大量データは合成検査。
 SHIFT_INTEGRITY_GUIDEを更新、SERVER_ROLLOUT_READINESSへPR #113〜#116の未反映関数・同版/定期実行/限定合成データ・復旧条件を整理。Functions許可リストやデプロイワークフローの権限範囲は変更しない。Hostingの反映はFunctions稼働証跡にしない。
+
+## 管理者変更先勤務枠の整合検査（2026-09-07）
+adminEditJobInputsの新勤務枠は従来active=trueかつjobIdが違う場合だけ拒否しており、同案件を名乗る別会社/担当者/日付の枠や、active不明・不正な無効枠を上書きできた。回帰ケース追加で修正前の拒否不足を再現。
+変更先の既存枠はcompanyId/staffId/dateKey/activeの型を照合し、不一致はfailed-precondition。有効別案件の既存拒否は維持。有効な自案件枠、所属情報が一致する無効枠、欠落枠は利用可能。手配日付は文字列YYYY-MM-DDと実日付の往復検証で確認し、欠落/不正は拒否。旧workDateのfallbackは維持。同transaction内の検査で書込前に止め、再試行時の新枠所有者交代も再照合する。読取回数の追加なし。日付のない案件の通常項目編集や担当者解除の意味は変更しない。
+検証: 実EditSchema/handlerを使うSDK境界模擬43ケース（従来23+新20）、取消24、取込48の計115ケース成功。新規ケースは有効/無効の会社・担当者・日付不一致、状態不明、正常再利用、日付不正/旧形式fallback、競合再試行。旧枠・案件・変更先の保持と監査未書込も確認。実DB競合/本番の受入ではない。Functions未反映。原本・実データ・GAS・送信・Rules・IAM変更なし。

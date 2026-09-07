@@ -48,3 +48,8 @@ CLIは`--company <companyId> --output <新規ファイル>`を受け取り、既
 根拠: [beginTransaction](https://firebase.google.com/docs/firestore/reference/rest/v1/projects.databases.documents/beginTransaction)のreadOnly指定、[runQuery](https://firebase.google.com/docs/firestore/reference/rest/v1/projects.databases.documents/runQuery)の既存transaction指定。トランザクションの終了はrollbackのみでcommitは使いません。
 
 2026-09-07のSTAGING読取確認: 設定サンプルで使用されるcompanyId=lipknotsについてjobs=0、staffDayLocks=0。結果unverified。これは指定会社の2コレクションの結果であり、他社・別コレクション・原本の空判定ではありません。実業務データに対する診断受入は未完了です。証跡release-evidence/staging-integrity-read-20260907.json。
+
+## 管理者の再手配で止まった場合
+変更先の勤務枠が存在する場合、会社・担当者・日付・activeの真偽値が一致している必要があります。不整合な無効枠も自動的に上書きしません。同日の別案件が有効な枠を所有する場合は、その案件の手配を先に確認します。案件日付が不正な場合も新しい手配は保存しません。
+
+これらの検査で拒否されたtransactionは、案件や旧枠も変更しません。既存診断のINVALID_LOCK_METADATA/AMBIGUOUS_LOCK_STATE/LOCK_OWNER_MISMATCHなどを手掛かりに読み取って照合し、機械的な枠解除で回避しないでください。通常編集には追加読取なし。これはソース修正であり、Functions反映前は稼働環境の振る舞いに変化しません。

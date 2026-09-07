@@ -511,8 +511,18 @@ export const adminEditJobInputs = onCall(async (request) => {
       );
     }
 
+    const rawLockDateKey = job.dateKey ?? job.workDate;
+    const lockDateKey = String(rawLockDateKey);
     let staff: FirebaseFirestore.DocumentData | null = null;
     if (staffRef) {
+      if (
+        typeof rawLockDateKey !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(rawLockDateKey) ||
+        !Number.isFinite(Date.parse(rawLockDateKey)) ||
+        new Date(rawLockDateKey).toISOString().slice(0, 10) !== rawLockDateKey
+      ) {
+        throw new HttpsError("failed-precondition", "案件の日付を確認してから手配してください。");
+      }
       const staffSnap = await tx.get(staffRef);
       if (
         !staffSnap.exists ||
@@ -523,22 +533,28 @@ export const adminEditJobInputs = onCall(async (request) => {
       }
       staff = staffSnap.data()!;
       const lockRef = db.collection("staffDayLocks").doc(
-        `${companyId}_${staffRef.id}_${String(job.dateKey ?? job.workDate)}`
+        `${companyId}_${staffRef.id}_${lockDateKey}`
       );
       const lockSnap = await tx.get(lockRef);
-      if (
-        lockSnap.exists &&
-        lockSnap.data()?.active === true &&
-        lockSnap.data()?.jobId !== input.jobId
-      ) {
-        throw new HttpsError("failed-precondition", "このスタッフは同日に別シフトがあります。");
+      const targetLock = lockSnap.data();
+      // 無効枠の再利用でも、別会社や不整合な勤務枠を推定で上書きしない。
+      if (lockSnap.exists) {
+        if (
+          !targetLock || targetLock.companyId !== companyId ||
+          targetLock.staffId !== staffRef.id || targetLock.dateKey !== lockDateKey ||
+          typeof targetLock.active !== "boolean"
+        ) {
+          throw new HttpsError("failed-precondition", "勤務枠の登録情報が一致しません。管理者が確認してから再手配してください。");
+        }
+        if (targetLock.active && targetLock.jobId !== input.jobId) {
+          throw new HttpsError("failed-precondition", "このスタッフは同日に別シフトがあります。");
+        }
       }
     }
 
     const oldStaffId = typeof job.assignedStaffId === "string"
       ? job.assignedStaffId
       : null;
-    const lockDateKey = String(job.dateKey ?? job.workDate);
     const oldLockRef = oldStaffId && input.fields.assignedStaffId !== undefined &&
       oldStaffId !== input.fields.assignedStaffId
       ? db.collection("staffDayLocks").doc(`${companyId}_${oldStaffId}_${lockDateKey}`)
@@ -599,11 +615,11 @@ export const adminEditJobInputs = onCall(async (request) => {
         update.publishable = false;
         sheetUpdates.staffName = displayName;
         tx.set(db.collection("staffDayLocks").doc(
-          `${companyId}_${newStaffId}_${String(job.dateKey ?? job.workDate)}`
+          `${companyId}_${newStaffId}_${lockDateKey}`
         ), {
           companyId,
           staffId: newStaffId,
-          dateKey: String(job.dateKey ?? job.workDate),
+          dateKey: lockDateKey,
           jobId: input.jobId,
           active: true,
           source: "admin.job.edit",

@@ -269,10 +269,12 @@ async function executeShiftImport(
           !staffIndex.byName.has(normalizeName(job.assignedStaffName))
       ).length;
 
+      if (!lock) throw new HttpsError("internal", "取込リースを確認できません。");
       writes = await writeJobsAndLocks(
         allJobs,
         staffIndex.byName,
-        runRef?.id ?? ""
+        runRef?.id ?? "",
+        lock
       );
 
       if (config.markMissingAsArchived) {
@@ -382,7 +384,8 @@ async function buildStaffNameIndex(companyId: string): Promise<{
 async function writeJobsAndLocks(
   jobs: ParsedShiftJob[],
   staffNameIndex: Map<string, string>,
-  runId: string
+  runId: string,
+  lock: { ref: FirebaseFirestore.DocumentReference; token: string }
 ): Promise<number> {
   // 案件と旧/新勤務枠を同じtransactionに収め、通信を最大25案件単位にまとめる。
   if (new Set(jobs.map((job) => job.jobId)).size !== jobs.length) {
@@ -392,6 +395,12 @@ async function writeJobsAndLocks(
   for (let offset = 0; offset < jobs.length; offset += 25) {
     const chunk = jobs.slice(offset, offset + 25);
     writeCount += await db.runTransaction(async (tx) => {
+      const [leaseSnap] = await tx.getAll(lock.ref);
+      const lease = leaseSnap?.data();
+      if (!lease || lease.token !== lock.token || lease.companyId !== chunk[0]?.companyId ||
+        !(lease.leaseUntil instanceof Timestamp) || lease.leaseUntil.toMillis() <= Timestamp.now().toMillis()) {
+        throw new HttpsError("aborted", "取込リースの期限切れ、または所有者が変わりました。取込を停止しました。");
+      }
       const jobRefs = chunk.map((job) => db.collection("jobs").doc(job.jobId));
       const snapshots = await tx.getAll(...jobRefs);
       const now = Timestamp.now();
@@ -551,11 +560,10 @@ async function acquireSyncLock(companyId: string): Promise<{
 }> {
   const ref = db.collection("syncLocks").doc(`${companyId}_shift_import`);
   const token = db.collection("_ids").doc().id;
-  const now = Timestamp.now();
-  const leaseUntil = Timestamp.fromMillis(now.toMillis() + 8 * 60 * 1000);
 
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
+    const now = Timestamp.now();
     const currentLease = snap.data()?.leaseUntil as Timestamp | undefined;
     if (currentLease && currentLease.toMillis() > now.toMillis()) {
       throw new HttpsError(
@@ -563,6 +571,8 @@ async function acquireSyncLock(companyId: string): Promise<{
         "別のスプシ同期が実行中です。"
       );
     }
+    // 最大実行時間540秒より長く保持し、再試行時点から期限を計算する。
+    const leaseUntil = Timestamp.fromMillis(now.toMillis() + 10 * 60 * 1000);
     tx.set(ref, {
       companyId,
       token,

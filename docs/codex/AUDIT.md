@@ -211,3 +211,9 @@ adminEditJobInputsは担当者解除/変更で旧枠のjobIdを検査せずactiv
 修正: 担当者を実際に解除/変更する時だけ同transaction内で旧枠を読取り、有効状態・会社・担当者・日付・案件が一致する場合だけ解除。欠落/不整合/別案件の旧枠は保持。全読取は書込より先。新担当者側の既存チェック、revision、編集内容、書戻し保留/キュー、監査の意味は変更しない。
 検証: scripts/test-admin-reassignment-locks.mjsの23ケース成功（解除/変更それぞれ8条件、同担当者・非担当者項目、revision/role拒否、変更先競合、旧枠変更後の再試行、workDate fallback）。Functions型ビルド、既存取込43・取消24ケース成功。Functions CIへ追加。実DB/シート/送信は使っていない。
 担当者変更時最大1読取増、通常項目編集/同担当者なら追加なし。既存破損枠の修復・取消済み案件の再手配方針・新枠の不正メタデータ・監査書込失敗時の再試行は今回の対象外。Functions未反映。Hosting反映だけでは本修正は有効にならない。
+## 勤務枠診断・取込リース・対応手順の一括改善（2026-09-07）
+ユーザーは小さな修正単位で止めず関連作業をまとめることを希望。ローカル読取専用診断、取込重複保護、合成例、対応手順、再実行可能な性能計測を1PRに統合。
+診断: scripts/diagnose-shift-integrity.mjsはJSONのみ読取り、会社混在/重複文書IDを拒否。欠落/無効/別案件枠、二重手配、孤立枠、取消/未手配の有効枠、担当者/日付不一致、曖昧状態を検出。complete.jobs/locksが不明なら不在を異常と断定しない。CLIは既存出力を上書きせず、標準出力は件数のみ。レポートはID/コード/重要度のみ（余分な氏名・メール・金額を転記しない）。データ取得/修復/API/自動送信なし。
+取込: 最大540秒に対しリース480秒だった不一致を600秒へ修正。取得transactionの再試行時点で期限を再計算。各25案件transactionでリースを読取り、会社/token/Timestamp期限を照合し、期限切れ/交代/欠落時はabortedでその単位を停止。リース文書もtransactionで読むので交代と競合時に再検証される。自分のtoken以外の解放は従来どおり禁止。更新単位最大読取75→76、失敗時の先行正常単位保持は継続。リース判定は各単位の開始時点。実行上限変更/新規トリガー/スケジュール有効化はしない。
+検証: 型ビルド、取込48・リース6・診断24・担当者変更23・取消24の計125ケース成功。合成1万件ずつの診断を含む。実SDKの負荷/競合/実原本取込の受入ではない。benchmark-shift-integrity.mjsで1000/10000件を各20回測定、正本release-evidence/shift-integrity-benchmark.jsonに全標本・ソースSHA256を保存。数値はメモリ上照合のみでI/O/クラウドを含まない。
+操作資料docs/codex/SHIFT_INTEGRITY_GUIDE.md、合成入力config-samples/shift-integrity.synthetic.json、診断例release-evidence/shift-integrity-example.json（3指摘）を保存。Functions未反映。原本/GAS/Rules/IAM/Production/実データ/実送信変更なし。手動/定期取込両方のFunctionsを同版に揃える反映は現在の範囲外で未実施。

@@ -1,0 +1,59 @@
+{
+  "companyId": "synthetic",
+  "complete": {
+    "locks": true,
+    "jobs": true
+  },
+  "jobs": [
+    {
+      "assignedStaffId": "staff-a",
+      "cancelled": false,
+      "companyId": "synthetic",
+      "status": "assigned",
+      "id": "job-a",
+      "dateKey": "2026-09-20"
+    },
+    {
+      "assignedStaffId": "staff-b",
+      "cancelled": false,
+      "companyId": "synthetic",
+      "status": "assigned",
+      "id": "job-missing",
+      "dateKey": "2026-09-20"
+    },
+    {
+      "assignedStaffId": "staff-c",
+      "cancelled": true,
+      "companyId": "synthetic",
+      "status": "cancelled",
+      "id": "job-cancelled",
+      "dateKey": "2026-09-20"
+    }
+  ],
+  "locks": [
+    {
+      "active": true,
+      "staffId": "staff-a",
+      "companyId": "synthetic",
+      "id": "synthetic_staff-a_2026-09-20",
+      "dateKey": "2026-09-20",
+      "jobId": "job-a"
+    },
+    {
+      "active": true,
+      "staffId": "staff-c",
+      "companyId": "synthetic",
+      "id": "synthetic_staff-c_2026-09-20",
+      "dateKey": "2026-09-20",
+      "jobId": "job-cancelled"
+    },
+    {
+      "active": true,
+      "staffId": "staff-d",
+      "companyId": "synthetic",
+      "id": "synthetic_staff-d_2026-09-20",
+      "dateKey": "2026-09-20",
+      "jobId": "job-absent"
+    }
+  ]
+}

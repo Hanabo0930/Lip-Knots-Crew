@@ -203,4 +203,29 @@ for (const collection of ['jobs', 'staffDayLocks']) {
     assert.equal(h.commits.length, 0); assert.deepEqual([...h.records], entries);
   });
 }
+const configStart = source.indexOf('const ColumnSchema =');
+const configEnd = source.indexOf('type ImportMode =', configStart);
+const loaderStart = source.indexOf('async function loadConfig(');
+const loaderEnd = source.indexOf('async function buildStaffNameIndex(', loaderStart);
+assert.ok(configStart >= 0 && configEnd > configStart && loaderStart >= 0 && loaderEnd > loaderStart);
+const configCode = ts.transpileModule(source.slice(configStart, configEnd) + source.slice(loaderStart, loaderEnd) + '\nexports.loadConfig = loadConfig;', { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const validConfig = { enabled: false, spreadsheetId: 'synthetic-spreadsheet', columns: { workDate: 'A', staffName: 'B', clientName: 'J', storeName: 'K', makerName: 'L', menuName: 'M', workTime: 'O' } };
+for (const [label, saved, shouldReject] of [
+  ['foreign company setting', { ...validConfig, companyId: 'other-company' }, true],
+  ['matching company setting', { ...validConfig, companyId }, false],
+  ['legacy setting without company field', validConfig, false],
+  ['missing setting', null, true],
+  ['invalid setting', { companyId, enabled: true }, true],
+]) {
+  await test(label, async () => {
+    const exports = {};
+    runInNewContext(configCode, { exports, HttpsError, z: dependency('zod').z, db: { collection: name => {
+      assert.equal(name, 'sheetImportConfigs'); return { doc: id => {
+        assert.equal(id, companyId); return { get: async () => ({ exists: saved !== null, data: () => saved }) };
+      } };
+    } } }, { timeout: 3000 });
+    if (shouldReject) await assert.rejects(exports.loadConfig(companyId), { code: 'failed-precondition' });
+    else assert.equal((await exports.loadConfig(companyId)).companyId, companyId);
+  });
+}
 console.log(`Shift import transaction: ${passed} cases passed (SDK boundary mocks; no external writes).`);

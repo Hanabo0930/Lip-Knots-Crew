@@ -340,9 +340,13 @@ async function loadConfig(companyId: string): Promise<ShiftImportConfig> {
     );
   }
 
+  const saved = snap.data();
+  if (saved?.companyId !== undefined && saved.companyId !== companyId) {
+    throw new HttpsError("failed-precondition", "取込設定の会社が一致しません。取込を停止しました。");
+  }
   const parsed = ConfigSchema.safeParse({
+    ...saved,
     companyId,
-    ...snap.data(),
   });
   if (!parsed.success) {
     throw new HttpsError(

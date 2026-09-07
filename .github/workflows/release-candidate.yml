@@ -96,6 +96,7 @@ jobs:
         run: |
           npm run build -w @lkc/functions
           node scripts/test-cancellation-lock-ownership.mjs
+          node scripts/test-shift-import-transactions.mjs
           npm test
       - name: Publish Functions summary
         if: always()

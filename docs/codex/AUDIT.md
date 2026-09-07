@@ -194,3 +194,13 @@ applyToJobはuid/requestIdで成功結果を保存しているが、画面が再
 範囲: Functionsソース・回帰・CI・本記録のみ。Functions反映、Rules/IAM/原本/GAS/実データ/実送信は実施しない。Hosting反映だけではこの修正は有効にならない。
 残事項: shift-import.tsの勤務枠更新は別経路で、取消再取込時の所有者と日付変更の扱いを引き続き監査する。新規提出の取消後ポリシーは本人へ質問中。今回の修正を全取消経路の解決と扱わない。
 現行AdminのApp.tsxはadminSetJobCancellationを呼ぶことを確認。analytics.tsでも同じ不具合を修正前の検査で再現してから修正。通知・取消理由/金銭区分・auditLogs・appOverrideの書込は保持。旧APIのみの修正ではなく両取消APIが対象。管理者担当者編集の旧枠解除は別経路として監査に残す。
+
+## シフト取込の案件・勤務枠整合性（2026-09-07）
+
+問題: 取込は案件を事前getAll後にBatchWriterで上書きし、旧勤務枠解除に新dateKeyを使い、枠所有者も未照合だった。取消再取込で同日別案件の枠を解除し、永続案件IDの日付変更で旧枠が残る。350書込境界で案件と枠が分断され、応募transactionとの競合で古い担当者状態へ戻り得た。
+変更: 最大25案件単位のtransactionで最新案件を読取り、旧日付・新日付の必要枠を重複なく取得。全検査後に案件・旧枠解除・新枠確保を同transactionで書く。別案件の有効枠、所属/状態不明な新枠、同単位の二重手配はfailed-preconditionでその単位の全書込を止める。旧枠は会社/担当者/旧日付/案件の一致した有効枠だけ解除。欠落旧枠は作らない。既存他社案件は拒否。同一jobIdの重複入力は全書込前に拒否。
+応募保護: applicationUnconfirmed=trueかつ非取消assignedのアプリ応募は、原本の担当者/日付/assigned状態が一致するまで古い空欄・別担当者・日付で消さず取込を止める。原本一致時に同フラグをfalseにする（applicationAdminConfirmedとは別。管理者確認を書き換えない）。明示の取消と既存appOverrideのcancel/restore状態優先は維持。担当者データ全体や他の業務項目の同期競合解決ではない。
+検証: scripts/test-shift-import-transactions.mjsで実writeJobsAndLocksを境界抽出しSDKの読取/書込/再試行を模擬。修正前は他案件枠保持のケースが失敗、修正後38ケース成功。日付/担当者変更、取消、他社/曖昧枠、appOverride、未反映応募、競合再試行で応募/枠を読み直し、commit失敗、重複ID/手配、0/1/25/26/351件、後続単位失敗、読取結果不足を含む。Functions型ビルド成功（初回のnoUncheckedIndexedAccess検出は不足時明示拒否を追加して解消）。既存取消24ケース成功。新テストをFunctions CIへ追加。
+制限: 取込全体のall-or-nothingではない。後続単位失敗時、先行の正常完了単位は残る。最大25案件/75書込、読取は案件25+旧/新枠最大50（重複除去）で、再試行時は増える。合成351件は15transactionに分割。旧batchより実速度が速いとは主張しない。実Firestore競合/負荷/原本取込は未受入。取込leaseと最大所要時間、管理者担当者変更の旧枠解除、既存破損枠の修復、cancel/restore時の担当者優先順位は別途監査。原本未確定・取消列未確定のまま同期を有効化しない。
+反映: Functionsソースの準備のみ。原本/GAS/Functions/Rules/IAM/実データ/実送信は変更しない。Hosting反映はFunctionsの有効化ではない。
+公式仕様: https://firebase.google.com/docs/firestore/manage-data/transactions （全読取を全書込より先に行い、競合時はcallbackが再実行される）。

@@ -227,3 +227,10 @@ SHIFT_INTEGRITY_GUIDEを更新、SERVER_ROLLOUT_READINESSへPR #113〜#116の未
 adminEditJobInputsの新勤務枠は従来active=trueかつjobIdが違う場合だけ拒否しており、同案件を名乗る別会社/担当者/日付の枠や、active不明・不正な無効枠を上書きできた。回帰ケース追加で修正前の拒否不足を再現。
 変更先の既存枠はcompanyId/staffId/dateKey/activeの型を照合し、不一致はfailed-precondition。有効別案件の既存拒否は維持。有効な自案件枠、所属情報が一致する無効枠、欠落枠は利用可能。手配日付は文字列YYYY-MM-DDと実日付の往復検証で確認し、欠落/不正は拒否。旧workDateのfallbackは維持。同transaction内の検査で書込前に止め、再試行時の新枠所有者交代も再照合する。読取回数の追加なし。日付のない案件の通常項目編集や担当者解除の意味は変更しない。
 検証: 実EditSchema/handlerを使うSDK境界模擬43ケース（従来23+新20）、取消24、取込48の計115ケース成功。新規ケースは有効/無効の会社・担当者・日付不一致、状態不明、正常再利用、日付不正/旧形式fallback、競合再試行。旧枠・案件・変更先の保持と監査未書込も確認。実DB競合/本番の受入ではない。Functions未反映。原本・実データ・GAS・送信・Rules・IAM変更なし。
+
+## Hosting準備処理の効率化（2026-09-08）
+差分だけで再配信を省略する案は、公開設定の変更・前回反映版・稼働サイトの差分を照合する根拠が不足するため今回は導入しない。最新main/同SHA CI/Preview/guard/保護環境/バックアップ/同版promote/公開後検査を維持する。
+PreviewのStaff/Admin stagingビルドをbuild-staging-hosting.shで並行実行。別dist・別tsconfig（referencesなし/noEmit）を確認。両方のPIDをwaitし、片側または両側の失敗を非0に集約してサイズ検査・配信へ進ませない。npmコマンドは2対象だけに固定。Promoteでは引き続き再ビルドしない。新シェルスクリプトのLFを.gitattributesで固定。
+Preview/PromoteのPlaywright取得を--only-shellへ。現行検査はchromium.launch({headless:true})でchannel指定なしのため、未使用のフルChromium取得を省く。根拠: https://playwright.dev/docs/browsers 。固定バージョンのChromium Headless Shell・OS依存・画面検査自体は維持。
+ローカル検証: 実Bash+模擬npmで双方同時起動、成功、Staff失敗、Admin失敗、両失敗、後続停止を5ケース確認。既存Hosting44ケース成功。H直下の初回既存テストはplaywright依存なしで起動不可、H正本から固定依存付きCキャッシュへ準備して再実行成功。両アプリの実stagingモードビルドとバンドルサイズ検査成功。ローカルは合成/デモ設定であり公開設定の受入はGitHub Previewで別に実施する。
+ローカル成果物比較: 同設定/同ソースの並行/逐次で34ファイルすべてSHA256一致。単回・暖機済み環境で逐次10.153秒、並行7秒（Bash秒単位）。有意な速度保証/本番性能値ではない。release-evidence/hosting-build-efficiency-local.jsonに結果保存。

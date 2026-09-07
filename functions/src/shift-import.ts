@@ -340,9 +340,13 @@ async function loadConfig(companyId: string): Promise<ShiftImportConfig> {
     );
   }
 
+  const saved = snap.data();
+  if (saved?.companyId !== undefined && saved.companyId !== companyId) {
+    throw new HttpsError("failed-precondition", "取込設定の会社が一致しません。取込を停止しました。");
+  }
   const parsed = ConfigSchema.safeParse({
+    ...saved,
     companyId,
-    ...snap.data(),
   });
   if (!parsed.success) {
     throw new HttpsError(
@@ -380,171 +384,165 @@ async function writeJobsAndLocks(
   staffNameIndex: Map<string, string>,
   runId: string
 ): Promise<number> {
-  const existing = await fetchExistingJobs(jobs.map((job) => job.jobId));
-  const writer = new BatchWriter();
-  const now = Timestamp.now();
-
-  for (const job of jobs) {
-    const jobRef = db.collection("jobs").doc(job.jobId);
-    const old = existing.get(job.jobId);
-    const resolvedStaffId = job.assignedStaffName
-      ? staffNameIndex.get(normalizeName(job.assignedStaffName)) ?? null
-      : null;
-    const override = old?.appOverride as { type?: string; active?: boolean } | undefined;
-    const sourceMatchesOverride = override?.type === "cancel"
-      ? job.cancelled === true
-      : override?.type === "restore"
-        ? job.cancelled !== true
-        : true;
-    const preserveAppOverride = override?.active === true && !sourceMatchesOverride;
-    const effectiveStatus = preserveAppOverride
-      ? String(old?.status ?? job.status)
-      : job.status;
-    const effectiveCancelled = preserveAppOverride
-      ? old?.cancelled === true
-      : job.cancelled;
-    const isActiveAssignment =
-      effectiveStatus === "assigned" &&
-      !effectiveCancelled &&
-      resolvedStaffId !== null;
-
-    const oldStaffId = typeof old?.assignedStaffId === "string"
-      ? old.assignedStaffId
-      : null;
-
-    const data: Record<string, unknown> = {
-      companyId: job.companyId,
-      caseId: job.caseId,
-      sourceIdentityKey: job.sourceIdentityKey,
-      identityFingerprint: job.identityFingerprint,
-      sourceOccurrence: job.sourceOccurrence,
-      workDate: job.workDate,
-      dateKey: job.dateKey,
-      clientName: job.clientName,
-      rawClientName: job.rawClientName,
-      storeName: job.storeName,
-      makerName: job.makerName,
-      menuName: job.menuName,
-      menuConditions: job.menuConditions,
-      entryTime: job.entryTime,
-      workTime: job.workTime,
-      subcontractorName: job.subcontractorName,
-      materialStatus: job.materialStatus,
-      assignedStaffName: job.assignedStaffName || FieldValue.delete(),
-      rawStaffName: job.rawStaffName,
-      assignedStaffId: resolvedStaffId ?? FieldValue.delete(),
-      assignmentUnresolved:
-        effectiveStatus === "assigned" && job.assignedStaffName !== "" && !resolvedStaffId,
-      status: effectiveStatus,
-      publishable: preserveAppOverride
-        ? old?.publishable === true
-        : job.publishable,
-      recruitmentStopped: preserveAppOverride
-        ? old?.recruitmentStopped === true
-        : job.recruitmentStopped,
-      cancelled: effectiveCancelled,
-      cancellationReason: preserveAppOverride
-        ? (old?.cancellationReason ?? FieldValue.delete())
-        : (job.cancellationReason || FieldValue.delete()),
-      basePay: job.basePay,
-      financials: job.financials,
-      expenses: job.expenses,
-      preContact: job.preContact,
-      importWarnings: job.importWarnings,
-      sheetRef: job.sheetRef,
-      source: {
-        type: "google_sheets_readonly",
-        spreadsheetId: job.sheetRef.spreadsheetId,
-        sheetName: job.sheetRef.sheetName,
-        row: job.sheetRef.currentRow,
-      },
-      sync: {
-        runId,
-        configVersion: "0.2",
-        readOnlySource: true,
-        lastSeenAt: now,
-      },
-      sourceMissing: false,
-      updatedAt: now,
-    };
-
-    if (override?.active === true) {
-      data.appOverride = sourceMatchesOverride ? FieldValue.delete() : override;
-    }
-    if (!old) data.createdAt = now;
-    await writer.set(jobRef, data, { merge: true });
-
-    if (oldStaffId && (
-      oldStaffId !== resolvedStaffId ||
-      !isActiveAssignment
-    )) {
-      const oldLockId = `${job.companyId}_${oldStaffId}_${job.dateKey}`;
-      await writer.set(db.collection("staffDayLocks").doc(oldLockId), {
-        active: false,
-        releasedAt: now,
-        releaseReason: "sheet.import.assignment_changed",
-        jobId: job.jobId,
-      }, { merge: true });
-    }
-
-    if (isActiveAssignment && resolvedStaffId) {
-      const lockId = `${job.companyId}_${resolvedStaffId}_${job.dateKey}`;
-      await writer.set(db.collection("staffDayLocks").doc(lockId), {
-        companyId: job.companyId,
-        staffId: resolvedStaffId,
-        dateKey: job.dateKey,
-        jobId: job.jobId,
-        active: true,
-        source: "sheet.import",
-        updatedAt: now,
-      }, { merge: true });
-    }
+  // 案件と旧/新勤務枠を同じtransactionに収め、通信を最大25案件単位にまとめる。
+  if (new Set(jobs.map((job) => job.jobId)).size !== jobs.length) {
+    throw new HttpsError("failed-precondition", "取込対象に同じ案件IDが重複しています。取込を停止しました。");
   }
+  let writeCount = 0;
+  for (let offset = 0; offset < jobs.length; offset += 25) {
+    const chunk = jobs.slice(offset, offset + 25);
+    writeCount += await db.runTransaction(async (tx) => {
+      const jobRefs = chunk.map((job) => db.collection("jobs").doc(job.jobId));
+      const snapshots = await tx.getAll(...jobRefs);
+      const now = Timestamp.now();
+      const plans = chunk.map((job, index) => {
+        const ref = jobRefs[index];
+        const snapshot = snapshots[index];
+        if (!ref || !snapshot) throw new HttpsError("internal", "案件の読取結果が不足しています。取込を停止しました。");
+        const old = snapshot.exists ? snapshot.data() : undefined;
+        if (old && old.companyId !== job.companyId) {
+          throw new HttpsError("permission-denied", "既存案件の会社が一致しません。取込を停止しました。");
+        }
+        const resolvedStaffId = job.assignedStaffName
+          ? staffNameIndex.get(normalizeName(job.assignedStaffName)) ?? null
+          : null;
+        const override = old?.appOverride as { type?: string; active?: boolean } | undefined;
+        const sourceMatchesOverride = override?.type === "cancel"
+          ? job.cancelled === true
+          : override?.type === "restore" ? job.cancelled !== true : true;
+        const preserveAppOverride = override?.active === true && !sourceMatchesOverride;
+        const effectiveStatus = preserveAppOverride ? String(old?.status ?? job.status) : job.status;
+        const effectiveCancelled = preserveAppOverride ? old?.cancelled === true : job.cancelled;
+        const isActiveAssignment = effectiveStatus === "assigned" && !effectiveCancelled && resolvedStaffId !== null;
+        const oldStaffId = typeof old?.assignedStaffId === "string" ? old.assignedStaffId : null;
+        const oldDateKey = typeof old?.dateKey === "string" ? old.dateKey : "";
+        const pendingApplication = old?.applicationUnconfirmed === true &&
+          old.status === "assigned" && old.cancelled !== true && Boolean(oldStaffId);
+        const sourceConfirmsApplication = isActiveAssignment &&
+          oldStaffId === resolvedStaffId && oldDateKey === job.dateKey;
+        if (pendingApplication && !effectiveCancelled && !sourceConfirmsApplication) {
+          throw new HttpsError("failed-precondition", "アプリ応募とシフト表の担当者・日付が未一致です。応募を保持して取込を停止しました。");
+        }
+        if (oldStaffId && !oldDateKey) {
+          throw new HttpsError("failed-precondition", "既存案件の勤務日を確認できません。勤務枠を保持して取込を停止しました。");
+        }
+        const oldLockId = oldStaffId ? `${job.companyId}_${oldStaffId}_${oldDateKey}` : null;
+        const newLockId = isActiveAssignment ? `${job.companyId}_${resolvedStaffId}_${job.dateKey}` : null;
+        const data: Record<string, unknown> = {
+          companyId: job.companyId,
+          caseId: job.caseId,
+          sourceIdentityKey: job.sourceIdentityKey,
+          identityFingerprint: job.identityFingerprint,
+          sourceOccurrence: job.sourceOccurrence,
+          workDate: job.workDate,
+          dateKey: job.dateKey,
+          clientName: job.clientName,
+          rawClientName: job.rawClientName,
+          storeName: job.storeName,
+          makerName: job.makerName,
+          menuName: job.menuName,
+          menuConditions: job.menuConditions,
+          entryTime: job.entryTime,
+          workTime: job.workTime,
+          subcontractorName: job.subcontractorName,
+          materialStatus: job.materialStatus,
+          assignedStaffName: job.assignedStaffName || FieldValue.delete(),
+          rawStaffName: job.rawStaffName,
+          assignedStaffId: resolvedStaffId ?? FieldValue.delete(),
+          assignmentUnresolved:
+            effectiveStatus === "assigned" && job.assignedStaffName !== "" && !resolvedStaffId,
+          status: effectiveStatus,
+          publishable: preserveAppOverride
+            ? old?.publishable === true
+            : job.publishable,
+          recruitmentStopped: preserveAppOverride
+            ? old?.recruitmentStopped === true
+            : job.recruitmentStopped,
+          cancelled: effectiveCancelled,
+          cancellationReason: preserveAppOverride
+            ? (old?.cancellationReason ?? FieldValue.delete())
+            : (job.cancellationReason || FieldValue.delete()),
+          basePay: job.basePay,
+          financials: job.financials,
+          expenses: job.expenses,
+          preContact: job.preContact,
+          importWarnings: job.importWarnings,
+          sheetRef: job.sheetRef,
+          source: {
+            type: "google_sheets_readonly",
+            spreadsheetId: job.sheetRef.spreadsheetId,
+            sheetName: job.sheetRef.sheetName,
+            row: job.sheetRef.currentRow,
+          },
+          sync: {
+            runId,
+            configVersion: "0.2",
+            readOnlySource: true,
+            lastSeenAt: now,
+          },
+          sourceMissing: false,
+          updatedAt: now,
+        };
 
-  await writer.flush();
-  return writer.writeCount;
-}
+        if (override?.active === true) {
+          data.appOverride = sourceMatchesOverride ? FieldValue.delete() : override;
+        }
+        if (!old) data.createdAt = now;
 
-async function fetchExistingJobs(
-  jobIds: string[]
-): Promise<Map<string, FirebaseFirestore.DocumentData>> {
-  const result = new Map<string, FirebaseFirestore.DocumentData>();
-  const unique = [...new Set(jobIds)];
-
-  for (let index = 0; index < unique.length; index += 250) {
-    const refs = unique.slice(index, index + 250)
-      .map((id) => db.collection("jobs").doc(id));
-    if (!refs.length) continue;
-    const snaps = await db.getAll(...refs);
-    for (const snap of snaps) {
-      if (snap.exists) result.set(snap.id, snap.data() ?? {});
-    }
+        if (pendingApplication && sourceConfirmsApplication) data.applicationUnconfirmed = false;
+        return { job, oldStaffId, oldDateKey, oldLockId, newLockId, data, ref };
+      });
+      const lockIds = [...new Set(plans.flatMap((plan) => [plan.oldLockId, plan.newLockId]).filter((id): id is string => id !== null))];
+      const lockRefs = lockIds.map((id) => db.collection("staffDayLocks").doc(id));
+      const lockSnaps = lockRefs.length ? await tx.getAll(...lockRefs) : [];
+      const locks = new Map(lockIds.map((id, index) => {
+        const snapshot = lockSnaps[index];
+        if (!snapshot) throw new HttpsError("internal", "勤務枠の読取結果が不足しています。取込を停止しました。");
+        return [id, snapshot.data()] as const;
+      }));
+      const claims = new Map<string, string>();
+      // 全検査を終えてから書く。既存の別案件枠や同じ取込内の重複手配は上書きしない。
+      for (const plan of plans) {
+        if (!plan.newLockId) continue;
+        const lock = locks.get(plan.newLockId);
+        const claimedBy = claims.get(plan.newLockId);
+        const resolvedStaffId = plan.data.assignedStaffId;
+        if ((claimedBy && claimedBy !== plan.job.jobId) || (lock && (
+          lock.companyId !== plan.job.companyId || lock.staffId !== resolvedStaffId ||
+          lock.dateKey !== plan.job.dateKey ||
+          (lock.active !== false && (lock.active !== true || lock.jobId !== plan.job.jobId))
+        ))) {
+          throw new HttpsError("failed-precondition", "同日の勤務枠が競合、または所属を確認できません。案件と勤務枠を保持して取込を停止しました。");
+        }
+        claims.set(plan.newLockId, plan.job.jobId);
+      }
+      let committedWrites = 0;
+      for (const plan of plans) {
+        tx.set(plan.ref, plan.data, { merge: true });
+        committedWrites++;
+        const oldLock = plan.oldLockId ? locks.get(plan.oldLockId) : undefined;
+        if (plan.oldLockId && plan.oldLockId !== plan.newLockId && !claims.has(plan.oldLockId) &&
+          oldLock?.active === true && oldLock.jobId === plan.job.jobId &&
+          oldLock.companyId === plan.job.companyId && oldLock.staffId === plan.oldStaffId &&
+          oldLock.dateKey === plan.oldDateKey) {
+          tx.set(db.collection("staffDayLocks").doc(plan.oldLockId), {
+            active: false, releasedAt: now, releaseReason: "sheet.import.assignment_changed", jobId: plan.job.jobId,
+          }, { merge: true });
+          committedWrites++;
+        }
+        if (plan.newLockId) {
+          tx.set(db.collection("staffDayLocks").doc(plan.newLockId), {
+            companyId: plan.job.companyId, staffId: plan.data.assignedStaffId,
+            dateKey: plan.job.dateKey, jobId: plan.job.jobId, active: true,
+            source: "sheet.import", updatedAt: now,
+          }, { merge: true });
+          committedWrites++;
+        }
+      }
+      return committedWrites;
+    });
   }
-  return result;
-}
-
-class BatchWriter {
-  private batch = db.batch();
-  private pending = 0;
-  public writeCount = 0;
-
-  async set(
-    ref: FirebaseFirestore.DocumentReference,
-    data: FirebaseFirestore.DocumentData,
-    options: FirebaseFirestore.SetOptions
-  ): Promise<void> {
-    this.batch.set(ref, data, options);
-    this.pending++;
-    this.writeCount++;
-    if (this.pending >= 350) await this.flush();
-  }
-
-  async flush(): Promise<void> {
-    if (this.pending === 0) return;
-    await this.batch.commit();
-    this.batch = db.batch();
-    this.pending = 0;
-  }
+  return writeCount;
 }
 
 async function acquireSyncLock(companyId: string): Promise<{

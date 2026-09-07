@@ -95,6 +95,7 @@ jobs:
       - name: Build and test Functions
         run: |
           npm run build -w @lkc/functions
+          node scripts/test-cancellation-lock-ownership.mjs
           npm test
       - name: Publish Functions summary
         if: always()

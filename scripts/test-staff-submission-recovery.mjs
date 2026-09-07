@@ -71,6 +71,15 @@ const queryScope={upcomingShiftCursorRef:{current:null},hasMoreUpcomingShifts:fa
  },
 };
 runInNewContext(ts.transpileModule(app.slice(from,to),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,queryScope);
+let serverReads=0;
+queryScope.getDocsFromServer=async filters=>{serverReads++;return queryScope.getDocs(filters);};
+const serverLoaded=await queryScope.fetchMyJobs('staff','a',true);
+assert.equal(serverReads,2);assert.equal(serverLoaded.length,52);
+assert.ok(requests.every(filters=>filters.some(f=>f.field==='companyId'&&f.value==='a')&&filters.some(f=>f.field==='assignedStaffId'&&f.value==='staff')));
+queryScope.getDocsFromServer=async()=>{throw Error('server offline');};
+await assert.rejects(queryScope.fetchMyJobs('staff','a',true),/server offline/);
+requests=[];dateReads=0;
+
 const loaded=await queryScope.fetchMyJobs();
 assert.deepEqual(Array.from(loaded.slice(0,2),job=>job.id),['today','tomorrow']);
 assert.equal(loaded.length,52);

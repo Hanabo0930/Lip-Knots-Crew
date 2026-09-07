@@ -237,7 +237,7 @@ jobs:
               's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
               /etc/apt/apt-mirrors.txt
           fi
-          npx playwright install --with-deps chromium
+          npx playwright install --with-deps chromium --only-shell
           node scripts/automation/hosting-browser-check.mjs \
             --staff-url "${{ steps.channel.outputs.staff_url }}" \
             --admin-url "${{ steps.channel.outputs.admin_url }}" \

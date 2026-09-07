@@ -127,8 +127,7 @@ jobs:
       - name: Build only Staff and Admin Hosting
         working-directory: source
         run: |
-          npm run build:staging -w @lkc/staff
-          npm run build:staging -w @lkc/admin
+          bash scripts/automation/build-staging-hosting.sh
           npm run test:bundle-size
           if [[ -f scripts/check-web-boot-bundles.mjs ]]; then
             node scripts/check-web-boot-bundles.mjs
@@ -168,7 +167,7 @@ jobs:
           fi
       - name: Install the locked Chromium runtime
         working-directory: source
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium --only-shell
       - name: Run real-browser startup checks
         working-directory: source
         run: |

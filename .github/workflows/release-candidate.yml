@@ -65,6 +65,7 @@ jobs:
           npm run test:production-evidence-security
           npm run test:staging-preflight
           npm run test:staging-automation
+          node scripts/automation/test-hosting-build.mjs
           npm run test:release-checkpoint
           npm run test:staging-smoke
           npm run test:production-rehearsal

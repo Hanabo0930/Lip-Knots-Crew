@@ -198,6 +198,7 @@ export default function App(){
   const draftHydratingRef=useRef(false);
   const skipNextDraftSaveRef=useRef(false);
   const authLoadVersionRef=useRef(0);
+  const applicationAttemptsRef=useRef(new Map<string,{requestId:string;startedAt:number}>());
   const openJobsLoadVersionRef=useRef(0);
   const submissionProcessingVersionRef=useRef(0);
 
@@ -253,6 +254,7 @@ export default function App(){
   useEffect(()=>{ if(!auth)return; return onAuthStateChanged(auth,async current=>{
     const loadStarted=performance.now();
     const authLoadVersion=++authLoadVersionRef.current;
+    applicationAttemptsRef.current.clear();
     const isCurrentAuthLoad=()=>authLoadVersion===authLoadVersionRef.current;
     openJobsLoadVersionRef.current+=1;
     pastShiftVersionRef.current+=1;
@@ -855,8 +857,19 @@ export default function App(){
         try{
           if(!firebaseConfigured){setMessage("デモ：応募が確定しました。");setOpenJobs(v=>v.filter(x=>x.id!==job.id));return;}
           if(!functions)return;
-          await httpsCallable(functions,"applyToJob")({jobId:job.id,requestId:crypto.randomUUID()});
+          let attempt=applicationAttemptsRef.current.get(job.id);
+          if(!attempt){
+            attempt={requestId:crypto.randomUUID(),startedAt:Date.now()};
+            applicationAttemptsRef.current.set(job.id,attempt);
+          }
+          // サーバーの重複防止記録は24時間。期限を超えた再送は自動で新規応募にしない。
+          const attemptAge=Date.now()-attempt.startedAt;
+          if(attemptAge<0||attemptAge>=23*60*60*1000){
+            throw new Error("前回の応募から時間が経過しています。再応募する前に「シフト」で確定状況を確認してください。");
+          }
+          await httpsCallable(functions,"applyToJob")({jobId:job.id,requestId:attempt.requestId});
           if(!isCurrentAction())return;
+          applicationAttemptsRef.current.delete(job.id);
           setMessage("応募が確定しました。");
           setOpenJobs(current=>current.filter(item=>item.id!==job.id));
           setExpandedOpenJobId("");

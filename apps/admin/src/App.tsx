@@ -964,6 +964,7 @@ export default function App() {
 
 const [jobForm, setJobForm] = useState<JobForm>(blankJobForm);
 const [jobCreateBusy, setJobCreateBusy] = useState(false);
+const adminJobActionRef=useRef<object|null>(null);
 const [jobEditId, setJobEditId] = useState(demoJobs[0]?.id ?? "");
 const [jobEdit, setJobEdit] = useState<JobEditForm>(blankJobEdit);
 const [jobEditRevision, setJobEditRevision] = useState(0);
@@ -1013,6 +1014,8 @@ const [monthBusy, setMonthBusy] = useState(false);
     let cancelDeferredLoads:(()=>void)|null=null;
     const unsubscribe=onAuthStateChanged(activeAuth, (current) => {
       const currentRun=++authRun;
+      adminJobActionRef.current=null;
+      setJobCreateBusy(false);setJobEditBusy(false);
       setAdminSessionReady(false);
       const nextUid=current?.uid??null;
       const isCurrentRun=()=>(
@@ -3021,16 +3024,31 @@ function updateJobForm<K extends keyof JobForm>(key:K,value:JobForm[K]) {
   setJobForm((current)=>({...current,[key]:value}));
 }
 
-async function refreshJobsAfterAction(resultMessage:string) {
+async function runAdminJobAction(action:(isCurrent:()=>boolean)=>Promise<void>) {
+  if(adminJobActionRef.current || (firebaseConfigured&&!auth?.currentUser))return;
+  const token={};
+  const activeUser=auth?.currentUser;
+  adminJobActionRef.current=token;
+  const isCurrent=()=>adminJobActionRef.current===token&&auth?.currentUser===activeUser;
+  try { await action(isCurrent); }
+  finally { if(adminJobActionRef.current===token)adminJobActionRef.current=null; }
+}
+function createJobGroup(){return runAdminJobAction(isCurrent=>createJobGroupAction(isCurrent));}
+function duplicateJob(job:Job){return runAdminJobAction(isCurrent=>duplicateJobAction(job,isCurrent));}
+function changePublication(job:Job,action:"publish"|"stop"|"draft"|"schedule"){return runAdminJobAction(isCurrent=>changePublicationAction(job,action,isCurrent));}
+function saveJobEdit(){return runAdminJobAction(isCurrent=>saveJobEditAction(isCurrent));}
+
+async function refreshJobsAfterAction(resultMessage:string,isCurrent:()=>boolean) {
+  if(!isCurrent())return;
   setMessage(resultMessage);
   try {
-    await loadJobs();
+    await loadJobs(isCurrent);
   } catch {
-    setMessage(`${resultMessage} 一覧の更新だけができませんでした。同じ操作を繰り返さず「一覧を再読込」で表示を更新してください。`);
+    if(isCurrent())setMessage(`${resultMessage} 一覧の更新だけができませんでした。同じ操作を繰り返さず「一覧を再読込」で表示を更新してください。`);
   }
 }
 
-async function createJobGroup() {
+async function createJobGroupAction(isCurrent:()=>boolean) {
   if (!window.confirm(`${jobForm.slots}名分の案件を下書き作成しますか？`)) return;
   setJobCreateBusy(true);
   try {
@@ -3058,18 +3076,19 @@ async function createJobGroup() {
       basePay:jobForm.basePay===""?null:Number(jobForm.basePay),
       publishAt:jobForm.publishAt?new Date(jobForm.publishAt).toISOString():null,
     });
+    if(!isCurrent())return;
     const data=response.data as {jobIds?:string[];warning?:string|null};
     const resultMessage=data.warning || `${data.jobIds?.length ?? 0}名分の案件を作成しました。`;
     setJobForm((current)=>({...blankJobForm,workDate:current.workDate}));
-    await refreshJobsAfterAction(resultMessage);
+    await refreshJobsAfterAction(resultMessage,isCurrent);
   } catch(error) {
-    setMessage(error instanceof Error?error.message:String(error));
+    if(isCurrent())setMessage(error instanceof Error?error.message:String(error));
   } finally {
-    setJobCreateBusy(false);
+    if(isCurrent())setJobCreateBusy(false);
   }
 }
 
-async function duplicateJob(job:Job) {
+async function duplicateJobAction(job:Job,isCurrent:()=>boolean) {
   const date=window.prompt("複製後の実施日",job.workDate) || job.workDate;
   const slots=Number(window.prompt("募集人数","1") || "1");
   if (!firebaseConfigured) {
@@ -3087,13 +3106,14 @@ async function duplicateJob(job:Job) {
     const response=await httpsCallable(functions,"duplicateAdminJob")({
       sourceJobId:job.id,workDate:date,slots,publicationMode:"draft",publishAt:null,
     });
-    await refreshJobsAfterAction(`${(response.data as {jobIds?:string[]}).jobIds?.length ?? 0}件を複製しました。`);
+    if(!isCurrent())return;
+    await refreshJobsAfterAction(`${(response.data as {jobIds?:string[]}).jobIds?.length ?? 0}件を複製しました。`,isCurrent);
   } catch(error) {
-    setMessage(error instanceof Error?error.message:String(error));
+    if(isCurrent())setMessage(error instanceof Error?error.message:String(error));
   }
 }
 
-async function changePublication(job:Job,action:"publish"|"stop"|"draft"|"schedule") {
+async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"schedule",isCurrent:()=>boolean) {
   let publishAt:string|null=null;
   if(action==="schedule") {
     const entered=window.prompt("公開日時（例 2026-08-01T09:00）","");
@@ -3115,10 +3135,11 @@ async function changePublication(job:Job,action:"publish"|"stop"|"draft"|"schedu
     const response=await httpsCallable(functions,"updateJobPublication")({
       jobIds:[job.id],action,publishAt,
     });
+    if(!isCurrent())return;
     const data=response.data as {updated?:string[];blocked?:string[]};
-    await refreshJobsAfterAction(data.blocked?.length?"安全条件により下書きのままです。":"公開状態を変更しました。");
+    await refreshJobsAfterAction(data.blocked?.length?"安全条件により下書きのままです。":"公開状態を変更しました。",isCurrent);
   } catch(error) {
-    setMessage(error instanceof Error?error.message:String(error));
+    if(isCurrent())setMessage(error instanceof Error?error.message:String(error));
   }
 }
 
@@ -3141,7 +3162,7 @@ function updateJobEdit<K extends keyof JobEditForm>(key:K,value:JobEditForm[K]) 
   setJobEdit((current)=>({...current,[key]:value}));
 }
 
-async function saveJobEdit() {
+async function saveJobEditAction(isCurrent:()=>boolean) {
   if(!jobEditId)return;
   if(!window.confirm("入力セルだけを保存します。合計・数式セルは変更しません。続けますか？"))return;
   setJobEditBusy(true);
@@ -3174,13 +3195,14 @@ async function saveJobEdit() {
         clientChargeInputs,staffPaymentInputs,
       },
     });
+    if(!isCurrent())return;
     const data=response.data as {revision?:number;sheetWriteQueued?:boolean;pendingSourceWrite?:boolean};
     setJobEditRevision(data.revision ?? jobEditRevision+1);
-    await refreshJobsAfterAction(data.sheetWriteQueued?"スプシ書込キューへ送りました。":data.pendingSourceWrite?"アプリへ保存しました。スプシ書込は安全確認待ちです。":"保存しました。");
+    await refreshJobsAfterAction(data.sheetWriteQueued?"スプシ書込キューへ送りました。":data.pendingSourceWrite?"アプリへ保存しました。スプシ書込は安全確認待ちです。":"保存しました。",isCurrent);
   } catch(error) {
-    setMessage(error instanceof Error?error.message:String(error));
+    if(isCurrent())setMessage(error instanceof Error?error.message:String(error));
   } finally {
-    setJobEditBusy(false);
+    if(isCurrent())setJobEditBusy(false);
   }
 }
 

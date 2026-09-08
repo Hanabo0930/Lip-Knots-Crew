@@ -150,6 +150,11 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
     return;
   }
 
+  // 旧版の転送済みデータは加算済みか判別できないため、自動再加算しない。
+  if (meta.driveFileId && !(meta.transferCompletedAt instanceof Timestamp) && meta.completionCounted !== true) {
+    throw new HttpsError("failed-precondition", "旧版の転送済み提出です。完了数を確認してから再処理してください。");
+  }
+  const gcsFile = storage.bucket(object.bucket).file(path);
   await fileRef.set({ status: "processing", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
 
   try {
@@ -170,77 +175,90 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
       throw new Error("Driveルートフォルダが未設定です。");
     }
 
-    const drive = getWritableDriveClient();
-    const clientFolder = await ensureFolder(
-      drive,
-      driveConfig.rootFolderId,
-      String(job.clientName ?? "未分類")
-    );
-    const monthFolder = await ensureFolder(
-      drive,
-      clientFolder,
-      String(job.monthKey ?? String(job.dateKey ?? "").slice(0, 7).replace("-0", ".").replace("-", "."))
-    );
+    let submittedAt = meta.transferCompletedAt instanceof Timestamp
+      ? meta.transferCompletedAt : meta.completedAt instanceof Timestamp ? meta.completedAt : Timestamp.now();
+    let transferResult = {
+      id: typeof meta.driveFileId === "string" ? meta.driveFileId : "",
+      name: String(meta.driveName ?? ""), sequence: Number(meta.sequence ?? 0),
+    };
+    if (!transferResult.id) {
+      const drive = getWritableDriveClient();
+      const clientFolder = await ensureFolder(
+        drive,
+        driveConfig.rootFolderId,
+        String(job.clientName ?? "未分類")
+      );
+      const monthFolder = await ensureFolder(
+        drive,
+        clientFolder,
+        String(job.monthKey ?? String(job.dateKey ?? "").slice(0, 7).replace("-0", ".").replace("-", "."))
+      );
 
-    const counterRef = db.collection("fileCounters")
-      .doc(`${meta.jobId}_${meta.type}`);
-    const sequence = await db.runTransaction(async (tx) => {
-      const counterSnap = await tx.get(counterRef);
-      const next = Number(counterSnap.data()?.value ?? 0) + 1;
-      tx.set(counterRef, { value: next, updatedAt: Timestamp.now() }, { merge: true });
-      return next;
-    });
+      const counterRef = db.collection("fileCounters")
+        .doc(`${meta.jobId}_${meta.type}`);
+      const sequence = await db.runTransaction(async (tx) => {
+        const counterSnap = await tx.get(counterRef);
+        const next = Number(counterSnap.data()?.value ?? 0) + 1;
+        tx.set(counterRef, { value: next, updatedAt: Timestamp.now() }, { merge: true });
+        return next;
+      });
 
-    const datePart = formatMd(String(job.dateKey ?? ""));
-    const storeName = sanitizeName(String(job.storeName ?? "店舗"));
-    const staffName = sanitizeName(String(staff.displayName ?? "スタッフ"));
-    const typeLabel = meta.type === "sales_floor" ? "（売場画像）" : "";
-    const extension = extensionFromName(String(meta.originalName ?? object.name ?? ""));
-    const finalName = `${datePart} ${storeName} ${staffName}さん${typeLabel}(${sequence})${extension}`;
+      const datePart = formatMd(String(job.dateKey ?? ""));
+      const storeName = sanitizeName(String(job.storeName ?? "店舗"));
+      const staffName = sanitizeName(String(staff.displayName ?? "スタッフ"));
+      const typeLabel = meta.type === "sales_floor" ? "（売場画像）" : "";
+      const extension = extensionFromName(String(meta.originalName ?? object.name ?? ""));
+      const finalName = `${datePart} ${storeName} ${staffName}さん${typeLabel}(${sequence})${extension}`;
 
-    const bucket = storage.bucket(object.bucket);
-    const gcsFile = bucket.file(path);
-    const response = await drive.files.create({
-      requestBody: { name: finalName, parents: [monthFolder] },
-      media: { mimeType: object.contentType ?? undefined, body: gcsFile.createReadStream() },
-      fields: "id,name,webViewLink",
-      supportsAllDrives: true,
-    });
+      const response = await drive.files.create({
+        requestBody: { name: finalName, parents: [monthFolder] },
+        media: { mimeType: object.contentType ?? undefined, body: gcsFile.createReadStream() },
+        fields: "id,name,webViewLink",
+        supportsAllDrives: true,
+      });
 
+      if (!response.data.id) throw new Error("Drive転送結果のIDがありません。");
+      submittedAt = Timestamp.now();
+      transferResult = { id: response.data.id, name: response.data.name ?? finalName, sequence };
+      // 転送結果を先に保存し、後続DB処理の再試行では同じDriveファイルを使う。
+      await fileRef.set({
+        driveFileId: transferResult.id, driveName: transferResult.name,
+        driveWebViewLink: response.data.webViewLink ?? null, sequence,
+        transferCompletedAt: submittedAt,
+      }, { merge: true });
+    }
     await fileRef.set({
-      status: "completed",
-      driveFileId: response.data.id ?? null,
-      driveName: response.data.name ?? finalName,
-      driveWebViewLink: response.data.webViewLink ?? null,
-      sequence,
-      completedAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
+      status: "completed", completedAt: submittedAt, updatedAt: submittedAt,
+      errorMessage: FieldValue.delete(),
     }, { merge: true });
 
-    const submittedAt = Timestamp.now();
     const requestIdForFile = String(meta.resubmissionRequestId ?? "");
     if (requestIdForFile) {
       await markResubmissionReplacementFile({
         requestId: requestIdForFile,
         submissionId,
         fileId,
-        driveFileId: response.data.id ?? null,
-        driveName: response.data.name ?? finalName,
+        driveFileId: transferResult.id,
+        driveName: transferResult.name,
         previewContentType: String(object.contentType ?? meta.contentType ?? "application/octet-stream"),
         submittedAt,
       });
     }
     const completedAll = await db.runTransaction(async (tx) => {
       const submissionRef = db.collection("submissions").doc(submissionId);
-      const current = await tx.get(submissionRef);
+      const [current, countedFile] = await Promise.all([tx.get(submissionRef), tx.get(fileRef)]);
       if (!current.exists) return false;
-      const completedFiles = Number(current.data()?.completedFiles ?? 0) + 1;
+      const completedFiles = Number(current.data()?.completedFiles ?? 0) + (countedFile.data()?.completionCounted === true ? 0 : 1);
       const totalFiles = Number(current.data()?.totalFiles ?? 0);
       const completed = totalFiles > 0 && completedFiles >= totalFiles;
+      const otherFailed = current.data()?.status === "error" &&
+        current.data()?.failedFileId && current.data()?.failedFileId !== fileId;
+      tx.set(fileRef, { completionCounted: true }, { merge: true });
       tx.set(submissionRef, {
         completedFiles,
-        status: completed ? "completed" : "uploading",
-        ...(completed ? { completedAt: submittedAt } : {}),
+        status: completed ? "completed" : otherFailed ? "error" : "uploading",
+        ...(completed ? { completedAt: current.data()?.completedAt ?? submittedAt } : {}),
+        ...(!otherFailed || completed ? { errorMessage: FieldValue.delete(), failedFileId: FieldValue.delete() } : {}),
         updatedAt: submittedAt,
       }, { merge: true });
       return completed;
@@ -248,6 +266,7 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
 
     if (completedAll) {
       await markSubmissionCompleted({
+        submissionId,
         jobId: String(meta.jobId),
         type: meta.type === "sales_floor" ? "sales_floor" : "report",
         submittedAt,
@@ -260,7 +279,6 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
       }
     }
 
-    await gcsFile.delete({ ignoreNotFound: true });
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
@@ -282,6 +300,8 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
 
     throw error;
   }
+  // 後片付け失敗で完了を取り消さない。イベント再試行で削除だけも再実行できる。
+  await gcsFile.delete({ ignoreNotFound: true });
 });
 
 async function ensureFolder(

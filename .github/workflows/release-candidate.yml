@@ -100,6 +100,7 @@ jobs:
           node scripts/test-cancellation-lock-ownership.mjs
           node scripts/test-shift-import-transactions.mjs
           node scripts/test-shift-lifecycle.mjs
+          node scripts/test-submission-lifecycle.mjs
           node scripts/test-emulator-seed-safety.mjs
           node scripts/test-shift-import-lease.mjs
           node scripts/test-shift-integrity-diagnostics.mjs

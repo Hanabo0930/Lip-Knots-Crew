@@ -12,14 +12,14 @@ const code=ts.transpileModule(source.slice(start>=0?start:fallback,end),{compile
 function setup({apiFailure=false,refreshFailure=false,data={},demo=false,apiWait=async()=>{},refreshWait=async()=>{}}={}){
  const state={messages:[],calls:[],refreshes:0,revision:2,busy:false,jobs:[{id:'j',workDate:'2026-09-20'}],form:{workDate:'2026-09-20',slots:'1',basePay:'',publishAt:''}};
  const form={...state.form};
- const deps={auth:{currentUser:{}},adminJobActionRef:{current:null},firebaseConfigured:!demo,functions:{},window:{confirm:()=>true,prompt:(_label,value)=>value},
+ const deps={jobEditContextRef:{current:0},blankJobEdit:{},setTimeout:()=>{},setJobEditId:id=>state.editId=id,setJobEdit:value=>state.edit=value,auth:{currentUser:{}},adminJobActionRef:{current:null},firebaseConfigured:!demo,functions:{},window:{confirm:()=>true,prompt:(_label,value)=>value},
   jobForm:form,blankJobForm:{slots:'1'},jobEditId:'j',jobEditRevision:2,jobEdit:{assignedStaffId:'',clientName:'Synthetic'},invoiceLabels:[],staffPayLabels:[],staff:[],
   setMessage:m=>state.messages.push(m),setJobCreateBusy:b=>state.busy=b,setJobEditBusy:b=>state.busy=b,
   setJobForm:f=>state.form=f(state.form),setJobs:f=>state.jobs=f(state.jobs),setJobEditRevision:r=>state.revision=typeof r==='function'?r(state.revision):r,
   httpsCallable:(_functions,name)=>async()=>{state.calls.push(name);await apiWait();if(apiFailure)throw Error('API rejected');return {data:{jobIds:['new'],revision:3,...data}};},
   loadJobs:async()=>{state.refreshes++;await refreshWait();if(refreshFailure)throw Error('READ_FAILED');},
  };
- const handlers=Function(...Object.keys(deps),code+';return {createJobGroup,duplicateJob,changePublication,saveJobEdit};')(...Object.values(deps));
+ const handlers=Function(...Object.keys(deps),code+';return {createJobGroup,duplicateJob,changePublication,saveJobEdit,loadJobEdit};')(...Object.values(deps));
  return {state,handlers,deps};
 }
 let cases=0;
@@ -82,5 +82,21 @@ for(const [name,args] of actions){
 }
 {
  const test=setup();test.deps.window.confirm=()=>false;await test.handlers.createJobGroup();assert.equal(test.state.calls.length,0);assert.equal(test.deps.adminJobActionRef.current,null);cases++;
+}
+for(const id of ['other','j']){
+ for(const apiFailure of [false,true]){
+  const gate=deferred(),test=setup({apiWait:()=>gate.promise,apiFailure});
+  const pending=test.handlers.saveJobEdit();
+  test.handlers.loadJobEdit({id,revision:9,clientName:'New form'});
+  const messagesBefore=[...test.state.messages];gate.resolve();await pending;
+  assert.equal(test.state.revision,9);assert.equal(test.state.editId,id);assert.equal(test.state.edit.clientName,'New form');
+  assert.deepEqual(test.state.messages,messagesBefore);assert.equal(test.state.refreshes,0);assert.equal(test.state.busy,false);assert.equal(test.deps.adminJobActionRef.current,null);cases++;
+ }
+}
+{
+ const gate=deferred(),test=setup({refreshWait:()=>gate.promise,refreshFailure:true});
+ const pending=test.handlers.saveJobEdit();while(!test.state.refreshes)await Promise.resolve();
+ test.handlers.loadJobEdit({id:'other',revision:8});gate.resolve();await pending;
+ assert.equal(test.state.revision,8);assert.equal(test.state.messages.at(-1),'');assert.equal(test.state.busy,false);cases++;
 }
 console.log(`Admin action confirmation: ${cases} cases passed (synthetic API; no external writes).`);

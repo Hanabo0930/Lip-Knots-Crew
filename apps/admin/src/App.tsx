@@ -969,6 +969,7 @@ const [jobEditId, setJobEditId] = useState(demoJobs[0]?.id ?? "");
 const [jobEdit, setJobEdit] = useState<JobEditForm>(blankJobEdit);
 const [jobEditRevision, setJobEditRevision] = useState(0);
 const [jobEditBusy, setJobEditBusy] = useState(false);
+const jobEditContextRef=useRef(0);
 const [exportFrom, setExportFrom] = useState("2026-07-01");
 const [exportThrough, setExportThrough] = useState("2026-07-31");
 const [exportGroupBy, setExportGroupBy] = useState<"client"|"maker">("client");
@@ -3144,6 +3145,8 @@ async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"
 }
 
 function loadJobEdit(job:Job) {
+  jobEditContextRef.current++;
+  setMessage("");
   setJobEditId(job.id);
   setJobEditRevision(job.revision ?? 0);
   setJobEdit({
@@ -3164,6 +3167,8 @@ function updateJobEdit<K extends keyof JobEditForm>(key:K,value:JobEditForm[K]) 
 
 async function saveJobEditAction(isCurrent:()=>boolean) {
   if(!jobEditId)return;
+  const editContext=jobEditContextRef.current;
+  const isCurrentEdit=()=>isCurrent()&&jobEditContextRef.current===editContext;
   if(!window.confirm("入力セルだけを保存します。合計・数式セルは変更しません。続けますか？"))return;
   setJobEditBusy(true);
   try {
@@ -3195,12 +3200,12 @@ async function saveJobEditAction(isCurrent:()=>boolean) {
         clientChargeInputs,staffPaymentInputs,
       },
     });
-    if(!isCurrent())return;
+    if(!isCurrentEdit())return;
     const data=response.data as {revision?:number;sheetWriteQueued?:boolean;pendingSourceWrite?:boolean};
     setJobEditRevision(data.revision ?? jobEditRevision+1);
-    await refreshJobsAfterAction(data.sheetWriteQueued?"スプシ書込キューへ送りました。":data.pendingSourceWrite?"アプリへ保存しました。スプシ書込は安全確認待ちです。":"保存しました。",isCurrent);
+    await refreshJobsAfterAction(data.sheetWriteQueued?"スプシ書込キューへ送りました。":data.pendingSourceWrite?"アプリへ保存しました。スプシ書込は安全確認待ちです。":"保存しました。",isCurrentEdit);
   } catch(error) {
-    if(isCurrent())setMessage(error instanceof Error?error.message:String(error));
+    if(isCurrentEdit())setMessage(error instanceof Error?error.message:String(error));
   } finally {
     if(isCurrent())setJobEditBusy(false);
   }

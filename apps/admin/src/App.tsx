@@ -31,6 +31,7 @@ const AdminJobSearchControls=lazy(()=>import("./AdminJobSearchControls"));
 const AdminSubmissionTimeline=lazy(()=>import("./AdminSubmissionTimeline"));
 const ProductionAcceptanceRollbackConsole = lazy(() => import("./ProductionAcceptanceRollbackConsole"));
 const StoreLocationFields = lazy(() => import("./StoreLocationFields"));
+const AdminExpensePanel = lazy(() => import("./AdminExpensePanel"));
 const JobSafeEditPanel = lazy(() => import("./JobSafeEditPanel"));
 
 type Job = {
@@ -951,6 +952,11 @@ export default function App() {
   const [expenseNote, setExpenseNote] = useState("");
   const [expenseStatus, setExpenseStatus] = useState("未読込");
   const [expenseBusy, setExpenseBusy] = useState(false);
+  const [expenseReady, setExpenseReady] = useState(false);
+  const expenseVersionRef = useRef(0);
+  const expenseReadyRef = useRef<{jobId:string;user:unknown}|null>(null);
+  const expenseLoadRef = useRef<number|null>(null);
+  const expenseWriteRef = useRef<symbol|null>(null);
   const [dashboardMonth, setDashboardMonth] = useState(currentTokyoMonth());
   const [dashboard, setDashboard] = useState<DashboardData | null>(firebaseConfigured ? null : demoDashboard);
   const [dashboardBusy, setDashboardBusy] = useState(false);
@@ -1015,6 +1021,9 @@ const [monthBusy, setMonthBusy] = useState(false);
     let cancelDeferredLoads:(()=>void)|null=null;
     const unsubscribe=onAuthStateChanged(activeAuth, (current) => {
       const currentRun=++authRun;
+      expenseVersionRef.current++;
+      expenseReadyRef.current=null;expenseLoadRef.current=null;expenseWriteRef.current=null;
+      setExpenseReady(false);setExpenseBusy(false);setExpenseValues(blankExpense);setExpenseNote("");setExpenseStatus("未読込");
       adminJobActionRef.current=null;
       setJobCreateBusy(false);setJobEditBusy(false);
       setAdminSessionReady(false);
@@ -2778,95 +2787,68 @@ async function previewRowCreation() {
 
   async function loadExpenseReview(jobId:string) {
     openWorkspace("submissions");
+    const version=++expenseVersionRef.current;
+    const user=auth?.currentUser??null;
+    const isCurrent=()=>expenseVersionRef.current===version&&(auth?.currentUser??null)===user;
+    expenseReadyRef.current=null;expenseLoadRef.current=null;
+    setExpenseReady(false);setExpenseValues(blankExpense);setExpenseNote("");setExpenseStatus("未読込");
     setExpenseJobId(jobId);
-    if (!jobId) return;
-    if (!firebaseConfigured) {
-      const job=jobs.find((item)=>item.id===jobId);
-      setExpenseValues({
-        transportation:String(job?.expenses?.transportation ?? ""),
-        purchase8:String(job?.expenses?.purchase8 ?? ""),
-        purchase10:String(job?.expenses?.purchase10 ?? ""),
-        netPrintCost:String(job?.expenses?.netPrintCost ?? ""),
-        postageCost:String(job?.expenses?.postageCost ?? ""),
-      });
-      setExpenseNote("");
-      setExpenseStatus("デモ読込済み");
-      return;
-    }
-    if (!functions) return;
-    setExpenseBusy(true);
+    if (!jobId) {setExpenseBusy(expenseWriteRef.current!==null);return;}
+    if (firebaseConfigured&&(!functions||!user||!adminSessionReady)) {setExpenseBusy(expenseWriteRef.current!==null);return;}
+    expenseLoadRef.current=version;setExpenseBusy(true);setExpenseStatus("読込中");
     try {
-      const callable=httpsCallable(functions,"getExpenseReview");
-      const response=await callable({jobId});
-      const data=response.data as {
-        currentValues?:Record<string,number|null>;
-        draft?:{values?:Record<string,number|null>;note?:string;status?:string}|null;
-      };
-      const source=data.draft?.values ?? data.currentValues ?? {};
-      setExpenseValues({
-        transportation:String(source.transportation ?? ""),
-        purchase8:String(source.purchase8 ?? ""),
-        purchase10:String(source.purchase10 ?? ""),
-        netPrintCost:String(source.netPrintCost ?? ""),
-        postageCost:String(source.postageCost ?? ""),
-      });
-      setExpenseNote(data.draft?.note ?? "");
-      setExpenseStatus(data.draft?.status ?? "未処理");
-    } catch (error) {
-      setMessage(error instanceof Error?error.message:String(error));
+      let values:Record<string,unknown>={};let note="";let status="デモ読込済み";
+      if (!firebaseConfigured) {
+        const job=jobs.find(item=>item.id===jobId);
+        if (!job) throw new Error("案件が見つかりません。");
+        values=job.expenses??{};
+      } else {
+        const response=await httpsCallable(functions!,"getExpenseReview")({jobId});
+        if (!isCurrent()) return;
+        const data=response.data as {job?:{id?:string};currentValues?:Record<string,number|null>;draft?:{values?:Record<string,number|null>;note?:string;status?:string}|null};
+        if (data.job?.id!==jobId) throw new Error("経費の読込対象が一致しません。再読込してください。");
+        values=data.draft?.values??data.currentValues??{};note=data.draft?.note??"";status=data.draft?.status??"未処理";
+      }
+      if (!isCurrent()) return;
+      setExpenseValues({transportation:String(values.transportation??""),purchase8:String(values.purchase8??""),purchase10:String(values.purchase10??""),netPrintCost:String(values.netPrintCost??""),postageCost:String(values.postageCost??"")});
+      setExpenseNote(note);setExpenseStatus(status);
+      expenseReadyRef.current={jobId,user};setExpenseReady(true);
+    } catch(error) {
+      if(isCurrent()){setExpenseStatus("読込できませんでした");setMessage(error instanceof Error?error.message:String(error));}
     } finally {
-      setExpenseBusy(false);
+      if(expenseLoadRef.current===version){expenseLoadRef.current=null;setExpenseBusy(expenseWriteRef.current!==null);}
     }
   }
 
-  async function saveExpenseDraft() {
-    if (!expenseJobId) return;
-    if (!firebaseConfigured) {
-      setExpenseStatus("一時保存");
-      setMessage("デモ：経費を一時保存しました。");
-      return;
-    }
-    if (!functions) return;
-    setExpenseBusy(true);
-    try {
-      await httpsCallable(functions,"saveExpenseReviewDraft")({
-        jobId:expenseJobId,
-        values:expenseValues,
-        note:expenseNote,
-      });
-      setExpenseStatus("一時保存");
-      setMessage("経費を一時保存しました。");
-    } catch(error) {
-      setMessage(error instanceof Error?error.message:String(error));
-    } finally {
-      setExpenseBusy(false);
-    }
-  }
+  async function saveExpenseDraft() { await runExpenseWrite(false); }
+  async function completeExpense() { await runExpenseWrite(true); }
 
-  async function completeExpense() {
-    if (!expenseJobId) return;
-    if (!window.confirm("スプシの現在値と一致する場合だけ、経費を書込キューへ送ります。続けますか？")) return;
-    if (!firebaseConfigured) {
-      setExpenseStatus("書込待ち");
-      setMessage("デモ：経費を書込キューへ送りました。");
-      return;
-    }
-    if (!functions) return;
-    setExpenseBusy(true);
+  async function runExpenseWrite(complete:boolean) {
+    const user=auth?.currentUser??null;
+    if(!expenseJobId||expenseWriteRef.current!==null||expenseLoadRef.current!==null||
+      expenseReadyRef.current?.jobId!==expenseJobId||expenseReadyRef.current.user!==user||
+      (firebaseConfigured&&(!functions||!user||!adminSessionReady)))return;
+    if(complete&&!window.confirm("スプシの現在値と一致する場合だけ、経費を書込キューへ送ります。続けますか？"))return;
+    const version=expenseVersionRef.current,token=Symbol("expense-write");
+    const isCurrent=()=>version===expenseVersionRef.current&&(auth?.currentUser??null)===user;
+    const payload={jobId:expenseJobId,values:{...expenseValues},note:expenseNote,...(complete?{confirmExistingValues:false}:{})};
+    expenseWriteRef.current=token;setExpenseBusy(true);
     try {
-      await httpsCallable(functions,"completeExpenseReview")({
-        jobId:expenseJobId,
-        values:expenseValues,
-        note:expenseNote,
-        confirmExistingValues:false,
-      });
-      setExpenseStatus("書込待ち");
-      setMessage("経費を書込キューへ送りました。");
-      await loadSheetIssues();
+      if(firebaseConfigured)await httpsCallable(functions!,complete?"completeExpenseReview":"saveExpenseReviewDraft")(payload);
+      if(!isCurrent())return;
+      setExpenseStatus(complete?"書込待ち":"一時保存");
+      setMessage((firebaseConfigured?"":"デモ：")+(complete?"経費を書込キューへ送りました。":"経費を一時保存しました。"));
+      if(complete){
+        expenseReadyRef.current=null;setExpenseReady(false);
+        if(firebaseConfigured){try{await loadSheetIssues(isCurrent);}catch{if(isCurrent())setMessage("経費は受付済みです。書込状況の更新に失敗しました。再送せず、再読込して確認してください。");}}
+      }
     } catch(error) {
-      setMessage(error instanceof Error?error.message:String(error));
+      if(isCurrent()){
+        expenseReadyRef.current=null;setExpenseReady(false);setExpenseStatus("結果を再確認してください");
+        setMessage("経費操作の結果を確認できません。再送する前に再読込して確認してください。 "+(error instanceof Error?error.message:String(error)));
+      }
     } finally {
-      setExpenseBusy(false);
+      if(expenseWriteRef.current===token){expenseWriteRef.current=null;setExpenseBusy(expenseLoadRef.current!==null);}
     }
   }
 
@@ -3923,47 +3905,7 @@ function downloadCsv(filename:string,content:string) {
         )}
       </section></WorkspacePanel>
 
-      <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel expense-panel">
-        <div className="section-heading">
-          <div>
-            <h2>報告書確認・経費入力</h2>
-            <p>画像を見ながら一時保存し、確認完了時だけ安全なスプシ書込キューへ送ります。</p>
-          </div>
-          <span className="mini-tag">{expenseStatus}</span>
-        </div>
-        <div className="expense-select">
-          <select value={expenseJobId} onChange={(event)=>loadExpenseReview(event.target.value)}>
-            {jobs.map((job)=><option value={job.id} key={job.id}>{job.workDate} {job.storeName} {job.assignedStaffName ?? "募集中"}</option>)}
-          </select>
-          <button className="ghost" onClick={()=>loadExpenseReview(expenseJobId)} disabled={expenseBusy}>読込</button>
-        </div>
-        <div className="expense-grid">
-          {[
-            ["transportation","交通費"],
-            ["purchase8","8％買取"],
-            ["purchase10","10％買取"],
-            ["netPrintCost","ネットプリント"],
-            ["postageCost","切手・速達・レターパック"],
-          ].map(([key,label])=>(
-            <label key={key}>{label}
-              <input
-                inputMode="numeric"
-                value={expenseValues[key as keyof ExpenseValues]}
-                onChange={(event)=>setExpenseValues((current)=>({...current,[key]:event.target.value}))}
-                placeholder="0"
-              />
-            </label>
-          ))}
-        </div>
-        <label className="expense-note">確認メモ
-          <textarea value={expenseNote} onChange={(event)=>setExpenseNote(event.target.value)} placeholder="途中メモや確認内容"/>
-        </label>
-        <div className="sync-actions">
-          <button className="ghost" onClick={saveExpenseDraft} disabled={expenseBusy}>一時保存</button>
-          <button onClick={completeExpense} disabled={expenseBusy}>確認完了・書込待ちへ</button>
-          <button className="ghost" onClick={()=>{const job=jobs.find((item)=>item.id===expenseJobId);if(job)openJobSheet(job);}}>スプシ該当行</button>
-        </div>
-      </section></WorkspacePanel>
+      <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">経費画面を読み込んでいます…</p>}><AdminExpensePanel jobs={jobs} expenseJobId={expenseJobId} expenseValues={expenseValues} expenseNote={expenseNote} expenseStatus={expenseStatus} expenseBusy={expenseBusy} expenseReady={expenseReady} loadExpenseReview={loadExpenseReview} saveExpenseDraft={saveExpenseDraft} completeExpense={completeExpense} setExpenseValues={setExpenseValues} setExpenseNote={setExpenseNote} openSheet={()=>{const job=jobs.find(item=>item.id===expenseJobId);if(job)void openJobSheet(job);}}/></Suspense></WorkspacePanel>
 
       <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel" ref={reviewPanelRef} tabIndex={-1} aria-labelledby="submission-materials-heading">
         <div className="section-heading">

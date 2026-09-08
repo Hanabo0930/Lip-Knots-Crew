@@ -38,6 +38,7 @@ jobs:
           fi
           npm run test:admin-startup
           node scripts/test-admin-action-confirmation.mjs
+          node scripts/test-admin-expense-recovery.mjs
       - name: Validate Staff workflows and company isolation
         run: |
           npm run test:staff-company-scope

@@ -1,3 +1,4 @@
+import { assertSubmissionCounters, assertSubmissionOwner } from "./submission-integrity";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { z } from "zod";
@@ -57,29 +58,36 @@ export async function markSubmissionCompleted(input: {
   await db.runTransaction(async (tx) => {
     const submissionRef = db.collection("submissions").doc(input.submissionId);
     const [snap, submission] = await Promise.all([tx.get(jobRef), tx.get(submissionRef)]);
-    if (!submission.exists || submission.data()?.jobStatusApplied === true) return;
-    if (!snap.exists) return;
+    const data = submission.data();
+    if (!data || data.jobId !== input.jobId || data.type !== input.type) throw new HttpsError("failed-precondition", "提出と完了対象の案件が一致しません。");
+    assertSubmissionCounters(data);
+    assertSubmissionOwner(data, snap.data());
+    if (data.status !== "completed" || data.completedFiles !== data.totalFiles) throw new HttpsError("failed-precondition", "すべてのファイルの転送完了を確認できません。");
+    if (data.jobStatusApplied === true) return;
     const job = snap.data() as {
       dateKey?: string;
       submissionStatus?: {
-        report?: { firstCompletedAt?: Timestamp };
-        salesFloor?: { firstCompletedAt?: Timestamp; clientSubmitted?: boolean };
+        report?: { firstCompletedAt?: Timestamp; latestCompletedAt?: Timestamp; lateFirstSubmission?: boolean };
+        salesFloor?: { firstCompletedAt?: Timestamp; latestCompletedAt?: Timestamp; lateFirstSubmission?: boolean; clientSubmitted?: boolean };
       };
     };
     const deadline = job.dateKey ? submissionDeadline(job.dateKey) : null;
-    const late = deadline ? input.submittedAt.toMillis() > deadline.toMillis() : false;
     const key = input.type === "report" ? "report" : "salesFloor";
     const previous = job.submissionStatus?.[key];
+    const firstCompletedAt = previous?.firstCompletedAt instanceof Timestamp && previous.firstCompletedAt.toMillis() < input.submittedAt.toMillis()
+      ? previous.firstCompletedAt : input.submittedAt;
+    const latestCompletedAt = previous?.latestCompletedAt instanceof Timestamp && previous.latestCompletedAt.toMillis() > input.submittedAt.toMillis()
+      ? previous.latestCompletedAt : input.submittedAt;
+    const lateFirstSubmission = deadline ? firstCompletedAt.toMillis() > deadline.toMillis() : previous?.lateFirstSubmission === true;
 
     const basePath = `submissionStatus.${key}`;
     const update: FirebaseFirestore.UpdateData<FirebaseFirestore.DocumentData> = {
       [`${basePath}.completed`]: true,
       [`${basePath}.lipKnotsSubmitted`]: true,
-      [`${basePath}.firstCompletedAt`]: previous?.firstCompletedAt ?? input.submittedAt,
-      [`${basePath}.latestCompletedAt`]: input.submittedAt,
-      [`${basePath}.lateFirstSubmission`]: previous?.firstCompletedAt ?
-        Boolean((previous as { lateFirstSubmission?: boolean }).lateFirstSubmission) : late,
-      updatedAt: input.submittedAt,
+      [`${basePath}.firstCompletedAt`]: firstCompletedAt,
+      [`${basePath}.latestCompletedAt`]: latestCompletedAt,
+      [`${basePath}.lateFirstSubmission`]: lateFirstSubmission,
+      updatedAt: FieldValue.serverTimestamp(),
     };
     if (key === "salesFloor") {
       update[`${basePath}.clientSubmitted`] =
@@ -88,9 +96,9 @@ export async function markSubmissionCompleted(input: {
     tx.update(jobRef, update);
     tx.update(submissionRef, { jobStatusApplied: true });
     const operation = input.type === "report" ? "submission.report" : "submission.sales_floor";
-    const updates = input.type === "report" ? { reportSubmitted: late && !previous?.firstCompletedAt ? "遅延" : "提出済" } : { salesFloorSubmitted: (previous as { clientSubmitted?: boolean } | undefined)?.clientSubmitted === true ? "直＋リップ" : "リップ" };
+    const updates = input.type === "report" ? { reportSubmitted: lateFirstSubmission ? "遅延" : "提出済" } : { salesFloorSubmitted: (previous as { clientSubmitted?: boolean } | undefined)?.clientSubmitted === true ? "直＋リップ" : "リップ" };
     tx.set(db.collection("sheetSyncQueue").doc(), {
-      companyId: String((snap.data() as Record<string,unknown>).companyId ?? "lipknots"), jobId: input.jobId, operation, updates,
+      companyId: String(data.companyId), jobId: input.jobId, operation, updates,
       status:"pending", attempts:0, idempotencyKey:`submission:${input.type}:${input.jobId}:${input.submittedAt.toMillis()}`, createdAt:input.submittedAt,
     });
   });

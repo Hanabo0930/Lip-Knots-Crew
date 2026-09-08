@@ -37,7 +37,7 @@ function harness(){
     }
     records.clear();for(const [k,v]of next)records.set(k,v);for(const w of writes)versions.set(w.ref.path,(versions.get(w.ref.path)??0)+1);
   }
-  const ref=p=>({path:p,id:p.split('/').at(-1),collection:n=>collection(`${p}/${n}`),get:async()=>snap(ref(p)),set:async(data,opts)=>commit([{ref:ref(p),data,merge:opts?.merge}])});
+  const ref=p=>({path:p,id:p.split('/').at(-1),collection:n=>collection(`${p}/${n}`),get:async()=>snap(ref(p)),set:async(data,opts)=>commit([{ref:ref(p),data,merge:opts?.merge}]),update:async data=>commit([{ref:ref(p),data,mode:"update"}])});
   const field=(v,k)=>k.split('.').reduce((x,p)=>x?.[p],v);
   const collection=(name,filters=[],ordering=null,max=Infinity)=>({
     doc:(id=`synthetic-${++serial}`)=>ref(`${name}/${id}`),
@@ -68,7 +68,7 @@ function harness(){
       const id=input.requestBody.id??`synthetic-drive-${h.copies+1}`;
       if(h.conflictMismatch){h.driveFiles.set(id,{id,name:'unrelated',size:'100'});throw {code:409};}
       if(h.driveFiles.has(id))throw {code:409};
-      h.copies++;const data={...input.requestBody,id,size:'100',mimeType:'image/png',md5Checksum:'00000000000000000000000000000000',createdTime:'2099-09-20T02:00:00.000Z'};
+      h.copies++;const data={...input.requestBody,id,size:'100',mimeType:'image/png',md5Checksum:'00000000000000000000000000000000',createdTime:h.driveCreatedAt??'2099-09-20T02:00:00.000Z'};
       h.driveFiles.set(id,data);await h.afterCopy?.();if(h.loseCopyResponse)throw new Error('synthetic lost response');return {data:copy(data)};
     },
   }};
@@ -79,7 +79,7 @@ function harness(){
     const source=fs.readFileSync(new URL(`../functions/src/${name.slice(2)}.ts`,import.meta.url),'utf8');const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
     const exports={};modules.set(name,exports);h.loaded.push(name);runInNewContext(code,{exports,require:load,process:{env:{APP_ENVIRONMENT:'development'}}},{timeout:5000});return exports;
   }
-  h.uploads=load('./uploads');h.requests=load('./resubmissions');h.views=load('./submission-files');
+  h.status=load('./submission-status');h.uploads=load('./uploads');h.requests=load('./resubmissions');h.views=load('./submission-files');
   h.staff={uid:'synthetic-user',token:{companyId:'synthetic-company',staffId:'synthetic-staff',role:'staff'}};h.admin={uid:'synthetic-admin',token:{companyId:'synthetic-company',role:'admin'}};
   records.set('jobs/synthetic-job',{companyId:'synthetic-company',assignedStaffId:'synthetic-staff',dateKey:'2099-09-20',storeName:'Synthetic Store',clientName:'Synthetic Client'});
   records.set('staffProfiles/synthetic-staff',{companyId:'synthetic-company',displayName:'Synthetic Staff'});
@@ -169,4 +169,66 @@ await test('reservation failure cannot upload an unpersisted Drive ID',async()=>
 await test('completed replay does not regress the file into processing',async()=>{
   const h=harness(),s=await h.start();await h.finish(s.files[0]);h.failWrite=w=>w.data.status==='processing';await h.finish(s.files[0]);assert.equal((await h.state(s.submissionId)).status,'completed');assert.equal(h.copies,1);
 });
+
+for(const [target,field,value] of [['submission','companyId','foreign'],['submission','jobId','foreign'],['submission','uid','foreign'],['submission','staffId','foreign'],['submission','type','sales_floor'],['job','companyId','foreign'],['job','assignedStaffId','foreign'],['staff','companyId','foreign']]){
+ await test('reject broken submission relation before transfer: '+target+'.'+field,async()=>{
+  const h=harness(),s=await h.start();const key=target==='submission'?'submissions/'+s.submissionId:target==='job'?'jobs/synthetic-job':'staffProfiles/synthetic-staff';h.records.get(key)[field]=value;
+  await assert.rejects(h.finish(s.files[0]));assert.equal(h.copies,0);assert.equal(h.deletes,0);assert.equal(h.list('sheetSyncQueue').length,0);
+ });
+}
+await test('deleted replacement request cannot be recreated by late upload',async()=>{
+ const h=harness(),initial=await h.start();await h.finish(initial.files[0]);const r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});const s=await h.start(1,{purpose:'replacement',resubmissionRequestId:r.requestId});h.records.delete('resubmissionRequests/'+r.requestId);
+ await assert.rejects(h.finish(s.files[0]));assert.equal(h.records.has('resubmissionRequests/'+r.requestId),false);assert.equal(h.copies,1);
+});
+await test('two replacement sessions cannot overwrite one request',async()=>{
+ const h=harness(),r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});const a=await h.start(1,{purpose:'replacement',resubmissionRequestId:r.requestId}),b=await h.start(1,{purpose:'replacement',resubmissionRequestId:r.requestId});await h.finish(a.files[0]);await assert.rejects(h.finish(b.files[0]));assert.equal(h.records.get('resubmissionRequests/'+r.requestId).replacementSubmissionId,a.submissionId);assert.equal(h.copies,1);
+});
+await test('foreign source submission cannot be attached to an admin request',async()=>{
+ const h=harness(),s=await h.start();await h.finish(s.files[0]);h.records.get('submissions/'+s.submissionId).companyId='foreign';
+ await assert.rejects(h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:s.submissionId,reasons:['その他']}}));assert.equal(h.list('resubmissionRequests').length,0);
+});
+await test('post-transfer reassignment cannot complete the new staff job',async()=>{
+ const h=harness(),s=await h.start();h.afterCopy=async()=>{h.records.get('jobs/synthetic-job').assignedStaffId='another-staff';};await assert.rejects(h.finish(s.files[0]));assert.equal(h.records.get('jobs/synthetic-job').submissionStatus,undefined);assert.equal(h.list('sheetSyncQueue').length,0);assert.equal(h.deletes,0);
+ h.afterCopy=null;h.records.get('jobs/synthetic-job').assignedStaffId='synthetic-staff';await h.finish(s.files[0]);assert.equal(h.copies,1);assert.equal(h.list('sheetSyncQueue').length,1);
+});
+await test('missing job does not silently finish and remove source',async()=>{
+ const h=harness(),s=await h.start();h.afterCopy=async()=>{h.records.delete('jobs/synthetic-job');};await assert.rejects(h.finish(s.files[0]));assert.equal(h.deletes,0);assert.equal(h.records.get('submissions/'+s.submissionId).jobStatusApplied,undefined);
+});
+await test('job completion rejects incomplete parent counters',async()=>{
+ const h=harness(),s=await h.start(2);await assert.rejects(h.status.markSubmissionCompleted({submissionId:s.submissionId,jobId:'synthetic-job',type:'report',submittedAt:Timestamp.now()}));assert.equal(h.list('sheetSyncQueue').length,0);
+});
+await test('job completion cannot target another job',async()=>{
+ const h=harness(),s=await h.start();await h.finish(s.files[0]);h.records.get('submissions/'+s.submissionId).jobStatusApplied=false;h.records.set('jobs/other',{companyId:'synthetic-company',assignedStaffId:'synthetic-staff'});await assert.rejects(h.status.markSubmissionCompleted({submissionId:s.submissionId,jobId:'other',type:'report',submittedAt:Timestamp.now()}));assert.equal(h.records.get('jobs/other').submissionStatus,undefined);
+});
+
+
+for(const value of [0,-1,21,1.5,'1'])await test('invalid total count never transfers: '+value,async()=>{const h=harness(),s=await h.start();h.records.get('submissions/'+s.submissionId).totalFiles=value;await assert.rejects(h.finish(s.files[0]));assert.equal(h.copies,0);assert.equal(h.deletes,0);});
+await test('concurrent replacement sessions reserve only one request owner',async()=>{
+ const h=harness(),r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}),a=await h.start(1,{purpose:'replacement',resubmissionRequestId:r.requestId}),b=await h.start(1,{purpose:'replacement',resubmissionRequestId:r.requestId});
+ let release,entered;const gate=new Promise(r=>release=r),ready=new Promise(r=>entered=r);h.beforeCopy=async()=>{entered();await gate;};const running=h.finish(a.files[0]);await ready;await assert.rejects(h.finish(b.files[0]));release();await running;assert.equal(h.copies,1);assert.equal(h.records.get('resubmissionRequests/'+r.requestId).replacementSubmissionId,a.submissionId);
+});
+await test('replacement deleted during copy is not recreated and retains source',async()=>{
+ const h=harness(),r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}),s=await h.start(1,{purpose:'replacement',resubmissionRequestId:r.requestId});h.afterCopy=async()=>h.records.delete('resubmissionRequests/'+r.requestId);await assert.rejects(h.finish(s.files[0]));assert.equal(h.records.has('resubmissionRequests/'+r.requestId),false);assert.equal(h.deletes,0);
+});
+await test('admin completion validates replacement and repeated completion is harmless',async()=>{
+ const h=harness(),r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}),s=await h.start(1,{purpose:'replacement',resubmissionRequestId:r.requestId});await h.finish(s.files[0]);const parent=h.records.get('submissions/'+s.submissionId);parent.jobStatusApplied=false;await assert.rejects(h.requests.completeResubmissionRequest({auth:h.admin,data:r}));parent.jobStatusApplied=true;await h.requests.completeResubmissionRequest({auth:h.admin,data:r});const before=JSON.stringify(h.records.get('resubmissionRequests/'+r.requestId));await h.requests.completeResubmissionRequest({auth:h.admin,data:r});assert.equal(JSON.stringify(h.records.get('resubmissionRequests/'+r.requestId)),before);
+});
+await test('additional late report preserves late first submission in queued sheet status',async()=>{
+ const h=harness();h.driveCreatedAt='2099-09-25T02:00:00.000Z';const a=await h.start();await h.finish(a.files[0]);h.driveCreatedAt='2099-09-26T02:00:00.000Z';const b=await h.start(1,{purpose:'additional'});await h.finish(b.files[0]);assert.equal(h.records.get('jobs/synthetic-job').submissionStatus.report.lateFirstSubmission,true);assert.equal(h.list('sheetSyncQueue').at(-1).updates.reportSubmitted,'遅延');
+});
+await test('recovery of older transfer keeps earliest and latest submission chronology',async()=>{
+ const h=harness(),a=await h.start();h.failWrite=w=>w.ref.path.startsWith('sheetSyncQueue/');await assert.rejects(h.finish(a.files[0]));h.failWrite=null;h.driveCreatedAt='2099-09-25T02:00:00.000Z';const b=await h.start(1,{purpose:'additional'});await h.finish(b.files[0]);await h.finish(a.files[0]);const report=h.records.get('jobs/synthetic-job').submissionStatus.report;assert.equal(report.firstCompletedAt.toDate().toISOString(),'2099-09-20T02:00:00.000Z');assert.equal(report.latestCompletedAt.toDate().toISOString(),'2099-09-25T02:00:00.000Z');assert.equal(h.copies,2);
+});
+
+
+for(const target of ['parent','file'])await test('deleted '+target+' during transfer is never recreated',async()=>{const h=harness(),s=await h.start();const key='submissions/'+s.submissionId+(target==='file'?'/files/'+s.files[0].fileId:'');h.afterCopy=async()=>h.records.delete(key);await assert.rejects(h.finish(s.files[0]));assert.equal(h.records.has(key),false);assert.equal(h.deletes,0);});
+await test('already full counter with uncounted file stops before transfer',async()=>{const h=harness(),s=await h.start();h.records.get('submissions/'+s.submissionId).completedFiles=1;await assert.rejects(h.finish(s.files[0]));assert.equal(h.copies,0);assert.equal(h.deletes,0);});
+
+
+await test('legacy completed source remains available for admin resubmission review',async()=>{const h=harness(),s=await h.start();await h.finish(s.files[0]);delete h.records.get('submissions/'+s.submissionId+'/files/'+s.files[0].fileId).completionCounted;const r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:s.submissionId,sourceFileId:s.files[0].fileId,reasons:['その他']}});assert.ok(r.requestId);assert.equal(h.copies,1);});
+await test('foreign source file metadata cannot create a resubmission request',async()=>{const h=harness(),s=await h.start();await h.finish(s.files[0]);h.records.get('submissions/'+s.submissionId+'/files/'+s.files[0].fileId).companyId='foreign';await assert.rejects(h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:s.submissionId,sourceFileId:s.files[0].fileId,reasons:['その他']}}));assert.equal(h.list('resubmissionRequests').length,0);});
+
+
+await test('parallel files of one replacement keep both files and one completion',async()=>{const h=harness(),r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}),s=await h.start(2,{purpose:'replacement',resubmissionRequestId:r.requestId});await Promise.all(s.files.map(f=>h.finish(f)));const request=h.records.get('resubmissionRequests/'+r.requestId);assert.equal(request.replacementFiles.length,2);assert.equal(request.status,'submitted');assert.equal((await h.state(s.submissionId)).completedFiles,2);assert.equal(h.copies,2);assert.equal(h.list('sheetSyncQueue').length,1);await h.requests.completeResubmissionRequest({auth:h.admin,data:r});});
+
 console.log(JSON.stringify({passed:results.filter(r=>r.ok).length,results,boundary:'Complete actual modules, synthetic callable/Storage/Drive and in-memory DB. No external network, real login, emulator, concurrent SDK transactions or delivery.'},null,2));if(results.some(r=>!r.ok))process.exitCode=1;

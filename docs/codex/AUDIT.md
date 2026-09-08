@@ -234,3 +234,8 @@ PreviewのStaff/Admin stagingビルドをbuild-staging-hosting.shで並行実行
 Preview/PromoteのPlaywright取得を--only-shellへ。現行検査はchromium.launch({headless:true})でchannel指定なしのため、未使用のフルChromium取得を省く。根拠: https://playwright.dev/docs/browsers 。固定バージョンのChromium Headless Shell・OS依存・画面検査自体は維持。
 ローカル検証: 実Bash+模擬npmで双方同時起動、成功、Staff失敗、Admin失敗、両失敗、後続停止を5ケース確認。既存Hosting44ケース成功。H直下の初回既存テストはplaywright依存なしで起動不可、H正本から固定依存付きCキャッシュへ準備して再実行成功。両アプリの実stagingモードビルドとバンドルサイズ検査成功。ローカルは合成/デモ設定であり公開設定の受入はGitHub Previewで別に実施する。
 ローカル成果物比較: 同設定/同ソースの並行/逐次で34ファイルすべてSHA256一致。単回・暖機済み環境で逐次10.153秒、並行7秒（Bash秒単位）。有意な速度保証/本番性能値ではない。release-evidence/hosting-build-efficiency-local.jsonに結果保存。
+
+## 管理者操作結果と一覧更新エラーの分離（2026-09-08）
+createJobGroup/duplicateJob/changePublication/saveJobEditのAPI成功後にloadJobsが失敗すると、成功・警告表示が読取例外に置き換わる問題を再現。refreshJobsAfterActionへ結果表示と一覧読取を集約し、一覧失敗だけを捕捉して元結果と「一覧を再読込」への案内を表示する。同操作の繰返しを促さない。既存の一覧再読込は読取だけで操作APIを再送しない。
+API失敗は従来のcatchを維持して成功扱いにしない。作成後フォーム初期化、保存後revision更新、公開制限の警告、スプシキュー/保留の意味を維持。デモ経路はAPI/一覧取得を呼ばない。追加API呼出なし。保存自体の応答喪失やサーバー側の監査失敗、他の操作経路は本修正の対象外。
+実ハンドラーをTypeScript変換して20ケースのSDK境界模擬検査。4操作それぞれ一覧成功/一覧失敗/API拒否/デモ、スプシキュー/保留、作成警告/公開制限を確認。修正前はREAD_FAILEDが作成完了表示を消す検査失敗、修正後成功。CIへ追加。原本/実データ/GAS/実送信/Functions/Rules/IAM変更なし。

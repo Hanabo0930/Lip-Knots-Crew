@@ -3021,6 +3021,15 @@ function updateJobForm<K extends keyof JobForm>(key:K,value:JobForm[K]) {
   setJobForm((current)=>({...current,[key]:value}));
 }
 
+async function refreshJobsAfterAction(resultMessage:string) {
+  setMessage(resultMessage);
+  try {
+    await loadJobs();
+  } catch {
+    setMessage(`${resultMessage} 一覧の更新だけができませんでした。同じ操作を繰り返さず「一覧を再読込」で表示を更新してください。`);
+  }
+}
+
 async function createJobGroup() {
   if (!window.confirm(`${jobForm.slots}名分の案件を下書き作成しますか？`)) return;
   setJobCreateBusy(true);
@@ -3050,9 +3059,9 @@ async function createJobGroup() {
       publishAt:jobForm.publishAt?new Date(jobForm.publishAt).toISOString():null,
     });
     const data=response.data as {jobIds?:string[];warning?:string|null};
-    setMessage(data.warning || `${data.jobIds?.length ?? 0}名分の案件を作成しました。`);
+    const resultMessage=data.warning || `${data.jobIds?.length ?? 0}名分の案件を作成しました。`;
     setJobForm((current)=>({...blankJobForm,workDate:current.workDate}));
-    await loadJobs();
+    await refreshJobsAfterAction(resultMessage);
   } catch(error) {
     setMessage(error instanceof Error?error.message:String(error));
   } finally {
@@ -3078,8 +3087,7 @@ async function duplicateJob(job:Job) {
     const response=await httpsCallable(functions,"duplicateAdminJob")({
       sourceJobId:job.id,workDate:date,slots,publicationMode:"draft",publishAt:null,
     });
-    setMessage(`${(response.data as {jobIds?:string[]}).jobIds?.length ?? 0}件を複製しました。`);
-    await loadJobs();
+    await refreshJobsAfterAction(`${(response.data as {jobIds?:string[]}).jobIds?.length ?? 0}件を複製しました。`);
   } catch(error) {
     setMessage(error instanceof Error?error.message:String(error));
   }
@@ -3108,8 +3116,7 @@ async function changePublication(job:Job,action:"publish"|"stop"|"draft"|"schedu
       jobIds:[job.id],action,publishAt,
     });
     const data=response.data as {updated?:string[];blocked?:string[]};
-    setMessage(data.blocked?.length?"安全条件により下書きのままです。":"公開状態を変更しました。");
-    await loadJobs();
+    await refreshJobsAfterAction(data.blocked?.length?"安全条件により下書きのままです。":"公開状態を変更しました。");
   } catch(error) {
     setMessage(error instanceof Error?error.message:String(error));
   }
@@ -3169,8 +3176,7 @@ async function saveJobEdit() {
     });
     const data=response.data as {revision?:number;sheetWriteQueued?:boolean;pendingSourceWrite?:boolean};
     setJobEditRevision(data.revision ?? jobEditRevision+1);
-    setMessage(data.sheetWriteQueued?"スプシ書込キューへ送りました。":data.pendingSourceWrite?"アプリへ保存しました。スプシ書込は安全確認待ちです。":"保存しました。");
-    await loadJobs();
+    await refreshJobsAfterAction(data.sheetWriteQueued?"スプシ書込キューへ送りました。":data.pendingSourceWrite?"アプリへ保存しました。スプシ書込は安全確認待ちです。":"保存しました。");
   } catch(error) {
     setMessage(error instanceof Error?error.message:String(error));
   } finally {

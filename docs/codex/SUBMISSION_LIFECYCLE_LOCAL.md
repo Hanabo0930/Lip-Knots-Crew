@@ -34,3 +34,6 @@ uploads.tsでtransferCompletedAt/Drive IDを保存し、保存後の再実行で
 
 ## 2026-09-08 更新
 Drive応答喪失・同時転送に固定ID予約/同じIDの内容照合を追加。[DRIVE_TRANSFER_RECOVERY.md](DRIVE_TRANSFER_RECOVERY.md)を最新の説明として参照。テストは30ケースへ拡張。実SDK/実API受入、旧版データ制限、Functions未配備は維持する。
+
+## 2026-09-08 一括整合性検証の追加
+最新はSUBMISSION_INTEGRITY_LOCAL.md。所属・担当変更・再提出予約・消失/並行処理・時系列を含む61ケースに拡張。実クラウド受入/Functions配備は未実行。

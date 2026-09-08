@@ -1,3 +1,4 @@
+import { assertSubmissionFile, assertSubmissionOwner, assertReplacementRequest } from "./submission-integrity";
 import { basename } from "node:path";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onObjectFinalized } from "firebase-functions/v2/storage";
@@ -147,9 +148,11 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
 
   const meta = fileSnap.data() as Record<string, unknown>;
   if (meta.uid !== uid || meta.companyId !== companyId) {
-    await fileRef.set({ status: "security_error", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    await fileRef.update({ status: "security_error", updatedAt: FieldValue.serverTimestamp() });
     return;
   }
+
+  assertSubmissionFile(submissionSnap.data(), meta, submissionId);
 
   // 旧版の転送済みデータは加算済みか判別できないため、自動再加算しない。
   if (meta.driveFileId && !(meta.transferCompletedAt instanceof Timestamp) && meta.completionCounted !== true) {
@@ -161,31 +164,35 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
   }
   assertTransferSource(meta.driveTransferPlan, source);
   const gcsFile = storage.bucket(object.bucket).file(path, { generation: source.generation });
-  await db.runTransaction(async tx => {
-    const latest = await tx.get(fileRef);
-    if (latest.data()?.completionCounted !== true) {
-      tx.set(fileRef, { status: "processing", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  const jobRef = db.collection("jobs").doc(String(meta.jobId));
+  const staffRef = db.collection("staffProfiles").doc(String(meta.staffId));
+  const requestId = String(meta.resubmissionRequestId ?? "");
+  const requestRef = requestId ? db.collection("resubmissionRequests").doc(requestId) : null;
+  const { job, staff, driveConfig } = await db.runTransaction(async tx => {
+    const [latest, parent, jobSnap, staffSnap, driveSnap, replacement] = await Promise.all([
+      tx.get(fileRef), tx.get(db.collection("submissions").doc(submissionId)),
+      tx.get(jobRef), tx.get(staffRef), tx.get(db.doc(`companies/${companyId}/settings/drive`)),
+      requestRef ? tx.get(requestRef) : Promise.resolve(null),
+    ]);
+    const file = latest.data();
+    assertSubmissionFile(parent.data(), file, submissionId);
+    if (["companyId", "uid", "jobId", "staffId", "type", "submissionId", "storagePath", "size", "contentType", "resubmissionRequestId"].some(key => file?.[key] !== meta[key])) {
+      throw new HttpsError("failed-precondition", "転送開始前に提出情報が変更されました。");
     }
+    if (!staffSnap.exists || !driveSnap.exists) throw new HttpsError("failed-precondition", "Drive転送に必要な設定が不足しています。");
+    assertSubmissionOwner(parent.data()!, jobSnap.data(), staffSnap.data());
+    const config = driveSnap.data() as { rootFolderId?: string };
+    if (!config.rootFolderId) throw new HttpsError("failed-precondition", "Driveルートフォルダが未設定です。");
+    if (requestRef) {
+      assertReplacementRequest(replacement?.data(), parent.data()!, submissionId);
+      // 最初に処理を開始した提出だけが、この依頼へ差替ファイルを追加できる。
+      if (!replacement?.data()?.replacementSubmissionId) tx.update(requestRef, { replacementSubmissionId: submissionId });
+    }
+    if (file?.completionCounted !== true) tx.set(fileRef, { status: "processing", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    return { job: jobSnap.data()!, staff: staffSnap.data()!, driveConfig: { rootFolderId: config.rootFolderId } };
   });
 
   try {
-    const [jobSnap, staffSnap, driveSnap] = await Promise.all([
-      db.collection("jobs").doc(String(meta.jobId)).get(),
-      db.collection("staffProfiles").doc(String(meta.staffId)).get(),
-      db.doc(`companies/${companyId}/settings/drive`).get(),
-    ]);
-
-    if (!jobSnap.exists || !staffSnap.exists || !driveSnap.exists) {
-      throw new Error("Drive転送に必要な設定が不足しています。");
-    }
-
-    const job = jobSnap.data() as Record<string, unknown>;
-    const staff = staffSnap.data() as Record<string, unknown>;
-    const driveConfig = driveSnap.data() as { rootFolderId?: string };
-    if (!driveConfig.rootFolderId) {
-      throw new Error("Driveルートフォルダが未設定です。");
-    }
-
     let submittedAt = meta.transferCompletedAt instanceof Timestamp
       ? meta.transferCompletedAt : meta.completedAt instanceof Timestamp ? meta.completedAt : Timestamp.now();
     let transferResult = {
@@ -219,16 +226,16 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
       submittedAt = transferred.submittedAt;
       transferResult = transferred;
       // 転送結果を先に保存し、後続DB処理の再試行では同じDriveファイルを使う。
-      await fileRef.set({
+      await fileRef.update({
         driveFileId: transferResult.id, driveName: transferResult.name,
         driveWebViewLink: transferred.webViewLink, sequence: transferred.sequence,
         transferCompletedAt: submittedAt,
-      }, { merge: true });
+      });
     }
-    await fileRef.set({
+    await fileRef.update({
       status: "completed", completedAt: submittedAt, updatedAt: submittedAt,
       errorMessage: FieldValue.delete(),
-    }, { merge: true });
+    });
 
     const requestIdForFile = String(meta.resubmissionRequestId ?? "");
     if (requestIdForFile) {
@@ -244,8 +251,10 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
     }
     const completedAll = await db.runTransaction(async (tx) => {
       const submissionRef = db.collection("submissions").doc(submissionId);
-      const [current, countedFile] = await Promise.all([tx.get(submissionRef), tx.get(fileRef)]);
-      if (!current.exists) return false;
+      const [current, countedFile, currentJob, currentStaff] = await Promise.all([tx.get(submissionRef), tx.get(fileRef), tx.get(jobRef), tx.get(staffRef)]);
+      assertSubmissionFile(current.data(), countedFile.data(), submissionId);
+      if (!currentStaff.exists) throw new HttpsError("failed-precondition", "担当スタッフが見つかりません。");
+      assertSubmissionOwner(current.data()!, currentJob.data(), currentStaff.data());
       const completedFiles = Number(current.data()?.completedFiles ?? 0) + (countedFile.data()?.completionCounted === true ? 0 : 1);
       const totalFiles = Number(current.data()?.totalFiles ?? 0);
       const completed = totalFiles > 0 && completedFiles >= totalFiles;
@@ -285,6 +294,7 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
     await db.runTransaction(async tx => {
       const submissionRef = db.collection("submissions").doc(submissionId);
       const [latestFile, latestSubmission] = await Promise.all([tx.get(fileRef), tx.get(submissionRef)]);
+      if (!latestFile.exists || !latestSubmission.exists) return;
       // 別の実行が完了させた結果を、遅れて届いた失敗で上書きしない。
       if (latestFile.data()?.completionCounted === true &&
         (latestSubmission.data()?.status !== "completed" || latestSubmission.data()?.jobStatusApplied === true)) return;

@@ -366,25 +366,42 @@ export const updateExpenseReviewFromQueue = onDocumentWritten(
     if (reviewQuery.empty) return;
 
     const reviewRef = reviewQuery.docs[0]!.ref;
-    await reviewRef.set({
-      status: status === "completed" ? "completed" : "error",
-      sheetWriteStatus: status,
-      sheetWriteError: queue.errorMessage ?? null,
-      sheetRow: queue.resolvedRow ?? null,
-      finalizedAt: status === "completed"
-        ? FieldValue.serverTimestamp()
-        : null,
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-
-    if (status === "completed" && queue.jobId) {
-      await db.collection("jobs").doc(String(queue.jobId)).set({
-        expenses: queue.updates ?? {},
-        expenseReviewStatus: "completed",
-        expenseReviewedAt: FieldValue.serverTimestamp(),
+    if (typeof queue.jobId !== "string" || !queue.jobId) return;
+    const jobRef = db.collection("jobs").doc(queue.jobId);
+    await db.runTransaction(async (tx) => {
+      // 遅延イベントや照合後の再確認・担当変更で、新しい状態を上書きしない。
+      const [currentQueue, review, job] = await Promise.all([
+        tx.get(after.ref), tx.get(reviewRef), tx.get(jobRef),
+      ]);
+      const latest = currentQueue.data();
+      const currentReview = review.data();
+      const currentJob = job.data();
+      if (!currentQueue.exists || !review.exists || !job.exists ||
+        latest?.operation !== "expense.review" || latest.jobId !== queue.jobId ||
+        typeof latest.companyId !== "string" || !latest.companyId ||
+        currentReview?.queueId !== after.id || currentReview.jobId !== latest.jobId ||
+        currentReview.companyId !== latest.companyId || currentJob?.companyId !== latest.companyId ||
+        (currentReview.staffId ?? null) !== (currentJob.assignedStaffId ?? null) ||
+        !["queued", "error", "completed"].includes(String(currentReview.status ?? ""))) return;
+      const currentStatus = String(latest.status ?? "");
+      if (!["completed", "blocked", "dead_letter", "acknowledged"].includes(currentStatus)) return;
+      tx.update(reviewRef, {
+        status: currentStatus === "completed" ? "completed" : "error",
+        sheetWriteStatus: currentStatus,
+        sheetWriteError: latest.errorMessage ?? null,
+        sheetRow: latest.resolvedRow ?? null,
+        finalizedAt: currentStatus === "completed" ? FieldValue.serverTimestamp() : null,
         updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true });
-    }
+      });
+      if (currentStatus === "completed") {
+        tx.update(jobRef, {
+          expenses: { ...(currentJob.expenses ?? {}), ...(latest.updates ?? {}) },
+          expenseReviewStatus: "completed",
+          expenseReviewedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+    });
   }
 );
 

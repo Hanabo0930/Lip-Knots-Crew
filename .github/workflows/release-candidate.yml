@@ -102,6 +102,7 @@ jobs:
           node scripts/test-shift-lifecycle.mjs
           node scripts/test-submission-lifecycle.mjs
           node scripts/test-submission-acceptance-kit.mjs
+          node scripts/test-submission-acceptance-result.mjs
           node scripts/test-emulator-seed-safety.mjs
           node scripts/test-shift-import-lease.mjs
           node scripts/test-shift-integrity-diagnostics.mjs

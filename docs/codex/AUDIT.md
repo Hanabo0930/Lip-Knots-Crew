@@ -252,3 +252,6 @@ busy解除は既存の操作token判定を維持し、同一利用者が編集�
 
 ## 2026-09-08 募集→応募→取消→再同期の結合検証
 実モジュール全体を同じ合成DBへ接続して3失敗を再現。adminCancelJobの取消override不足による確定/募集への巻戻りと、取込元読取失敗の誤成功を修正。8結合シナリオ、seed接続先ガード23ケース、取消24/取込48/リース6回帰、Functions型ビルド成功。詳細・保証範囲は[SHIFT_LIFECYCLE_LOCAL.md](SHIFT_LIFECYCLE_LOCAL.md)。Java/Emulatorキャッシュ未確認のため今回はインメモリ境界であり、実SDKの並行transaction・Auth署名検証・実通知は保証しない。Functionsは未反映。Hostingと業務受入を区別する。
+
+## 2026-09-08 提出・再提出の結合検証
+提出→管理者確認→再提出→新旧比較→管理者完了を実モジュール全体で接続。再実行による二重加算・Drive再コピー、後片付け失敗による完了状態消失を再現し、転送/加算/案件反映のチェックポイントで修正。7合成シナリオ成功。詳細は[SUBMISSION_LIFECYCLE_LOCAL.md](SUBMISSION_LIFECYCLE_LOCAL.md)。Drive成功直後のチェックポイント未保存・同時イベントの重複コピーは未保証。旧版転送済みデータは自動再加算せず停止。Functionsは今回未配備、実ログイン・実送信・原本変更なし。

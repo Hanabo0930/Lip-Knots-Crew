@@ -23,3 +23,6 @@
 
 ## 2026-09-08 ローカル結合検証の追加
 adminCancelJobの古い同期に対する取消保持と、手動/定期取込の読取失敗時停止を修正。詳細は[SHIFT_LIFECYCLE_LOCAL.md](SHIFT_LIFECYCLE_LOCAL.md)。8シナリオは合成境界であり、実SDK並行制御・配信の受入には代用しない。上記Functionsの許可範囲と未配備状態は変わらない。
+
+## 提出処理の反映前条件（2026-09-08）
+finalizeStagedUploadと内部submission-status処理に再実行用チェックポイントを追加。Hostingでは配備されない。finalizeStagedUploadは既存Functions許可リスト内だが、今回のHosting業務単位ではFunctionsを配備しない。反映前に旧版の転送済み提出でマーカーがないデータの取扱い、重複イベントと失敗復旧の限定受入、退避版を具体化する。旧データの直接修復/実DB投入は別承認。createUploadSessionや再提出APIは既存許可リスト外で範囲を広げない。Drive成功→チェックポイント保存の窓と同時転送は未保証。詳細は[SUBMISSION_LIFECYCLE_LOCAL.md](SUBMISSION_LIFECYCLE_LOCAL.md)。

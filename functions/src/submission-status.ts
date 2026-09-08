@@ -48,13 +48,16 @@ export const setSalesFloorClientSubmitted = onCall(async (request) => {
 });
 
 export async function markSubmissionCompleted(input: {
+  submissionId: string;
   jobId: string;
   type: "report" | "sales_floor";
   submittedAt: Timestamp;
 }): Promise<void> {
   const jobRef = db.collection("jobs").doc(input.jobId);
   await db.runTransaction(async (tx) => {
-    const snap = await tx.get(jobRef);
+    const submissionRef = db.collection("submissions").doc(input.submissionId);
+    const [snap, submission] = await Promise.all([tx.get(jobRef), tx.get(submissionRef)]);
+    if (!submission.exists || submission.data()?.jobStatusApplied === true) return;
     if (!snap.exists) return;
     const job = snap.data() as {
       dateKey?: string;
@@ -83,6 +86,7 @@ export async function markSubmissionCompleted(input: {
         (previous as { clientSubmitted?: boolean } | undefined)?.clientSubmitted === true;
     }
     tx.update(jobRef, update);
+    tx.update(submissionRef, { jobStatusApplied: true });
     const operation = input.type === "report" ? "submission.report" : "submission.sales_floor";
     const updates = input.type === "report" ? { reportSubmitted: late && !previous?.firstCompletedAt ? "遅延" : "提出済" } : { salesFloorSubmitted: (previous as { clientSubmitted?: boolean } | undefined)?.clientSubmitted === true ? "直＋リップ" : "リップ" };
     tx.set(db.collection("sheetSyncQueue").doc(), {

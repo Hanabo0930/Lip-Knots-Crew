@@ -10,14 +10,14 @@ function harness() {
   const rows = new Map(), h = { rows }, modules = new Map();
   const snapshot = ref => { const value=copy(rows.get(ref.path)); return {id:ref.id,ref,exists:rows.has(ref.path),data:()=>copy(value)}; };
   const write = (ref,data,options) => { if(options?.update)assert.ok(rows.has(ref.path)); rows.set(ref.path,{...(options?.merge||options?.update ? rows.get(ref.path) : {}),...copy(data)}); };
-  const ref = p => ({path:p,id:p.split('/').at(-1),get:async()=>snapshot(ref(p)),set:async(data,options)=>write(ref(p),data,options)});
+  const ref = p => ({path:p,id:p.split('/').at(-1),get:async()=>{const value=snapshot(ref(p));await h.afterRead?.(p);return value;},set:async(data,options)=>write(ref(p),data,options)});
   const collection = (name, filters=[]) => ({doc:(id='new')=>ref(`${name}/${id}`),where:(key,op,value)=>{assert.equal(op,'==');return collection(name,[...filters,[key,value]]);},limit:()=>collection(name,filters),get:async()=>{ const docs=[...rows].filter(([p,data])=>p.startsWith(name+'/')&&filters.every(([k,v])=>data[k]===v)).map(([p])=>snapshot(ref(p))); await h.afterQuery?.(); return {docs,empty:docs.length===0}; }});
   const db = {collection,runTransaction:async fn=>{await h.beforeTransaction?.();const writes=[];const value=await fn({get:async r=>{assert.equal(writes.length,0);return snapshot(r);},set:(r,d,o)=>writes.push([r,d,o]),update:(r,d)=>writes.push([r,d,{update:true}])}); for(const [r,d,o] of writes)write(r,d,o);return value;}};
   const boundary={'./firebase':{db},'firebase-admin/firestore':{Timestamp,FieldValue:{serverTimestamp:()=>Timestamp.fromMillis(1000)}},'firebase-functions/v2/https':{HttpsError,onCall:fn=>fn},'firebase-functions/v2/firestore':{onDocumentWritten:(_p,fn)=>fn},zod:dependency('zod'),'./utils':{requireAdmin:request=>request.auth,companyFromClaims:token=>token.companyId,requestId:()=> 'synthetic'},'./system-safety':{assertProductionOperational:async()=>{}}};
   function load(name){if(boundary[name])return boundary[name];assert.equal(name,'./admin-operations-core');if(modules.has(name))return modules.get(name);return compile(name);}
   function compile(name){const exports={};modules.set(name,exports);const code=ts.transpileModule(fs.readFileSync(`functions/src/${name.slice(2)}.ts`,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;runInNewContext(code,{exports,require:load},{timeout:5000});return exports;}
   h.api=compile('./admin-operations');
-  rows.set('jobs/job',{companyId:'company',assignedStaffId:'staff',expenses:{transportation:10}});
+  rows.set('jobs/job',{companyId:'company',assignedStaffId:'staff',sheetRef:{spreadsheetId:'synthetic_spreadsheet_12345678901234567890',sheetId:1,currentRow:2},expenses:{transportation:10}});
   rows.set('expenseReviews/job',{companyId:'company',jobId:'job',staffId:'staff',queueId:'queue',revision:1,status:'queued'});
   rows.set('sheetSyncQueue/queue',{companyId:'company',jobId:'job',operation:'expense.review',status:'completed',updates:{transportation:20},resolvedRow:2});
   h.event=()=>({data:{after:snapshot(ref('sheetSyncQueue/queue'))}});
@@ -49,5 +49,26 @@ for(const [name,mutate] of [
  ['reassign during lookup',h=>h.rows.get('jobs/job').assignedStaffId='other'],
 ]) await test(name,async()=>{const h=harness();let before;h.afterQuery=async()=>{mutate(h);before=JSON.stringify([...h.rows]);};await h.run();assert.equal(JSON.stringify([...h.rows]),before);});
 await test('retain other expense fields',async()=>{const h=harness();h.rows.get('jobs/job').expenses.otherMetadata='retained';await h.run();assert.equal(h.rows.get('jobs/job').expenses.otherMetadata,'retained');});
+
+const request = () => ({ auth: { uid: 'admin', token: { companyId: 'company' } }, data: { jobId: 'job', values: { transportation: 25 }, note: 'synthetic' } });
+for (const action of ['saveExpenseReviewDraft', 'completeExpenseReview']) {
+  await test(action + ' normal save', async () => { const h=harness(); await h.api[action](request()); const review=h.rows.get('expenseReviews/job'); assert.equal(review.values.transportation,25); assert.equal(review.status,action==='saveExpenseReviewDraft'?'draft':'queued'); });
+  for (const [name,mutate] of [
+    ['job deletion',h=>h.rows.delete('jobs/job')],
+    ['company change',h=>h.rows.get('jobs/job').companyId='other'],
+    ['staff change',h=>h.rows.get('jobs/job').assignedStaffId='other'],
+    ['expense change',h=>h.rows.get('jobs/job').expenses.transportation=99],
+    ['sheet target change',h=>h.rows.get('jobs/job').sheetRef={spreadsheetId:'other',sheetId:2,currentRow:3}],
+  ]) await test(action + ' rejects ' + name, async()=>{ const h=harness();let before;h.afterRead=async p=>{if(p==='jobs/job'){h.afterRead=null;mutate(h);before=JSON.stringify([...h.rows]);}};await assert.rejects(h.api[action](request()));assert.equal(JSON.stringify([...h.rows]),before); });
+  for(const key of ['companyId','jobId']) await test(action+' rejects foreign review '+key,async()=>{const h=harness();h.rows.get('expenseReviews/job')[key]='other';const before=JSON.stringify([...h.rows]);await assert.rejects(h.api[action](request()));assert.equal(JSON.stringify([...h.rows]),before);});
+  await test(action+' retains original creation time',async()=>{const h=harness();h.rows.get('expenseReviews/job').createdAt=Timestamp.fromMillis(7);await h.api[action](request());assert.equal(h.rows.get('expenseReviews/job').createdAt.toMillis(),7);});
+}
+for(const revision of [-1,1.5,'bad',Number.MAX_SAFE_INTEGER]) await test('invalid revision '+revision,async()=>{const h=harness();h.rows.get('expenseReviews/job').revision=revision;const before=JSON.stringify([...h.rows]);await assert.rejects(h.api.completeExpenseReview(request()));assert.equal(JSON.stringify([...h.rows]),before);});
+await test('current expected values preserved in queue',async()=>{const h=harness();await h.api.completeExpenseReview(request());assert.equal(h.rows.get('sheetSyncQueue/new').expected.transportation.value,10);assert.equal(h.rows.get('expenseReviews/job').revision,2);});
+await test('explicit existing-value confirmation retained',async()=>{const h=harness();const input=request();input.data.confirmExistingValues=true;await h.api.completeExpenseReview(input);assert.equal(h.rows.get('sheetSyncQueue/new').expected.transportation.mode,'any');});
+
+
+for(const target of [null,{spreadsheetId:'bad',sheetId:1,currentRow:2}]) await test('invalid sheet link rejects before queue',async()=>{const h=harness();h.rows.get('jobs/job').sheetRef=target;const before=JSON.stringify([...h.rows]);await assert.rejects(h.api.completeExpenseReview(request()));assert.equal(JSON.stringify([...h.rows]),before);});
+
 console.log(JSON.stringify({cases:cases.length,passed:cases.every(c=>c.passed),results:cases},null,2));if(cases.some(c=>!c.passed))process.exitCode=1;
 

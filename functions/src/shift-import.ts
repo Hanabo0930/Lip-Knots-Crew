@@ -244,6 +244,8 @@ async function executeShiftImport(
         const message = `${target.title}: ${
           error instanceof Error ? error.message : String(error)
         }`;
+        // commitでは一部タブの読取失敗を成功扱いせず、案件反映前に停止する。
+        if (mode === "commit") throw new HttpsError("unavailable", message);
         warnings.push(message);
         summaries.push({
           sheetName: target.title,

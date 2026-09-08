@@ -189,6 +189,8 @@ export const adminCancelJob = onCall(async (request) => {
       status: "cancelled",
       cancelled: true,
       cancellationReason: input.reason,
+      publishable: false,
+      appOverride: { type: "cancel", active: true, createdAt: now },
       cancelledAt: now,
       updatedAt: now,
     });

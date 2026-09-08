@@ -1,9 +1,8 @@
 import crypto from "node:crypto";
-import admin from "firebase-admin";
+import { emulatorSeedEnvironment } from "./emulator-seed-safety.mjs";
 
-process.env.FIRESTORE_EMULATOR_HOST ||= "127.0.0.1:8080";
-process.env.FIREBASE_AUTH_EMULATOR_HOST ||= "127.0.0.1:9099";
-process.env.GCLOUD_PROJECT ||= "demo-lip-knots-crew";
+Object.assign(process.env, emulatorSeedEnvironment(process.env));
+const { default: admin } = await import("firebase-admin");
 
 admin.initializeApp({ projectId: process.env.GCLOUD_PROJECT });
 const db = admin.firestore();

@@ -215,6 +215,10 @@ export const getExpenseReview = onCall(async (request) => {
     throw new HttpsError("not-found", "案件が見つかりません。");
   }
 
+  if (draft.exists && (draft.data()?.companyId !== companyId || draft.data()?.jobId !== input.jobId)) {
+    throw new HttpsError("failed-precondition", "経費確認と案件の所属情報が一致しません。");
+  }
+
   const jobData = job.data()!;
   const currentValues = {
     transportation: numberOrNull(jobData.expenses?.transportation),
@@ -252,17 +256,19 @@ export const saveExpenseReviewDraft = onCall(async (request) => {
 
   const job = await requireCompanyJob(companyId, input.jobId);
   const ref = db.collection("expenseReviews").doc(input.jobId);
-  await ref.set({
-    companyId,
-    jobId: input.jobId,
-    staffId: job.assignedStaffId ?? null,
-    values: parsed.values,
-    note: input.note,
-    status: "draft",
-    updatedBy: session.uid,
-    updatedAt: FieldValue.serverTimestamp(),
-    createdAt: FieldValue.serverTimestamp(),
-  }, { merge: true });
+  await db.runTransaction(async (tx) => {
+    const [currentJob, currentReview] = await Promise.all([
+      tx.get(db.collection("jobs").doc(input.jobId)), tx.get(ref),
+    ]);
+    assertExpenseWriteContext(companyId, input.jobId, job, currentJob, currentReview);
+    const now = Timestamp.now();
+    tx.set(ref, {
+      companyId, jobId: input.jobId, staffId: job.assignedStaffId ?? null,
+      values: parsed.values, note: input.note, status: "draft",
+      updatedBy: session.uid, updatedAt: now,
+      createdAt: currentReview.data()?.createdAt ?? now,
+    }, { merge: true });
+  });
 
   return { saved: true, status: "draft" };
 });
@@ -279,6 +285,8 @@ export const completeExpenseReview = onCall(async (request) => {
   }
 
   const job = await requireCompanyJob(companyId, input.jobId);
+  // URL生成で失敗する案件を、キュー作成後のエラーにしない。
+  const sheetUrl = buildSheetUrl(job);
   const currentValues = {
     transportation: numberOrNull(job.expenses?.transportation),
     purchase8: numberOrNull(job.expenses?.purchase8),
@@ -292,8 +300,15 @@ export const completeExpenseReview = onCall(async (request) => {
   const now = Timestamp.now();
 
   await db.runTransaction(async (tx) => {
-    const existingReview = await tx.get(reviewRef);
-    const revision = Number(existingReview.data()?.revision ?? 0) + 1;
+    const [currentJob, existingReview] = await Promise.all([
+      tx.get(db.collection("jobs").doc(input.jobId)), tx.get(reviewRef),
+    ]);
+    assertExpenseWriteContext(companyId, input.jobId, job, currentJob, existingReview);
+    const previousRevision = existingReview.data()?.revision ?? 0;
+    if (!Number.isSafeInteger(previousRevision) || previousRevision < 0 || previousRevision >= Number.MAX_SAFE_INTEGER) {
+      throw new HttpsError("failed-precondition", "経費確認の版番号が不正です。");
+    }
+    const revision = previousRevision + 1;
     const expected = input.confirmExistingValues
       ? Object.fromEntries(Object.keys(currentValues).map((key) => [key, { mode: "any" }]))
       : buildExpenseExpected(currentValues);
@@ -334,7 +349,7 @@ export const completeExpenseReview = onCall(async (request) => {
   return {
     queued: true,
     queueId: queueRef.id,
-    sheetUrl: buildSheetUrl(job),
+    sheetUrl,
   };
 });
 
@@ -404,6 +419,34 @@ export const updateExpenseReviewFromQueue = onDocumentWritten(
     });
   }
 );
+
+
+function expenseWriteContext(job: FirebaseFirestore.DocumentData): string {
+  return JSON.stringify([
+    job.assignedStaffId ?? null,
+    ...["transportation", "purchase8", "purchase10", "netPrintCost", "postageCost"].map(key => numberOrNull(job.expenses?.[key])),
+    job.sheetRef?.spreadsheetId ?? null, job.sheetRef?.sheetId ?? null, job.sheetRef?.currentRow ?? null,
+  ]);
+}
+
+function assertExpenseWriteContext(
+  companyId: string,
+  jobId: string,
+  expectedJob: FirebaseFirestore.DocumentData,
+  currentJob: FirebaseFirestore.DocumentSnapshot,
+  review: FirebaseFirestore.DocumentSnapshot
+): void {
+  const job = currentJob.data();
+  if (!currentJob.exists || job?.companyId !== companyId) {
+    throw new HttpsError("not-found", "案件が見つかりません。");
+  }
+  if (expenseWriteContext(job) !== expenseWriteContext(expectedJob)) {
+    throw new HttpsError("failed-precondition", "案件の担当・経費・書込先が変更されました。再読込して確認してください。");
+  }
+  if (review.exists && (review.data()?.companyId !== companyId || review.data()?.jobId !== jobId)) {
+    throw new HttpsError("failed-precondition", "経費確認と案件の所属情報が一致しません。");
+  }
+}
 
 async function requireCompanyJob(
   companyId: string,

@@ -5,6 +5,7 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { z } from "zod";
 import { db, storage } from "./firebase";
 import { getWritableDriveClient } from "./google-drive-client";
+import { assertTransferSource, transferSource, transferWithStableId } from "./drive-transfer";
 import { readCachedFolderId, writeCachedFolderId } from "./drive-folder-cache";
 import { markSubmissionCompleted } from "./submission-status";
 import { markResubmissionReplacementFile, markResubmissionSubmitted } from "./resubmissions";
@@ -154,8 +155,18 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
   if (meta.driveFileId && !(meta.transferCompletedAt instanceof Timestamp) && meta.completionCounted !== true) {
     throw new HttpsError("failed-precondition", "旧版の転送済み提出です。完了数を確認してから再処理してください。");
   }
-  const gcsFile = storage.bucket(object.bucket).file(path);
-  await fileRef.set({ status: "processing", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  const source = transferSource(object);
+  if (meta.storagePath !== path || String(meta.size) !== source.size || meta.contentType !== source.contentType) {
+    throw new HttpsError("failed-precondition", "転送元と提出メタデータが一致しません。");
+  }
+  assertTransferSource(meta.driveTransferPlan, source);
+  const gcsFile = storage.bucket(object.bucket).file(path, { generation: source.generation });
+  await db.runTransaction(async tx => {
+    const latest = await tx.get(fileRef);
+    if (latest.data()?.completionCounted !== true) {
+      tx.set(fileRef, { status: "processing", updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    }
+  });
 
   try {
     const [jobSnap, staffSnap, driveSnap] = await Promise.all([
@@ -194,36 +205,23 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
         String(job.monthKey ?? String(job.dateKey ?? "").slice(0, 7).replace("-0", ".").replace("-", "."))
       );
 
-      const counterRef = db.collection("fileCounters")
-        .doc(`${meta.jobId}_${meta.type}`);
-      const sequence = await db.runTransaction(async (tx) => {
-        const counterSnap = await tx.get(counterRef);
-        const next = Number(counterSnap.data()?.value ?? 0) + 1;
-        tx.set(counterRef, { value: next, updatedAt: Timestamp.now() }, { merge: true });
-        return next;
-      });
-
       const datePart = formatMd(String(job.dateKey ?? ""));
       const storeName = sanitizeName(String(job.storeName ?? "店舗"));
       const staffName = sanitizeName(String(staff.displayName ?? "スタッフ"));
       const typeLabel = meta.type === "sales_floor" ? "（売場画像）" : "";
       const extension = extensionFromName(String(meta.originalName ?? object.name ?? ""));
-      const finalName = `${datePart} ${storeName} ${staffName}さん${typeLabel}(${sequence})${extension}`;
-
-      const response = await drive.files.create({
-        requestBody: { name: finalName, parents: [monthFolder] },
-        media: { mimeType: object.contentType ?? undefined, body: gcsFile.createReadStream() },
-        fields: "id,name,webViewLink",
-        supportsAllDrives: true,
+      const transferred = await transferWithStableId({
+        fileRef, counterRef: db.collection("fileCounters").doc(`${meta.jobId}_${meta.type}`),
+        source, parentId: monthFolder,
+        nameForSequence: sequence => `${datePart} ${storeName} ${staffName}さん${typeLabel}(${sequence})${extension}`,
+        createBody: () => gcsFile.createReadStream(),
       });
-
-      if (!response.data.id) throw new Error("Drive転送結果のIDがありません。");
-      submittedAt = Timestamp.now();
-      transferResult = { id: response.data.id, name: response.data.name ?? finalName, sequence };
+      submittedAt = transferred.submittedAt;
+      transferResult = transferred;
       // 転送結果を先に保存し、後続DB処理の再試行では同じDriveファイルを使う。
       await fileRef.set({
         driveFileId: transferResult.id, driveName: transferResult.name,
-        driveWebViewLink: response.data.webViewLink ?? null, sequence,
+        driveWebViewLink: transferred.webViewLink, sequence: transferred.sequence,
         transferCompletedAt: submittedAt,
       }, { merge: true });
     }
@@ -284,19 +282,15 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
       error instanceof Error ? error.message : String(error);
     const failedAt = FieldValue.serverTimestamp();
 
-    await Promise.all([
-      fileRef.set({
-        status: "error",
-        errorMessage,
-        updatedAt: failedAt,
-      }, { merge: true }),
-      db.collection("submissions").doc(submissionId).set({
-        status: "error",
-        errorMessage,
-        failedFileId: fileId,
-        updatedAt: failedAt,
-      }, { merge: true }),
-    ]);
+    await db.runTransaction(async tx => {
+      const submissionRef = db.collection("submissions").doc(submissionId);
+      const [latestFile, latestSubmission] = await Promise.all([tx.get(fileRef), tx.get(submissionRef)]);
+      // 別の実行が完了させた結果を、遅れて届いた失敗で上書きしない。
+      if (latestFile.data()?.completionCounted === true &&
+        (latestSubmission.data()?.status !== "completed" || latestSubmission.data()?.jobStatusApplied === true)) return;
+      tx.set(fileRef, { status: "error", errorMessage, updatedAt: failedAt }, { merge: true });
+      tx.set(submissionRef, { status: "error", errorMessage, failedFileId: fileId, updatedAt: failedAt }, { merge: true });
+    });
 
     throw error;
   }

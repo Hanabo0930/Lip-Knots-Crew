@@ -26,3 +26,14 @@ adminCancelJobの古い同期に対する取消保持と、手動/定期取込�
 
 ## 提出処理の反映前条件（2026-09-08）
 finalizeStagedUploadと内部submission-status処理に再実行用チェックポイントを追加。Hostingでは配備されない。finalizeStagedUploadは既存Functions許可リスト内だが、今回のHosting業務単位ではFunctionsを配備しない。反映前に旧版の転送済み提出でマーカーがないデータの取扱い、重複イベントと失敗復旧の限定受入、退避版を具体化する。旧データの直接修復/実DB投入は別承認。createUploadSessionや再提出APIは既存許可リスト外で範囲を広げない。Drive成功→チェックポイント保存の窓と同時転送は未保証。詳細は[SUBMISSION_LIFECYCLE_LOCAL.md](SUBMISSION_LIFECYCLE_LOCAL.md)。
+
+## finalizeStagedUpload限定反映の具体条件（2026-09-08・未実行）
+
+- 対象は既存許可内のSTAGING/asia-northeast1/finalizeStagedUploadだけ。内部drive-transfer/submission-statusを同版にする。createUploadSession/再提出API/取込・取消API/定期同期を配備対象へ広げない。
+- 正規staging-functions-deploy.ymlのoperation=deploy、source_ref=CI成功済みmain、functions=finalizeStagedUploadを使用する。既存確認文字列・有効化スイッチ・保護環境・同SHA CI・ソース整合・対象認証ガードを守る。gmail-smokeは起動しない。文書等を含む未統合ブランチのsource guardを迂回しない。
+- 反映前に稼働revision/配備元SHA/退避可能アーティファクトを読取で確定する。今回その確定は未実施。コード巻戻しと書込済み転送計画/DB状態の保全を分ける。旧版は二重転送の可能性があり、巻戻しだけをデータ復旧と扱わない。
+- 旧データを未転送/PR124 checkpointあり/旧版転送済み加算不明に読取分類する。実DB分類は未実施。加算不明は自動再実行停止。予約済みplanは移行時に消さない。
+- 受入候補は専用会社/スタッフ/案件/2ファイル合成提出と専用Driveフォルダ/Storage接頭辞。sheetSyncQueue worker/通知配信が原本・実利用者へ到達しない隔離が必要。応答喪失、DB結果保存失敗、同時イベント、不一致を注入しDrive1/連番1/加算1/キュー1を確認する。具体的な隔離先IDと書込/削除範囲は未確定で、クラウド合成投入/実Drive保存/イベント起動は未承認・未実行。
+- 必要な判断は隔離先・書込対象・片付け対象の確定とそのデータ操作承認。Functions配備の既存許可を実データ操作へ拡張しない。イベント再実行経路/既存retry設定も読取確認する。
+
+現時点の不足は隔離先/書込範囲、稼働退避版、旧データ分類。ローカル30ケースは完了。詳細[DRIVE_TRANSFER_RECOVERY.md](DRIVE_TRANSFER_RECOVERY.md)。

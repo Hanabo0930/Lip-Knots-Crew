@@ -70,5 +70,9 @@ await test('explicit existing-value confirmation retained',async()=>{const h=har
 
 for(const target of [null,{spreadsheetId:'bad',sheetId:1,currentRow:2}]) await test('invalid sheet link rejects before queue',async()=>{const h=harness();h.rows.get('jobs/job').sheetRef=target;const before=JSON.stringify([...h.rows]);await assert.rejects(h.api.completeExpenseReview(request()));assert.equal(JSON.stringify([...h.rows]),before);});
 
+
+for(const key of ['companyId','jobId']) await test('read rejects foreign review '+key,async()=>{const h=harness();h.rows.get('expenseReviews/job')[key]='other';await assert.rejects(h.api.getExpenseReview(request()));});
+await test('read accepts matching review',async()=>{const h=harness();const result=await h.api.getExpenseReview(request());assert.equal(result.draft.companyId,'company');assert.equal(result.job.id,'job');});
+
 console.log(JSON.stringify({cases:cases.length,passed:cases.every(c=>c.passed),results:cases},null,2));if(cases.some(c=>!c.passed))process.exitCode=1;
 

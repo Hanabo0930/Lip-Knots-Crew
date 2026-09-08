@@ -215,6 +215,10 @@ export const getExpenseReview = onCall(async (request) => {
     throw new HttpsError("not-found", "案件が見つかりません。");
   }
 
+  if (draft.exists && (draft.data()?.companyId !== companyId || draft.data()?.jobId !== input.jobId)) {
+    throw new HttpsError("failed-precondition", "経費確認と案件の所属情報が一致しません。");
+  }
+
   const jobData = job.data()!;
   const currentValues = {
     transportation: numberOrNull(jobData.expenses?.transportation),

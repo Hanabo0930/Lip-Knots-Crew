@@ -31,3 +31,6 @@ uploads.tsでtransferCompletedAt/Drive IDを保存し、保存後の再実行で
 7シナリオは再実行時の永続チェックポイントを検証するもので、exactly-once配信の証明ではない。Functions反映や実業務受入をHosting反映で代用しない。取消後の提出受付方針は変更しない。
 
 検証結果: 7合成シナリオとFunctions全体型ビルド成功。既存認証ガードはGit履歴のないCキャッシュでは実行不能だったため、コミット後のH正本で対象Functionと正確なHeadを指定して確認する。
+
+## 2026-09-08 更新
+Drive応答喪失・同時転送に固定ID予約/同じIDの内容照合を追加。[DRIVE_TRANSFER_RECOVERY.md](DRIVE_TRANSFER_RECOVERY.md)を最新の説明として参照。テストは30ケースへ拡張。実SDK/実API受入、旧版データ制限、Functions未配備は維持する。

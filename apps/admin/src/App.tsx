@@ -937,7 +937,7 @@ export default function App() {
   const timelineReady=timelineStatus==="ready"&&timelineLoadedKey===timelineKey;
   const [sheetIssues, setSheetIssues] = useState<SheetWriteIssue[]>([]);
   const [issuesBusy, setIssuesBusy] = useState(false);
-  const issuesVersionRef=useRef(0),operationEpochRef=useRef(0);
+  const issuesVersionRef=useRef(0),operationEpochRef=useRef(0),resubmissionListVersionRef=useRef(0);
   const operationLocksRef=useRef(new Map<string,symbol>());
   const [operationKeys,setOperationKeys]=useState<string[]>([]);
   const [expenseJobId, setExpenseJobId] = useState(demoJobs[0]?.id ?? "");
@@ -1015,7 +1015,7 @@ const [monthBusy, setMonthBusy] = useState(false);
     const unsubscribe=onAuthStateChanged(activeAuth, (current) => {
       const currentRun=++authRun;
       expenseVersionRef.current++;
-      issuesVersionRef.current++;operationEpochRef.current++;operationLocksRef.current.clear();setOperationKeys([]);setIssuesBusy(false);
+      resubmissionListVersionRef.current++;issuesVersionRef.current++;operationEpochRef.current++;operationLocksRef.current.clear();setOperationKeys([]);setIssuesBusy(false);
       expenseReadyRef.current=null;expenseLoadRef.current=null;expenseWriteRef.current=null;
       setExpenseReady(false);setExpenseBusy(false);setExpenseValues(blankExpense);setExpenseNote("");setExpenseStatus("未読込");
       adminJobActionRef.current=null;
@@ -2664,25 +2664,18 @@ async function previewRowCreation() {
   }
 
   async function loadResubmissions(guard?:AuthRunGuard) {
-    if (!firebaseConfigured) return;
-    if (!functions) return;
-    const response = await httpsCallable(functions, "getAdminResubmissionRequests")({});
-    if(!canApplyAuthResult(guard))return;
-    setResubmissions((response.data as {requests?:ResubmissionRequest[]}).requests ?? []);
+    if(!firebaseConfigured||!functions||!auth?.currentUser||!canApplyAuthResult(guard))return;
+    const user=auth.currentUser,version=++resubmissionListVersionRef.current;
+    const isCurrent=()=>auth?.currentUser===user&&version===resubmissionListVersionRef.current&&canApplyAuthResult(guard);
+    try {
+      const response=await httpsCallable(functions,"getAdminResubmissionRequests")({});
+      if(isCurrent())setResubmissions((response.data as {requests?:ResubmissionRequest[]}).requests??[]);
+    }catch(error){if(isCurrent())throw error;}
   }
 
-  async function completeResubmission(requestId: string) {
-    if (!firebaseConfigured) {
-      setResubmissions((current) => current.map((item) => item.id === requestId ? {...item,status:"completed"} : item));
-      return;
-    }
-    if (!functions) return;
-    await httpsCallable(functions, "completeResubmissionRequest")({ requestId });
-    setMessage("再提出の確認を完了しました。");
-    setComparison(null);
-    await loadResubmissions();
+  async function completeResubmission(requestId:string) {
+    await runAdminOperation("resubmission:"+requestId,"completeResubmissionRequest",{requestId},"再提出の確認を完了しました。","resubmission");
   }
-
 
   async function loadSheetIssues(guard?:AuthRunGuard, propagateError=false) {
     const version=++issuesVersionRef.current,user=auth?.currentUser;
@@ -2753,7 +2746,7 @@ async function previewRowCreation() {
     await runAdminOperation("job:"+job.id,"confirmApplication",{jobId:job.id},"応募を確認済みにしました。",true);
   }
 
-  async function runAdminOperation(key:string,action:string,payload:Record<string,unknown>,success:string,application:boolean) {
+  async function runAdminOperation(key:string,action:string,payload:Record<string,unknown>,success:string,application:boolean|"resubmission") {
     const user=auth?.currentUser,epoch=operationEpochRef.current;
     if(operationLocksRef.current.has(key)||firebaseConfigured&&(!functions||!user||!adminSessionReady))return;
     const token=Symbol(key),isCurrent=()=>auth?.currentUser===user&&operationEpochRef.current===epoch;
@@ -2763,7 +2756,12 @@ async function previewRowCreation() {
       if(firebaseConfigured)await httpsCallable(functions!,action)(payload);
       if(!isCurrent())return;
       accepted=true;setMessage((firebaseConfigured?"":"デモ：")+success);
-      if(firebaseConfigured){if(application)await loadJobs(isCurrent);else await loadSheetIssues(isCurrent,true);}
+      if(application==="resubmission"){
+        setComparison(current=>current?.request.id===payload.requestId?null:current);
+        if(firebaseConfigured)await loadResubmissions(isCurrent);
+        else setResubmissions(current=>current.map(item=>item.id===payload.requestId?{...item,status:"completed"}:item));
+      }
+      else if(firebaseConfigured){if(application)await loadJobs(isCurrent);else await loadSheetIssues(isCurrent,true);}
       else if(application)setJobs(current=>current.map(job=>job.id===payload.jobId?{...job,applicationAdminConfirmed:true}:job));
       else setSheetIssues(current=>current.filter(item=>item.id!==payload.queueId));
     } catch(error) {
@@ -3911,7 +3909,7 @@ function downloadCsv(filename:string,content:string) {
               <span>{item.status === "open" ? "対応待ち" : item.status === "submitted" ? "確認待ち" : "完了"}</span>
               <div className="row-actions">
                 {item.status === "submitted" && <button className="ghost compact" onClick={() => openComparison(item.id)}>旧・新を比較</button>}
-                {item.status === "submitted" && <button className="ghost compact" onClick={() => completeResubmission(item.id)}>確認完了</button>}
+                {item.status === "submitted" && <button className="ghost compact" disabled={operationKeys.includes("resubmission:"+item.id)} onClick={() => completeResubmission(item.id)}>確認完了</button>}
               </div>
             </div>
           ))}

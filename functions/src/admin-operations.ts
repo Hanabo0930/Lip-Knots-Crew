@@ -81,7 +81,7 @@ export const getSheetWriteIssues = onCall(async (request) => {
           status: String(data.status ?? ""),
           errorType: String(data.errorType ?? ""),
         }),
-        job: job ? {
+        job: job?.companyId === companyId ? {
           workDate: job.workDate ?? job.dateKey ?? "",
           storeName: job.storeName ?? "",
           assignedStaffName: job.assignedStaffName ?? "",

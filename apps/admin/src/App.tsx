@@ -33,6 +33,7 @@ const AdminSubmissionTimeline=lazy(()=>import("./AdminSubmissionTimeline"));
 const ProductionAcceptanceRollbackConsole = lazy(() => import("./ProductionAcceptanceRollbackConsole"));
 const StoreLocationFields = lazy(() => import("./StoreLocationFields"));
 const AdminSheetIssuePanel=lazy(()=>import("./AdminSheetIssuePanel"));
+const AdminComparisonPanel=lazy(()=>import("./AdminComparisonPanel"));
 const AdminExpensePanel = lazy(() => import("./AdminExpensePanel"));
 const JobSafeEditPanel = lazy(() => import("./JobSafeEditPanel"));
 
@@ -124,7 +125,7 @@ export type SubmissionFile = {
   sequence:number|null; purpose:string; status:string; previewUrl:string|null; completedAt:string|null; replacesFileId:string|null;
 };
 export type SubmissionGroup = { id:string; purpose:string; status:string; createdAt:string|null; completedAt:string|null; files:SubmissionFile[] };
-type ResubmissionComparison = {
+export type ResubmissionComparison = {
   request:{id:string;jobId:string;type:"report"|"sales_floor";reasons:string[];note:string;status:string};
   source:SubmissionFile|null; replacements:SubmissionFile[];
 };
@@ -917,6 +918,7 @@ export default function App() {
   const [submissionTimeline, setSubmissionTimeline] = useState<SubmissionGroup[]>([]);
   const [selectedSourceFile, setSelectedSourceFile] = useState<SubmissionFile | null>(null);
   const [comparison, setComparison] = useState<ResubmissionComparison | null>(null);
+  const comparisonVersionRef=useRef(0),comparisonRequestRef=useRef<string|null>(null);
   const [timelineBusy, setTimelineBusy] = useState(false);
   const resubmissionPendingRef=useRef(false);
   const [resubmissionBusy,setResubmissionBusy]=useState(false);
@@ -1014,7 +1016,7 @@ const [monthBusy, setMonthBusy] = useState(false);
     let cancelDeferredLoads:(()=>void)|null=null;
     const unsubscribe=onAuthStateChanged(activeAuth, (current) => {
       const currentRun=++authRun;
-      expenseVersionRef.current++;
+      closeComparison();expenseVersionRef.current++;
       resubmissionListVersionRef.current++;issuesVersionRef.current++;operationEpochRef.current++;operationLocksRef.current.clear();setOperationKeys([]);setIssuesBusy(false);
       expenseReadyRef.current=null;expenseLoadRef.current=null;expenseWriteRef.current=null;
       setExpenseReady(false);setExpenseBusy(false);setExpenseValues(blankExpense);setExpenseNote("");setExpenseStatus("未読込");
@@ -2545,7 +2547,7 @@ async function previewRowCreation() {
     const values = (job?.netPrint?.items ?? []).map((item) => item.number);
     setNetPrintNumbers([values[0] ?? "", values[1] ?? "", values[2] ?? ""]);
     setSelectedSourceFile(null);
-    setComparison(null);
+    closeComparison();
     return true;
   }
 
@@ -2554,7 +2556,7 @@ async function previewRowCreation() {
     if(type===resubmitType)return true;
     const edited=resubmitNote.trim()||resubmitReasons.length!==1||resubmitReasons[0]!=="手ブレで文字が読めません";
     if(edited&&!window.confirm("入力中の再提出理由・補足を破棄して提出種類を切り替えますか？"))return false;
-    setResubmitType(type);setResubmitNote("");setResubmitReasons(["手ブレで文字が読めません"]);setSelectedSourceFile(null);setComparison(null);
+    setResubmitType(type);setResubmitNote("");setResubmitReasons(["手ブレで文字が読めません"]);setSelectedSourceFile(null);closeComparison();
     return true;
   }
 
@@ -2616,15 +2618,25 @@ async function previewRowCreation() {
   }
 
   async function openComparison(requestId: string) {
+    closeComparison();
+    const version=comparisonVersionRef.current,user=auth?.currentUser,epoch=operationEpochRef.current;
+    comparisonRequestRef.current=requestId;
+    const isCurrent=()=>comparisonVersionRef.current===version&&auth?.currentUser===user&&operationEpochRef.current===epoch;
     if (!firebaseConfigured) {
       setComparison({ request:{id:requestId,jobId:selectedAdminJobId,type:resubmitType,reasons:["手ブレで文字が読めません"],note:"",status:"submitted"}, source:selectedSourceFile ?? submissionTimeline[0]?.files[0] ?? null, replacements:[{ id:"demo_new", submissionId:"demo_new_submission", originalName:"new.jpg", driveName:"7.12 ベイシア成田 Aさん (2).jpg", contentType:"image/jpeg", sequence:2, purpose:"replacement", status:"completed", previewUrl:demoPreview("再送画像（鮮明）","#e8f5ee"), completedAt:new Date().toISOString(), replacesFileId:"demo_source" }] });
       return;
     }
-    if (!functions) return;
-    const callable = httpsCallable(functions, "getResubmissionComparison");
-    const response = await callable({ requestId });
-    setComparison(response.data as ResubmissionComparison);
+    if (!functions||!user) return;
+    try {
+      const response=await httpsCallable(functions,"getResubmissionComparison")({requestId});
+      if(!isCurrent())return;
+      const data=response.data as ResubmissionComparison;
+      if(data?.request?.id!==requestId||!Array.isArray(data.request.reasons)||!Array.isArray(data.replacements))throw new Error("比較対象が一致しません。");
+      setComparison(data);
+    }catch{if(isCurrent())setMessage("比較画像を取得できませんでした。再度開いてください。");}
   }
+
+  function closeComparison(){comparisonVersionRef.current++;comparisonRequestRef.current=null;setComparison(null);}
 
   function toggleReason(reason: string) {
     setResubmitReasons((current) => current.includes(reason)
@@ -2757,6 +2769,7 @@ async function previewRowCreation() {
       if(!isCurrent())return;
       accepted=true;setMessage((firebaseConfigured?"":"デモ：")+success);
       if(application==="resubmission"){
+        if(comparisonRequestRef.current===payload.requestId){comparisonVersionRef.current++;comparisonRequestRef.current=null;}
         setComparison(current=>current?.request.id===payload.requestId?null:current);
         if(firebaseConfigured)await loadResubmissions(isCurrent);
         else setResubmissions(current=>current.map(item=>item.id===payload.requestId?{...item,status:"completed"}:item));
@@ -3915,13 +3928,7 @@ function downloadCsv(filename:string,content:string) {
           ))}
         </div>
         {comparison && (
-          <div className="comparison-panel">
-            <div className="comparison-head"><div><h3>再送画像の比較</h3><small>{comparison.request.reasons.join(" / ")}</small></div><button className="ghost compact" onClick={()=>setComparison(null)}>閉じる</button></div>
-            <div className="comparison-grid">
-              <figure><figcaption>元画像</figcaption>{comparison.source?.previewUrl ? <img src={comparison.source.previewUrl} alt="元画像" /> : <div className="pdf-preview">元画像なし</div>}<small>{comparison.source?.driveName ?? ""}</small></figure>
-              <figure><figcaption>再送画像</figcaption>{comparison.replacements[0]?.previewUrl ? <img src={comparison.replacements[0].previewUrl!} alt="再送画像" /> : <div className="pdf-preview">再送待ち</div>}<small>{comparison.replacements[0]?.driveName ?? ""}</small></figure>
-            </div>
-          </div>
+          <Suspense fallback={<p role="status">比較画面を読込中…</p>}><AdminComparisonPanel comparison={comparison} closeComparison={closeComparison}/></Suspense>
         )}
       </section></WorkspacePanel>
 

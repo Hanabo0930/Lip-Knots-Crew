@@ -954,7 +954,7 @@ export default function App() {
   const [expenseBusy, setExpenseBusy] = useState(false);
   const [expenseReady, setExpenseReady] = useState(false);
   const expenseVersionRef = useRef(0);
-  const expenseReadyRef = useRef<{jobId:string;user:unknown}|null>(null);
+  const expenseReadyRef = useRef<{jobId:string;user:unknown;reviewVersion?:string}|null>(null);
   const expenseLoadRef = useRef<number|null>(null);
   const expenseWriteRef = useRef<symbol|null>(null);
   const [dashboardMonth, setDashboardMonth] = useState(currentTokyoMonth());
@@ -2797,7 +2797,7 @@ async function previewRowCreation() {
     if (firebaseConfigured&&(!functions||!user||!adminSessionReady)) {setExpenseBusy(expenseWriteRef.current!==null);return;}
     expenseLoadRef.current=version;setExpenseBusy(true);setExpenseStatus("読込中");
     try {
-      let values:Record<string,unknown>={};let note="";let status="デモ読込済み";
+      let values:Record<string,unknown>={};let note="";let status="デモ読込済み";let reviewVersion:string|undefined;
       if (!firebaseConfigured) {
         const job=jobs.find(item=>item.id===jobId);
         if (!job) throw new Error("案件が見つかりません。");
@@ -2805,14 +2805,16 @@ async function previewRowCreation() {
       } else {
         const response=await httpsCallable(functions!,"getExpenseReview")({jobId});
         if (!isCurrent()) return;
-        const data=response.data as {job?:{id?:string};currentValues?:Record<string,number|null>;draft?:{values?:Record<string,number|null>;note?:string;status?:string}|null};
+        const data=response.data as {job?:{id?:string};reviewVersion?:string;currentValues?:Record<string,number|null>;draft?:{values?:Record<string,number|null>;note?:string;status?:string}|null};
         if (data.job?.id!==jobId) throw new Error("経費の読込対象が一致しません。再読込してください。");
+        if(data.reviewVersion!==undefined&&(typeof data.reviewVersion!=="string"||!/^[a-f0-9]{64}$/.test(data.reviewVersion)))throw new Error("経費確認の版を取得できません。再読込してください。");
+        reviewVersion=data.reviewVersion;
         values=data.draft?.values??data.currentValues??{};note=data.draft?.note??"";status=data.draft?.status??"未処理";
       }
       if (!isCurrent()) return;
       setExpenseValues({transportation:String(values.transportation??""),purchase8:String(values.purchase8??""),purchase10:String(values.purchase10??""),netPrintCost:String(values.netPrintCost??""),postageCost:String(values.postageCost??"")});
       setExpenseNote(note);setExpenseStatus(status);
-      expenseReadyRef.current={jobId,user};setExpenseReady(true);
+      expenseReadyRef.current={jobId,user,reviewVersion};setExpenseReady(true);
     } catch(error) {
       if(isCurrent()){setExpenseStatus("読込できませんでした");setMessage(error instanceof Error?error.message:String(error));}
     } finally {
@@ -2831,13 +2833,15 @@ async function previewRowCreation() {
     if(complete&&!window.confirm("スプシの現在値と一致する場合だけ、経費を書込キューへ送ります。続けますか？"))return;
     const version=expenseVersionRef.current,token=Symbol("expense-write");
     const isCurrent=()=>version===expenseVersionRef.current&&(auth?.currentUser??null)===user;
-    const payload={jobId:expenseJobId,values:{...expenseValues},note:expenseNote,...(complete?{confirmExistingValues:false}:{})};
+    const reviewVersion=expenseReadyRef.current.reviewVersion;
+    const payload={...(reviewVersion?{expectedVersion:reviewVersion}:{}),jobId:expenseJobId,values:{...expenseValues},note:expenseNote,...(complete?{confirmExistingValues:false}:{})};
     expenseWriteRef.current=token;setExpenseBusy(true);
     try {
       if(firebaseConfigured)await httpsCallable(functions!,complete?"completeExpenseReview":"saveExpenseReviewDraft")(payload);
       if(!isCurrent())return;
       setExpenseStatus(complete?"書込待ち":"一時保存");
       setMessage((firebaseConfigured?"":"デモ：")+(complete?"経費を書込キューへ送りました。":"経費を一時保存しました。"));
+      if(!complete&&reviewVersion){expenseReadyRef.current=null;setExpenseReady(false);setMessage("経費を一時保存しました。続けて編集する場合は再読込してください。");}
       if(complete){
         expenseReadyRef.current=null;setExpenseReady(false);
         if(firebaseConfigured){try{await loadSheetIssues(isCurrent);}catch{if(isCurrent())setMessage("経費は受付済みです。書込状況の更新に失敗しました。再送せず、再読込して確認してください。");}}

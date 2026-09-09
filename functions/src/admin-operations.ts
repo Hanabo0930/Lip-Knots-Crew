@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onDocumentWritten } from "firebase-functions/v2/firestore";
@@ -28,6 +29,7 @@ const JobSchema = z.object({
 
 const DraftSchema = z.object({
   jobId: z.string().min(1),
+  expectedVersion: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   values: z.object({
     transportation: z.union([z.number(), z.string(), z.null()]).optional(),
     purchase8: z.union([z.number(), z.string(), z.null()]).optional(),
@@ -239,6 +241,7 @@ export const getExpenseReview = onCall(async (request) => {
       sheetUrl: buildSheetUrl(jobData),
     },
     currentValues,
+    reviewVersion: expenseReviewVersion(companyId, input.jobId, job, draft),
     draft: draft.exists ? serializeDocument(draft.data() ?? {}) : null,
   };
 });
@@ -261,6 +264,7 @@ export const saveExpenseReviewDraft = onCall(async (request) => {
       tx.get(db.collection("jobs").doc(input.jobId)), tx.get(ref),
     ]);
     assertExpenseWriteContext(companyId, input.jobId, job, currentJob, currentReview);
+    assertExpenseReviewVersion(input.expectedVersion, companyId, input.jobId, currentJob, currentReview);
     const now = Timestamp.now();
     tx.set(ref, {
       companyId, jobId: input.jobId, staffId: job.assignedStaffId ?? null,
@@ -304,6 +308,7 @@ export const completeExpenseReview = onCall(async (request) => {
       tx.get(db.collection("jobs").doc(input.jobId)), tx.get(reviewRef),
     ]);
     assertExpenseWriteContext(companyId, input.jobId, job, currentJob, existingReview);
+    assertExpenseReviewVersion(input.expectedVersion, companyId, input.jobId, currentJob, existingReview);
     const previousRevision = existingReview.data()?.revision ?? 0;
     if (!Number.isSafeInteger(previousRevision) || previousRevision < 0 || previousRevision >= Number.MAX_SAFE_INTEGER) {
       throw new HttpsError("failed-precondition", "経費確認の版番号が不正です。");
@@ -420,6 +425,32 @@ export const updateExpenseReviewFromQueue = onDocumentWritten(
   }
 );
 
+
+
+function expenseVersionValue(value: unknown): unknown {
+  if (value instanceof Timestamp) return ["timestamp", value.seconds, value.nanoseconds];
+  if (Array.isArray(value)) return value.map(expenseVersionValue);
+  if (value && typeof value === "object") return Object.fromEntries(
+    Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, expenseVersionValue(item)])
+  );
+  return value;
+}
+
+function expenseReviewVersion(companyId: string, jobId: string, job: FirebaseFirestore.DocumentSnapshot, review: FirebaseFirestore.DocumentSnapshot): string {
+  // 確認版は認可の代用ではない。所属照合後、同じtransactionで現在版を比較する。
+  return createHash("sha256").update(JSON.stringify([
+    companyId, jobId, expenseWriteContext(job.data() ?? {}),
+    expenseVersionValue(job.updateTime ?? null), review.exists,
+    expenseVersionValue(review.updateTime ?? null), expenseVersionValue(review.data() ?? null),
+  ])).digest("hex");
+}
+
+function assertExpenseReviewVersion(expected: string | undefined, companyId: string, jobId: string, job: FirebaseFirestore.DocumentSnapshot, review: FirebaseFirestore.DocumentSnapshot): void {
+  // 旧クライアントのAPI互換性を維持。版を受け取った新画面は必ず送信する。
+  if (expected !== undefined && expected !== expenseReviewVersion(companyId, jobId, job, review)) {
+    throw new HttpsError("failed-precondition", "経費確認が別の操作で更新されました。再読込して確認してください。");
+  }
+}
 
 function expenseWriteContext(job: FirebaseFirestore.DocumentData): string {
   return JSON.stringify([

@@ -5,7 +5,7 @@ import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
 const dependency=createRequire(path.join(process.env.LKC_TEST_DEPENDENCY_ROOT||process.cwd(),'package.json'));
 const ts=dependency('typescript'), source=fs.readFileSync('apps/admin/src/App.tsx','utf8');
-const start=source.indexOf('  async function loadExpenseReview('),end=source.indexOf('  async function openJobSheet(',start);
+const start=source.indexOf('  async function retrySheetIssue('),end=source.indexOf('  async function openJobSheet(',start);
 assert.ok(start>=0&&end>start);
 const code=ts.transpileModule(source.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
 const blank={transportation:'',purchase8:'',purchase10:'',netPrintCost:'',postageCost:''};
@@ -48,4 +48,15 @@ await test('invalid server version cannot be downgraded to legacy',async()=>{con
 await test('real issue loader preserves accepted completion on refresh failure',async()=>{const h=setup(true);await h.ready();const task=h.ctx.completeExpense();h.state.calls[1].gate.resolve({data:{}});for(let tick=0;tick<6;tick++)await Promise.resolve();assert.equal(h.state.calls[2].name,'getSheetWriteIssues');h.state.calls[2].gate.reject(Error('refresh offline'));await task;assert.equal(h.state.status,'書込待ち');assert.match(h.state.messages.at(-1),/受付済み/);assert.equal(h.state.ready,false);});
 await test('standalone issue reload reports failure and clears busy',async()=>{const h=setup(true);const task=h.ctx.loadSheetIssues();h.state.calls[0].gate.reject(Error('refresh offline'));await task;assert.equal(h.state.issuesBusy,false);assert.match(h.state.messages.at(-1),/refresh offline/);});
 await test('real issue loader ignores stale completion refresh failure',async()=>{const h=setup(true);await h.ready();const task=h.ctx.completeExpense();h.state.calls[1].gate.resolve({data:{}});for(let tick=0;tick<6;tick++)await Promise.resolve();h.ctx.auth.currentUser={uid:'other'};const count=h.state.messages.length;h.state.calls[2].gate.reject(Error('old refresh'));await task;assert.equal(h.state.messages.length,count);});
+for(const action of ['retrySheetIssue','acknowledgeSheetIssue']){
+ await test(action+' handles rejected callable',async()=>{const h=setup();h.ctx.window.prompt=()=> 'synthetic';const task=h.ctx[action]({id:'queue',canRetry:true});h.state.calls[0].gate.reject(Error('offline'));await task;assert.match(h.state.messages.at(-1),/offline|失敗|再読込/);});
+ await test(action+' ignores success after auth switch',async()=>{const h=setup();h.ctx.window.prompt=()=> 'synthetic';const task=h.ctx[action]({id:'queue',canRetry:true});h.ctx.auth.currentUser={uid:'other'};h.state.calls[0].gate.resolve({data:{}});await task;assert.equal(h.state.messages.length,0);assert.equal(h.state.refreshes,0);});
+}
+
+for(const action of ['retrySheetIssue','acknowledgeSheetIssue']){
+ await test(action+' accepted action survives refresh failure',async()=>{const h=setup(true);h.ctx.window.prompt=()=> 'synthetic';const task=h.ctx[action]({id:'queue',canRetry:true});h.state.calls[0].gate.resolve({data:{}});for(let tick=0;tick<6;tick++)await Promise.resolve();h.state.calls[1].gate.reject(Error('refresh offline'));await task;assert.match(h.state.messages.at(-1),/受付済み/);});
+ await test(action+' requires authenticated session',async()=>{const h=setup();h.ctx.window.prompt=()=> 'synthetic';h.ctx.auth.currentUser=null;await h.ctx[action]({id:'queue',canRetry:true});assert.equal(h.state.calls.length,0);});
+}
+await test('cancel acknowledgement sends nothing',async()=>{const h=setup();h.ctx.window.prompt=()=>null;await h.ctx.acknowledgeSheetIssue({id:'queue'});assert.equal(h.state.calls.length,0);});
+await test('conflict cannot be retried',async()=>{const h=setup();await h.ctx.retrySheetIssue({id:'queue',canRetry:false});assert.equal(h.state.calls.length,0);});
 console.log(JSON.stringify({cases:results.length,passed:results.every(r=>r.passed),results},null,2));if(results.some(r=>!r.passed))process.exitCode=1;

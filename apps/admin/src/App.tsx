@@ -2738,39 +2738,30 @@ async function previewRowCreation() {
   }
 
   async function retrySheetIssue(issue:SheetWriteIssue) {
-    if (!issue.canRetry) {
-      setMessage("競合は自動再試行できません。スプシの現在値を確認してください。");
-      return;
-    }
-    if (!firebaseConfigured) {
-      setSheetIssues((current)=>current.filter((item)=>item.id!==issue.id));
-      setMessage("デモ：書込を再試行しました。");
-      return;
-    }
-    if (!functions) return;
-    await httpsCallable(functions,"retrySheetWriteIssue")({
-      queueId:issue.id,
-      note:"管理画面から手動再試行",
-    });
-    setMessage("書込を再試行しました。");
-    await loadSheetIssues();
+    if (!issue.canRetry) {setMessage("競合は自動再試行できません。スプシの現在値を確認してください。");return;}
+    await runSheetIssueAction(issue,"retrySheetWriteIssue","管理画面から手動再試行");
   }
 
   async function acknowledgeSheetIssue(issue:SheetWriteIssue) {
     const note=window.prompt("対応メモ", "スプシを確認して手動対応");
-    if (note===null) return;
-    if (!firebaseConfigured) {
-      setSheetIssues((current)=>current.filter((item)=>item.id!==issue.id));
-      setMessage("デモ：確認済みにしました。");
-      return;
+    if(note!==null)await runSheetIssueAction(issue,"acknowledgeSheetWriteIssue",note);
+  }
+
+  async function runSheetIssueAction(issue:SheetWriteIssue,action:string,note:string) {
+    const user=auth?.currentUser;
+    if(firebaseConfigured&&(!functions||!user||!adminSessionReady))return;
+    const isCurrent=()=>auth?.currentUser===user;
+    let accepted=false;
+    try {
+      if(firebaseConfigured)await httpsCallable(functions!,action)({queueId:issue.id,note});
+      if(!isCurrent())return;
+      accepted=true;
+      setMessage((firebaseConfigured?"":"デモ：")+(action==="retrySheetWriteIssue"?"書込を再試行しました。":"書込エラーを確認済みにしました。"));
+      if(firebaseConfigured)await loadSheetIssues(isCurrent,true);
+      else setSheetIssues(current=>current.filter(item=>item.id!==issue.id));
+    } catch(error) {
+      if(isCurrent())setMessage(accepted?"受付済みです。一覧を再読込してください。":(error instanceof Error?error.message:String(error))+" 再読込して状態を確認してください。");
     }
-    if (!functions) return;
-    await httpsCallable(functions,"acknowledgeSheetWriteIssue")({
-      queueId:issue.id,
-      note,
-    });
-    setMessage("書込エラーを確認済みにしました。");
-    await loadSheetIssues();
   }
 
   async function confirmJobApplication(job:Job) {

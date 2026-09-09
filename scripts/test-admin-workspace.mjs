@@ -140,6 +140,22 @@ try{
    }
   }
   assert.ok([...scripts].some(path=>path.includes('ProductionAcceptanceRollbackConsole')),'Operational console must become available on demand');
+  await nav.getByRole('button',{name:'概要',exact:true}).click();
+  const issuePanel=page.locator('.issue-panel');
+  await issuePanel.getByRole('heading',{name:'スプシ書込エラー・競合',exact:true}).waitFor();
+  await issuePanel.getByRole('button',{name:'再読込',exact:true}).click();
+  assert.equal(await issuePanel.locator('article').count(),2);
+  await issuePanel.getByRole('button',{name:'再試行',exact:true}).click();
+  assert.equal(await issuePanel.locator('article').count(),1);
+  page.once('dialog',dialog=>dialog.dismiss());
+  await issuePanel.getByRole('button',{name:'確認済み',exact:true}).click();
+  assert.equal(await issuePanel.locator('article').count(),1);
+  page.once('dialog',dialog=>dialog.accept('合成確認'));
+  await issuePanel.getByRole('button',{name:'確認済み',exact:true}).click();
+  assert.equal(await issuePanel.locator('article').count(),0);
+  await issuePanel.getByRole('button',{name:'再読込',exact:true}).click();
+  assert.equal(await issuePanel.locator('article').count(),2);
+  if(output)await issuePanel.screenshot({path:resolve(output,'admin-issue-actions.png')});
   await nav.getByRole('button',{name:'案件',exact:true}).click();
   const search=page.getByPlaceholder('スタッフ名・店舗・メーカー・クライアントを検索');
   await search.fill('船橋');

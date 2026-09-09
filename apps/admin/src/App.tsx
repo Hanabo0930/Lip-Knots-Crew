@@ -1,3 +1,4 @@
+import type { SheetWriteIssue } from "./AdminSheetIssuePanel";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   GoogleAuthProvider,
@@ -31,6 +32,7 @@ const AdminJobSearchControls=lazy(()=>import("./AdminJobSearchControls"));
 const AdminSubmissionTimeline=lazy(()=>import("./AdminSubmissionTimeline"));
 const ProductionAcceptanceRollbackConsole = lazy(() => import("./ProductionAcceptanceRollbackConsole"));
 const StoreLocationFields = lazy(() => import("./StoreLocationFields"));
+const AdminSheetIssuePanel=lazy(()=>import("./AdminSheetIssuePanel"));
 const AdminExpensePanel = lazy(() => import("./AdminExpensePanel"));
 const JobSafeEditPanel = lazy(() => import("./JobSafeEditPanel"));
 
@@ -128,19 +130,7 @@ type ResubmissionComparison = {
 };
 
 
-type SheetWriteIssue = {
-  id:string;
-  jobId:string;
-  operation:string;
-  status:string;
-  errorType:string;
-  errorMessage:string;
-  attempts:number;
-  canRetry:boolean;
-  desiredUpdates:Record<string,unknown>;
-  beforeValues:Record<string,unknown>;
-  job:null|{workDate:string;storeName:string;assignedStaffName:string;clientName:string};
-};
+
 
 type ExpenseValues = {
   transportation:string;
@@ -947,6 +937,9 @@ export default function App() {
   const timelineReady=timelineStatus==="ready"&&timelineLoadedKey===timelineKey;
   const [sheetIssues, setSheetIssues] = useState<SheetWriteIssue[]>([]);
   const [issuesBusy, setIssuesBusy] = useState(false);
+  const issuesVersionRef=useRef(0),operationEpochRef=useRef(0);
+  const operationLocksRef=useRef(new Map<string,symbol>());
+  const [operationKeys,setOperationKeys]=useState<string[]>([]);
   const [expenseJobId, setExpenseJobId] = useState(demoJobs[0]?.id ?? "");
   const [expenseValues, setExpenseValues] = useState<ExpenseValues>(blankExpense);
   const [expenseNote, setExpenseNote] = useState("");
@@ -1022,6 +1015,7 @@ const [monthBusy, setMonthBusy] = useState(false);
     const unsubscribe=onAuthStateChanged(activeAuth, (current) => {
       const currentRun=++authRun;
       expenseVersionRef.current++;
+      issuesVersionRef.current++;operationEpochRef.current++;operationLocksRef.current.clear();setOperationKeys([]);setIssuesBusy(false);
       expenseReadyRef.current=null;expenseLoadRef.current=null;expenseWriteRef.current=null;
       setExpenseReady(false);setExpenseBusy(false);setExpenseValues(blankExpense);setExpenseNote("");setExpenseStatus("未読込");
       adminJobActionRef.current=null;
@@ -2691,6 +2685,8 @@ async function previewRowCreation() {
 
 
   async function loadSheetIssues(guard?:AuthRunGuard, propagateError=false) {
+    const version=++issuesVersionRef.current,user=auth?.currentUser;
+    const isCurrent=()=>version===issuesVersionRef.current&&auth?.currentUser===user&&canApplyAuthResult(guard);
     if (!firebaseConfigured) {
       setSheetIssues([
         {
@@ -2727,13 +2723,14 @@ async function previewRowCreation() {
     try {
       const callable = httpsCallable(functions, "getSheetWriteIssues");
       const response = await callable({ limit:100 });
-      if(!canApplyAuthResult(guard))return;
+      if(!isCurrent())return;
       setSheetIssues((response.data as { issues?:SheetWriteIssue[] }).issues ?? []);
     } catch (error) {
+      if(!isCurrent())return;
       if(propagateError)throw error;
-      if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
+      setMessage(error instanceof Error ? error.message : String(error));
     } finally {
-      if(!guard)setIssuesBusy(false);
+      if(isCurrent())setIssuesBusy(false);
     }
   }
 
@@ -2748,33 +2745,32 @@ async function previewRowCreation() {
   }
 
   async function runSheetIssueAction(issue:SheetWriteIssue,action:string,note:string) {
-    const user=auth?.currentUser;
-    if(firebaseConfigured&&(!functions||!user||!adminSessionReady))return;
-    const isCurrent=()=>auth?.currentUser===user;
-    let accepted=false;
-    try {
-      if(firebaseConfigured)await httpsCallable(functions!,action)({queueId:issue.id,note});
-      if(!isCurrent())return;
-      accepted=true;
-      setMessage((firebaseConfigured?"":"デモ：")+(action==="retrySheetWriteIssue"?"書込を再試行しました。":"書込エラーを確認済みにしました。"));
-      if(firebaseConfigured)await loadSheetIssues(isCurrent,true);
-      else setSheetIssues(current=>current.filter(item=>item.id!==issue.id));
-    } catch(error) {
-      if(isCurrent())setMessage(accepted?"受付済みです。一覧を再読込してください。":(error instanceof Error?error.message:String(error))+" 再読込して状態を確認してください。");
-    }
+    await runAdminOperation("issue:"+issue.id,action,{queueId:issue.id,note},action==="retrySheetWriteIssue"?"書込を再試行しました。":"書込エラーを確認済みにしました。",false);
   }
 
   async function confirmJobApplication(job:Job) {
-    if (job.applicationAdminConfirmed) return;
-    if (!firebaseConfigured) {
-      setJobs((current)=>current.map((item)=>item.id===job.id?{...item,applicationAdminConfirmed:true}:item));
-      setMessage("デモ：応募を確認済みにしました。");
-      return;
+    if(job.applicationAdminConfirmed||job.status!=="assigned")return;
+    await runAdminOperation("job:"+job.id,"confirmApplication",{jobId:job.id},"応募を確認済みにしました。",true);
+  }
+
+  async function runAdminOperation(key:string,action:string,payload:Record<string,unknown>,success:string,application:boolean) {
+    const user=auth?.currentUser,epoch=operationEpochRef.current;
+    if(operationLocksRef.current.has(key)||firebaseConfigured&&(!functions||!user||!adminSessionReady))return;
+    const token=Symbol(key),isCurrent=()=>auth?.currentUser===user&&operationEpochRef.current===epoch;
+    operationLocksRef.current.set(key,token);setOperationKeys([...operationLocksRef.current.keys()]);
+    let accepted=false;
+    try {
+      if(firebaseConfigured)await httpsCallable(functions!,action)(payload);
+      if(!isCurrent())return;
+      accepted=true;setMessage((firebaseConfigured?"":"デモ：")+success);
+      if(firebaseConfigured){if(application)await loadJobs(isCurrent);else await loadSheetIssues(isCurrent,true);}
+      else if(application)setJobs(current=>current.map(job=>job.id===payload.jobId?{...job,applicationAdminConfirmed:true}:job));
+      else setSheetIssues(current=>current.filter(item=>item.id!==payload.queueId));
+    } catch(error) {
+      if(isCurrent())setMessage(accepted?"受付済みです。一覧を再読込してください。":(error instanceof Error?error.message:String(error))+" 再読込して状態を確認してください。");
+    } finally {
+      if(operationLocksRef.current.get(key)===token){operationLocksRef.current.delete(key);if(isCurrent())setOperationKeys([...operationLocksRef.current.keys()]);}
     }
-    if (!functions) return;
-    await httpsCallable(functions,"confirmApplication")({jobId:job.id});
-    setMessage("応募を確認済みにしました。");
-    await loadJobs();
   }
 
   async function loadExpenseReview(jobId:string) {
@@ -3679,35 +3675,7 @@ function downloadCsv(filename:string,content:string) {
         <article><small>書込エラー</small><strong>{sheetIssues.length}件</strong></article>
       </section></WorkspacePanel>
 
-      <WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel issue-panel">
-        <div className="sync-head">
-          <div>
-            <h2>スプシ書込エラー・競合</h2>
-            <p>手入力との競合は上書きせず止め、一時エラーだけ再試行できます。</p>
-          </div>
-          <strong>{sheetIssues.length}件</strong>
-        </div>
-        <div className="sync-actions">
-          <button className="ghost" onClick={()=>loadSheetIssues()} disabled={issuesBusy}>
-            {issuesBusy ? "読込中…" : "再読込"}
-          </button>
-        </div>
-        <div className="issue-list">
-          {sheetIssues.map((issue)=>(
-            <article key={issue.id} className={issue.errorType==="conflict"?"conflict-issue":""}>
-              <div>
-                <strong>{issue.job?.workDate} {issue.job?.storeName} {issue.job?.assignedStaffName}</strong>
-                <small>{issue.operation} / {issue.errorMessage}</small>
-              </div>
-              <div className="row-actions">
-                {issue.canRetry && <button className="ghost compact" onClick={()=>retrySheetIssue(issue)}>再試行</button>}
-                <button className="ghost compact" onClick={()=>acknowledgeSheetIssue(issue)}>確認済み</button>
-              </div>
-            </article>
-          ))}
-          {!sheetIssues.length && <div className="empty-inline">書込エラーはありません。</div>}
-        </div>
-      </section></WorkspacePanel>
+      <WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">書込エラーを読込中…</p>}><AdminSheetIssuePanel sheetIssues={sheetIssues} issuesBusy={issuesBusy} operationKeys={operationKeys} loadSheetIssues={loadSheetIssues} retrySheetIssue={retrySheetIssue} acknowledgeSheetIssue={acknowledgeSheetIssue}/></Suspense></WorkspacePanel>
 
       <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel sync-panel">
         <div className="sync-head">
@@ -3817,7 +3785,7 @@ function downloadCsv(filename:string,content:string) {
                         ? <button className="ghost compact" onClick={()=>changePublication(job,"stop")}>募集停止</button>
                         : <button className="ghost compact" onClick={()=>changePublication(job,"publish")}>募集開始</button>
                     )}
-                    {job.status==="assigned" && !job.applicationAdminConfirmed && <button className="ghost compact" onClick={()=>confirmJobApplication(job)}>応募確認</button>}
+                    {job.status==="assigned" && !job.applicationAdminConfirmed && <button className="ghost compact" disabled={operationKeys.includes("job:"+job.id)} onClick={()=>confirmJobApplication(job)}>応募確認</button>}
                     {job.applicationAdminConfirmed && <span className="mini-tag">確認済み</span>}
                     <button className="ghost compact" disabled={resubmissionBusy} onClick={()=>openReportReview(job)}>報告書を確認</button>
                     <button className="ghost compact" onClick={()=>loadExpenseReview(job.id)}>経費</button>

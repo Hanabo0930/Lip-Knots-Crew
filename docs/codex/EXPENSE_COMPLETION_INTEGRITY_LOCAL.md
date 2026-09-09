@@ -33,3 +33,7 @@ getExpenseReviewは案件と確認記録からreviewVersionを返し、新画面
 retrySheetWriteIssue/acknowledgeSheetWriteIssueが読取後に削除・所属変更・完了したキューを古い状態で上書きする問題を6ケースで再現した。最新キューの読取/所属・状態検査/更新/監査記録を同じtransactionへ移す。削除されたキューを再作成せず、完了・処理中・受付済みの状態を巻き戻さない。確認済み操作は一覧表示対象のblocked/dead_letter/retry_waitのみを許可する。競合エラーの手動再試行禁止は維持し、競合の確認済み操作は引き続き許可する。
 
 既存65を含む合成87ケースPASS。正常3状態、削除/別所属/完了変更、pending/processing/acknowledged拒否、transaction失敗時のキュー/監査不変、競合の扱いを検査した。実SDK再試行やFieldValue.increment/deleteの動作試験ではない。Functions型ビルド成功。実DB/原本/送信への操作なし、Functionsは未配備。画面の応答処理や他の管理操作はこの変更に含めない。
+
+## 応募確認の保存整合（2026-09-09）
+confirmApplicationが読取後の案件削除・会社変更・担当変更・状態変更を検査せず書き込む問題、再確認で最初の確認者/日時を上書きする問題を再現した。保存transactionで最新の所属/手配済み状態/初回読取と同じ担当を照合し、確認済みなら追記せず成功扱いにする。更新と監査を原子的に保存する。削除済み案件を復活させない。
+新規7ケース中6失敗を修正前に再現、既存87を含む94ケースPASS、Functions型ビルド成功。合成境界であり実SDKの再試行・実DB・原本は使用しない。画面表示からAPI初回読取までの担当変更や同値への戻りは保証外。Functions未配備のため稼働未反映。

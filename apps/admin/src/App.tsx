@@ -2690,7 +2690,7 @@ async function previewRowCreation() {
   }
 
 
-  async function loadSheetIssues(guard?:AuthRunGuard) {
+  async function loadSheetIssues(guard?:AuthRunGuard, propagateError=false) {
     if (!firebaseConfigured) {
       setSheetIssues([
         {
@@ -2730,6 +2730,7 @@ async function previewRowCreation() {
       if(!canApplyAuthResult(guard))return;
       setSheetIssues((response.data as { issues?:SheetWriteIssue[] }).issues ?? []);
     } catch (error) {
+      if(propagateError)throw error;
       if(canApplyAuthResult(guard))setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       if(!guard)setIssuesBusy(false);
@@ -2844,7 +2845,7 @@ async function previewRowCreation() {
       if(!complete&&reviewVersion){expenseReadyRef.current=null;setExpenseReady(false);setMessage("経費を一時保存しました。続けて編集する場合は再読込してください。");}
       if(complete){
         expenseReadyRef.current=null;setExpenseReady(false);
-        if(firebaseConfigured){try{await loadSheetIssues(isCurrent);}catch{if(isCurrent())setMessage("経費は受付済みです。書込状況の更新に失敗しました。再送せず、再読込して確認してください。");}}
+        if(firebaseConfigured){try{await loadSheetIssues(isCurrent,true);}catch{if(isCurrent())setMessage("経費は受付済みです。書込状況の更新に失敗しました。再送せず、再読込して確認してください。");}}
       }
     } catch(error) {
       if(isCurrent()){

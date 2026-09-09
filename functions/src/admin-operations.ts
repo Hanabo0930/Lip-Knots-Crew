@@ -98,40 +98,25 @@ export const retrySheetWriteIssue = onCall(async (request) => {
   await assertProductionOperational(companyId);
   const input = QueueActionSchema.parse(request.data ?? {});
   const ref = db.collection("sheetSyncQueue").doc(input.queueId);
-  const snap = await ref.get();
-
-  if (!snap.exists || snap.data()?.companyId !== companyId) {
-    throw new HttpsError("not-found", "書込エラーが見つかりません。");
-  }
-
-  const data = snap.data()!;
-  if (!canManuallyRetrySheetWrite({
-    status: String(data.status ?? ""),
-    errorType: String(data.errorType ?? ""),
-  })) {
-    throw new HttpsError(
-      "failed-precondition",
-      "競合は自動再試行できません。スプシの現在値を確認してください。"
-    );
-  }
-
-  await ref.set({
-    status: "pending",
-    attempts: 0,
-    manualRetryCount: FieldValue.increment(1),
-    manualRetryBy: session.uid,
-    manualRetryNote: input.note,
-    updatedAt: FieldValue.serverTimestamp(),
-    retryAt: FieldValue.delete(),
-  }, { merge: true });
-
-  await db.collection("auditLogs").add({
-    companyId,
-    actorUid: session.uid,
-    action: "sheet.issue.retry",
-    queueId: ref.id,
-    note: input.note,
-    createdAt: FieldValue.serverTimestamp(),
+  const auditRef = db.collection("auditLogs").doc();
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists || snap.data()?.companyId !== companyId) {
+      throw new HttpsError("not-found", "書込エラーが見つかりません。");
+    }
+    const data = snap.data()!;
+    if (!canManuallyRetrySheetWrite({ status: String(data.status ?? ""), errorType: String(data.errorType ?? "") })) {
+      throw new HttpsError("failed-precondition", "現在の書込状態では再試行できません。再読込して確認してください。");
+    }
+    tx.update(ref, {
+      status: "pending", attempts: 0, manualRetryCount: FieldValue.increment(1),
+      manualRetryBy: session.uid, manualRetryNote: input.note,
+      updatedAt: FieldValue.serverTimestamp(), retryAt: FieldValue.delete(),
+    });
+    tx.set(auditRef, {
+      companyId, actorUid: session.uid, action: "sheet.issue.retry", queueId: ref.id,
+      note: input.note, createdAt: FieldValue.serverTimestamp(),
+    });
   });
 
   return { retried: true };
@@ -142,27 +127,23 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
   const companyId = companyFromClaims(session.token);
   const input = QueueActionSchema.parse(request.data ?? {});
   const ref = db.collection("sheetSyncQueue").doc(input.queueId);
-  const snap = await ref.get();
-
-  if (!snap.exists || snap.data()?.companyId !== companyId) {
-    throw new HttpsError("not-found", "書込エラーが見つかりません。");
-  }
-
-  await ref.set({
-    status: "acknowledged",
-    acknowledgedBy: session.uid,
-    acknowledgedNote: input.note,
-    acknowledgedAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  }, { merge: true });
-
-  await db.collection("auditLogs").add({
-    companyId,
-    actorUid: session.uid,
-    action: "sheet.issue.acknowledge",
-    queueId: ref.id,
-    note: input.note,
-    createdAt: FieldValue.serverTimestamp(),
+  const auditRef = db.collection("auditLogs").doc();
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists || snap.data()?.companyId !== companyId) {
+      throw new HttpsError("not-found", "書込エラーが見つかりません。");
+    }
+    if (!["blocked", "dead_letter", "retry_wait"].includes(String(snap.data()?.status ?? ""))) {
+      throw new HttpsError("failed-precondition", "現在の書込状態では確認済みにできません。再読込して確認してください。");
+    }
+    tx.update(ref, {
+      status: "acknowledged", acknowledgedBy: session.uid, acknowledgedNote: input.note,
+      acknowledgedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+    });
+    tx.set(auditRef, {
+      companyId, actorUid: session.uid, action: "sheet.issue.acknowledge", queueId: ref.id,
+      note: input.note, createdAt: FieldValue.serverTimestamp(),
+    });
   });
 
   return { acknowledged: true };

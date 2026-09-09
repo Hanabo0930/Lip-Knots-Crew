@@ -27,3 +27,9 @@ getExpenseReviewは案件と確認記録からreviewVersionを返し、新画面
 互換性のためexpectedVersionは省略可能。旧画面のリクエストに版照合は適用されない。新画面も旧サーバーが版を返さなければ従来通り動く。版があるのに形式不正なら読込失敗とし、互換モードへ降格しない。版付き下書き保存の成功後も再読込まで再送を無効にする。Functionsは今回配備しないため、Hostingだけでは本機能が稼働したと扱わない。
 
 実モジュールの合成境界テストは65ケースPASS（既存48に対して追加15失敗を修正前に再現、その後同値更新/キー順の2ケース追加）。画面ハンドラー24ケースPASS。Functions/Admin型ビルドと既存350KiBの設定ありentry予算もPASS（349.8KiB/raw、102.1KiB/gzip）。実SDK transaction再試行や実DBの並行試験ではない。受付IDによる応答喪失時の受付結果復元、旧クライアントを含む全経路の重複排除、再読込後に利用者が再度完了する操作の排除は保証しない。実表/DB/Drive/Storage/送信への操作なし。
+
+## 書込エラーの再試行と確認済み操作（2026-09-09）
+
+retrySheetWriteIssue/acknowledgeSheetWriteIssueが読取後に削除・所属変更・完了したキューを古い状態で上書きする問題を6ケースで再現した。最新キューの読取/所属・状態検査/更新/監査記録を同じtransactionへ移す。削除されたキューを再作成せず、完了・処理中・受付済みの状態を巻き戻さない。確認済み操作は一覧表示対象のblocked/dead_letter/retry_waitのみを許可する。競合エラーの手動再試行禁止は維持し、競合の確認済み操作は引き続き許可する。
+
+既存65を含む合成87ケースPASS。正常3状態、削除/別所属/完了変更、pending/processing/acknowledged拒否、transaction失敗時のキュー/監査不変、競合の扱いを検査した。実SDK再試行やFieldValue.increment/deleteの動作試験ではない。Functions型ビルド成功。実DB/原本/送信への操作なし、Functionsは未配備。画面の応答処理や他の管理操作はこの変更に含めない。

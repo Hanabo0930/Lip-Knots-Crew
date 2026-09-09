@@ -167,19 +167,27 @@ export const confirmApplication = onCall(async (request) => {
     );
   }
 
-  await ref.set({
-    applicationAdminConfirmed: true,
-    applicationAdminConfirmedBy: session.uid,
-    applicationAdminConfirmedAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  }, { merge: true });
-
-  await db.collection("auditLogs").add({
-    companyId,
-    actorUid: session.uid,
-    action: "application.confirm",
-    jobId: input.jobId,
-    createdAt: FieldValue.serverTimestamp(),
+  const auditRef = db.collection("auditLogs").doc();
+  await db.runTransaction(async (tx) => {
+    const current = await tx.get(ref);
+    if (!current.exists || current.data()?.companyId !== companyId) {
+      throw new HttpsError("not-found", "案件が見つかりません。");
+    }
+    const data = current.data()!;
+    if (data.status !== "assigned" || (data.assignedStaffId ?? null) !== (job.data()?.assignedStaffId ?? null)) {
+      throw new HttpsError("failed-precondition", "案件の状態または担当が変わりました。再読込して確認してください。");
+    }
+    if (data.applicationAdminConfirmed === true) return;
+    tx.update(ref, {
+      applicationAdminConfirmed: true,
+      applicationAdminConfirmedBy: session.uid,
+      applicationAdminConfirmedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    tx.set(auditRef, {
+      companyId, actorUid: session.uid, action: "application.confirm",
+      jobId: input.jobId, createdAt: FieldValue.serverTimestamp(),
+    });
   });
 
   return { confirmed: true };

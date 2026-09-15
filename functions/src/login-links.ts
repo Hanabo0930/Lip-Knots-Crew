@@ -28,6 +28,10 @@ const RequestLoginSchema = z.object({
 
 const LOGIN_CODE_TTL_MS = 15 * 60 * 1000;
 
+function isLoginDocumentId(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && !/[\/\\\u0000-\u001f\u007f]/.test(value);
+}
+
 function resolveStaffLoginContinueUrl(requested?: string): string {
   const configured = new URL(staffAppUrl.value());
   if (!requested) return configured.origin;
@@ -105,9 +109,9 @@ export const requestStaffLoginLink = onCall(
     } | undefined;
 
     // 登録有無を画面上で推測されないよう、未登録でも同じ応答にします。
-    if (indexSnap.exists && index?.active && index.staffId && index.companyId) {
+    if (indexSnap.exists && index?.active === true && isLoginDocumentId(index.staffId) && isLoginDocumentId(index.companyId)) {
       const profileSnap = await db.collection("staffProfiles").doc(index.staffId).get();
-      if (profileSnap.exists && profileSnap.data()?.active === true) {
+      if (profileSnap.exists && profileSnap.data()?.active === true && profileSnap.data()?.companyId === index.companyId) {
         try {
           await assertProductionOperational(index.companyId);
           const displayName = String(profileSnap.data()?.displayName ?? "スタッフ");
@@ -152,8 +156,8 @@ async function redeemStaffLoginCode(email: string, code: string) {
     !initialSnap.exists
     || initial?.loginCodeActive !== true
     || initial.loginCodeHash !== loginCodeKey(email, code)
-    || !initial.loginCodeCompanyId
-    || !initial.loginCodeStaffId
+    || !isLoginDocumentId(initial.loginCodeCompanyId)
+    || !isLoginDocumentId(initial.loginCodeStaffId)
     || !initial.loginCodeGatewayTokenHash
     || !initial.loginCodeExpiresAt
     || initial.loginCodeExpiresAt.toMillis() <= Date.now()
@@ -208,6 +212,7 @@ async function redeemStaffLoginCode(email: string, code: string) {
       || index.staffId !== initial.loginCodeStaffId
       || !profileSnap.exists
       || profileSnap.data()?.active !== true
+      || profileSnap.data()?.companyId !== initial.loginCodeCompanyId
       || !gatewaySnap.exists
       || gateway?.active !== true
       || gateway.companyId !== initial.loginCodeCompanyId
@@ -260,7 +265,7 @@ export const getLoginInviteCandidates = onCall(async (request) => {
 
   const profiles = await getProfiles(staffIds);
   const candidates = profiles
-    .filter((profile) => profile.active === true)
+    .filter((profile) => profile.companyId === companyId && profile.active === true)
     .filter((profile) => !profile.lastLoginAt)
     .filter((profile) => Array.isArray(profile.emails) && profile.emails.length > 0)
     .map((profile) => ({
@@ -304,6 +309,9 @@ export const sendLoginInvites = onCall(
 export async function sendLoginInviteBatch(input: LoginInviteBatchInput) {
   await assertProductionOperational(input.companyId);
   const profiles = await getProfiles(input.staffIds);
+  if (!isLoginDocumentId(input.companyId) || profiles.some(profile => profile.companyId !== input.companyId)) {
+    throw new HttpsError("permission-denied", "所属を確認できないスタッフが含まれています。");
+  }
   const profilesById = new Map(profiles.map((profile) => [profile.id, profile]));
   const batchRef = db.collection("loginInviteBatches").doc();
   await batchRef.set({
@@ -436,6 +444,8 @@ export const loginGateway = onRequest(async (request, response) => {
 
     const data = snap.data() as {
       companyId?: string;
+      staffId?: string;
+      emailHash?: string;
       actionLink?: string;
       expiresAt?: Timestamp;
       active?: boolean;
@@ -445,7 +455,9 @@ export const loginGateway = onRequest(async (request, response) => {
 
     if (
       data.active !== true ||
-      !data.actionLink ||
+      typeof data.actionLink !== "string" || !data.actionLink.trim() ||
+      !isLoginDocumentId(data.companyId) || !isLoginDocumentId(data.staffId) ||
+      typeof data.emailHash !== "string" || !/^[a-f0-9]{64}$/.test(data.emailHash) ||
       !data.expiresAt ||
       data.expiresAt.toMillis() <= Date.now()
     ) {
@@ -454,12 +466,27 @@ export const loginGateway = onRequest(async (request, response) => {
       return;
     }
 
-    await snap.ref.set({
-      openedAt: FieldValue.serverTimestamp(),
-      openCount: FieldValue.increment(1),
-    }, { merge: true });
-
-    response.redirect(302, data.actionLink);
+    await assertProductionOperational(data.companyId);
+    const actionLink = await db.runTransaction(async tx => {
+      const [latest, indexSnap, profileSnap] = await Promise.all([
+        tx.get(snap.ref),
+        tx.get(db.collection("emailIndex").doc(data.emailHash!)),
+        tx.get(db.collection("staffProfiles").doc(data.staffId!)),
+      ]);
+      const current = latest.data() as typeof data | undefined;
+      const index = indexSnap.data();
+      const profile = profileSnap.data();
+      if (!latest.exists || current?.active !== true || current.actionLink !== data.actionLink ||
+          current.companyId !== data.companyId || current.staffId !== data.staffId || current.emailHash !== data.emailHash ||
+          !(current.expiresAt instanceof Timestamp) || current.expiresAt.toMillis() <= Date.now() ||
+          !indexSnap.exists || index?.active !== true || index.companyId !== data.companyId || index.staffId !== data.staffId ||
+          !profileSnap.exists || profile?.active !== true || profile.companyId !== data.companyId) {
+        throw new HttpsError("permission-denied", "このログインリンクを利用できません。");
+      }
+      tx.set(snap.ref, { openedAt: FieldValue.serverTimestamp(), openCount: FieldValue.increment(1) }, { merge: true });
+      return current.actionLink!;
+    });
+    response.redirect(302, actionLink);
   } catch (error) {
     if(metricCompanyId)await incrementProductionMetrics(metricCompanyId,{authenticationFailures:1},"login_gateway_error");
     console.error("loginGateway failed", error);
@@ -515,6 +542,19 @@ async function sendLoginLink(input: {
   batchId?: string;
   continueUrl?: string;
 }): Promise<void> {
+  if (!isLoginDocumentId(input.companyId) || !isLoginDocumentId(input.staffId)) {
+    throw new HttpsError("permission-denied", "スタッフの所属を確認できません。");
+  }
+  const [indexSnap, profileSnap] = await Promise.all([
+    db.collection("emailIndex").doc(emailHash(input.email)).get(),
+    db.collection("staffProfiles").doc(input.staffId).get(),
+  ]);
+  const index = indexSnap.data();
+  const profile = profileSnap.data();
+  if (!indexSnap.exists || index?.active !== true || index.companyId !== input.companyId || index.staffId !== input.staffId ||
+      !profileSnap.exists || profile?.active !== true || profile.companyId !== input.companyId) {
+    throw new HttpsError("permission-denied", "メールアドレスとスタッフの所属を確認できません。");
+  }
   const continueUrl = input.continueUrl ?? staffAppUrl.value();
   const actionLink = await auth.generateSignInWithEmailLink(input.email, {
     url: continueUrl,
@@ -734,7 +774,7 @@ async function getProfiles(
     if (!refs.length) continue;
     const snaps = await db.getAll(...refs);
     for (const snap of snaps) {
-      if (snap.exists) result.push({ id: snap.id, ...(snap.data() ?? {}) });
+      if (snap.exists) result.push({ ...(snap.data() ?? {}), id: snap.id });
     }
   }
   return result;

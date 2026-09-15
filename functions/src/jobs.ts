@@ -10,11 +10,19 @@ import {
   staffFromClaims,
 } from "./utils";
 import { queueDocumentData } from "./notification-core";
+import { tokyoParts } from "./notification-time";
+import { cancellationSheetWriteIdentity } from "./sheet-write-core";
+import { assignmentPreparationPatch } from "./assignment-preparation-core";
 import { assertProductionOperational } from "./system-safety";
+import { readMailApplicationForAssignment } from "./automation-intake";
 
 const ApplySchema = z.object({
   jobId: z.string().min(1),
   requestId: z.string().min(8).max(120),
+  mailApplicationId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  mailApplicationRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+}).refine(value => (value.mailApplicationId === undefined) === (value.mailApplicationRevision === undefined), {
+  message: "メール応募の確認版が必要です。",
 });
 
 export const applyToJob = onCall(async (request) => {
@@ -33,10 +41,26 @@ export const applyToJob = onCall(async (request) => {
   const idempotencyRef = db.collection("idempotencyKeys")
     .doc(`${session.uid}_${input.requestId}`);
 
+  const queueRef = db.collection("sheetSyncQueue").doc();
   const result = await db.runTransaction(async (tx) => {
     const idempotencySnap = await tx.get(idempotencyRef);
     if (idempotencySnap.exists) {
-      return idempotencySnap.data()?.result ?? { ok: true, duplicate: true };
+      const previous = idempotencySnap.data();
+      if (previous?.uid !== session.uid || previous?.companyId !== companyId) {
+        throw new HttpsError("permission-denied", "応募記録の所属情報が一致しません。");
+      }
+      if (previous.staffId !== staffId) {
+        throw new HttpsError("failed-precondition", "前回の応募者を確認できません。「シフト」で確定状況を確認してください。");
+      }
+      if ((previous.mailApplicationId ?? null) !== (input.mailApplicationId ?? null)) {
+        throw new HttpsError("failed-precondition", "前回と異なる応募候補です。確定状況を確認してください。");
+      }
+      const response = previous.result;
+      if (response?.ok !== true || response.jobId !== input.jobId ||
+          typeof response.assignedAt !== "string" || !Number.isFinite(Date.parse(response.assignedAt))) {
+        throw new HttpsError("failed-precondition", "前回の応募結果を確認できません。「シフト」で確定状況を確認してください。");
+      }
+      return { ok: true, jobId: input.jobId, assignedAt: response.assignedAt };
     }
 
     const [jobSnap, staffSnap] = await Promise.all([
@@ -67,7 +91,13 @@ export const applyToJob = onCall(async (request) => {
       throw new HttpsError("failed-precondition", "この案件は募集を終了しています。");
     }
 
+    if (job.sourceMissing === true || job.assignmentUnresolved === true || job.applicationUnconfirmed === true || job.publishable !== true) {
+      throw new HttpsError("failed-precondition", "募集内容の公開・取込・手配確認が完了していません。シフトを更新してください。");
+    }
     const workDate = dateKeyFromIso(String(job.dateKey));
+    if (workDate < tokyoParts(new Date()).dateKey) {
+      throw new HttpsError("failed-precondition", "この案件は実施日を過ぎているため応募できません。");
+    }
     const lockId = `${companyId}_${staffId}_${workDate}`;
     const lockRef = db.collection("staffDayLocks").doc(lockId);
     const lockSnap = await tx.get(lockRef);
@@ -76,7 +106,15 @@ export const applyToJob = onCall(async (request) => {
       throw new HttpsError("failed-precondition", "この日はシフトが確定済みです。");
     }
 
-    const displayName = String(staff.displayName ?? "");
+    if (typeof staff.displayName !== "string" || !staff.displayName.trim()) {
+      throw new HttpsError("failed-precondition", "スタッフ氏名を確認できません。管理者へ確認してください。");
+    }
+    const mailApplicationRef = input.mailApplicationId
+      ? await readMailApplicationForAssignment(tx, {
+        companyId, staffId, jobId: input.jobId, applicationId: input.mailApplicationId,
+        revision: input.mailApplicationRevision!,
+      }) : null;
+    const displayName = staff.displayName;
     const now = Timestamp.now();
 
     tx.update(jobRef, {
@@ -85,6 +123,8 @@ export const applyToJob = onCall(async (request) => {
       assignedStaffName: displayName,
       assignedUid: session.uid,
       assignedAt: now,
+      ...assignmentPreparationPatch(job, { ...job, assignedStaffId: staffId, assignedStaffName: displayName }),
+      assignmentSheetWrite: { queueId: queueRef.id, identity: cancellationSheetWriteIdentity({ ...job, assignedStaffId: staffId, assignedStaffName: displayName }) },
       applicationUnconfirmed: true,
       updatedAt: now,
     });
@@ -98,15 +138,15 @@ export const applyToJob = onCall(async (request) => {
       createdAt: now,
     });
 
-    const queueRef = db.collection("sheetSyncQueue").doc();
     tx.set(queueRef, {
       companyId,
       jobId: input.jobId,
       operation: "job.assign",
+      dateKey: workDate,
       updates: { staffName: displayName },
       status: "pending",
       attempts: 0,
-      idempotencyKey: `job.assign:${input.jobId}:${input.requestId}`,
+      idempotencyKey: `job.assign:${input.jobId}:${queueRef.id}`,
       expected: { staffName: { mode: "blank" } },
       actorUid: session.uid,
       actorStaffId: staffId,
@@ -136,9 +176,15 @@ export const applyToJob = onCall(async (request) => {
     }));
 
     const response = { ok: true, jobId: input.jobId, assignedAt: now.toDate().toISOString() };
+    if (mailApplicationRef) tx.update(mailApplicationRef, {
+      status: "assigned", assignedAt: now, assignedUid: session.uid, updatedAt: now,
+      assignmentRequestId: input.requestId, sheetQueueId: queueRef.id,
+    });
     tx.set(idempotencyRef, {
+      mailApplicationId: input.mailApplicationId ?? null,
       uid: session.uid,
       companyId,
+      staffId,
       result: response,
       expiresAt: Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000),
       createdAt: now,
@@ -161,6 +207,7 @@ export const adminCancelJob = onCall(async (request) => {
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
   const jobRef = db.collection("jobs").doc(input.jobId);
+  const queueRef = db.collection("sheetSyncQueue").doc();
 
   await db.runTransaction(async (tx) => {
     const jobSnap = await tx.get(jobRef);
@@ -184,13 +231,16 @@ export const adminCancelJob = onCall(async (request) => {
       lock.staffId === job.assignedStaffId &&
       lock.dateKey === job.dateKey;
 
+    if (job.cancelled === true && job.status === "cancelled" && job.cancellationReason === input.reason && !ownsActiveLock) return;
     const now = Timestamp.now();
     tx.update(jobRef, {
       status: "cancelled",
       cancelled: true,
+      assignmentSheetWrite: null,
       cancellationReason: input.reason,
       publishable: false,
       appOverride: { type: "cancel", active: true, createdAt: now },
+      cancellationSheetWrite: { queueId: queueRef.id, operation: "job.cancel", identity: cancellationSheetWriteIdentity(job) },
       cancelledAt: now,
       updatedAt: now,
     });
@@ -203,7 +253,7 @@ export const adminCancelJob = onCall(async (request) => {
       }, { merge: true });
     }
 
-    tx.set(db.collection("sheetSyncQueue").doc(), {
+    tx.set(queueRef, {
       companyId,
       jobId: input.jobId,
       operation: "job.cancel",
@@ -212,7 +262,7 @@ export const adminCancelJob = onCall(async (request) => {
         cancellationReason: input.reason,
       },
       status: "pending",
-      idempotencyKey: `job.cancel:${input.jobId}:${now.toMillis()}`,
+      idempotencyKey: `job.cancel:${input.jobId}:${queueRef.id}`,
       actorUid: session.uid,
       attempts: 0,
       createdAt: now,

@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onDocumentCreated } from "firebase-functions/v2/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { db, messaging } from "./firebase";
-import { tokyoParts } from "./notification-time";
+import { applyQuietHours, tokyoParts } from "./notification-time";
 import { getProductionOperationalState } from "./system-safety";
 import { incrementProductionMetrics } from "./production-metrics";
 import {
@@ -22,8 +23,14 @@ type QueueData = {
   status?: string;
   deliverAt?: Timestamp;
   quietDeferred?: boolean;
+  bypassQuietHours?: boolean;
   data?: Record<string, string>;
   attempts?: number;
+  processedTokenHashes?: string[];
+  successCount?: number;
+  failureCount?: number;
+  invalidTokenCount?: number;
+  failureCodeCounts?: Record<string, number>;
 };
 
 type TokenRecord = {
@@ -85,22 +92,35 @@ async function dispatchQueueDocument(
   if (!pending.exists) return;
   const pendingData = pending.data() as QueueData;
   const state = await getProductionOperationalState(pendingData.companyId);
-  const emergencyControlNotice = pendingData.category === "production_global_kill_switch";
-  if (!state.operational && !emergencyControlNotice) {
-    await ref.set({
-      status: "paused_global",
-      pauseReason: state.reason,
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-    return;
-  }
   const leaseToken = db.collection("_ids").doc().id;
   const data = await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) return null;
     const current = snap.data() as QueueData;
     if (current.status !== "queued") return null;
+    // 古いイベントや別workerの完了を、運用停止の記録で巻き戻さないようにします。
+    const emergencyControlNotice = current.category === "production_global_kill_switch";
+    if (!state.operational && !emergencyControlNotice) {
+      tx.update(ref, {
+        status: "paused_global",
+        pauseReason: state.reason,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      return null;
+    }
+
     if ((current.deliverAt?.toMillis() ?? 0) > Date.now() + 5_000) return null;
+
+    // 作成時から配信までに22時をまたぐ場合も、通常通知を翌朝へ保留します。
+    const timing = applyQuietHours(Timestamp.now());
+    if (current.bypassQuietHours !== true && timing.quietDeferred) {
+      tx.update(ref, {
+        deliverAt: timing.deliverAt,
+        quietDeferred: true,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      return null;
+    }
 
     tx.update(ref, {
       status: "sending",
@@ -115,23 +135,38 @@ async function dispatchQueueDocument(
   if (!data) return;
 
   try {
-    const tokens = await resolveTokens(data);
-    if (!tokens.length) {
+    const processed = new Set(data.processedTokenHashes ?? []);
+    const tokens = (await resolveTokens(data))
+      .filter((item) => !processed.has(pushTokenHash(item.token)));
+    if (!tokens.length && !processed.size) {
       await incrementProductionMetrics(data.companyId,{notificationAttempts:1,notificationFailures:1},"notification_no_tokens");
-      await ref.set({
+      await updateLeasedQueue(ref, leaseToken, {
         status: "no_tokens",
         completedAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true });
+      });
       return;
     }
 
-    let successCount = 0;
-    let failureCount = 0;
-    const invalidTokenIds: string[] = [];
-    const failureCodeCounts: Record<string, number> = {};
+    let successCount = data.successCount ?? 0;
+    let failureCount = data.failureCount ?? 0;
+    let invalidTokenCount = data.invalidTokenCount ?? 0;
+    const failureCodeCounts: Record<string, number> = { ...data.failureCodeCounts };
 
     for (let index = 0; index < tokens.length; index += 500) {
+      const current = await ref.get();
+      if (current.data()?.status !== "sending" || current.data()?.leaseToken !== leaseToken) return;
+      // 一覧読込や前の送信応答を待つ間に22時をまたいだら、未処理端末を翌朝へ回します。
+      const timing = applyQuietHours(Timestamp.now());
+      if (data.bypassQuietHours !== true && timing.quietDeferred) {
+        await updateLeasedQueue(ref, leaseToken, {
+          status: "queued",
+          deliverAt: timing.deliverAt,
+          quietDeferred: true,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        return;
+      }
       const chunk = tokens.slice(index, index + 500);
       const result = await messaging.sendEachForMulticast({
         tokens: chunk.map((item) => item.token),
@@ -150,6 +185,7 @@ async function dispatchQueueDocument(
 
       successCount += result.successCount;
       failureCount += result.failureCount;
+      const invalidTokenIds: string[] = [];
       result.responses.forEach((response, responseIndex) => {
         const code = response.error?.code ?? "";
         if (!response.success) {
@@ -161,37 +197,48 @@ async function dispatchQueueDocument(
           if (item) invalidTokenIds.push(item.id);
         }
       });
-    }
-
-    if (invalidTokenIds.length) {
-      const batch = db.batch();
-      invalidTokenIds.forEach((tokenId) => {
-        batch.set(db.collection("pushTokens").doc(tokenId), {
-          active: false,
-          invalidatedAt: FieldValue.serverTimestamp(),
-          updatedAt: FieldValue.serverTimestamp(),
-        }, { merge: true });
+      if (invalidTokenIds.length) {
+        const batch = db.batch();
+        invalidTokenIds.forEach((tokenId) => {
+          batch.set(db.collection("pushTokens").doc(tokenId), {
+            active: false,
+            invalidatedAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          }, { merge: true });
+        });
+        await batch.commit();
+      }
+      invalidTokenCount += invalidTokenIds.length;
+      chunk.forEach((item) => processed.add(pushTokenHash(item.token)));
+      // 生のPushトークンはキューへ複製せず、応答確認済みの端末をハッシュで記録します。
+      const saved = await updateLeasedQueue(ref, leaseToken, {
+        processedTokenHashes: [...processed],
+        successCount,
+        failureCount,
+        invalidTokenCount,
+        failureCodeCounts,
+        updatedAt: FieldValue.serverTimestamp(),
       });
-      await batch.commit();
+      if (!saved) return;
+      await incrementProductionMetrics(data.companyId,{notificationAttempts:chunk.length,notificationFailures:result.failureCount},"notification_dispatch");
     }
 
-    await ref.set({
+    await updateLeasedQueue(ref, leaseToken, {
       status: failureCount > 0 ? "partial" : "completed",
       successCount,
       failureCount,
-      invalidTokenCount: invalidTokenIds.length,
+      invalidTokenCount,
       failureReason: classifyPushFailureCodes(Object.keys(failureCodeCounts)),
       failureCodeCounts,
       completedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-    await incrementProductionMetrics(data.companyId,{notificationAttempts:tokens.length,notificationFailures:failureCount},"notification_dispatch");
+    });
   } catch (error) {
     await incrementProductionMetrics(data.companyId,{notificationAttempts:1,notificationFailures:1},"notification_dispatch_error");
     const snap = await ref.get();
     const attempts = Number(snap.data()?.attempts ?? 1);
     const retry = attempts < 5;
-    await ref.set({
+    const saved = await updateLeasedQueue(ref, leaseToken, {
       status: retry ? "queued" : "error",
       deliverAt: retry
         ? Timestamp.fromMillis(Date.now() + Math.min(30, 2 ** attempts) * 60_000)
@@ -199,9 +246,28 @@ async function dispatchQueueDocument(
       errorMessage: error instanceof Error ? error.message : String(error),
       failedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-    if (!retry) throw error;
+    });
+    if (saved && !retry) throw error;
   }
+}
+
+async function updateLeasedQueue(
+  ref: FirebaseFirestore.DocumentReference,
+  leaseToken: string,
+  values: Record<string, unknown>
+): Promise<boolean> {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists || snap.data()?.status !== "sending" || snap.data()?.leaseToken !== leaseToken) {
+      return false;
+    }
+    tx.update(ref, values);
+    return true;
+  });
+}
+
+function pushTokenHash(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
 async function resolveTokens(data: QueueData): Promise<TokenRecord[]> {
@@ -241,14 +307,9 @@ async function bundleQuietNotifications(now: Timestamp): Promise<void> {
   const groups = new Map<string, FirebaseFirestore.QueryDocumentSnapshot[]>();
   for (const doc of deferred.docs) {
     const data = doc.data() as QueueData;
-    const target = data.targetStaffId
-      ? `staff:${data.targetStaffId}`
-      : data.targetRole
-        ? `role:${data.targetRole}`
-        : data.targetUid
-          ? `uid:${data.targetUid}`
-          : "invalid";
-    const key = `${data.companyId}|${target}`;
+    // 一部端末への配信済み通知は、まとめると既送端末へ再通知するため個別再開します。
+    if (data.processedTokenHashes?.length) continue;
+    const key = notificationGroupKey(data);
     const current = groups.get(key) ?? [];
     current.push(doc);
     groups.set(key, current);
@@ -256,34 +317,45 @@ async function bundleQuietNotifications(now: Timestamp): Promise<void> {
 
   for (const [key, docs] of groups.entries()) {
     if (docs.length <= 1) continue;
-    const sample = docs[0]?.data() as QueueData | undefined;
-    if (!sample) continue;
-    const digestRef = db.collection("notificationQueue")
-      .doc(`digest_${hashKey(`${key}|${tokyoParts(now.toDate()).dateKey}`)}`);
-
     await db.runTransaction(async (tx) => {
+      // 一覧は古くなり得るため、配信状態・時刻・宛先を同じtransactionで再確認します。
+      const latest = await Promise.all(docs.map((doc) => tx.get(doc.ref)));
+      const eligible = latest.filter((doc) => {
+        const current = doc.data() as QueueData | undefined;
+        return doc.exists && current?.status === "queued"
+          && current.quietDeferred === true
+          && !current.processedTokenHashes?.length
+          && (current.deliverAt?.toMillis() ?? Infinity) <= now.toMillis()
+          && notificationGroupKey(current) === key;
+      });
+      if (eligible.length <= 1) return;
+      const sample = eligible[0]!.data() as QueueData;
+      const queueIds = eligible.map((doc) => doc.id).sort();
+      // 同日でも後から到着した別の集合は、既存の送信済みまとめに吸収しません。
+      const dedupeKey = JSON.stringify([key, tokyoParts(now.toDate()).dateKey, queueIds]);
+      const digestId = createHash("sha256").update(dedupeKey, "utf8").digest("hex").slice(0, 36);
+      const digestRef = db.collection("notificationQueue").doc("digest_" + digestId);
       const existing = await tx.get(digestRef);
-      if (!existing.exists) {
-        tx.create(digestRef, {
-          companyId: sample.companyId,
-          ...(sample.targetStaffId ? { targetStaffId: sample.targetStaffId } : {}),
-          ...(sample.targetRole ? { targetRole: sample.targetRole } : {}),
-          ...(sample.targetUid ? { targetUid: sample.targetUid } : {}),
-          title: "未確認の通知があります",
-          body: `${docs.length}件のお知らせ・対応事項があります。`,
-          route: "/",
-          category: "quiet_digest",
-          dedupeKey: `${key}|${tokyoParts(now.toDate()).dateKey}`,
-          status: "queued",
-          deliverAt: now,
-          quietDeferred: false,
-          bundledQueueIds: docs.map((doc) => doc.id),
-          attempts: 0,
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
-      docs.forEach((doc) => tx.update(doc.ref, {
+      if (existing.exists) return;
+      tx.create(digestRef, {
+        companyId: sample.companyId,
+        ...(sample.targetStaffId ? { targetStaffId: sample.targetStaffId } : {}),
+        ...(sample.targetRole ? { targetRole: sample.targetRole } : {}),
+        ...(sample.targetUid ? { targetUid: sample.targetUid } : {}),
+        title: "未確認の通知があります",
+        body: eligible.length + "件のお知らせ・対応事項があります。",
+        route: "/",
+        category: "quiet_digest",
+        dedupeKey,
+        status: "queued",
+        deliverAt: now,
+        quietDeferred: false,
+        bundledQueueIds: queueIds,
+        attempts: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+      eligible.forEach((doc) => tx.update(doc.ref, {
         status: "bundled",
         bundledInto: digestRef.id,
         completedAt: now,
@@ -291,6 +363,13 @@ async function bundleQuietNotifications(now: Timestamp): Promise<void> {
       }));
     });
   }
+}
+
+function notificationGroupKey(data: QueueData): string {
+  return JSON.stringify([
+    data.companyId, data.targetStaffId ?? null,
+    data.targetRole ?? null, data.targetUid ?? null,
+  ]);
 }
 
 function urgentForCategory(category?: string): boolean {
@@ -305,12 +384,4 @@ function stringData(data?: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
     Object.entries(data).map(([key, value]) => [key, String(value)])
   );
-}
-
-function hashKey(value: string): string {
-  let hash = 0;
-  for (let index = 0; index < value.length; index++) {
-    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
-  }
-  return Math.abs(hash).toString(36);
 }

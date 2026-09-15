@@ -22,6 +22,8 @@ type DiagnosticInput = {
   signedIn: boolean;
   companyScoped: boolean;
   businessDataStatus: "idle" | "loading" | "ready" | "error";
+  businessDataSource: "none" | "cached" | "live" | "stale";
+  businessRefreshing: boolean;
   homeDisplayMs: number | null;
   businessRefreshMs: number | null;
   homeLoadedFromCache: boolean;
@@ -29,11 +31,16 @@ type DiagnosticInput = {
   functions: Functions | null;
 };
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => window.setTimeout(() => reject(new Error("タイムアウト")), ms)),
-  ]);
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof window.setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => { timer = window.setTimeout(() => reject(new Error("タイムアウト")), ms); }),
+    ]);
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer);
+  }
 }
 
 function overallLevel(checks: DiagnosticCheck[]): DiagnosticLevel {
@@ -42,12 +49,13 @@ function overallLevel(checks: DiagnosticCheck[]): DiagnosticLevel {
 }
 
 export async function runStaffDiagnostics(input: DiagnosticInput): Promise<DiagnosticReport> {
+  const startedOnline = navigator.onLine;
   const checks: DiagnosticCheck[] = [
     {
       id: "network",
       label: "インターネット接続",
-      level: navigator.onLine ? "pass" : "fail",
-      detail: navigator.onLine ? "接続中" : "オフラインです",
+      level: startedOnline ? "pass" : "fail",
+      detail: startedOnline ? "接続中" : "オフラインです。通信を確認し、接続後に「もう一度診断」を押してください",
     },
     {
       id: "auth",
@@ -64,8 +72,14 @@ export async function runStaffDiagnostics(input: DiagnosticInput): Promise<Diagn
     {
       id: "business",
       label: "業務データ",
-      level: input.businessDataStatus === "ready" ? "pass" : input.businessDataStatus === "error" ? "fail" : "warn",
-      detail: input.businessDataStatus === "ready" ? "取得済み" : input.businessDataStatus === "error" ? "取得エラー" : "読み込み中",
+      level: input.businessDataStatus === "error" ? "fail" : input.businessDataStatus === "ready" && input.businessDataSource === "live" && !input.businessRefreshing ? "pass" : "warn",
+      detail: input.businessDataStatus === "error" ? "取得エラー。シフト画面で更新してください"
+        : input.businessDataStatus === "idle" ? "まだ取得を確認できません"
+        : input.businessDataStatus === "loading" ? "読み込み中"
+        : input.businessRefreshing ? "最新情報を更新中です"
+        : input.businessDataSource === "cached" ? "前回データを表示中。シフト画面で更新してください"
+        : input.businessDataSource === "stale" ? "更新結果を確認できません。シフト画面で更新してください"
+        : input.businessDataSource === "live" ? "最新情報を取得済み" : "取得元を確認できません",
     },
     {
       id: "device",
@@ -93,9 +107,14 @@ export async function runStaffDiagnostics(input: DiagnosticInput): Promise<Diagn
     });
   }
 
-  const serviceWorkerReady = await ("serviceWorker" in navigator
-    ? withTimeout(navigator.serviceWorker.ready.then(() => true), 2_500).catch(() => false)
-    : Promise.resolve(false));
+  let serviceWorkerReady = false;
+  try {
+    if ("serviceWorker" in navigator) {
+      serviceWorkerReady = await withTimeout(navigator.serviceWorker.ready.then(() => true), 2_500);
+    }
+  } catch {
+    serviceWorkerReady = false;
+  }
   checks.push({
     id: "pwa",
     label: "アプリ本体",
@@ -106,9 +125,9 @@ export async function runStaffDiagnostics(input: DiagnosticInput): Promise<Diagn
   const permission = currentPushPermission();
   checks.push({
     id: "permission",
-    label: "iPhone通知許可",
+    label: "通知許可",
     level: permission === "granted" ? "pass" : permission === "denied" || permission === "unsupported" ? "fail" : "warn",
-    detail: permission === "granted" ? "許可済み" : permission === "denied" ? "端末設定で拒否中" : permission === "unsupported" ? "非対応" : "未設定",
+    detail: permission === "granted" ? "許可済み" : permission === "denied" ? "端末・ブラウザーの設定で通知を許可し、画面を開き直してください" : permission === "unsupported" ? "この環境は通知非対応です。ホームの「今日やること」で対応事項を確認してください" : "未設定です。受信する場合はホームの「通知を有効にする」を押してください",
   });
 
   let serverPushEnabled: boolean | null = null;
@@ -119,7 +138,7 @@ export async function runStaffDiagnostics(input: DiagnosticInput): Promise<Diagn
         id: "push",
         label: "通知サービス",
         level: serverPushEnabled ? "pass" : "warn",
-        detail: serverPushEnabled ? "この端末は通知ON" : "通知端末の再登録が必要です",
+        detail: serverPushEnabled ? "この端末は通知ON" : "通知OFFです。受信する場合はホームの「通知を有効にする」を押してください",
       });
     } catch {
       checks.push({
@@ -138,6 +157,25 @@ export async function runStaffDiagnostics(input: DiagnosticInput): Promise<Diagn
     });
   }
 
+  const latestPermission = currentPushPermission();
+  if (latestPermission !== permission) {
+    serverPushEnabled = null;
+    const permissionIndex = checks.findIndex(check => check.id === "permission");
+    checks[permissionIndex] = {
+      id: "permission", label: "通知許可", level: latestPermission === "denied" || latestPermission === "unsupported" ? "fail" : "warn",
+      detail: "診断中に通知許可が変更されました。端末・ブラウザーの通知設定を確認し、「もう一度診断」を押してください",
+    };
+    const pushIndex = checks.findIndex(check => check.id === "push");
+    checks[pushIndex] = {id: "push", label: "通知サービス", level: "warn", detail: "通知設定が変わったため、通知の状態は未確認です。「もう一度診断」で確認してください"};
+  }
+
+  if (navigator.onLine !== startedOnline) {
+    checks[0] = {
+      id: "network", label: "インターネット接続", level: navigator.onLine ? "warn" : "fail",
+      detail: navigator.onLine ? "診断中に接続が復旧しました。「もう一度診断」で最新の状態を確認してください" : "診断中にオフラインになりました。通信を確認し、接続後に「もう一度診断」を押してください",
+    };
+  }
+
   return {
     checkedAt: new Date().toISOString(),
     checks,
@@ -147,6 +185,8 @@ export async function runStaffDiagnostics(input: DiagnosticInput): Promise<Diagn
 }
 
 export function formatDiagnosticReport(report: DiagnosticReport): string {
+  const checkedAt = new Date(typeof report.checkedAt === "string" && report.checkedAt.trim() ? report.checkedAt : NaN);
+  const checkedAtLabel = Number.isFinite(checkedAt.getTime()) ? checkedAt.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) + "（日本時間）" : "確認中";
   const summary = report.summary === "pass" ? "PASS" : report.summary === "warn" ? "要確認" : "エラーあり";
   const lines = report.checks.map((check) => {
     const mark = check.level === "pass" ? "OK" : check.level === "warn" ? "確認" : "NG";
@@ -155,7 +195,7 @@ export function formatDiagnosticReport(report: DiagnosticReport): string {
   return [
     "Lip Knots Crew かんたん診断",
     `総合結果: ${summary}`,
-    `確認日時: ${new Date(report.checkedAt).toLocaleString("ja-JP")}`,
+    `確認日時: ${checkedAtLabel}`,
     ...lines,
   ].join("\n");
 }

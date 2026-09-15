@@ -20,6 +20,12 @@ export function parseStaffSheet(
 ): StaffParseResult {
   const headerRow = resolveHeaderRow(values, config);
   const dataStartRow = config.dataStartRow ?? (headerRow + 1);
+  if (!Number.isSafeInteger(headerRow) || headerRow < 1 || headerRow > values.length
+    || !Number.isSafeInteger(dataStartRow) || dataStartRow <= headerRow
+    || (dataStartRow > values.length && values.slice(headerRow).some(row =>
+      row.some(value => String(value ?? "").trim() !== "")))) {
+    throw new Error("ヘッダー行またはデータ開始行が読取結果と一致しません。");
+  }
   const rows: ParsedStaffRow[] = [];
   const summaryWarnings: string[] = [];
   let invalidEmailCount = 0;
@@ -224,12 +230,12 @@ function headerScore(row: unknown[], config: StaffImportConfig): number {
 }
 
 function cellText(row: unknown[], column?: string): string {
-  if (!column) return "";
+  if (!column?.trim()) return "";
   const index = columnLetterToIndex(column);
   return String(row[index] ?? "").trim();
 }
 
-function columnLetterToIndex(column: string): number {
+export function columnLetterToIndex(column: string): number {
   const normalized = column.trim().toUpperCase();
   if (!/^[A-Z]+$/.test(normalized)) {
     throw new Error(`列記号が不正です: ${column}`);

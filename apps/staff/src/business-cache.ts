@@ -29,6 +29,38 @@ function safeScopeValue(value: unknown): value is string {
     && !/[\r\n\0]/u.test(value);
 }
 
+function isRecord(value:unknown):value is Record<string,unknown>{return Boolean(value)&&typeof value==="object"&&!Array.isArray(value);}
+function text(value:unknown):value is string{return typeof value==="string"&&value.trim().length>0;}
+function optionalFields(value:Record<string,unknown>,fields:string[],type:string):boolean{return fields.every(key=>value[key]==null||typeof value[key]===type);}
+function validRows(value:unknown,check:(row:Record<string,unknown>)=>boolean):boolean{
+  if(!Array.isArray(value))return false;
+  const ids=new Set<string>();
+  return value.every(row=>{if(!isRecord(row)||!text(row.id)||ids.has(row.id)||!check(row))return false;ids.add(row.id);return true;});
+}
+function validCachedJob(job:Record<string,unknown>):boolean{
+  if(!text(job.dateKey)||!text(job.status)||typeof job.menuName!=="string"||
+     !optionalFields(job,["workDate","clientName","makerName","storeName","workTime","storeAddress","storeNearestStation","materialStatus","companyId","assignedStaffId"],"string")||
+     !optionalFields(job,["cancelled"],"boolean"))return false;
+  if(job.preContact!=null){
+    if(!isRecord(job.preContact)||!optionalFields(job.preContact,["arrivalTime"],"string"))return false;
+    const temperature=job.preContact.temperature;
+    if(temperature!=null&&typeof temperature!=="number"&&typeof temperature!=="string")return false;
+  }
+  if(job.netPrint!=null){
+    if(!isRecord(job.netPrint))return false;
+    if(job.netPrint.items!=null&&!validRows(job.netPrint.items,item=>typeof item.number==="string"&&optionalFields(item,["printed"],"boolean")))return false;
+  }
+  if(job.submissionStatus!=null){
+    if(!isRecord(job.submissionStatus))return false;
+    for(const kind of ["report","salesFloor"]){const status=job.submissionStatus[kind];if(status!=null&&(!isRecord(status)||!optionalFields(status,["completed","clientSubmitted","lipKnotsSubmitted"],"boolean")))return false;}
+  }
+  return true;
+}
+function validCachedTask(task:Record<string,unknown>):boolean{
+  return [task.jobId,task.kind,task.title].every(text)&&typeof task.body==="string"&&
+    typeof task.priority==="string"&&["normal","urgent","overdue"].includes(task.priority)&&(task.metadata==null||isRecord(task.metadata));
+}
+
 function removeCacheKey(key: string): void {
   try {
     localStorage.removeItem(key);
@@ -87,8 +119,8 @@ export function loadBusinessSnapshot<Job, Task>(
       && typeof snapshot.savedAt === "number"
       && snapshot.savedAt <= now + 5 * 60 * 1000
       && now - snapshot.savedAt <= BUSINESS_CACHE_MAX_AGE_MS
-      && Array.isArray(snapshot.jobs)
-      && Array.isArray(snapshot.tasks);
+      && validRows(snapshot.jobs,validCachedJob)
+      && validRows(snapshot.tasks,validCachedTask);
     if (!valid) {
       removeCacheKey(key);
       return null;

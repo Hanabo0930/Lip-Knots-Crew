@@ -42,6 +42,18 @@ export function buildExpenseSheetUpdates(values: ExpenseValues): Record<string, 
   };
 }
 
+// 行の並べ替えは許容し、担当・勤務日・案件・タブの変更は別の確認として扱う。
+export function expenseSheetWriteContext(job: Record<string, unknown>): string {
+  const sheet = job.sheetRef && typeof job.sheetRef === "object"
+    ? job.sheetRef as Record<string, unknown> : {};
+  return JSON.stringify([
+    job.assignedStaffId ?? null, job.assignedStaffName ?? null,
+    job.dateKey ?? null, job.workDate ?? null, job.caseId ?? null,
+    job.clientName ?? null, job.storeName ?? null, job.workTime ?? null,
+    sheet.spreadsheetId ?? null, sheet.sheetId ?? null, sheet.sheetName ?? null,
+  ]);
+}
+
 export function buildExpenseExpected(
   values: ExpenseValues
 ): Record<string, { mode: "blank" | "exact"; value?: number }> {
@@ -80,11 +92,13 @@ export function createSpreadsheetRowUrl(input: {
 export function canManuallyRetrySheetWrite(input: {
   status: string;
   errorType?: string;
+  writeVerificationRequired?: unknown;
 }): boolean {
+  if (input.writeVerificationRequired !== undefined && input.writeVerificationRequired !== false) return false;
   if (!["blocked", "dead_letter", "retry_wait"].includes(input.status)) {
     return false;
   }
-  return input.errorType !== "conflict";
+  return input.errorType !== "conflict" && input.errorType !== "verification_required";
 }
 
 function parseExpenseValue(raw: unknown): { value: number | null; error?: string } {

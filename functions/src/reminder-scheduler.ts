@@ -1,7 +1,7 @@
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { db } from "./firebase";
-import { enqueueNotification } from "./notification-core";
+import { enqueueNotification, notificationQueueId, queueDocumentData, type QueueNotificationInput } from "./notification-core";
 import { getProductionOperationalState } from "./system-safety";
 import {
   addTokyoDays,
@@ -28,6 +28,9 @@ type JobData = {
   dateKey?: string;
   storeName?: string;
   cancelled?: boolean;
+  sourceMissing?: boolean;
+  applicationUnconfirmed?: boolean;
+  assignmentUnresolved?: boolean;
   preContact?: { temperature?: unknown; arrivalTime?: unknown } | null;
   submissionStatus?: {
     report?: { completed?: boolean };
@@ -107,6 +110,7 @@ async function schedulePreContact(
   settings: NotificationSettings,
   now: Date
 ): Promise<void> {
+  if (job.sourceMissing === true || job.applicationUnconfirmed === true || job.assignmentUnresolved === true) return;
   const complete = Boolean(
     job.preContact?.temperature !== undefined &&
     job.preContact?.temperature !== "" &&
@@ -115,56 +119,71 @@ async function schedulePreContact(
   if (complete || !job.dateKey || !job.assignedStaffId) return;
 
   const today = tokyoParts(now).dateKey;
-  const store = job.storeName ?? "店舗";
   const workDate = job.dateKey;
   const d3Hour = settings.preContactThreeDaysHour ?? 9;
-
-  if (
-    workDate === addTokyoDays(today, 3) &&
-    isWithinMinuteWindow(now, d3Hour, 0)
-  ) {
-    await enqueueNotification({
-      companyId,
-      targetStaffId: job.assignedStaffId,
-      title: "事前連絡を送ってください",
-      body: `${workDate} ${store}の事前連絡を送れます。`,
-      route: `/shifts/${jobId}/precontact`,
-      category: "precontact_reminder",
-      dedupeKey: `${jobId}_d3`,
-    });
+  if (workDate === addTokyoDays(today, 3) && isWithinMinuteWindow(now, d3Hour, 0)) {
+    await enqueueCurrentPreContact(companyId, jobId, job, "d3");
   }
-
   if (workDate === addTokyoDays(today, 1)) {
-    for (const reminder of [{ hour: 8, key: "d1_0800" }, { hour: 12, key: "d1_1200" }]) {
+    for (const reminder of [{ hour: 8, key: "d1_0800" }, { hour: 12, key: "d1_1200" }] as const) {
       if (isWithinMinuteWindow(now, reminder.hour, 0)) {
-        await enqueueNotification({
-          companyId,
-          targetStaffId: job.assignedStaffId,
-          title: "事前連絡が未送信です",
-          body: `${store}の体温と到着予定時刻を、15:00までに送ってください。`,
-          route: `/shifts/${jobId}/precontact`,
-          category: "precontact_reminder",
-          dedupeKey: `${jobId}_${reminder.key}`,
-        });
+        await enqueueCurrentPreContact(companyId, jobId, job, reminder.key);
       }
     }
-
     if (isWithinMinuteWindow(now, 15, 0)) {
-      await db.collection("jobs").doc(jobId).set({
-        preContactLate: true,
-        preContactLateDetectedAt: FieldValue.serverTimestamp(),
-      }, { merge: true });
-      await enqueueNotification({
-        companyId,
-        targetRole: "admin",
-        title: "事前連絡の締切超過",
-        body: `${job.assignedStaffName ?? "スタッフ"} / ${store}`,
-        route: `/admin/jobs/${jobId}`,
-        category: "precontact_late",
-        dedupeKey: `${jobId}_late`,
-      });
+      await enqueueCurrentPreContact(companyId, jobId, job, "late");
     }
   }
+}
+
+type PreContactSlot = "d3" | "d1_0800" | "d1_1200" | "late";
+
+function preContactNotificationInput(
+  companyId: string, jobId: string, job: JobData, slot: PreContactSlot
+): QueueNotificationInput {
+  const store = job.storeName ?? "店舗";
+  if (slot === "late") {
+    return {
+      companyId, targetRole: "admin", title: "事前連絡の締切超過",
+      body: `${job.assignedStaffName ?? "スタッフ"} / ${store}`,
+      route: `/admin/jobs/${jobId}`, category: "precontact_late", dedupeKey: `${jobId}_late`,
+    };
+  }
+  return {
+    companyId, targetStaffId: job.assignedStaffId!,
+    title: slot === "d3" ? "事前連絡を送ってください" : "事前連絡が未送信です",
+    body: slot === "d3" ? `${job.dateKey} ${store}の事前連絡を送れます。`
+      : `${store}の体温と到着予定時刻を、15:00までに送ってください。`,
+    route: `/shifts/${jobId}/precontact`, category: "precontact_reminder", dedupeKey: `${jobId}_${slot}`,
+  };
+}
+
+async function enqueueCurrentPreContact(
+  companyId: string, jobId: string, expected: JobData, slot: PreContactSlot
+): Promise<void> {
+  if (!expected.assignedStaffId || !expected.dateKey) return;
+  const jobRef = db.collection("jobs").doc(jobId);
+  const queueRef = db.collection("notificationQueue").doc(
+    notificationQueueId(preContactNotificationInput(companyId, jobId, expected, slot))
+  );
+  await db.runTransaction(async (tx) => {
+    const currentSnap = await tx.get(jobRef);
+    const queued = await tx.get(queueRef);
+    if (!currentSnap.exists || queued.exists) return;
+    const current = currentSnap.data() as JobData;
+    if (current.companyId !== companyId || current.status !== "assigned" || current.cancelled === true ||
+        current.assignedStaffId !== expected.assignedStaffId || current.dateKey !== expected.dateKey ||
+        current.sourceMissing === true || current.applicationUnconfirmed === true || current.assignmentUnresolved === true) return;
+    if (current.preContact?.temperature !== undefined && current.preContact.temperature !== "" && current.preContact.arrivalTime) return;
+    // 案件の現在値と予約を同じ取引で確認し、遅延記録だけを先に残さない。
+    tx.create(queueRef, {
+      ...queueDocumentData(preContactNotificationInput(companyId, jobId, current, slot)),
+      createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
+    });
+    if (slot === "late") {
+      tx.set(jobRef, { preContactLate: true, preContactLateDetectedAt: FieldValue.serverTimestamp() }, { merge: true });
+    }
+  });
 }
 
 async function scheduleSubmissions(

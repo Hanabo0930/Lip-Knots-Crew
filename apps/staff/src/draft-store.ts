@@ -38,7 +38,7 @@ function enqueueDraftMutation(key: string, mutation: () => Promise<void>): Promi
 }
 
 async function waitForDraftMutation(key: string): Promise<void> {
-  await draftMutations.get(key)?.catch(() => undefined);
+  await draftMutations.get(key);
 }
 
 function openDb(): Promise<IDBDatabase> {

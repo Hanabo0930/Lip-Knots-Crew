@@ -8,6 +8,7 @@ import { companyFromClaims, requireAdmin, requestId } from "./utils";
 import { assertProductionOperational } from "./system-safety";
 import {
   buildExpenseExpected,
+  expenseSheetWriteContext,
   buildExpenseSheetUpdates,
   canManuallyRetrySheetWrite,
   createSpreadsheetRowUrl,
@@ -51,7 +52,7 @@ export const getSheetWriteIssues = onCall(async (request) => {
 
   const snap = await db.collection("sheetSyncQueue")
     .where("companyId", "==", companyId)
-    .where("status", "in", ["blocked", "dead_letter", "retry_wait"])
+    .where("status", "in", ["blocked", "dead_letter", "retry_wait", "acknowledged", "error", "paused_global"])
     .orderBy("updatedAt", "desc")
     .limit(input.limit)
     .get();
@@ -77,9 +78,14 @@ export const getSheetWriteIssues = onCall(async (request) => {
         expected: data.expected ?? {},
         beforeValues: data.beforeValues ?? {},
         updatedAt: serializeTimestamp(data.updatedAt),
+        writeVerificationRequired: (data.writeVerificationRequired !== undefined && data.writeVerificationRequired !== false) || data.errorType === "verification_required",
+        sourceWriteVerified: false,
+        acknowledgedAt: serializeTimestamp(data.acknowledgedAt),
+        acknowledgedNote: typeof data.acknowledgedNote === "string" ? data.acknowledgedNote : "",
         canRetry: canManuallyRetrySheetWrite({
           status: String(data.status ?? ""),
           errorType: String(data.errorType ?? ""),
+          writeVerificationRequired: data.writeVerificationRequired,
         }),
         job: job?.companyId === companyId ? {
           workDate: job.workDate ?? job.dateKey ?? "",
@@ -105,7 +111,7 @@ export const retrySheetWriteIssue = onCall(async (request) => {
       throw new HttpsError("not-found", "書込エラーが見つかりません。");
     }
     const data = snap.data()!;
-    if (!canManuallyRetrySheetWrite({ status: String(data.status ?? ""), errorType: String(data.errorType ?? "") })) {
+    if (!canManuallyRetrySheetWrite({ status: String(data.status ?? ""), errorType: String(data.errorType ?? ""), writeVerificationRequired: data.writeVerificationRequired })) {
       throw new HttpsError("failed-precondition", "現在の書込状態では再試行できません。再読込して確認してください。");
     }
     tx.update(ref, {
@@ -133,11 +139,16 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
     if (!snap.exists || snap.data()?.companyId !== companyId) {
       throw new HttpsError("not-found", "書込エラーが見つかりません。");
     }
-    if (!["blocked", "dead_letter", "retry_wait"].includes(String(snap.data()?.status ?? ""))) {
+    const data = snap.data()!;
+    if (data.status === "acknowledged") {
+      if (data.acknowledgedBy === session.uid && data.acknowledgedNote === input.note) return;
+      throw new HttpsError("failed-precondition", "既に確認メモが記録されています。再読込して確認してください。");
+    }
+    if (!["blocked", "dead_letter", "retry_wait", "error", "paused_global"].includes(String(data.status ?? ""))) {
       throw new HttpsError("failed-precondition", "現在の書込状態では確認済みにできません。再読込して確認してください。");
     }
     tx.update(ref, {
-      status: "acknowledged", acknowledgedBy: session.uid, acknowledgedNote: input.note,
+      status: "acknowledged", acknowledgedFromStatus: data.status, acknowledgedBy: session.uid, acknowledgedNote: input.note,
       acknowledgedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
     });
     tx.set(auditRef, {
@@ -146,7 +157,7 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
     });
   });
 
-  return { acknowledged: true };
+  return { acknowledged: true, sourceWriteVerified: false };
 });
 
 export const confirmApplication = onCall(async (request) => {
@@ -327,6 +338,7 @@ export const completeExpenseReview = onCall(async (request) => {
       staffId: job.assignedStaffId ?? null,
       values: parsed.values,
       expectedValues: currentValues,
+      writeContext: expenseSheetWriteContext(currentJob.data()!),
       note: input.note,
       status: "queued",
       queueId: queueRef.id,
@@ -443,7 +455,7 @@ function assertExpenseReviewVersion(expected: string | undefined, companyId: str
 
 function expenseWriteContext(job: FirebaseFirestore.DocumentData): string {
   return JSON.stringify([
-    job.assignedStaffId ?? null,
+    expenseSheetWriteContext(job),
     ...["transportation", "purchase8", "purchase10", "netPrintCost", "postageCost"].map(key => numberOrNull(job.expenses?.[key])),
     job.sheetRef?.spreadsheetId ?? null, job.sheetRef?.sheetId ?? null, job.sheetRef?.currentRow ?? null,
   ]);

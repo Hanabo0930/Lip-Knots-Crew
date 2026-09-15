@@ -28,6 +28,7 @@ export type ShiftColumnConfig = {
 };
 
 export type ShiftImportConfig = {
+  adminEditColumns?: Record<string, unknown>;
   companyId: string;
   enabled: boolean;
   spreadsheetId: string;
@@ -57,6 +58,7 @@ export type SheetDescriptor = {
 };
 
 export type ParsedShiftJob = {
+  editSourceSnapshot?: import("./admin-edit-state-core").EditSourceSnapshot;
   jobId: string;
   caseId: string;
   companyId: string;

@@ -7,11 +7,17 @@ type StaffJobListItem = {
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
 
 export function localDateKey(date = new Date()): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  // 国内シフトの業務日は端末のタイムゾーンによらず日本時間で判定する。
+  return new Date(date.getTime()+9*60*60*1000).toISOString().slice(0,10);
 }
 
-function hasValidDateKey(job: StaffJobListItem): boolean {
-  return DATE_KEY_PATTERN.test(job.dateKey);
+export function hasValidDateKey(job: Pick<StaffJobListItem,"dateKey">): boolean {
+  if(typeof job.dateKey!=="string"||!DATE_KEY_PATTERN.test(job.dateKey))return false;
+  const [year,month,day]=job.dateKey.split("-").map(Number);
+  if(year<1||month<1||month>12||day<1)return false;
+  const leapYear=year%4===0&&(year%100!==0||year%400===0);
+  const daysInMonth=[31,leapYear?29:28,31,30,31,30,31,31,30,31,30,31];
+  return day<=daysInMonth[month-1];
 }
 
 export function isUpcomingJob(job: StaffJobListItem, today = localDateKey()): boolean {

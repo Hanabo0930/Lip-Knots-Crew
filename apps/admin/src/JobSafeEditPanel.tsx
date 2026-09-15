@@ -1,3 +1,4 @@
+import AutomationRegistryEntry from "./AutomationRegistryEntry";
 import StoreLocationFields from "./StoreLocationFields";
 
 type EditValues = Record<string, string> & {
@@ -14,12 +15,13 @@ type EditValues = Record<string, string> & {
 };
 
 type Props = {
-  jobs: Array<{ id: string; workDate: string; storeName: string }>;
+  jobs: Array<{ id: string; workDate: string; storeName: string; pendingSourceWrite?: boolean }>;
   staff: Array<{ id: string; displayName: string; active?: boolean }>;
   jobEditId: string;
   revision: number;
   values: EditValues;
   busy: boolean;
+  dirty: boolean;
   invoiceLabels: Array<[string, string]>;
   staffPayLabels: Array<[string, string]>;
   onSelectJob: (jobId: string) => void;
@@ -34,6 +36,7 @@ export default function JobSafeEditPanel({
   revision,
   values,
   busy,
+  dirty,
   invoiceLabels,
   staffPayLabels,
   onSelectJob,
@@ -45,13 +48,16 @@ export default function JobSafeEditPanel({
       <div className="section-heading">
         <div>
           <h2>案件の安全編集</h2>
-          <p>スタッフ、基本情報、請求・支払の入力セルだけを変更します。合計・数式セルはロックされています。</p>
+          <p>変更した項目だけを保存します。原本への反映は、案件と変更前の内容を確認してから行います。</p>
         </div>
-        <strong>Revision {revision}</strong>
+        <strong>保存版 {revision}</strong>
       </div>
+      {jobs.find(job=>job.id===jobEditId)?.pendingSourceWrite===true&&(
+        <p className="locked-note" role="status">アプリに保存済みです。シフト表への反映は確認待ちです。</p>
+      )}
       <div className="job-form-grid">
         <label>対象案件
-          <select value={jobEditId} onChange={(event) => onSelectJob(event.target.value)}>
+          <select aria-label="編集対象案件" value={jobEditId} onChange={(event) => onSelectJob(event.target.value)}>
             {jobs.map((job) => <option key={job.id} value={job.id}>{job.workDate} {job.storeName}</option>)}
           </select>
         </label>
@@ -77,16 +83,17 @@ export default function JobSafeEditPanel({
         <label>実施時間<input value={values.workTime} onChange={(event) => onUpdate("workTime", event.target.value)} /></label>
         <label>外注名<input value={values.subcontractorName} onChange={(event) => onUpdate("subcontractorName", event.target.value)} /></label>
       </div>
-      <h3>請求側 S～Z</h3>
+      <h3>請求の入力項目</h3>
       <div className="money-grid">{invoiceLabels.map(([key, label]) => (
         <label key={key}>{label}<input inputMode="numeric" value={values[key]} onChange={(event) => onUpdate(key, event.target.value)} /></label>
       ))}</div>
-      <h3>支払側 AB～AI</h3>
+      <h3>支払の入力項目</h3>
       <div className="money-grid">{staffPayLabels.map(([key, label]) => (
         <label key={key}>{label}<input inputMode="numeric" value={values[key]} onChange={(event) => onUpdate(key, event.target.value)} /></label>
       ))}</div>
-      <div className="locked-note">🔒 AA・AJ・AR・BBなどの合計／数式セルは直接編集しません。</div>
-      <div className="sync-actions"><button onClick={onSave} disabled={busy}>{busy ? "保存中…" : "入力セルだけ保存"}</button></div>
+      <div className="locked-note">合計金額は原本の内容を使います。保存中の追加入力は、そのまま続けて編集できます。</div>
+      <div className="sync-actions"><button onClick={onSave} disabled={busy||!dirty||!jobEditId}>{busy ? "保存中…" : dirty ? "変更を保存" : "変更はありません"}</button><span role="status" aria-live="polite">{busy?"保存結果を確認しています。":dirty?"未保存の変更があります。":"表示中の内容に変更はありません。"}</span></div>
+      <AutomationRegistryEntry jobs={jobs} staff={staff} disabled={busy} selectedJobId={jobEditId}/>
     </section>
   );
 }

@@ -147,12 +147,13 @@ export const bootstrapSession = onCall(async (request) => {
     active: boolean;
   };
 
-  if (!index.active) {
+  if (index.active !== true || [index.companyId, index.staffId].some(value =>
+    typeof value !== "string" || !value.trim() || /[\/\\\u0000-\u001f\u007f]/.test(value))) {
     throw new HttpsError("permission-denied", "このアカウントは利用停止中です。");
   }
 
   const profileSnap = await db.collection("staffProfiles").doc(index.staffId).get();
-  if (!profileSnap.exists || profileSnap.data()?.active !== true) {
+  if (!profileSnap.exists || profileSnap.data()?.active !== true || profileSnap.data()?.companyId !== index.companyId) {
     throw new HttpsError("permission-denied", "このアカウントは利用停止中です。");
   }
 

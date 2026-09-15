@@ -11,6 +11,8 @@ import {
   selectImportSheets,
 } from "./sheet-reader";
 import { parseShiftSheet } from "./shift-parser";
+import { assignmentPreparationPatch } from "./assignment-preparation-core";
+import { captureEditSource, selectEditSourceColumns, importedEditConfirmation, adminEditContext, editProjection, sourceMoneyInputs, importedEditRevision } from "./admin-edit-state-core";
 import {
   ParsedShiftJob,
   SheetParseSummary,
@@ -223,6 +225,7 @@ async function executeShiftImport(
 
     for (const target of targets) {
       try {
+        const readStartedAtMs = Date.now();
         const values = await readShiftSheet(
           sheets,
           config.spreadsheetId,
@@ -237,6 +240,9 @@ async function executeShiftImport(
           config,
           target.sheetId
         );
+        for (const job of parsed.jobs) {
+          job.editSourceSnapshot = captureEditSource(job as unknown as Record<string, unknown>, values[job.sheetRef.currentRow - 1] ?? [], config.adminEditColumns ?? {}, config.readRangeEndColumn, readStartedAtMs);
+        }
         allJobs.push(...parsed.jobs);
         summaries.push(parsed.summary);
         warnings.push(...parsed.summary.warnings);
@@ -265,6 +271,9 @@ async function executeShiftImport(
 
     if (mode === "commit") {
       const staffIndex = await buildStaffNameIndex(companyId);
+      if (allJobs.some(job => job.assignedStaffName && staffIndex.ambiguousNames.has(normalizeName(job.assignedStaffName)))) {
+        throw new HttpsError("failed-precondition", "同じ名前のスタッフが複数いるため本人を特定できません。スタッフ名簿を確認してから再取込してください。");
+      }
       unresolvedStaff = allJobs.filter(
         (job) => job.status === "assigned" &&
           job.assignedStaffName &&
@@ -359,30 +368,37 @@ async function loadConfig(companyId: string): Promise<ShiftImportConfig> {
       parsed.error.flatten()
     );
   }
-  return parsed.data as ShiftImportConfig;
+  const config = parsed.data as ShiftImportConfig;
+  const mapping = await db.collection(`companies/${companyId}/sheetMappings`).doc("shift").get();
+  config.adminEditColumns = selectEditSourceColumns(config.columns as Record<string, unknown>, mapping.data(), config.spreadsheetId);
+  return config;
 }
 
 async function buildStaffNameIndex(companyId: string): Promise<{
   byName: Map<string, string>;
+  ambiguousNames: Set<string>;
 }> {
   const snap = await db.collection("staffProfiles")
     .where("companyId", "==", companyId)
     .get();
   const byName = new Map<string, string>();
-
+  const seenNames = new Set<string>();
+  const ambiguousNames = new Set<string>();
   for (const doc of snap.docs) {
     const data = doc.data();
     const name = normalizeName(String(data.displayName ?? ""));
     if (!name) continue;
-    if (byName.has(name) && byName.get(name) !== doc.id) {
-      console.warn("Duplicate normalized staff name", { companyId, name });
+    // 非稼働の同名者がいても、氏名だけで残りの人を本人と断定しない。
+    if (seenNames.has(name)) {
+      ambiguousNames.add(name);
+      byName.delete(name);
       continue;
     }
-    byName.set(name, doc.id);
+    seenNames.add(name);
+    if (data.active !== false) byName.set(name, doc.id);
   }
-  return { byName };
+  return { byName, ambiguousNames };
 }
-
 async function writeJobsAndLocks(
   jobs: ParsedShiftJob[],
   staffNameIndex: Map<string, string>,
@@ -414,6 +430,9 @@ async function writeJobsAndLocks(
         if (old && old.companyId !== job.companyId) {
           throw new HttpsError("permission-denied", "既存案件の会社が一致しません。取込を停止しました。");
         }
+        let editConfirmed: boolean | null;
+        try { editConfirmed = importedEditConfirmation(old, job); }
+        catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "編集内容の確認が必要です。"); }
         const resolvedStaffId = job.assignedStaffName
           ? staffNameIndex.get(normalizeName(job.assignedStaffName)) ?? null
           : null;
@@ -475,8 +494,9 @@ async function writeJobsAndLocks(
             : (job.cancellationReason || FieldValue.delete()),
           basePay: job.basePay,
           financials: job.financials,
+          ...sourceMoneyInputs(job.editSourceSnapshot),
           expenses: job.expenses,
-          preContact: job.preContact,
+          ...resolveImportedPreContact(old, job, resolvedStaffId, effectiveStatus, effectiveCancelled),
           importWarnings: job.importWarnings,
           sheetRef: job.sheetRef,
           source: {
@@ -495,8 +515,21 @@ async function writeJobsAndLocks(
           updatedAt: now,
         };
 
+        Object.assign(data, assignmentPreparationPatch(old, {
+          ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null,
+        }));
+        if (editConfirmed !== null) {
+          const finalJob = { ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null };
+          data.adminEditSheetWrite = editConfirmed ? { ...old!.adminEditSheetWrite, pending: false, confirmedAtMs: now.toMillis(), context: adminEditContext(finalJob), projection: editProjection(finalJob, Object.keys(old!.adminEditSheetWrite.updates)) } : null;
+          if (editConfirmed) { data.pendingSourceWrite = false; data.pendingSourceFields = []; }
+        }
         if (override?.active === true) {
           data.appOverride = sourceMatchesOverride ? FieldValue.delete() : override;
+        }
+        try {
+          data.revision = importedEditRevision(old, { ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null });
+        } catch (error) {
+          throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "案件の保存版を確認できません。");
         }
         if (!old) data.createdAt = now;
 
@@ -530,6 +563,10 @@ async function writeJobsAndLocks(
       let committedWrites = 0;
       for (const plan of plans) {
         tx.set(plan.ref, plan.data, { merge: true });
+        if (plan.job.editSourceSnapshot) {
+          tx.set(db.collection("adminJobEditSources").doc(plan.job.jobId), { ...plan.job.editSourceSnapshot, observedAt: now, runId });
+          committedWrites++;
+        }
         committedWrites++;
         const oldLock = plan.oldLockId ? locks.get(plan.oldLockId) : undefined;
         if (plan.oldLockId && plan.oldLockId !== plan.newLockId && !claims.has(plan.oldLockId) &&
@@ -556,6 +593,54 @@ async function writeJobsAndLocks(
   return writeCount;
 }
 
+function resolveImportedPreContact(
+  old: Record<string, unknown> | undefined,
+  job: ParsedShiftJob,
+  staffId: string | null,
+  status: string,
+  cancelled: boolean
+): Record<string, unknown> {
+  const ownerChanged = Boolean(old && (
+    (old.assignedStaffId ?? null) !== staffId || old.dateKey !== job.dateKey
+  ));
+  const stored = old?.preContact && typeof old.preContact === "object"
+    ? old.preContact as Record<string, unknown> : null;
+  const wrongProof = Boolean(stored?.source === "app" && (
+    stored.staffId !== staffId || stored.dateKey !== job.dateKey
+  ));
+  const needsReview = old?.preContactNeedsReview === true || ownerChanged || wrongProof;
+  if (!staffId || needsReview) {
+    // G/Hの値だけでは新担当の本人入力を証明できない。再取込でも解除しない。
+    return { preContact: null, preContactNeedsReview: needsReview, preContactSyncPending: false };
+  }
+  const parseValues = (value: Record<string, unknown> | null) => {
+    const rawTemperature = value?.temperature;
+    const temperature = typeof rawTemperature === "number" ? rawTemperature
+      : typeof rawTemperature === "string" && /^\d+(?:\.\d+)?$/.test(rawTemperature.trim()) ? Number(rawTemperature) : NaN;
+    const time = value?.arrivalTime;
+    return Number.isFinite(temperature) && temperature >= 34 && temperature <= 42 &&
+      typeof time === "string" && /^([01]?\d|2[0-3]):[0-5]\d$/.test(time)
+      ? { temperature, arrivalTime: time.padStart(5, "0") } : null;
+  };
+  const source = parseValues(job.preContact);
+  const local = parseValues(stored);
+  if (local && stored?.submittedAt instanceof Timestamp && old?.assignedStaffId === staffId && old.dateKey === job.dateKey) {
+    // 保存済みアプリ値と本人の提出時刻は、古いシート値で巻き戻さない。
+    return {
+      preContact: stored,
+      preContactNeedsReview: false,
+      preContactSyncPending: source?.temperature !== local.temperature || source?.arrivalTime !== local.arrivalTime,
+    };
+  }
+  if (status !== "assigned" || cancelled) {
+    return { preContact: null, preContactNeedsReview: false, preContactSyncPending: false };
+  }
+  return {
+    preContact: source ? { ...source, source: "sheet" } : null,
+    preContactNeedsReview: job.preContact !== null && !source,
+    preContactSyncPending: false,
+  };
+}
 async function acquireSyncLock(companyId: string): Promise<{
   ref: FirebaseFirestore.DocumentReference;
   token: string;

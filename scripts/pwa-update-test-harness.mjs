@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';import{runInNewContext}from'node:vm';import ts from'typescript';
+export async function runPwaUpdateModule(source,previousReloadAt=null,now=Date.now(),storageFailure='',initiallyControlled=true,failPromptOnce=false){
+ const serviceWorkerEvents=new Map(),documentEvents=new Map(),offers=[];let reloads=0,updateChecks=0,waitingMessages=0,registered=0,storageReads=0,storageWrites=0,promptAttempts=0;
+ const serviceWorker={controller:initiallyControlled?{}:null,addEventListener:(name,fn)=>serviceWorkerEvents.set(name,fn)};
+ const registration={installing:null,waiting:initiallyControlled?{postMessage:()=>waitingMessages++}:null,addEventListener:()=>{},update:()=>{updateChecks++;return Promise.resolve();}};let options;
+ const module={exports:{}},scope={exports:module.exports,module,Date:{now:()=>now},Number,Promise,String,document:{visibilityState:'visible',addEventListener:(name,fn)=>documentEvents.set(name,fn)},navigator:{serviceWorker},window:{location:{reload:()=>reloads++}},sessionStorage:{getItem:()=>{storageReads++;if(storageFailure==='read')throw Error('read denied');return previousReloadAt;},setItem:()=>{storageWrites++;if(storageFailure==='write')throw Error('write denied');}},require:name=>{if(name==='virtual:pwa-register')return{registerSW:value=>{registered++;options=value;options.onRegisteredSW('/sw.js',registration);}};assert.equal(name,'./pwa-update-prompt');promptAttempts++;if(failPromptOnce&&promptAttempts===1)throw Error('synthetic lazy module failure');return{showUpdatePrompt:(registration,active)=>offers.push({registration,active})};}};
+ runInNewContext(ts.transpileModule(source.replace('import.meta.env.PROD','true'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,scope);
+ module.exports.registerControlledServiceWorker();module.exports.registerControlledServiceWorker();documentEvents.get('visibilitychange')?.();
+ const flush=async()=>{for(let i=0;i<15;i++)await Promise.resolve();};await flush();const initialOffers=offers.length;
+ serviceWorker.controller={};serviceWorkerEvents.get('controllerchange')?.();serviceWorkerEvents.get('controllerchange')?.();await flush();const firstInstallOffers=offers.length;
+ if(!initiallyControlled){serviceWorker.controller={};serviceWorkerEvents.get('controllerchange')?.();await flush();}
+ options.onNeedReload?.();await flush();if(failPromptOnce){await documentEvents.get('visibilitychange')?.();await flush();}
+ return{reloads,updateChecks,waitingMessages,registered,storageReads,storageWrites,promptAttempts,initialOffers,firstInstallOffers,offers,libraryReloadIntercepted:typeof options.onNeedReload==='function'};
+}

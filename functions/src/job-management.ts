@@ -5,6 +5,8 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { z } from "zod";
 import { db } from "./firebase";
 import { hashText } from "./case-id";
+import { assignmentPreparationPatch } from "./assignment-preparation-core";
+import { prepareAdminEditIntent, EditSourceSnapshot, adminEditValueMatches, currentAdminEditValues } from "./admin-edit-state-core";
 import {
   buildJobCsv,
   clientInputKeys,
@@ -481,8 +483,9 @@ export const adminEditJobInputs = onCall(async (request) => {
   const staffRef = input.fields.assignedStaffId
     ? db.collection("staffProfiles").doc(input.fields.assignedStaffId)
     : null;
-  const mappingSnap = await db.collection("sheetWriteMappings").doc(companyId).get();
-  const mappingEnabled = mappingSnap.exists && mappingSnap.data()?.enabled === true;
+  const mappingRef = db.collection(`companies/${companyId}/sheetMappings`).doc("shift");
+  const sourceRef = db.collection("adminJobEditSources").doc(input.jobId);
+  const queueRef = db.collection("sheetSyncQueue").doc();
 
   const moneyClient = normalizeMoneyRecord(
     input.fields.clientChargeInputs,
@@ -503,7 +506,24 @@ export const adminEditJobInputs = onCall(async (request) => {
       throw new HttpsError("not-found", "案件が見つかりません。");
     }
     const job = jobSnap.data()!;
-    const currentRevision = Number(job.revision ?? 0);
+    const [mappingSnap, sourceSnap] = await Promise.all([tx.get(mappingRef), tx.get(sourceRef)]);
+    const mapping = mappingSnap.data();
+    const mappingEnabled = mapping?.enabled === true && mapping.spreadsheetId === job.sheetRef?.spreadsheetId;
+    if (input.fields.assignedStaffId === null && typeof sourceSnap.data()?.values?.staffName === "string" &&
+        /[（(]\s*キャンセル\s*[）)]/u.test(sourceSnap.data()!.values.staffName)) {
+      throw new HttpsError("failed-precondition", "原本の担当欄にキャンセル表示があります。取消状態を確認してから担当を解除してください。");
+    }
+    const previousIntent = job.adminEditSheetWrite;
+    if (Object.keys(input.fields).some(key => !appOnlyJobFields.includes(key as typeof appOnlyJobFields[number])) && previousIntent?.pending && previousIntent.queueId) {
+      const previousQueue = (await tx.get(db.collection("sheetSyncQueue").doc(previousIntent.queueId))).data();
+      if (!previousQueue || previousQueue.companyId !== companyId || previousQueue.jobId !== input.jobId || previousQueue.errorType === "verification_required") {
+        throw new HttpsError("failed-precondition", "前回の編集結果を確定できません。原本と変更履歴を確認してください。");
+      }
+    }
+    const currentRevision = job.revision ?? 0;
+    if (!Number.isSafeInteger(currentRevision) || currentRevision < 0 || currentRevision >= Number.MAX_SAFE_INTEGER) {
+      throw new HttpsError("failed-precondition", "案件の保存版を確認できません。");
+    }
     if (input.revision !== undefined && input.revision !== currentRevision) {
       throw new HttpsError(
         "aborted",
@@ -515,6 +535,7 @@ export const adminEditJobInputs = onCall(async (request) => {
     const lockDateKey = String(rawLockDateKey);
     let staff: FirebaseFirestore.DocumentData | null = null;
     if (staffRef) {
+      if (job.cancelled === true || job.status === "cancelled") throw new HttpsError("failed-precondition", "キャンセル済み案件には手配できません。");
       if (
         typeof rawLockDateKey !== "string" ||
         !/^\d{4}-\d{2}-\d{2}$/.test(rawLockDateKey) ||
@@ -589,11 +610,11 @@ export const adminEditJobInputs = onCall(async (request) => {
     }
 
     if (input.fields.clientChargeInputs) {
-      update.clientChargeInputs = moneyClient.values;
+      update.clientChargeInputs = { ...job.clientChargeInputs, ...moneyClient.values };
       Object.assign(sheetUpdates, moneyClient.values);
     }
     if (input.fields.staffPaymentInputs) {
-      update.staffPaymentInputs = moneyStaff.values;
+      update.staffPaymentInputs = { ...job.staffPaymentInputs, ...moneyStaff.values };
       Object.assign(sheetUpdates, moneyStaff.values);
     }
 
@@ -608,7 +629,8 @@ export const adminEditJobInputs = onCall(async (request) => {
       }
 
       if (newStaffId && staff) {
-        const displayName = String(staff.displayName ?? "");
+        if (typeof staff.displayName !== "string" || !staff.displayName.trim()) throw new HttpsError("failed-precondition", "スタッフ氏名を確認できません。");
+        const displayName = staff.displayName;
         update.assignedStaffId = newStaffId;
         update.assignedStaffName = displayName;
         update.status = "assigned";
@@ -634,39 +656,51 @@ export const adminEditJobInputs = onCall(async (request) => {
       }
     }
 
-    tx.set(jobRef, update, { merge: true });
-
-    const writeEnabled =
-      mappingEnabled &&
-      Boolean(job.sheetRef?.spreadsheetId);
-
-    if (writeEnabled && Object.keys(sheetUpdates).length) {
-      const queueRef = db.collection("sheetSyncQueue").doc();
-      tx.set(queueRef, {
-        companyId,
-        jobId: input.jobId,
-        operation: "job.admin_edit",
-        updates: sheetUpdates,
-        expected: buildExpected(job, sheetUpdates),
-        status: "pending",
-        attempts: 0,
-        actorUid: session.uid,
-        idempotencyKey: `job.admin_edit:${input.jobId}:${currentRevision + 1}`,
-        createdAt: Timestamp.now(),
-        updatedAt: Timestamp.now(),
-      });
-    } else if (Object.keys(sheetUpdates).length) {
-      update.pendingSourceWrite = true;
-      tx.set(jobRef, {
-        pendingSourceWrite: true,
-        pendingSourceFields: Object.keys(sheetUpdates),
-      }, { merge: true });
+    // 画面で整形された未変更項目を、原本の注意書きや表示形式へ書き戻さない。
+    const displayed = currentAdminEditValues(job, Object.keys(sheetUpdates));
+    for (const key of Object.keys(sheetUpdates)) {
+      if (adminEditValueMatches(key, sheetUpdates[key], displayed[key])) delete sheetUpdates[key];
     }
+    if (Object.hasOwn(sheetUpdates, "clientName")) {
+      const sourceClient = sourceSnap.data()?.values?.clientName;
+      if (typeof sourceClient === "string" && /[（(]\s*キャンセル\s*[）)]/u.test(sourceClient)) {
+        sheetUpdates.clientName = String(sheetUpdates.clientName).replace(/[（(]\s*キャンセル\s*[）)]/gu, "").trim() + "（キャンセル）";
+      }
+    }
+
+    const nextJob = { ...job, ...update };
+    if (input.fields.assignedStaffId !== undefined && !input.fields.assignedStaffId) {
+      nextJob.assignedStaffId = null; nextJob.assignedStaffName = null;
+    }
+    Object.assign(update, assignmentPreparationPatch(job, nextJob));
+    const hasSheetEdits = Object.keys(sheetUpdates).length > 0;
+    const writeEnabled = mappingEnabled && Boolean(job.sheetRef?.spreadsheetId);
+    if (hasSheetEdits) {
+      let intent;
+      try {
+        intent = prepareAdminEditIntent({ jobId: input.jobId, previous: job, next: nextJob, requested: sheetUpdates,
+          source: sourceSnap.exists ? sourceSnap.data() as EditSourceSnapshot : undefined,
+          mapping, enabled: writeEnabled, queueId: queueRef.id, revision: currentRevision + 1, actorUid: session.uid });
+      } catch (error) {
+        throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "編集前の原本確認が必要です。");
+      }
+      update.adminEditSheetWrite = intent;
+      update.pendingSourceWrite = true;
+      update.pendingSourceFields = Object.keys(intent.updates);
+      if (writeEnabled) tx.set(queueRef, {
+        companyId, jobId: input.jobId, operation: "job.admin_edit", dateKey: String(job.dateKey ?? ""),
+        updates: intent.updates, expected: intent.expected, status: "pending", attempts: 0,
+        actorUid: session.uid, actorStaffId: nextJob.assignedStaffId ?? null,
+        idempotencyKey: `job.admin_edit:${input.jobId}:${queueRef.id}`,
+        createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+      });
+    }
+    tx.set(jobRef, update, { merge: true });
 
     return {
       revision: currentRevision + 1,
       sheetWriteQueued: writeEnabled && Object.keys(sheetUpdates).length > 0,
-      pendingSourceWrite: !writeEnabled && Object.keys(sheetUpdates).length > 0,
+      pendingSourceWrite: hasSheetEdits || job.pendingSourceWrite === true,
     };
   });
 
@@ -790,23 +824,6 @@ function copyableJobFields(source: FirebaseFirestore.DocumentData) {
   );
 }
 
-function buildExpected(
-  job: FirebaseFirestore.DocumentData,
-  updates: Record<string, unknown>
-): Record<string, { mode: "any" | "blank" | "exact"; value?: unknown }> {
-  const expected: Record<string, { mode: "any" | "blank" | "exact"; value?: unknown }> = {};
-  for (const key of Object.keys(updates)) {
-    if (key === "staffName") {
-      expected[key] = {
-        mode: job.assignedStaffName ? "exact" : "blank",
-        value: job.assignedStaffName ?? "",
-      };
-    } else {
-      expected[key] = { mode: "any" };
-    }
-  }
-  return expected;
-}
 
 async function writeAudit(
   companyId: string,

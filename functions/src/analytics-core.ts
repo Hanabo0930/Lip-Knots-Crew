@@ -285,6 +285,7 @@ export function buildStaffPerformance(
 ): StaffPerformance {
   const selected = jobs
     .filter((job) => job.assignedStaffId === staffId)
+    .filter((job) => job.status === "assigned" || isCancelled(job))
     .filter((job) => {
       const date = dateKey(job);
       return date >= from && date <= through;

@@ -4,9 +4,12 @@ setGlobalOptions({ region: "asia-northeast1", maxInstances: 20 });
 
 export { bootstrapSession } from "./auth";
 export { applyToJob, adminCancelJob } from "./jobs";
+export { receiveCaseMailApplication, listMyMailApplications } from "./automation-intake";
+export { saveAutomationRegistry, getAutomationRegistry, cancelAutomationRegistryAttempt } from "./automation-registry";
 export { submitPreContact } from "./precontact";
 export { createUploadSession, finalizeStagedUpload } from "./uploads";
 export { processSafeSheetWrite, retrySafeSheetWrites } from "./safe-sheet-writes";
+export { listSheetWriteReviewRecords } from "./sheet-write-review";
 export { processNotificationQueue } from "./notifications";
 
 export { previewShiftImport, syncShiftSheetsReadOnly, syncShiftSheetsScheduled, getShiftSyncStatus } from "./shift-import";
@@ -174,3 +177,11 @@ export {
   getRegressionTemplate,
   saveRegressionRun,
 } from "./gas-patch";
+export { registerCaseMailCampaign, getCaseMailCampaignRegistration, previewCaseMailCampaignRegistration, cancelCaseMailCampaignRegistration } from "./automation-campaigns";
+export { getHeldMailApplication, recheckHeldMailApplication, listHeldMailApplications, cancelHeldMailApplicationReview } from "./automation-intake";
+
+export { getCaseMailImportSnapshot } from "./automation-import-snapshot";
+
+export { receiveAutomationNoticeReceipt, listAutomationNoticeReceipts } from "./automation-notice-receipts";
+
+export { getAutomationNoticeHandoff } from "./automation-notice-handoff";

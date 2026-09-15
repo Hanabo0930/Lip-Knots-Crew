@@ -3,6 +3,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { z } from "zod";
 import { db } from "./firebase";
 import { queueDocumentData } from "./notification-core";
+import { cancellationSheetWriteIdentity } from "./sheet-write-core";
 import {
   buildMonthlyDashboard,
   buildStaffPerformance,
@@ -18,10 +19,15 @@ const MonthSchema = z.object({
   month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
 });
 
+const PerformanceDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
+  const date = new Date(value + "T00:00:00.000Z");
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}, { message: "実在する日付を入力してください。" });
+
 const StaffPerformanceSchema = z.object({
   staffId: z.string().min(1),
-  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  through: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  from: PerformanceDateSchema,
+  through: PerformanceDateSchema,
 });
 
 const CancellationSchema = z.object({
@@ -59,8 +65,10 @@ export const getOperationsDashboard = onCall(async (request) => {
     .where("companyId", "==", companyId)
     .where("dateKey", ">=", from)
     .where("dateKey", "<", through)
-    .limit(15000)
+    .limit(15001)
     .get();
+
+  if (snapshot.size > 15000) throw new HttpsError("resource-exhausted", "月次集計の対象が15,000件を超えています。不完全な集計を防ぐため表示を停止しました。管理者へ確認してください。");
 
   const jobs = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
   return buildMonthlyDashboard(jobs, input.month, tokyoToday());
@@ -84,8 +92,10 @@ export const getStaffPerformance = onCall(async (request) => {
     .where("assignedStaffId", "==", input.staffId)
     .where("dateKey", ">=", input.from)
     .where("dateKey", "<=", input.through)
-    .limit(10000)
+    .limit(10001)
     .get();
+
+  if (snapshot.size > 10000) throw new HttpsError("resource-exhausted", "実績集計の対象が10,000件を超えています。期間を短くして再度お試しください。");
 
   const jobs = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
   return {
@@ -112,6 +122,7 @@ export const adminSetJobCancellation = onCall(async (request) => {
   await assertProductionOperational(companyId);
   const input = CancellationSchema.parse(request.data ?? {});
   const jobRef = db.collection("jobs").doc(input.jobId);
+  const queueRef = db.collection("sheetSyncQueue").doc();
 
   await db.runTransaction(async (tx) => {
     const jobSnap = await tx.get(jobRef);
@@ -140,6 +151,7 @@ export const adminSetJobCancellation = onCall(async (request) => {
       ? `${reasonLabel}：${input.reasonNote.trim()}`
       : reasonLabel;
 
+    if (job.cancelled === true && job.status === "cancelled" && job.cancellationReasonCategory === reasonCategory && job.cancellationReasonNote === input.reasonNote.trim() && job.cancellationFinancialTreatment === treatment && !ownsActiveLock) return;
     tx.set(jobRef, {
       status: "cancelled",
       cancelled: true,
@@ -148,9 +160,11 @@ export const adminSetJobCancellation = onCall(async (request) => {
       cancellationReasonNote: input.reasonNote.trim(),
       cancellationFinancialTreatment: treatment,
       cancellationFinancialTreatmentLabel: cancellationTreatmentLabels[treatment],
+      assignmentSheetWrite: null,
+      cancellationSheetWrite: { queueId: queueRef.id, operation: "job.cancel.v2", identity: cancellationSheetWriteIdentity(job) },
       cancelledAt: now,
       cancelledBy: session.uid,
-      preCancellationStatus: job.status ?? "assigned",
+      preCancellationStatus: job.cancelled === true ? job.preCancellationStatus ?? "assigned" : job.status ?? "assigned",
       appOverride: { type: "cancel", active: true, createdAt: now },
       updatedAt: now,
     }, { merge: true });
@@ -176,7 +190,7 @@ export const adminSetJobCancellation = onCall(async (request) => {
       }));
     }
 
-    tx.set(db.collection("sheetSyncQueue").doc(), {
+    tx.set(queueRef, {
       companyId,
       jobId: input.jobId,
       operation: "job.cancel.v2",
@@ -189,7 +203,7 @@ export const adminSetJobCancellation = onCall(async (request) => {
       expected: {},
       status: "pending",
       attempts: 0,
-      idempotencyKey: `job.cancel.v2:${input.jobId}:${now.toMillis()}`,
+      idempotencyKey: `job.cancel.v2:${input.jobId}:${queueRef.id}`,
       actorUid: session.uid,
       createdAt: now,
       updatedAt: now,
@@ -216,6 +230,7 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
   await assertProductionOperational(companyId);
   const input = RestoreSchema.parse(request.data ?? {});
   const jobRef = db.collection("jobs").doc(input.jobId);
+  const queueRef = db.collection("sheetSyncQueue").doc();
 
   await db.runTransaction(async (tx) => {
     const jobSnap = await tx.get(jobRef);
@@ -237,10 +252,14 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
     const now = Timestamp.now();
     let restoredStatus = "open";
 
+    if (assignedStaffId && !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) throw new HttpsError("failed-precondition", "復帰するシフトの日付を確認できません。");
     if (assignedStaffId && dateKey) {
       const lockId = `${companyId}_${assignedStaffId}_${dateKey}`;
       const lockRef = db.collection("staffDayLocks").doc(lockId);
-      const lockSnap = await tx.get(lockRef);
+      const [lockSnap, staffSnap] = await Promise.all([tx.get(lockRef), tx.get(db.collection("staffProfiles").doc(assignedStaffId))]);
+      if (!staffSnap.exists || staffSnap.data()?.companyId !== companyId) throw new HttpsError("failed-precondition", "復帰する担当者の会社情報を確認できません。");
+      const currentLock = lockSnap.data();
+      if (lockSnap.exists && (currentLock?.companyId !== companyId || currentLock.staffId !== assignedStaffId || currentLock.dateKey !== dateKey)) throw new HttpsError("failed-precondition", "勤務枠の所属情報が一致しません。");
       if (
         lockSnap.exists &&
         lockSnap.data()?.active === true &&
@@ -274,6 +293,8 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
       cancellationFinancialTreatmentLabel: FieldValue.delete(),
       cancelledAt: FieldValue.delete(),
       cancelledBy: FieldValue.delete(),
+      assignmentSheetWrite: null,
+      cancellationSheetWrite: { queueId: queueRef.id, operation: "job.restore", identity: cancellationSheetWriteIdentity(job) },
       restoredAt: now,
       restoredBy: session.uid,
       restoreNote: input.note.trim() || FieldValue.delete(),
@@ -282,7 +303,7 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
       updatedAt: now,
     }, { merge: true });
 
-    tx.set(db.collection("sheetSyncQueue").doc(), {
+    tx.set(queueRef, {
       companyId,
       jobId: input.jobId,
       operation: "job.restore",
@@ -295,7 +316,7 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
       expected: {},
       status: "pending",
       attempts: 0,
-      idempotencyKey: `job.restore:${input.jobId}:${now.toMillis()}`,
+      idempotencyKey: `job.restore:${input.jobId}:${queueRef.id}`,
       actorUid: session.uid,
       createdAt: now,
       updatedAt: now,

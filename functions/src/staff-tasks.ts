@@ -24,18 +24,37 @@ export const getMyTasks = onCall(async (request) => {
     db.collection("resubmissionRequests")
       .where("companyId", "==", companyId)
       .where("staffId", "==", staffId)
-      .where("status", "in", ["open", "submitted"])
+      .where("status", "==", "open")
       .limit(100)
       .get(),
   ]);
 
   const jobs: TaskJob[] = jobsSnap.docs.map((doc) => ({
-    id: doc.id,
     ...(doc.data() as Omit<TaskJob, "id">),
+    id: doc.id,
   }));
   const jobMap = new Map(jobs.map((job) => [job.id, job]));
-  const resubmissions: OpenResubmission[] = requestsSnap.docs
-    .filter((doc) => doc.data().status === "open")
+  const openRequests = requestsSnap.docs.filter(doc => {
+    const data = doc.data();
+    return data.status === "open" && (data.type === "report" || data.type === "sales_floor") &&
+      typeof data.jobId === "string" && data.jobId.length > 0 && !data.jobId.includes("/");
+  });
+  // 一覧の期間・件数上限に含まれない案件も、再提出の対象なら現在の担当を確認する。
+  const missingIds = [...new Set(openRequests.map(doc => String(doc.data().jobId)))].filter(id => !jobMap.has(id));
+  if (missingIds.length) {
+    const snapshots = await db.getAll(...missingIds.map(id => db.collection("jobs").doc(id)));
+    for (const snapshot of snapshots) {
+      const data = snapshot.data();
+      if (snapshot.exists && data?.companyId === companyId && data?.assignedStaffId === staffId) {
+        jobMap.set(snapshot.id, { ...data, id: snapshot.id } as TaskJob);
+      }
+    }
+  }
+  const resubmissions: OpenResubmission[] = openRequests
+    .filter(doc => {
+      const job = jobMap.get(String(doc.data().jobId));
+      return job?.status === "assigned" && job.cancelled !== true;
+    })
     .map((doc) => {
       const data = doc.data();
       const createdAt = data.createdAt as Timestamp | undefined;

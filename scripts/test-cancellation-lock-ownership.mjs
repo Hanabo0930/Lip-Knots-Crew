@@ -12,17 +12,29 @@ const staffId = 'synthetic-staff';
 const dateKey = '2026-09-20';
 const lockPath = `staffDayLocks/${companyId}_${staffId}_${dateKey}`;
 const ownLock = { companyId, staffId, dateKey, jobId: 'old-job', active: true };
+const pureModules = new Map();
+function pureModule(name) {
+  assert.ok(['sheet-write-core', 'netprint-state-core', 'assignment-preparation-core'].includes(name), 'Pure module is allowlisted');
+  if (pureModules.has(name)) return pureModules.get(name);
+  const module = { exports: {} };
+  pureModules.set(name, module.exports);
+  const source = fs.readFileSync(new URL('../functions/src/' + name + '.ts', import.meta.url), 'utf8');
+  const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  runInNewContext(code, { module, exports: module.exports, require: relative => pureModule(relative.replace(/^\.\//, '')) }, { timeout: 3000 });
+  return module.exports;
+}
 let passed = 0;
 for (const moduleName of ['jobs', 'analytics']) {
   const source = fs.readFileSync(new URL(`../functions/src/${moduleName}.ts`, import.meta.url), 'utf8');
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   function setup(lock, jobPatch = {}) {
     const records = new Map([['jobs/old-job', { companyId, assignedStaffId: staffId, dateKey, status: 'assigned', ...jobPatch }]]);
+    records.set(`staffProfiles/${staffId}`,{companyId});
     if (lock) records.set(lockPath, { ...lock });
     let generated = 0;
     const committed = [];
     const reads = [];
-    const ref = (collection, id) => ({ path: `${collection}/${id ?? `generated-${++generated}`}` });
+    const ref = (collection, id) => { const actualId = id ?? ('generated-' + (++generated)); return { id: actualId, path: collection + '/' + actualId }; };
     const db = { collection: (name) => ({ doc: (id) => ref(name, id) }), runTransaction: async (callback) => {
       const pending = [];
       const result = await callback({
@@ -40,17 +52,39 @@ for (const moduleName of ['jobs', 'analytics']) {
     } };
     const mocks = {
       'firebase-functions/v2/https': { onCall: (handler) => handler, HttpsError },
-      'firebase-admin/firestore': { FieldValue: {}, Timestamp: { now: () => ({ toMillis: () => 1234 }) } },
+      'firebase-admin/firestore': { FieldValue: {delete:()=>null}, Timestamp: { now: () => ({ toMillis: () => 1234 }) } },
       zod: { z }, './firebase': { db },
       './utils': { requireAdmin: (request) => { if (request.auth?.token.role !== 'admin') throw new HttpsError('permission-denied', 'admin required'); return request.auth; }, companyFromClaims: (token) => token.companyId },
       './analytics-core': { cancellationReasonLabels: { other: 'その他' }, cancellationTreatmentLabels: { neither: 'なし' } },
       './notification-core': { queueDocumentData: (input) => input },
+      './notification-time': { tokyoParts: () => assert.fail('Cancellation must not evaluate application dates') },
+      './sheet-write-core': pureModule('sheet-write-core'),
+      './assignment-preparation-core': pureModule('assignment-preparation-core'),
+      './automation-intake': { readMailApplicationForAssignment: () => assert.fail('Cancellation must not read mail applications') },
       './system-safety': { assertProductionOperational: async () => {} },
     };
     const exports = {};
     runInNewContext(compiled, { exports, require: (name) => { assert.ok(Object.hasOwn(mocks, name), `Unexpected import ${name}`); return mocks[name]; } }, { timeout: 3000 });
-    const cancel = (role = 'admin') => exports[moduleName === 'jobs' ? 'adminCancelJob' : 'adminSetJobCancellation']({ auth: { uid: 'synthetic-admin', token: { companyId, role } }, data: { jobId: 'old-job', reason: '合成取消', reasonCategory: 'other', financialTreatment: 'neither' } });
-    return { records, committed, reads, cancel };
+    const cancel = (role = 'admin', changes = {}) => exports[moduleName === 'jobs' ? 'adminCancelJob' : 'adminSetJobCancellation']({ auth: { uid: 'synthetic-admin', token: { companyId, role } }, data: { jobId: 'old-job', reason: '合成取消', reasonCategory: 'other', financialTreatment: 'neither', ...changes } });
+    return { records, committed, reads, cancel, restore:()=>exports.adminRestoreCancelledJob({auth:{uid:"synthetic-admin",token:{companyId,role:"admin"}},data:{jobId:"old-job",note:"合成復帰"}}) };
+  }
+  if(moduleName==='analytics'){
+    for(const mode of ['valid','missing-lock','inactive-lock','unassigned','other-job','lock-company','lock-staff','lock-date','staff-missing','staff-company','date-missing']){
+      const test=setup(ownLock,{cancelled:true,status:'cancelled'});
+      if(mode==='missing-lock')test.records.delete(lockPath);
+      if(mode==='inactive-lock'){test.records.get(lockPath).active=false;test.records.get(lockPath).jobId='previous-job';}
+      if(mode==='unassigned')test.records.get('jobs/old-job').assignedStaffId=null;
+      if(mode==='other-job')test.records.get(lockPath).jobId='other';
+      if(mode==='lock-company')test.records.get(lockPath).companyId='other';
+      if(mode==='lock-staff')test.records.get(lockPath).staffId='other';
+      if(mode==='lock-date')test.records.get(lockPath).dateKey='2099-01-01';
+      if(mode==='staff-missing')test.records.delete('staffProfiles/'+staffId);
+      if(mode==='staff-company')test.records.get('staffProfiles/'+staffId).companyId='other';
+      if(mode==='date-missing')test.records.get('jobs/old-job').dateKey='';
+      if(['valid','missing-lock','inactive-lock','unassigned'].includes(mode)){await test.restore();assert.equal(test.records.get('jobs/old-job').status,mode==='unassigned'?'open':'assigned');if(mode!=='unassigned')assert.equal(test.records.get(lockPath).active,true);}
+      else{await assert.rejects(test.restore(),{code:'failed-precondition'},mode);assert.equal(test.committed.length,0,mode);}
+      passed++;
+    }
   }
   for (const [label, lock, release] of [
     ['own active lock', ownLock, true],
@@ -81,6 +115,14 @@ for (const moduleName of ['jobs', 'analytics']) {
     assert.equal(test.records.get(lockPath).active, true, 'recancelling old job must retain newly assigned shift');
     assert.equal(test.records.get(lockPath).jobId, 'new-job');
     assert.equal(test.committed.slice(before).filter(item => item.path === lockPath).length, 0);
+    assert.equal(test.committed.length,before,'Identical cancellation must not repeat writes or notices');
+    passed++;
+  }
+  {
+    const test=setup(ownLock);await test.cancel();const old=test.records.get('jobs/old-job');
+    await test.cancel('admin',moduleName==='jobs'?{reason:'訂正した取消理由'}:{reasonNote:'訂正した取消理由'});
+    assert.equal(test.committed.filter(item=>item.path.startsWith('notificationQueue/')).length,2);
+    if(moduleName==='analytics')assert.equal(test.records.get('jobs/old-job').preCancellationStatus,old.preCancellationStatus);
     passed++;
   }
   for (const [patch, role] of [[{ companyId: 'other' }, 'admin'], [{}, 'staff']]) {
@@ -99,3 +141,5 @@ for (const moduleName of ['jobs', 'analytics']) {
   }
 }
 console.log(`Cancellation lock ownership: ${passed} cases passed (SDK mocks; no external writes).`);
+
+await import('./test-analytics-read-limits.mjs');

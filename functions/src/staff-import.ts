@@ -10,7 +10,7 @@ import {
   readNamedSheet,
   selectNamedSheets,
 } from "./sheet-reader";
-import { mergeStaffRows, parseStaffSheet } from "./staff-parser";
+import { columnLetterToIndex, mergeStaffRows, parseStaffSheet } from "./staff-parser";
 import {
   MergedStaffProfile,
   StaffImportConfig,
@@ -196,6 +196,16 @@ async function executeStaffImport(
       config.maxSheetsPerRun
     );
 
+    const expectedSheets = new Set(config.activeSheets.filter(name => !config.excludedSheets.includes(name)));
+    const completeSelection = expectedSheets.size > 0 && targets.length === expectedSheets.size
+      && new Set(targets.map(target => target.title)).size === expectedSheets.size
+      && targets.every(target => expectedSheets.has(target.title));
+    const completeRows = targets.every(target => Number.isSafeInteger(target.rowCount)
+      && target.rowCount > 0 && target.rowCount <= config.maxRowsPerSheet);
+    if (mode === "commit" && (!completeSelection || !completeRows)) {
+      throw new HttpsError("failed-precondition",
+        "対象のスタッフタブを全件読み取れることを確認できません。タブの不足・非表示・部分指定・読取上限を確認して同期を再実行してください。");
+    }
     if (!targets.length) {
       throw new HttpsError(
         "not-found",
@@ -206,10 +216,16 @@ async function executeStaffImport(
     const allRows = [];
     const summaries: StaffSheetSummary[] = [];
     const warnings: string[] = [];
+    if (!completeSelection) warnings.push("一部の対象タブだけを表示しています。この範囲では名簿同期できません。");
+    if (!completeRows) warnings.push("読取上限または行数不明のタブがあります。全行を確認できるまで名簿同期できません。");
     let failedSheets = 0;
 
     for (const target of targets) {
       try {
+        if ((config.headerRow != null && config.headerRow > target.rowCount)
+          || (config.dataStartRow != null && config.dataStartRow > target.rowCount + 1)) {
+          throw new Error("ヘッダー行またはデータ開始行がシートの行数を超えています。");
+        }
         const values = await readNamedSheet(
           sheets,
           config.spreadsheetId,
@@ -257,7 +273,7 @@ async function executeStaffImport(
     };
 
     if (mode === "commit") {
-      if (failedSheets > 0 && config.markMissingInactive) {
+      if (failedSheets > 0) {
         throw new HttpsError(
           "failed-precondition",
           "一部タブの読取に失敗したため、誤停止防止のため同期を中止しました。"
@@ -359,9 +375,18 @@ async function writeStaffDirectory(
     profile.emails.map((email) => emailHash(email))
   );
   const emailIndexes = await fetchDocuments("emailIndex", incomingEmailHashes);
+  const ownedIndexSnap = await db.collection("emailIndex").where("companyId", "==", companyId).get();
+  const activeIndexesByStaff = new Map<string, FirebaseFirestore.QueryDocumentSnapshot[]>();
+  for (const index of ownedIndexSnap.docs) {
+    const data = index.data();
+    if (data.active !== true || typeof data.staffId !== "string") continue;
+    const indexes = activeIndexesByStaff.get(data.staffId) ?? [];
+    indexes.push(index);
+    activeIndexesByStaff.set(data.staffId, indexes);
+  }
   const writer = new BatchWriter();
   const now = Timestamp.now();
-  const revocations: Array<{ uid: string; reason: string }> = [];
+  const revocations: Array<{ uid: string; staffId: string; emailHash: string; reason: string }> = [];
   let emailConflicts = 0;
   let activated = 0;
   let inactivated = 0;
@@ -369,33 +394,35 @@ async function writeStaffDirectory(
 
   for (const profile of profiles) {
     const old = existing.get(profile.staffId);
-    const oldEmails = new Set(
-      Array.isArray(old?.emails)
-        ? old.emails.map((value: unknown) => String(value).toLowerCase())
-        : []
-    );
-
     const acceptedEmails: string[] = [];
     const conflictEmails: string[] = [];
 
     for (const email of profile.emails) {
       const hash = emailHash(email);
       const index = emailIndexes.get(hash);
-      const indexedStaffId = typeof index?.staffId === "string"
-        ? index.staffId
-        : null;
-
-      if (indexedStaffId && indexedStaffId !== profile.staffId) {
+      if (index && (index.companyId !== companyId || index.staffId !== profile.staffId)) {
         emailConflicts++;
         conflictEmails.push(email);
         continue;
       }
       acceptedEmails.push(email);
+      emailIndexes.set(hash, { companyId, staffId: profile.staffId });
     }
 
     const isActive = profile.active;
+    const acceptedHashes = new Set(acceptedEmails.map(emailHash));
+    if (!isActive || config.revokeRemovedEmailSessions) {
+      const identities = await getProfileAuthIdentities(companyId, profile.staffId);
+      for (const identity of identities) {
+        if (!isActive || !acceptedHashes.has(identity.emailHash)) {
+          revocations.push({ ...identity, staffId: profile.staffId,
+            reason: isActive ? "staff.email.removed" : "staff.inactivated" });
+        }
+      }
+    }
     const wasActive = old?.active === true;
     if (isActive && !wasActive) activated++;
+    if (!isActive && wasActive) inactivated++;
 
     const profileRef = db.collection("staffProfiles").doc(profile.staffId);
     const profileData: FirebaseFirestore.DocumentData = {
@@ -451,93 +478,78 @@ async function writeStaffDirectory(
         active: isActive,
         source: "staff.import",
         updatedAt: now,
-      }, { merge: true });
+      }, { merge: true }, "claim");
       emailIndexesWritten++;
     }
 
-    const removedEmails = [...oldEmails].filter(
-      (email) => !acceptedEmails.includes(email)
-    );
-    for (const email of removedEmails) {
-      const hash = emailHash(email);
-      await writer.set(db.collection("emailIndex").doc(hash), {
-        companyId,
-        staffId: profile.staffId,
-        email,
-        active: false,
-        removedAt: now,
-        updatedAt: now,
-      }, { merge: true });
-
-      if (config.revokeRemovedEmailSessions) {
-        const identities = await getProfileAuthIdentities(profile.staffId);
-        for (const identity of identities) {
-          if (identity.emailHash === hash) {
-            revocations.push({
-              uid: identity.uid,
-              reason: "staff.email.removed",
-            });
-          }
-        }
-      }
+    for (const index of activeIndexesByStaff.get(profile.staffId) ?? []) {
+      if (acceptedHashes.has(index.id)) continue;
+      await writer.set(index.ref, {
+        companyId, staffId: profile.staffId, active: false, removedAt: now, updatedAt: now,
+      }, { merge: true }, "release");
     }
   }
 
   if (config.markMissingInactive) {
     for (const [staffId, old] of existing.entries()) {
-      if (incomingIds.has(staffId) || old.active !== true) continue;
-      inactivated++;
-
-      await writer.set(db.collection("staffProfiles").doc(staffId), {
-        active: false,
-        sourceMissing: true,
-        inactivatedAt: now,
-        inactivationReason: "not_found_in_active_staff_sheets",
-        updatedAt: now,
-      }, { merge: true });
-
-      const oldEmails = Array.isArray(old.emails)
-        ? old.emails.map((value: unknown) => String(value).toLowerCase())
-        : [];
-      for (const email of oldEmails) {
-        await writer.set(db.collection("emailIndex").doc(emailHash(email)), {
-          companyId,
-          staffId,
-          email,
-          active: false,
-          updatedAt: now,
+      if (incomingIds.has(staffId)) continue;
+      const identities = await getProfileAuthIdentities(companyId, staffId);
+      for (const identity of identities) {
+        revocations.push({ ...identity, staffId, reason: "staff.inactivated" });
+      }
+      if (old.active === true) {
+        inactivated++;
+        await writer.set(db.collection("staffProfiles").doc(staffId), {
+          active: false, sourceMissing: true, inactivatedAt: now,
+          inactivationReason: "not_found_in_active_staff_sheets", updatedAt: now,
         }, { merge: true });
       }
-
-      const authUids = Array.isArray(old.authUids)
-        ? old.authUids.map((value: unknown) => String(value))
-        : [];
-      for (const uid of authUids) {
-        revocations.push({ uid, reason: "staff.inactivated" });
+      for (const index of activeIndexesByStaff.get(staffId) ?? []) {
+        await writer.set(index.ref, {
+          companyId, staffId, active: false, updatedAt: now,
+        }, { merge: true }, "release");
       }
     }
   }
-
   await writer.flush();
 
-  let sessionsRevoked = 0;
-  const uniqueRevocations = new Map(
-    revocations.map((item) => [item.uid, item])
-  );
+  let sessionsRevoked = 0, sessionsFailed = 0;
+  const uniqueRevocations = new Map(revocations.map(item => [item.uid, item]));
   for (const item of uniqueRevocations.values()) {
     try {
+      const identityRef = db.collection("authIdentities").doc(item.uid);
+      const profileRef = db.collection("staffProfiles").doc(item.staffId);
+      const matches = (identity: FirebaseFirestore.DocumentData | undefined,
+        profile: FirebaseFirestore.DocumentData | undefined) => identity?.companyId === companyId
+        && identity.staffId === item.staffId && identity.emailHash === item.emailHash
+        && profile?.companyId === companyId;
+      const required = (profile: FirebaseFirestore.DocumentData) => item.reason === "staff.inactivated"
+        ? profile.active !== true
+        : !Array.isArray(profile.emails) || !profile.emails.some((email: unknown) =>
+          typeof email === "string" && emailHash(email) === item.emailHash);
+      const [identity, profile] = await Promise.all([identityRef.get(), profileRef.get()]);
+      if (!matches(identity.data(), profile.data())) throw new Error("Staff revocation identity changed");
+      if (!required(profile.data()!)) continue;
       await auth.revokeRefreshTokens(item.uid);
-      await db.collection("authIdentities").doc(item.uid).set({
-        active: false,
-        revokedAt: FieldValue.serverTimestamp(),
-        revokeReason: item.reason,
-      }, { merge: true });
+      await db.runTransaction(async tx => {
+        const [latestIdentity, latestProfile] = await Promise.all([tx.get(identityRef), tx.get(profileRef)]);
+        if (!matches(latestIdentity.data(), latestProfile.data()) || !required(latestProfile.data()!)) {
+          throw new Error("Staff revocation identity changed");
+        }
+        tx.update(identityRef, {
+          active: false, revokedAt: FieldValue.serverTimestamp(), revokeReason: item.reason,
+        });
+      });
       sessionsRevoked++;
-    } catch (error) {
-      console.error("Failed to revoke staff session", item, error);
+    } catch {
+      sessionsFailed++;
     }
   }
-
+  if (sessionsFailed) {
+    throw new HttpsError("unavailable",
+      "名簿の保存は完了しましたが、認証解除が一部完了していません。スタッフ名簿同期を再実行してください。",
+      { operation: "staff-import-revoke", directoryWritten: true, sessionsRevoked, sessionsFailed, retryable: true });
+  }
   return {
     emailConflicts,
     activated,
@@ -548,25 +560,25 @@ async function writeStaffDirectory(
   };
 }
 
-async function getProfileAuthIdentities(staffId: string): Promise<Array<{
+async function getProfileAuthIdentities(companyId: string, staffId: string): Promise<Array<{
   uid: string;
   emailHash: string;
 }>> {
   const profile = await db.collection("staffProfiles").doc(staffId).get();
-  const authUids = Array.isArray(profile.data()?.authUids)
-    ? profile.data()?.authUids.map((value: unknown) => String(value))
-    : [];
+  if (!profile.exists) return [];
+  const invalid = () => new HttpsError("failed-precondition", "スタッフの認証登録情報を確認できません。登録情報を確認して同期を再実行してください。");
+  if (profile.data()?.companyId !== companyId) throw invalid();
+  const authUids = profile.data()?.authUids ?? [];
+  if (!Array.isArray(authUids) || authUids.some(uid => typeof uid !== "string" || !uid.trim()
+    || /[\/\\\u0000-\u001f\u007f]/.test(uid))) throw invalid();
   if (!authUids.length) return [];
-
-  const snaps = await db.getAll(
-    ...authUids.map((uid: string) => db.collection("authIdentities").doc(uid))
-  );
-  return snaps.flatMap((snap) => {
-    if (!snap.exists) return [];
-    return [{
-      uid: snap.id,
-      emailHash: String(snap.data()?.emailHash ?? ""),
-    }];
+  const snaps = await db.getAll(...[...new Set(authUids as string[])].map(uid => db.collection("authIdentities").doc(uid)));
+  return snaps.flatMap(snap => {
+    const identity = snap.data();
+    if (!identity || identity.companyId !== companyId || identity.staffId !== staffId
+      || typeof identity.emailHash !== "string" || !identity.emailHash) throw invalid();
+    if (identity.active === false && identity.revokedAt instanceof Timestamp) return [];
+    return [{ uid: snap.id, emailHash: identity.emailHash }];
   });
 }
 
@@ -589,29 +601,54 @@ async function fetchDocuments(
 }
 
 class BatchWriter {
-  private batch = db.batch();
-  private pending = 0;
+  private pending: Array<{
+    ref: FirebaseFirestore.DocumentReference;
+    data: FirebaseFirestore.DocumentData;
+    options: FirebaseFirestore.SetOptions;
+    emailAction?: "claim" | "release";
+  }> = [];
   public writeCount = 0;
 
   async set(
     ref: FirebaseFirestore.DocumentReference,
     data: FirebaseFirestore.DocumentData,
-    options: FirebaseFirestore.SetOptions
+    options: FirebaseFirestore.SetOptions,
+    emailAction?: "claim" | "release"
   ): Promise<void> {
-    this.batch.set(ref, data, options);
-    this.pending++;
-    this.writeCount++;
-    if (this.pending >= 350) await this.flush();
+    this.pending.push({ ref, data, options, ...(emailAction ? { emailAction } : {}) });
+    if (this.pending.length >= 350) await this.flush();
   }
 
   async flush(): Promise<void> {
-    if (this.pending === 0) return;
-    await this.batch.commit();
-    this.batch = db.batch();
-    this.pending = 0;
+    if (!this.pending.length) return;
+    const pending = this.pending;
+    const committed = await db.runTransaction(async tx => {
+      const refs = new Map(pending.filter(item => item.emailAction).map(item => [item.ref.path, item.ref]));
+      const snapshots = await Promise.all([...refs.values()].map(ref => tx.get(ref)));
+      const owners = new Map(snapshots.map(snap => [snap.ref.path, snap.data()]));
+      let count = 0;
+      for (const item of pending) {
+        const current = owners.get(item.ref.path);
+        const owned = current?.companyId === item.data.companyId && current?.staffId === item.data.staffId;
+        if (item.emailAction === "release") {
+          if (!current || !owned) continue;
+          tx.update(item.ref, item.data);
+          owners.set(item.ref.path, { ...current, ...item.data });
+        } else {
+          if (item.emailAction === "claim" && current && !owned) {
+            throw new HttpsError("aborted", "メールの登録先が変更されています。スタッフ名簿同期を再実行してください。");
+          }
+          tx.set(item.ref, item.data, item.options);
+          if (item.emailAction) owners.set(item.ref.path, { ...current, ...item.data });
+        }
+        count++;
+      }
+      return count;
+    });
+    this.writeCount += committed;
+    this.pending = [];
   }
 }
-
 async function loadConfig(companyId: string): Promise<StaffImportConfig> {
   const snap = await db.collection("staffImportConfigs").doc(companyId).get();
   if (!snap.exists) {
@@ -621,13 +658,30 @@ async function loadConfig(companyId: string): Promise<StaffImportConfig> {
     );
   }
 
-  const parsed = ConfigSchema.safeParse({ companyId, ...snap.data() });
+  const stored = snap.data()!;
+  if (stored.companyId !== undefined && stored.companyId !== companyId) {
+    throw new HttpsError("failed-precondition", "スタッフ名簿同期設定の会社が一致しません。");
+  }
+  const parsed = ConfigSchema.safeParse({ ...stored, companyId });
   if (!parsed.success) {
     throw new HttpsError(
       "failed-precondition",
       "スタッフ名簿同期設定が不正です。",
       parsed.error.flatten()
     );
+  }
+  try {
+    const endIndex = columnLetterToIndex(parsed.data.readRangeEndColumn);
+    if (!Number.isSafeInteger(endIndex) || endIndex < 0) throw new Error("invalid end");
+    for (const [key, column] of Object.entries(parsed.data.columns)) {
+      if (!column?.trim() && key !== "displayName" && key !== "email") continue;
+      const index = columnLetterToIndex(column ?? "");
+      if (!Number.isSafeInteger(index) || index < 0 || index > endIndex) throw new Error("invalid column");
+    }
+    if (columnLetterToIndex(parsed.data.columns.displayName)
+      === columnLetterToIndex(parsed.data.columns.email)) throw new Error("duplicate required column");
+  } catch {
+    throw new HttpsError("failed-precondition", "スタッフ名簿の列設定が読取範囲と一致しません。");
   }
   return parsed.data as StaffImportConfig;
 }

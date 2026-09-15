@@ -10,6 +10,7 @@ import {
 } from "./utils";
 import { enqueueNotification } from "./notification-core";
 import { assertProductionOperational } from "./system-safety";
+import { assertDeviceAuthentication } from "./device-authentication";
 import {
   normalizePushFailureReason,
   type PushFailureReason,
@@ -50,30 +51,44 @@ export const registerPushToken = onCall(async (request) => {
   }
 
   const staffId = role === "staff" ? staffFromClaims(session.token) : null;
-  if (staffId) {
-    const profile = await db.collection("staffProfiles").doc(staffId).get();
-    if (!profile.exists || profile.data()?.active !== true) {
-      throw new HttpsError("permission-denied", "利用停止中です。");
-    }
+  if (staffId && (!input.deviceSessionId.trim() || /[\/\\\u0000-\u001f\u007f]/.test(input.deviceSessionId))) {
+    throw new HttpsError("permission-denied", "端末登録を確認できません。再読み込みしてください。");
   }
-
   const tokenHash = hashToken(input.token);
-  await db.collection("pushTokens").doc(tokenHash).set({
-    companyId,
-    uid: session.uid,
-    role,
-    staffId,
-    token: input.token,
-    tokenHash,
-    deviceSessionId: input.deviceSessionId,
-    permission: input.permission,
-    userAgent: input.userAgent,
-    platform: input.platform,
-    active: input.permission === "granted",
-    lastSeenAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-    createdAt: FieldValue.serverTimestamp(),
-  }, { merge: true });
+  const ref = db.collection("pushTokens").doc(tokenHash);
+  await db.runTransaction(async (tx) => {
+    if (staffId) {
+      const [profile, device] = await Promise.all([
+        tx.get(db.collection("staffProfiles").doc(staffId)),
+        tx.get(db.collection("deviceSessions").doc(input.deviceSessionId)),
+      ]);
+      if (!profile.exists || profile.data()?.active !== true || profile.data()?.companyId !== companyId) {
+        throw new HttpsError("permission-denied", "利用停止中です。");
+      }
+      const registered = device.data();
+      if (!device.exists || registered?.active !== true || registered.companyId !== companyId
+        || registered.staffId !== staffId || registered.uid !== session.uid) {
+        throw new HttpsError("permission-denied", "端末登録を確認できません。再ログインしてください。");
+      }
+      assertDeviceAuthentication(registered, session.token.auth_time);
+    }
+    tx.set(ref, {
+      companyId,
+      uid: session.uid,
+      role,
+      staffId,
+      token: input.token,
+      tokenHash,
+      deviceSessionId: input.deviceSessionId,
+      permission: input.permission,
+      userAgent: input.userAgent,
+      platform: input.platform,
+      active: input.permission === "granted",
+      lastSeenAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+      createdAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+  });
 
   return { registered: true, tokenId: tokenHash };
 });
@@ -83,27 +98,65 @@ export const unregisterPushToken = onCall(async (request) => {
   const input = RemoveSchema.parse(request.data ?? {});
   const tokenHash = hashToken(input.token);
   const ref = db.collection("pushTokens").doc(tokenHash);
-  const snap = await ref.get();
-  if (!snap.exists) return { removed: true };
-  if (snap.data()?.uid !== session.uid) {
+  const companyId = companyFromClaims(session.token);
+  const role = session.token.role;
+  if (role !== "staff" && role !== "admin") {
     throw new HttpsError("permission-denied", "通知情報が一致しません。");
   }
-  await ref.set({
-    active: false,
-    removedAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  }, { merge: true });
-  return { removed: true };
+  const staffId = role === "staff" ? staffFromClaims(session.token) : null;
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return { removed: true };
+    if (snap.data()?.uid !== session.uid || snap.data()?.companyId !== companyId
+      || snap.data()?.role !== role || (role === "staff" && snap.data()?.staffId !== staffId)) {
+      throw new HttpsError("permission-denied", "通知情報が一致しません。");
+    }
+    if (snap.data()?.active === false) return { removed: true };
+    tx.update(ref, {
+      active: false,
+      removedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return { removed: true };
+  });
 });
 
 export const getPushStatus = onCall(async (request) => {
   const session = requireAuth(request);
   const input = PushStatusSchema.parse(request.data ?? {});
-  const snap = await db.collection("pushTokens")
+  const companyId = companyFromClaims(session.token);
+  const role = session.token.role;
+  if (role !== "staff" && role !== "admin") {
+    throw new HttpsError("permission-denied", "通知状態を確認できません。");
+  }
+  const staffId = role === "staff" ? staffFromClaims(session.token) : null;
+  if (staffId) {
+    const profile = await db.collection("staffProfiles").doc(staffId).get();
+    if (!profile.exists || profile.data()?.companyId !== companyId || profile.data()?.active !== true) {
+      throw new HttpsError("permission-denied", "通知状態を確認できません。");
+    }
+  }
+  const base = db.collection("pushTokens")
+    .where("companyId", "==", companyId)
     .where("uid", "==", session.uid)
-    .where("active", "==", true)
-    .limit(20)
-    .get();
+    .where("active", "==", true);
+  const visible: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+  let cursor: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+  // 既存の会社/UID/active索引を使い、旧役割の登録で20件が埋まっても先へ進みます。
+  while (visible.length < 20) {
+    let query = base.limit(20);
+    if (cursor) query = query.startAfter(cursor);
+    const page = await query.get();
+    for (const doc of page.docs) {
+      const current = doc.data();
+      if (current.role === role && (role !== "staff" || current.staffId === staffId)) {
+        visible.push(doc);
+        if (visible.length === 20) break;
+      }
+    }
+    if (page.size < 20) break;
+    cursor = page.docs[page.docs.length - 1];
+  }
   const response: {
     enabled: boolean;
     tokens: { id: string; deviceSessionId: string; platform: string }[];
@@ -117,8 +170,8 @@ export const getPushStatus = onCall(async (request) => {
       failureReason: PushFailureReason;
     };
   } = {
-    enabled: !snap.empty,
-    tokens: snap.docs.map((doc) => ({
+    enabled: visible.length > 0,
+    tokens: visible.map((doc) => ({
       id: doc.id,
       deviceSessionId: doc.data().deviceSessionId ?? "",
       platform: doc.data().platform ?? "",
@@ -133,9 +186,11 @@ export const getPushStatus = onCall(async (request) => {
   }
   const data = queue.data() ?? {};
   if (
-    data.companyId !== companyFromClaims(session.token) ||
+    data.companyId !== companyId ||
     data.data?.requestedByUid !== session.uid ||
-    (data.category !== "push_test" && data.category !== "push_test_admin")
+    (role === "staff"
+      ? data.category !== "push_test" || data.targetStaffId !== staffId
+      : data.category !== "push_test_admin" || data.targetRole !== "admin")
   ) {
     throw new HttpsError("permission-denied", "通知テストを確認できません。");
   }

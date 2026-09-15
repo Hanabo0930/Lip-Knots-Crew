@@ -1,3 +1,4 @@
+import {getAdminFirestore} from "./firestore-client";
 import { collection, doc, getDoc, getDocs, limit, orderBy, query, startAfter, type Firestore, type QueryDocumentSnapshot } from "firebase/firestore";
 import { where } from "firebase/firestore";
 export const ADMIN_DIRECTORY_PAGE_SIZE=100;
@@ -15,4 +16,8 @@ export async function readAdminJobPage(database:Firestore,companyId:string,ancho
     return {...serialized,id:item.id,workDate};
   });
   return {jobs,cursor:page.at(-1)??cursor,hasMore:snapshot.docs.length>ADMIN_DIRECTORY_PAGE_SIZE};
+}
+
+export function readCurrentAdminJobPage(companyId:string,anchorId:string,cursor:QueryDocumentSnapshot|null){
+  return readAdminJobPage(getAdminFirestore(),companyId,anchorId,cursor);
 }

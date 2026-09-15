@@ -13,6 +13,9 @@ export type TaskJob = {
   dateKey: string;
   storeName: string;
   cancelled?: boolean;
+  sourceMissing?: boolean;
+  applicationUnconfirmed?: boolean;
+  assignmentUnresolved?: boolean;
   status?: string;
   preContact?: { temperature?: unknown; arrivalTime?: unknown } | null;
   netPrint?: { items?: Array<{ id?: string; number?: string; printed?: boolean }> };
@@ -62,13 +65,16 @@ export function deriveStaffTasks(input: {
       job.preContact?.temperature !== "" &&
       job.preContact?.arrivalTime
     );
+    const preContactWaitTitle = job.sourceMissing === true ? "シフトの取込状況を確認してください"
+      : job.applicationUnconfirmed === true ? "シフト表の担当確認待ちです"
+      : job.assignmentUnresolved === true ? "担当者の照合待ちです" : null;
     if (!preComplete && input.nowMs >= preAvailable) {
       tasks.push(makeTask({
         id: `${job.id}_precontact`, jobId: job.id, kind: "precontact",
-        title: "事前連絡を送ってください",
-        body: `${job.dateKey} ${job.storeName} / 体温と到着予定時刻`,
+        title: preContactWaitTitle ?? "事前連絡を送ってください",
+        body: `${job.dateKey} ${job.storeName} / ${preContactWaitTitle ? "確認後に事前連絡を送信できます。シフトで状態を確認してください。" : "体温と到着予定時刻"}`,
         actionRoute: `/shifts/${job.id}/precontact`,
-        dueAtMs: preDue, availableAtMs: preAvailable, nowMs: input.nowMs,
+        dueAtMs: preContactWaitTitle ? null : preDue, availableAtMs: preAvailable, nowMs: input.nowMs,
       }));
     }
 

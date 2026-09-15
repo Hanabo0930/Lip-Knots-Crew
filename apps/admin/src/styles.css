@@ -1,8 +1,13 @@
+@import "./notice-handoff.css";
+@import "./notice-reports.css";
+@import "./campaign-registration.css";
+@import "./held-mail-review.css";
+@import "./automation-registry.css";
 :root { font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic UI",sans-serif; color:#3f332c; background:#faf8f5; }
 * { box-sizing:border-box; }
 body { margin:0; }
 button,input { font:inherit; }
-button { border:0; border-radius:12px; padding:11px 14px; background:#c97f98; color:white; font-weight:800; cursor:pointer; }
+button { border:0; border-radius:12px; padding:11px 14px; background:#9d4c68; color:white; font-weight:800; cursor:pointer; }
 button.ghost { background:white; color:#5f4b44; border:1px solid #ddd; }
 button.danger { background:#b5473e; }
 button:disabled { opacity:.4; }
@@ -1077,3 +1082,47 @@ button.compact { padding:7px 9px; font-size:11px; white-space:nowrap; }
 .admin-preview-error { display:grid;place-items:center;min-height:140px;background:#f5f3f2;padding:12px;border-radius:10px; }
 .file-card button { min-height:48px;margin-top:8px; }
 section[aria-labelledby='submission-materials-heading']:focus { outline:3px solid #356f9e;outline-offset:3px; }
+
+/* 横スクロール中も操作対象の名前を残す。 */
+.staff-directory .table-wrap:focus-visible { outline:3px solid #c97f98; outline-offset:3px; }
+.staff-directory .table-wrap th:first-child,.staff-directory .table-wrap td:first-child { position:sticky; left:0; z-index:1; width:140px; min-width:140px; max-width:140px; background:#fff; box-shadow:2px 0 0 #e5ded8; overflow-wrap:anywhere; }
+.staff-directory .table-wrap tr.cancelled td:first-child { background:#eee; }
+.staff-directory .toolbar label { min-width:0; }
+.staff-directory .toolbar input { width:100%; min-width:0; max-width:100%; }
+
+.staff-directory .table-wrap { scroll-padding-left:140px; }
+@media(max-width:600px) { .staff-directory .row-actions { flex-direction:column; align-items:stretch; } }
+
+.expense-panel h2 { scroll-margin-top:16px; }
+
+.expense-job-search { display:block; margin-top:12px; font-size:13px; font-weight:700; }
+.expense-job-search input { display:block; width:100%; margin-top:6px; padding:11px; border:1px solid #ddd; border-radius:12px; }
+
+.comparison-head > div,.comparison-grid figure { min-width:0; overflow-wrap:anywhere; }
+.comparison-head p { white-space:pre-wrap; }
+
+.image-viewer { width:min(1100px,94vw); max-width:94vw; max-height:90vh; padding:16px; border:1px solid #eadfe2; border-radius:16px; background:#fffdfb; color:#493b35; }
+.image-viewer::backdrop { background:#241821b8; }
+.image-viewer-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.image-viewer .image-viewer-toolbar strong { white-space:normal; overflow-wrap:anywhere; min-width:0; }
+.image-viewer-toolbar button { flex-shrink:0; }
+.image-viewer-zoom { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:12px 0; }
+.image-viewer-zoom input { width:180px; max-width:100%; }
+.image-viewer-scroll { overflow:auto; max-height:65vh; background:#f5f3f2; }
+.image-viewer .image-viewer-scroll img { display:block; max-width:none; max-height:none; aspect-ratio:auto; border-radius:0; }
+@media(max-width:480px) { .image-viewer-toolbar { align-items:stretch; flex-direction:column; } }
+.expense-sync-note { border-left:3px solid #bf9235; background:#fff9eb; padding:10px 12px; color:#665024; border-radius:4px; }
+
+@media(max-width:650px) { button.compact { min-height:44px; min-width:44px; font-size:13px; } }
+
+.pdf-file-preview { display:grid; gap:10px; justify-items:stretch; padding:14px; min-width:0; background:#f3eff1; color:#654652; border-radius:12px; text-align:center; overflow-wrap:anywhere; }
+.pdf-open-link { display:flex; align-items:center; justify-content:center; min-height:48px; padding:12px; border:1px solid #ad7188; border-radius:12px; background:#fff; color:#704054; font-weight:800; text-decoration:underline; }
+.pdf-file-preview small { white-space:normal; overflow-wrap:anywhere; line-height:1.5; }
+
+.pdf-file-preview button[aria-disabled="true"] { opacity:.45; cursor:wait; }
+
+.sheet-review-summary{min-width:0;flex:1}.sheet-review-summary p{line-height:1.65;overflow-wrap:anywhere}.sheet-review-state{font-weight:600;color:#865638}.sheet-review-help{color:#78666c;font-size:.9rem;line-height:1.65}.sheet-review-note{white-space:pre-wrap;overflow-wrap:anywhere}.sheet-review-card details{border-top:1px solid #eadfe4;margin-top:.8rem}.sheet-review-card summary{cursor:pointer;padding:.65rem 0;min-height:44px;box-sizing:border-box}.sheet-review-card summary:focus-visible{outline:2px solid #ac4d70;outline-offset:3px}.sheet-review-card dl{display:grid;grid-template-columns:minmax(6rem,auto) minmax(0,1fr);gap:.5rem}.sheet-review-card dd{margin:0;overflow-wrap:anywhere}.sheet-review-card dt{color:#78666c}@media(max-width:650px){.sheet-review-card dl{grid-template-columns:1fr}.sheet-review-card dd{margin-bottom:.45rem}}
+
+.sheet-review-entry{margin-top:1rem}.sheet-record-review{margin-top:1rem;padding-top:1.2rem;border-top:1px solid #eadfe4;min-width:0}.sheet-record-review h3,.sheet-record-review h4{overflow-wrap:anywhere}.sheet-record-review .sync-head{align-items:flex-start}.sheet-record-review .sheet-review-card{padding:1rem;border:1px solid #eadfe4;border-radius:14px;background:#fff}.sheet-record-review .sheet-review-summary ul{padding-left:1.3rem;line-height:1.8}.sheet-record-review button{white-space:normal;overflow-wrap:anywhere;max-width:100%;min-height:44px}.sheet-record-review :focus-visible{outline:2px solid #ac4d70;outline-offset:3px}@media(max-width:650px){.sheet-record-review .sync-head{flex-direction:column}.sheet-record-review .sheet-review-card{padding:.85rem}}
+
+.sheet-record-review .issue-list{grid-template-columns:minmax(0,1fr)}.sheet-record-review .sheet-review-card{min-width:0}.sheet-record-review .sheet-review-summary{max-width:100%}.sheet-record-review .sheet-review-summary strong{overflow-wrap:anywhere}

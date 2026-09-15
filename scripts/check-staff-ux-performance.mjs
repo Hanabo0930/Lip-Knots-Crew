@@ -31,14 +31,14 @@ runInNewContext(
   },
 );
 const businessCacheApi = businessCacheModule.exports;
-businessCacheApi.saveBusinessSnapshot("uid-a", "company-a", "staff-a", [{ id: "job-a" }], [{ id: "task-a" }]);
+businessCacheApi.saveBusinessSnapshot("uid-a", "company-a", "staff-a", [{ id: "job-a", dateKey:"2026-09-10",status:"assigned",menuName:"demo" }], [{ id: "task-a",jobId:"job-a",kind:"report",title:"Report",body:"",priority:"normal" }]);
 assert.deepEqual(
   { ...businessCacheApi.loadLastBusinessScope("uid-a") },
   { companyId: "company-a", staffId: "staff-a" },
 );
 const cachedSnapshot = businessCacheApi.loadBusinessSnapshot("uid-a", "company-a", "staff-a");
-assert.equal(JSON.stringify(cachedSnapshot.jobs), JSON.stringify([{ id: "job-a" }]));
-assert.equal(JSON.stringify(cachedSnapshot.tasks), JSON.stringify([{ id: "task-a" }]));
+assert.equal(JSON.stringify(cachedSnapshot.jobs), JSON.stringify([{ id: "job-a", dateKey:"2026-09-10",status:"assigned",menuName:"demo" }]));
+assert.equal(JSON.stringify(cachedSnapshot.tasks), JSON.stringify([{ id: "task-a",jobId:"job-a",kind:"report",title:"Report",body:"",priority:"normal" }]));
 assert.equal(businessCacheApi.loadLastBusinessScope("uid-b"), null);
 businessCacheApi.clearBusinessSnapshot("uid-a", "company-a", "staff-a");
 assert.equal(businessCacheApi.loadBusinessSnapshot("uid-a", "company-a", "staff-a"), null);
@@ -92,17 +92,17 @@ assert.match(
 );
 assert.match(
   app,
-  /void registerCurrentDevice\(authLoadVersion\)\.catch\(\(\)=>\{if\(isCurrentAuthLoad\(\)\)setMessage\("端末情報を登録できませんでした。再読み込みしてください。"\);\}\);[\s\S]*async function registerCurrentDevice\(authLoadVersion=authLoadVersionRef\.current\)[\s\S]*const id=String\(\(r\.data as \{sessionId\?:string\}\)\.sessionId\?\?""\);[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return"";[\s\S]*setDeviceSessionId\(id\)/u,
+  /void registerCurrentDevice\(authLoadVersion\)\.catch\(\(\)=>\{if\(isCurrentAuthLoad\(\)\)setMessage\("端末情報を登録できませんでした。再読み込みしてください。"\);\}\);[\s\S]*async function registerCurrentDevice\(authLoadVersion=authLoadVersionRef\.current\)[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return"";[\s\S]*const id=\(r\.data as \{sessionId\?:unknown\}\|null\)\?\.sessionId;[\s\S]*if\(typeof id!=="string"[\s\S]*setDeviceSessionId\(id\)/u,
   "A delayed device registration must not attach an older account session to the current Staff screen.",
 );
 assert.match(
   app,
-  /const authLoadVersionRef=useRef\(0\);[\s\S]*const authLoadVersion=\+\+authLoadVersionRef\.current;[\s\S]*const isCurrentAuthLoad=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*const initialToken=await getIdTokenResult\(current\)\.catch\(\(\)=>null\);[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*const result=await bootstrapPromise;[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*await loadPrimaryBusinessData\(sid,cid,current\.uid\);[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*catch\{[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*finally\{[\s\S]*if\(isCurrentAuthLoad\(\)\)setBusinessRefreshing\(false\)[\s\S]*async function loadPrimaryBusinessData[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*Promise\.all\(\[fetchMyJobs\(sid,cid,serverOnly\),fetchTasks\(\)\]\);[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return false;[\s\S]*setMyJobs\(jobs\);[\s\S]*setTasks\(nextTasks\);[\s\S]*saveBusinessSnapshot/u,
+  /const authLoadVersionRef=useRef\(0\);[\s\S]*const authLoadVersion=\+\+authLoadVersionRef\.current;[\s\S]*const isCurrentAuthLoad=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*const initialToken=await getIdTokenResult\(current\)\.catch\(\(\)=>null\);[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*const result=await bootstrapPromise;[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*const loaded=await loadPrimaryBusinessData\(sid,cid,current\.uid\);[\s\S]*if\(!isCurrentAuthLoad\(\)\|\|!loaded\)return;[\s\S]*catch\{[\s\S]*if\(!isCurrentAuthLoad\(\)\)return;[\s\S]*finally\{[\s\S]*if\(isCurrentAuthLoad\(\)\)setBusinessRefreshing\(false\)[\s\S]*async function loadPrimaryBusinessData[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*Promise\.all\(\[pendingJobs,pendingTasks\]\)[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return false;[\s\S]*setMyJobs\(jobs\);[\s\S]*setTasks\(nextTasks\);[\s\S]*saveBusinessSnapshot/u,
   "Only the latest authentication callback may update business data or loading state.",
 );
 assert.match(
   app,
-  /async function refreshBusinessData\(showFailure:boolean\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const refreshed=await loadPrimaryBusinessData[\s\S]*if\(!refreshed\|\|authLoadVersion!==authLoadVersionRef\.current\)return;[\s\S]*catch\{[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return;[\s\S]*finally\{[\s\S]*if\(authLoadVersion===authLoadVersionRef\.current\)\{businessRefreshInFlightRef\.current=false;setBusinessRefreshing\(false\);\}[\s\S]*async function refreshPushStatus\(showFailure:boolean\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const enabled=await loadServerPushStatusWithRetry\(functions\);[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return;[\s\S]*setPushEnabled\(enabled\);[\s\S]*showFailure&&authLoadVersion===authLoadVersionRef\.current/u,
+  /async function refreshBusinessData\(showFailure:boolean\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const refreshed=await loadPrimaryBusinessData[\s\S]*if\(!refreshed\|\|authLoadVersion!==authLoadVersionRef\.current\)return;[\s\S]*catch\{[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return;[\s\S]*finally\{[\s\S]*if\(authLoadVersion===authLoadVersionRef\.current\)\{businessRefreshInFlightRef\.current=false;setBusinessRefreshing\(false\);\}[\s\S]*async function refreshPushStatus\(showFailure:boolean\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const enabled=await loadServerPushStatusWithRetry\(functions\);[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return;[\s\S]*setPushEnabled\(enabled\);[\s\S]*setPushStatusUncertain\(true\)/u,
   "Background business and push refreshes must not update a newer Staff session.",
 );
 assert.match(
@@ -132,7 +132,7 @@ assert.match(
 );
 assert.match(
   app,
-  /const stopWatching=watchDeviceSession\(deviceSessionId,async\(\)=>\{[\s\S]*if\(stopped\)return;[\s\S]*clearBusinessSnapshot\(user\.uid,companyId,staffId\);[\s\S]*try\{await signOut\(activeAuth\);\}catch\{if\(!stopped\)setMessage\("ログアウトに失敗しました。再読み込みしてください。"\);\}[\s\S]*function watchDeviceSession\(id:string,onRevoked:\(\)=>Promise<void>\)[\s\S]*void onRevoked\(\)\.catch\(\(\)=>undefined\)/u,
+  /const handleRevoked=async\(message:string\)=>\{[\s\S]*if\(stopped\|\|authVersion!==authLoadVersionRef\.current\|\|revocationPending\|\|revocationCompleted\)return;[\s\S]*clearBusinessSnapshot\(user\.uid,companyId,staffId\);[\s\S]*await signOut\(activeAuth\);revocationCompleted=true;[\s\S]*const stopWatching=watchDeviceSession\(deviceSessionId,\(\)=>handleRevoked\([\s\S]*void onRevoked\(\)\.catch\(\(\)=>undefined\)/u,
   "A revoked device listener must not sign out a newer session after its owning effect has stopped.",
 );
 assert.match(
@@ -157,17 +157,17 @@ assert.match(
 );
 assert.match(
   app,
-  /const hydratedDraftKeyRef=useRef\(""\);[\s\S]*const draftHydratingRef=useRef\(false\);[\s\S]*const skipNextDraftSaveRef=useRef\(false\);[\s\S]*hydratedDraftKeyRef\.current="";[\s\S]*draftHydratingRef\.current=Boolean\(draftKey\);[\s\S]*let active=true;[\s\S]*loadDraft\(draftKey\)\.then\(draftFiles=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(draftFiles\);[\s\S]*hydratedDraftKeyRef\.current=draftKey;[\s\S]*draftHydratingRef\.current=false;[\s\S]*catch\(\(\)=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(\[\]\);[\s\S]*draftHydratingRef\.current=false;[\s\S]*return\(\)=>\{active=false;\};[\s\S]*if\(!draftKey\|\|draftHydrating\|\|hydratedDraftKeyRef\.current!==draftKey\)return;[\s\S]*if\(skipNextDraftSaveRef\.current\)\{skipNextDraftSaveRef\.current=false;return;\}/u,
+  /const hydratedDraftKeyRef=useRef\(""\);[\s\S]*const draftHydratingRef=useRef\(false\);[\s\S]*const skipNextDraftSaveRef=useRef\(false\);[\s\S]*hydratedDraftKeyRef\.current="";[\s\S]*draftHydratingRef\.current=Boolean\(draftKey\);[\s\S]*let active=true;[\s\S]*loadDraft\(draftKey\)\.then\(draftFiles=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(draftFiles\);[\s\S]*hydratedDraftKeyRef\.current=draftKey;[\s\S]*draftHydratingRef\.current=false;[\s\S]*catch\(\(\)=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(\[\]\);[\s\S]*draftHydratingRef\.current=false;[\s\S]*return\(\)=>\{active=false;\};[\s\S]*if\(!draftKey\|\|draftHydrating\|\|hydratedDraftKeyRef\.current!==draftKey\|\|draftSavePaused\)return;[\s\S]*if\(skipNextDraftSaveRef\.current\)\{skipNextDraftSaveRef\.current=false;return;\}/u,
   "Submission drafts must ignore stale loads, clear stale files on failure, and never save before hydration.",
 );
 assert.match(
   app,
-  /saveDraft\(draftKey,files\)\.catch\(\(\)=>\{if\(hydratedDraftKeyRef\.current===draftKey\)showSubmissionMessage\("下書きを保存できませんでした/u,
+  /saveDraft\(draftKey,files\)\.catch\(\(\)=>\{\s*if\(active&&hydratedDraftKeyRef\.current===draftKey\)showSubmissionMessage\("下書きを保存できませんでした/u,
   "Draft persistence failures must be handled without an unhandled rejection or a silent data-loss state.",
 );
 assert.match(
   draftStore,
-  /const draftMutations = new Map<string, Promise<void>>\(\);[\s\S]*function enqueueDraftMutation[\s\S]*previous\.catch\(\(\) => undefined\)\.then\(mutation\)[\s\S]*function waitForDraftMutation[\s\S]*draftMutations\.get\(key\)\?\.catch[\s\S]*export function saveDraft[\s\S]*return enqueueDraftMutation\(key[\s\S]*export async function loadDraft[\s\S]*await waitForDraftMutation\(key\)[\s\S]*export function clearDraft[\s\S]*return enqueueDraftMutation\(key/u,
+  /const draftMutations = new Map<string, Promise<void>>\(\);[\s\S]*function enqueueDraftMutation[\s\S]*previous\.catch\(\(\) => undefined\)\.then\(mutation\)[\s\S]*function waitForDraftMutation[\s\S]*await draftMutations\.get\(key\)[\s\S]*export function saveDraft[\s\S]*return enqueueDraftMutation\(key[\s\S]*export async function loadDraft[\s\S]*await waitForDraftMutation\(key\)[\s\S]*export function clearDraft[\s\S]*return enqueueDraftMutation\(key/u,
   "Draft saves, reads, and clears for one submission must remain ordered so a stale save cannot restore cleared files.",
 );
 assert.match(
@@ -197,7 +197,7 @@ assert.match(
 );
 assert.match(
   app,
-  /navigator\.share\(\{title:"Lip Knots Crew かんたん診断",text\}\)[\s\S]*await copyDiagnostics\(\)/u,
+  /navigator\.share\(\{title:"Lip Knots Crew かんたん診断",text\}\)[\s\S]*await copyDiagnosticText\(text,isCurrent\)/u,
   "Diagnostics must support the iPhone share sheet with copy fallback.",
 );
 assert.match(
@@ -297,7 +297,7 @@ assert.match(
 );
 assert.match(
   app,
-  /async function requestLogout\(\)\{[\s\S]*isPending\("logout"\)[\s\S]*setMessage\("ログアウト処理中です…"\);[\s\S]*await run\("logout",logoutCurrentUser,\{setMessage\}\)[\s\S]*logout-button[\s\S]*disabled=\{isPending\("logout"\)\|\|deviceActionPending\}[\s\S]*aria-busy=\{isPending\("logout"\)\}[\s\S]*ログアウト中…/u,
+  /async function requestLogout\(\)\{[\s\S]*isPending\("logout"\)[\s\S]*setMessage\("ログアウト処理中です…"\);[\s\S]*await run\("logout",logoutCurrentUser,\{setMessage:\(\)=>\{if\(authVersion===authLoadVersionRef\.current\)setMessage\("ログアウトできませんでした。もう一度「ログアウト」を押してください。"\);\}\}\)[\s\S]*logout-button[\s\S]*aria-disabled=\{isPending\("logout"\)\|\|deviceActionPending\}[\s\S]*aria-busy=\{isPending\("logout"\)\}[\s\S]*ログアウト中…/u,
   "Confirmed Staff logout must show progress, block repeat actions, and keep retry context on failure.",
 );
 assert.match(
@@ -357,7 +357,7 @@ assert.match(
 );
 assert.match(
   app,
-  /function SelectedSubmissionFile[\s\S]*URL\.createObjectURL\(file\)[\s\S]*URL\.revokeObjectURL\(url\)/u,
+  /function SelectedSubmissionFile[\s\S]*URL\.createObjectURL\([\s\S]*?\)[\s\S]*URL\.revokeObjectURL\(url\)/u,
   "Selected image previews must release temporary browser URLs after use.",
 );
 assert.match(
@@ -407,7 +407,7 @@ assert.match(
 );
 assert.match(
   app,
-  /async function refreshOpenJobs\(showConfirmation=true,cid=companyId\)[\s\S]*await loadOpenJobs\(cid\)[\s\S]*募集中の案件を最新情報に更新しました/u,
+  /async function refreshOpenJobs\(showConfirmation=true,cid=companyId\)[\s\S]*(?:await loadOpenJobs\(cid\)|const pending=loadOpenJobs\(cid\);[\s\S]*?await pending)[\s\S]*募集中の案件を最新情報に更新しました/u,
   "Open jobs must support a one-tap refresh without reloading the whole app.",
 );
 assert.match(
@@ -452,7 +452,7 @@ assert.match(
 );
 assert.match(
   app,
-  /className=\{`panel push-panel \$\{pushEnabled\?"enabled":""\}`\}/u,
+  /className=\{`panel push-panel \$\{pushEnabled&&!pushStatusUncertain&&currentPushPermission\(\)==="granted"\?"enabled":""\}`\}/u,
   "An enabled push panel must switch to the compact daily-use layout.",
 );
 assert.match(
@@ -477,7 +477,7 @@ assert.match(
 );
 assert.match(
   app,
-  /async function runPushAction\(action:PushAction,task:\(\)=>Promise<void>\)\{[\s\S]*run\("push-action"[\s\S]*setPendingPushAction\(action\)[\s\S]*aria-busy=\{pushActionPending\}[\s\S]*push-settings-toggle[\s\S]*disabled=\{pushActionPending\}[\s\S]*通知テスト[\s\S]*disabled=\{pushActionPending\}[\s\S]*通知OFF/u,
+  /async function runPushAction\(action:PushAction,task:\(isCurrent:\(\)=>boolean\)=>Promise<void>\)\{[\s\S]*run\("push-action:"\+version[\s\S]*setPendingPushAction\(action\)[\s\S]*aria-busy=\{pushActionPending\}[\s\S]*push-settings-toggle[\s\S]*disabled=\{pushActionPending\}[\s\S]*通知テスト[\s\S]*disabled=\{pushActionPending\}[\s\S]*通知OFF/u,
   "Notification enable, test, disable, and settings controls must share one exclusive pending action.",
 );
 assert.match(
@@ -512,7 +512,7 @@ assert.match(
 );
 assert.match(
   app,
-  /const nextShift=nextShiftJob\(myJobs\);[\s\S]*<h2>次回シフト<\/h2>[\s\S]*nextShift\?<article[\s\S]*setSelectedJob\(nextShift\)/u,
+  /const nextShift=nextShiftJob\(myJobs,businessDate\);[\s\S]*<h2>次回シフト<\/h2>[\s\S]*nextShift\?<article[\s\S]*openShiftJob\(nextShift\)/u,
   "The next-shift card must not follow an older shift selected elsewhere in the app.",
 );
 assert.match(
@@ -528,19 +528,19 @@ assert.match(
 
 assert.match(
   app,
-  /where\("status","==","open"\),where\("dateKey",">=",localDateKey\(\)\),orderBy\("dateKey","asc"\)/u,
+  /where\("status","==","open"\),where\("dateKey",">=",today\),orderBy\("dateKey","asc"\)/u,
   "Open jobs must exclude dates before today at the database query boundary.",
 );
 
 assert.match(
   app,
-  /const values=availableOpenJobs\(snap\.docs\.map/u,
+  /const rows=snap\.docs\.slice\(0,100\);[\s\S]*const values=availableOpenJobs\(rows\.map/u,
   "Open jobs must remove cancelled or stale records before rendering.",
 );
 
 assert.match(
   app,
-  /useMemo\(\(\)=>splitAssignedJobs\(myJobs\),\[myJobs\]\)/u,
+  /useMemo\(\(\)=>splitAssignedJobs\(myJobs,businessDate\),\[myJobs,businessDate\]\)/u,
   "The shift screen must derive upcoming and past lists from the same ordered assigned-job source.",
 );
 
@@ -558,7 +558,7 @@ assert.match(
 
 assert.match(
   app,
-  /if\(showPastShifts\|\|!selectedJob\|\|!upcomingShifts\.length\|\|!pastShifts\.some[\s\S]*setSelectedJob\(upcomingShifts\[0\]\)/u,
+  /function togglePastShifts\(\)\{[\s\S]*if\(showPastShifts&&selectedJob&&upcomingShifts\.length&&pastShifts\.some[\s\S]*setSelectedJob\(upcomingShifts\[0\]\)/u,
   "Closing past shifts must return hidden selection to the nearest upcoming shift.",
 );
 
@@ -576,13 +576,13 @@ assert.match(
 
 assert.match(
   app,
-  /function navigate\(next:View\)\{[\s\S]*setShowAccountMenu\(false\);[\s\S]*setShowDevices\(false\);[\s\S]*setShowDiagnostics\(false\);[\s\S]*setView\(next\)/u,
+  /function navigate\(next:View\)\{[\s\S]*setShowAccountMenu\(false\);[\s\S]*setShowDevices\(false\);[\s\S]*closeDiagnostics\(\);[\s\S]*setView\(next\)/u,
   "Staff navigation must dismiss global utility panels before showing the selected screen.",
 );
 
 assert.match(
   app,
-  /async function openQuickDiagnostics\(\)\{[\s\S]*setShowAccountMenu\(false\);[\s\S]*setShowDevices\(false\);[\s\S]*setShowDiagnostics\(true\);[\s\S]*function toggleAccountMenu\(\)\{[\s\S]*setShowAccountMenu\(opening\);[\s\S]*if\(opening\)\{[\s\S]*setShowDevices\(false\);[\s\S]*setShowDiagnostics\(false\);[\s\S]*async function loadDevices\(\)\{[\s\S]*setShowAccountMenu\(false\);[\s\S]*setShowDiagnostics\(false\);[\s\S]*onClick=\{toggleAccountMenu\}/u,
+  /async function openQuickDiagnostics\(\)\{[\s\S]*setShowAccountMenu\(false\);[\s\S]*setShowDevices\(false\);[\s\S]*setShowDiagnostics\(true\);[\s\S]*function toggleAccountMenu\(\)\{[\s\S]*setShowAccountMenu\(opening\);[\s\S]*if\(opening\)\{[\s\S]*setShowDevices\(false\);[\s\S]*closeDiagnostics\(\);[\s\S]*async function loadDevices\(\)\{[\s\S]*setShowAccountMenu\(false\);[\s\S]*closeDiagnostics\(\);[\s\S]*onClick=\{toggleAccountMenu\}/u,
   "Staff utility switches must keep the account menu, device manager, and diagnostics mutually exclusive.",
 );
 
@@ -594,19 +594,19 @@ assert.match(
 
 assert.match(
   app,
-  /async function revokeDevice\(id:string\)\{[\s\S]*await run\("device-action"[\s\S]*confirm\("この端末をログアウトしますか？"\)[\s\S]*setPendingDeviceId\(id\)[\s\S]*await fetchDevices\(authLoadVersion\)[\s\S]*finally\{if\(isCurrentAction\(\)\)setPendingDeviceId\(""\);\}[\s\S]*deviceActionPending&&!pendingDeviceId[\s\S]*disabled=\{device\.active===false\|\|deviceActionPending\}[\s\S]*pendingDeviceId===device\.id\?"ログアウト中…"/u,
+  /async function revokeDevice\(id:string\)\{[\s\S]*await run\("device-action"[\s\S]*confirm\(confirmation\)[\s\S]*setPendingDeviceId\(id\)[\s\S]*await fetchDevices\(authLoadVersion\)[\s\S]*finally\{if\(isCurrentAction\(\)\)setPendingDeviceId\(""\);\}[\s\S]*deviceActionPending&&!pendingDeviceId[\s\S]*disabled=\{device\.active===false\|\|deviceActionPending\}[\s\S]*pendingDeviceId===device\.id\?"ログアウト中…"/u,
   "Device loading and logout must share one exclusive action while preserving per-device progress.",
 );
 
 assert.match(
   app,
-  /async function apply\(job:Job\)\{[\s\S]*await run\("apply-action"[\s\S]*setPendingApplicationJobId\(job\.id\)[\s\S]*finally\{if\(isCurrentAction\(\)\)setPendingApplicationJobId\(""\);\}[\s\S]*aria-busy=\{applicationPending\|\|openJobsRefreshing\|\|openJobsStatus==="loading"\}[\s\S]*disabled=\{applicationPending\}[\s\S]*pendingApplicationJobId===job\.id\?"応募中…"/u,
+  /async function apply\(job:Job\)\{[\s\S]*await run\("apply-action"[\s\S]*setPendingApplicationJobId\(job\.id\)[\s\S]*finally\{if\(isCurrentAction\(\)\)setPendingApplicationJobId\(""\);\}[\s\S]*aria-busy=\{applicationPending\|\|openJobsRefreshing\|\|openJobsStatus==="loading"\}[\s\S]*disabled=\{applicationPending\|\|openJobsRefreshing\}[\s\S]*pendingApplicationJobId===job\.id\?"応募中…"/u,
   "Staff job applications must share one exclusive action while keeping the selected job visibly in progress.",
 );
 
 assert.match(
   app,
-  /async function refreshOpenJobs\(showConfirmation=true,cid=companyId\)\{[\s\S]*if\(isPending\("open-jobs-refresh"\)\)return;[\s\S]*await run\("open-jobs-refresh"[\s\S]*await loadOpenJobs\(cid\)[\s\S]*const openJobsRefreshing=isPending\("open-jobs-refresh"\);[\s\S]*view==="jobs"&&<section aria-busy=\{applicationPending\|\|openJobsRefreshing\|\|openJobsStatus==="loading"\}/u,
+  /async function refreshOpenJobs\(showConfirmation=true,cid=companyId\)\{[\s\S]*if\(isPending\("open-jobs-refresh"\)\)return;[\s\S]*await run\("open-jobs-refresh"[\s\S]*(?:await loadOpenJobs\(cid\)|const pending=loadOpenJobs\(cid\);[\s\S]*?await pending)[\s\S]*const openJobsRefreshing=isPending\("open-jobs-refresh"\);[\s\S]*view==="jobs"&&<section aria-busy=\{applicationPending\|\|openJobsRefreshing\|\|openJobsStatus==="loading"\}/u,
   "Open-job refreshes must synchronously reject duplicate taps and expose their loading state to the jobs screen.",
 );
 
@@ -624,13 +624,13 @@ assert.match(
 
 assert.match(
   app,
-  /function isSubmissionActionPending\(\)\{[\s\S]*draftHydratingRef\.current\|\|isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("task-job"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;/u,
+  /function isSubmissionActionPending\(\)\{[\s\S]*draftHydratingRef\.current\|\|isPending\("submission-refresh"\)\|\|isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("task-job"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isSubmissionActionPending\(\)\|\|resubmissionSendBlocked\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;/u,
   "Submission file mutations must synchronously stop while draft hydration or another submission action is active.",
 );
 
 assert.match(
   app,
-  /const submissionEditPending=isSubmissionActionPending\(\);[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*setClientSubmitted[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\}/u,
+  /const submissionEditPending=isSubmissionActionPending\(\);[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*setClientSubmitted[\s\S]*aria-disabled=\{submissionEditPending\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\|\|resubmissionSendBlocked\}/u,
   "Client-submission updates, context, file pickers, removal, confirmation, and send controls must share one visible edit lock.",
 );
 
@@ -672,13 +672,13 @@ assert.match(
 
 assert.match(
   app,
-  /async function apply\(job:Job\)\{[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*applyToJob[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*async function submitPreContact\(\)[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*submitPreContact[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*refreshSelectedJob\(jobId,authLoadVersion\)[\s\S]*async function markPrinted[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*markNetPrintPrinted[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*async function setClientSubmitted[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*setSalesFloorClientSubmitted[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*catch\{[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*setSelectedJob\(previous\)/u,
+  /async function apply\(job:Job\)\{[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*applyToJob[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*async function submitPreContact\(\)[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*submitPreContact[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*refreshSelectedJob\(jobId,authLoadVersion\)[\s\S]*async function markPrinted[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*markNetPrintPrinted[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*async function setClientSubmitted[\s\S]*const isCurrentAction=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*setSalesFloorClientSubmitted[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*catch\{[\s\S]*if\(!isCurrentAction\(\)\)return;[\s\S]*setSelectedJob\(current=>current===optimistic\?previous:current\)/u,
   "Job applications and all shift mutations must suppress stale success, refresh, failure, and optimistic rollback after an account change.",
 );
 
 assert.match(
   app,
-  /async function refreshSelectedJob\(jobId:string,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current[\s\S]*async function loadSubmissionHistory\(jobId:string,type:SubmissionType,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current[\s\S]*async function loadResubmissionDetail\(id:string,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current/u,
+  /async function refreshSelectedJob\(jobId:string,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current[\s\S]*async function loadSubmissionHistory\(jobId:string,type:SubmissionType,authLoadVersion=authLoadVersionRef\.current\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current[\s\S]*async function loadResubmissionDetail\(id:string,authLoadVersion=authLoadVersionRef\.current,expectedJobId=selectedJob\?\.id,expectedType:SubmissionType=submissionType\):Promise<boolean>[\s\S]*authLoadVersion!==authLoadVersionRef\.current/u,
   "Submission completion refreshes must not write an older account's job, history, or resubmission detail into a newer session.",
 );
 
@@ -701,18 +701,18 @@ for(const switchAt of ["none","list","revoke","refresh","failure"]){
   const events=[];
   const scope={
     authLoadVersionRef:version,firebaseConfigured:true,functions:{},
-    devices:[{id:"current"}],deviceSessionId:"current",isCurrentDevice:()=>true,
-    confirm:()=>true,setDevices:()=>events.push("devices"),
+    devices:[{id:"current"}],deviceSessionId:"current",isCurrentDevice:()=>switchAt!=="refresh",
+    confirm:()=>true,setDevices:()=>events.push("devices"),setDeviceListUncertain:()=>{},
     setPendingDeviceId:value=>events.push(`pending:${value}`),
     setMessage:()=>events.push("message"),setShowAccountMenu:()=>{},
-    setShowDiagnostics:()=>{},setShowDevices:()=>{},
+    setShowDiagnostics:()=>{},closeDiagnostics:()=>{},setShowDevices:()=>{},
     logoutCurrentUser:async()=>events.push("logout"),
     run:async(_key,action,options)=>{try{await action();}catch(error){options.setMessage(error.message);throw error;}},
     httpsCallable:(_functions,name)=>async()=>{
       if((name==="listMyDevices"&&(switchAt==="list"||switchAt==="refresh"))||
          (name==="revokeMyDevice"&&(switchAt==="revoke"||switchAt==="failure")))version.current++;
       if(switchAt==="failure")throw new Error("Delayed failure from old account");
-      return {data:{devices:[]}};
+      return name==="revokeMyDevice"?{data:{revoked:true}}:{data:{devices:[]}};
     },
   };
   runInNewContext(ts.transpileModule(deviceHandlers,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,scope);
@@ -721,7 +721,7 @@ for(const switchAt of ["none","list","revoke","refresh","failure"]){
     assert.deepEqual(events,[],"A stale device list must not update the new account.");
   }else{
     await scope.revokeDevice("current");
-    assert.deepEqual(events,switchAt==="none"?["pending:current","devices","logout","message","pending:"]:["pending:current"],
+    assert.deepEqual(events,switchAt==="none"?["pending:current","logout","message","pending:"]:["pending:current"],
       `Device revocation must isolate the originating session (${switchAt}).`);
   }
 }

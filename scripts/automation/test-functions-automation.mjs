@@ -1,3 +1,5 @@
+import "./test-transfer-auth-guard.mjs";
+import "./test-staging-transfer-mode.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -6,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { safetyConfig } from "./validate-staging-scope.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const read = (path) => readFileSync(resolve(root, path), "utf8");
+const read = (path) => readFileSync(resolve(root, path), "utf8").replace(/\r\n/g, "\n");
 
 const expectedFunctions = [
   "bootstrapSession",
@@ -182,10 +184,18 @@ assert.match(
   /document\.visibilityState==="visible"[\s\S]*?heartbeat\(\)/,
   "Staff must refresh device activity when the tab becomes visible",
 );
+const revokedHandler = staffApp.match(/const handleRevoked=async[\s\S]*?(?=\s*const heartbeat=async)/)?.[0];
+const heartbeatHandler = staffApp.match(/const heartbeat=async[\s\S]*?(?=\s*const stopWatching=)/)?.[0];
+assert.ok(revokedHandler && heartbeatHandler, "Staff revocation and heartbeat handlers must exist");
 assert.match(
-  staffApp,
-  /code\.endsWith\("permission-denied"\)[\s\S]*?signOut\(activeAuth\)/,
-  "A revoked device heartbeat must sign out locally",
+  heartbeatHandler,
+  /if\(code\.endsWith\("permission-denied"\)\)await handleRevoked\(/,
+  "A revoked device heartbeat must invoke the revocation handler",
+);
+assert.match(
+  revokedHandler,
+  /try\{await signOut\(activeAuth\);revocationCompleted=true;\}/,
+  "The revocation handler must sign out before marking revocation completed",
 );
 assert.match(
   staffApp,

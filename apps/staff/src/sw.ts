@@ -1,8 +1,9 @@
 /// <reference lib="webworker" />
+import {notificationTarget,openNotificationTarget} from "./notification-target";
 import { initializeApp } from "firebase/app";
 import { getMessaging, onBackgroundMessage } from "firebase/messaging/sw";
 import { clientsClaim } from "workbox-core";
-import { cleanupOutdatedCaches, precacheAndRoute } from "workbox-precaching";
+import { cleanupOutdatedCaches, precacheAndRoute, PrecacheController } from "workbox-precaching";
 import { registerRoute, NavigationRoute } from "workbox-routing";
 import { NetworkFirst } from "workbox-strategies";
 import {
@@ -11,14 +12,22 @@ import {
   firebaseConfigured,
 } from "./firebase-config";
 
-declare let self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<unknown> };
+declare let self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<{url:string;revision?:string|null}> };
 
-precacheAndRoute(self.__WB_MANIFEST);
+const manifest=self.__WB_MANIFEST;
+const isShell=(entry:{url:string})=>entry.url==="index.html"||entry.url==="/index.html";
+const offlineShell=new PrecacheController({cacheName:"lkc-staff-offline-shell"});
+offlineShell.addToCacheList(manifest.filter(isShell));
+self.addEventListener("install",event=>{event.waitUntil(offlineShell.install(event));});
+self.addEventListener("activate",event=>{event.waitUntil(offlineShell.activate(event));});
+precacheAndRoute(manifest.filter(entry=>!isShell(entry)));
 cleanupOutdatedCaches();
 
 registerRoute(new NavigationRoute(new NetworkFirst({
   cacheName: "lkc-staff-pages",
   networkTimeoutSeconds: 10,
+  fetchOptions:{cache:"no-cache"},
+  plugins:[{handlerDidError:async()=>await offlineShell.matchPrecache("/index.html")??Response.error()}],
 })));
 
 self.addEventListener("message", (event) => {
@@ -47,17 +56,6 @@ if (messaging) onBackgroundMessage(messaging, async (payload) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const route = String(event.notification.data?.route ?? "/");
-  const target = new URL(route, self.location.origin).href;
-  event.waitUntil((async () => {
-    const windows = await self.clients.matchAll({ type:"window", includeUncontrolled:true });
-    for (const client of windows) {
-      if ("focus" in client) {
-        await (client as WindowClient).focus();
-        (client as WindowClient).navigate(target);
-        return;
-      }
-    }
-    await self.clients.openWindow(target);
-  })());
+  const target=notificationTarget(event.notification.data?.route,self.location.origin);
+  event.waitUntil(openNotificationTarget(self.clients,target));
 });

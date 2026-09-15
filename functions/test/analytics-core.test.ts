@@ -132,3 +132,11 @@ assert.equal(performance.totals.salesFloorLate, 1);
 assert.equal(performance.recentJobs.length, 5);
 
 console.log("analytics core tests passed");
+
+for (const status of ["open", "draft", undefined]) {
+  const invalid = { ...base, id: "unassigned", status, dateKey: "2026-07-02", preContactLate: true, submissionStatus: { report: { lateFirstSubmission: true } } };
+  const expected = buildStaffPerformance(jobs, "staff_1", "2026-07-01", "2026-07-31", "2026-07-12");
+  const actual = buildStaffPerformance([...jobs, invalid], "staff_1", "2026-07-01", "2026-07-31", "2026-07-12");
+  assert.deepEqual(actual, expected, "Unassigned jobs must not inflate staff work, finance, lateness or recent jobs.");
+}
+console.log("Staff performance excludes open/draft/missing status with stale staff identity.");

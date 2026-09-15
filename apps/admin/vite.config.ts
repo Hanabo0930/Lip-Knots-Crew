@@ -6,11 +6,19 @@ export default defineConfig({
   build: {
     emptyOutDir: true,
     rolldownOptions: {
+      preserveEntrySignatures: false,
       output: {
         codeSplitting: {
+          // 共通依存を遅延SDKへ巻き込まず、起動時のFirestore取得を避ける。
+          includeDependenciesRecursively: false,
           // Keep each Firebase product intact. Size-based re-splitting can create
           // circular ESM chunks and crash the app before React mounts.
           groups: [
+            {
+              name: "firebase-client",
+              test: /src[\\/]firebase-config\.ts$/,
+              priority: 7,
+            },
             {
               name: "firebase-firestore",
               test: /node_modules[\\/]@firebase[\\/]firestore[\\/]/,
@@ -54,7 +62,7 @@ export default defineConfig({
       filename: "sw.ts",
       registerType: "autoUpdate",
       includeAssets: ["logo.png"],
-      injectManifest: { globPatterns: ["**/*.{js,css,png,svg,ico}"] },
+      injectManifest: { globPatterns: ["**/*.{html,js,css,png,svg,ico}"] },
       manifest: {
         name: "Lip Knots Crew Admin",
         short_name: "Crew Admin",

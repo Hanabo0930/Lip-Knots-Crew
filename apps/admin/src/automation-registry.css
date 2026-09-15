@@ -1,0 +1,25 @@
+.registry-entry { margin-top:20px; }
+.automation-registry { margin:18px 0 0; padding:18px; border:1px solid #d8b3c1; background:#fffafd; }
+.automation-registry .section-heading { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:12px; }
+.automation-registry .section-heading h2 { margin-top:0; }
+.automation-registry h2:focus-visible { outline:3px solid #9d4c68; outline-offset:4px; }
+.registry-selectors { display:flex; flex-wrap:wrap; align-items:end; gap:12px; margin:18px 0; }
+.registry-selectors>label { flex:1 1 220px; min-width:0; }
+.registry-form { display:grid; gap:16px; max-width:820px; }
+.automation-registry label { display:grid; gap:7px; min-width:0; }
+.automation-registry input,.automation-registry select { width:100%; min-width:0; padding:11px; border:1px solid #d2c2c8; border-radius:10px; background:#fff; color:inherit; font:inherit; }
+.automation-registry .registry-check { display:flex; align-items:flex-start; gap:10px; line-height:1.6; }
+.automation-registry .registry-check input { flex:0 0 20px; width:20px; height:20px; margin-top:4px; accent-color:#9d4c68; }
+.automation-registry small { font-size:12px; line-height:1.6; color:#705763; }
+.automation-registry dl { display:grid; grid-template-columns:minmax(100px,1fr) minmax(0,3fr); gap:10px; margin:12px 0; padding:16px; border-radius:12px; background:#f6eef2; }
+.automation-registry dt { font-weight:700; }
+.automation-registry dd { margin:0; overflow-wrap:anywhere; }
+.automation-registry a { color:#7b3b54; text-decoration:underline; }
+.registry-actions { display:flex; flex-wrap:wrap; gap:12px; margin-top:15px; }
+.registry-result { padding:14px; border-left:4px solid #698674; background:#f0f8f2; line-height:1.6; }
+.registry-error { padding:14px; border-left:4px solid #b5473e; background:#fff2ef; line-height:1.6; overflow-wrap:anywhere; }
+.registry-pending { padding:16px; border:1px solid #d5bc8b; border-radius:14px; background:#fffaf0; }
+.registry-pending pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
+.registry-current { font-weight:700; }
+.automation-registry button { min-height:44px; white-space:normal; }
+@media(max-width:480px){ .automation-registry { padding:12px; } .automation-registry dl { grid-template-columns:1fr; } .automation-registry dd { margin-bottom:8px; } .registry-actions>button { width:100%; } }

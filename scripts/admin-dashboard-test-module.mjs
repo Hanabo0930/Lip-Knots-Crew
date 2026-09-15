@@ -1,0 +1,4 @@
+import assert from 'node:assert/strict';import fs from 'node:fs';import ts from 'typescript';import {runInNewContext} from 'node:vm';
+const modules=new Map();const paths={'./dashboard-data':'apps/admin/src/dashboard-data.ts','../../../functions/src/analytics-core':'functions/src/analytics-core.ts'};
+function load(name){assert.ok(paths[name],'Unexpected dashboard module: '+name);if(modules.has(name))return modules.get(name);const scope={exports:{},require:load};modules.set(name,scope.exports);runInNewContext(ts.transpileModule(fs.readFileSync(paths[name],'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,scope);return scope.exports;}
+export const dashboardModule=load('./dashboard-data');

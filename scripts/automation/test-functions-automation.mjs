@@ -1,3 +1,4 @@
+import './test-confirm-application-auth-guard.mjs';
 import "./test-transfer-auth-guard.mjs";
 import "./test-staging-transfer-mode.mjs";
 import assert from "node:assert/strict";

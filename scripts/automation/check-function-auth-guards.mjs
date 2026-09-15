@@ -21,6 +21,7 @@ const requestedFunctions = parseCsv(
 );
 const supportedFunctions = new Set([
   "bootstrapSession",
+  "confirmApplication",
   "getSubmissionTimeline",
   "requestStaffLoginLink",
   "getSubmissionProcessingStatus",
@@ -78,6 +79,31 @@ function functionBlock(source, exportName) {
   return source.slice(start, end);
 }
 
+function checkConfirmApplication() {
+  const source = sourceFile("functions/src/admin-operations.ts");
+  const block = functionBlock(source, "confirmApplication");
+  const checks = {
+    adminImport: /import \{[^}]*\brequireAdmin\b[^}]*\bcompanyFromClaims\b[^}]*\} from "\.\/utils";/.test(source)
+      || /import \{[^}]*\bcompanyFromClaims\b[^}]*\brequireAdmin\b[^}]*\} from "\.\/utils";/.test(source),
+    admin: /const session = requireAdmin\(request\);/.test(block),
+    claimsCompany: /const companyId = companyFromClaims\(session\.token\);/.test(block),
+    operational: /await assertProductionOperational\(companyId\);/.test(block)
+      && /import \{ assertProductionOperational \} from "\.\/system-safety";/.test(source),
+    validatedInput: /const input = JobSchema\.parse\(request\.data \?\? \{\}\);/.test(block),
+    jobReference: /const ref = db\.collection\("jobs"\)\.doc\(input\.jobId\);/.test(block),
+    initialCompany: /if \(!job\.exists \|\| job\.data\(\)\?\.companyId !== companyId\)/.test(block),
+    transaction: /await db\.runTransaction\(async \(tx\) =>/.test(block),
+    transactionRead: /const current = await tx\.get\(ref\);/.test(block),
+    transactionCompany: /if \(!current\.exists \|\| current\.data\(\)\?\.companyId !== companyId\)/.test(block),
+    assignmentStable: /data\.status !== "assigned" \|\| \(data\.assignedStaffId \?\? null\) !== \(job\.data\(\)\?\.assignedStaffId \?\? null\)/.test(block),
+    idempotent: /if \(data\.applicationAdminConfirmed === true\) return;/.test(block),
+    confirmedByActor: /tx\.update\(ref, \{\s*applicationAdminConfirmed: true,\s*applicationAdminConfirmedBy: session\.uid,/.test(block),
+    audit: /const auditRef = db\.collection\("auditLogs"\)\.doc\(\);/.test(block)
+      && /tx\.set\(auditRef, \{\s*companyId, actorUid: session\.uid, action: "application\.confirm",/.test(block),
+    noClientIdentity: !/input\.(?:companyId|uid|actorUid|assignedStaffId)/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
 function checkBootstrapSession() {
   const source = sourceFile("functions/src/auth.ts");
   const bootstrap = functionBlock(source, "bootstrapSession");
@@ -438,6 +464,7 @@ function checkProcessNotificationQueue() {
 
 const checkers = {
   bootstrapSession: checkBootstrapSession,
+  confirmApplication: checkConfirmApplication,
   requestStaffLoginLink: checkRequestStaffLoginLink,
   getSubmissionTimeline: checkSubmissionTimeline,
   getSubmissionProcessingStatus: checkSubmissionProcessingStatus,

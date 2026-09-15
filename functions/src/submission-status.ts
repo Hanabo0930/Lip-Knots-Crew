@@ -27,10 +27,12 @@ export const setSalesFloorClientSubmitted = onCall(async (request) => {
     if (job.companyId !== companyId || job.assignedStaffId !== staffId) {
       throw new HttpsError("permission-denied", "この案件を変更できません。");
     }
+    if (job.cancelled === true || job.status === "cancelled") throw new HttpsError("failed-precondition", "キャンセル済みの案件です。");
+    if (job.status !== "assigned") throw new HttpsError("failed-precondition", "確定したシフトだけを変更できます。シフトを更新して確認してください。");
+    const current = (job.submissionStatus as { salesFloor?: { lipKnotsSubmitted?: boolean; clientSubmitted?: boolean; completed?: boolean } } | undefined)?.salesFloor;
+    const lipKnotsSubmitted = current?.lipKnotsSubmitted === true;
+    if (current?.clientSubmitted === input.submitted && current.completed === (input.submitted || lipKnotsSubmitted)) return;
     const now = Timestamp.now();
-    const lipKnotsSubmitted =
-      (job.submissionStatus as { salesFloor?: { lipKnotsSubmitted?: boolean } } | undefined)
-        ?.salesFloor?.lipKnotsSubmitted === true;
     tx.update(jobRef, {
       "submissionStatus.salesFloor.clientSubmitted": input.submitted,
       "submissionStatus.salesFloor.clientSubmittedAt": input.submitted ? now : FieldValue.delete(),

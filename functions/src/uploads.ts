@@ -6,7 +6,7 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { z } from "zod";
 import { db, storage } from "./firebase";
 import { getWritableDriveClient } from "./google-drive-client";
-import { assertTransferSource, transferSource, transferWithStableId } from "./drive-transfer";
+import { assertTransferCheckpoint, assertTransferSource, transferSource, transferWithStableId } from "./drive-transfer";
 import { readCachedFolderId, writeCachedFolderId } from "./drive-folder-cache";
 import { markSubmissionCompleted } from "./submission-status";
 import { markResubmissionReplacementFile, markResubmissionSubmitted } from "./resubmissions";
@@ -22,43 +22,23 @@ const CreateSchema = z.object({
   jobId: z.string().min(1),
   type: z.enum(["report", "sales_floor"]),
   purpose: z.enum(["initial", "additional", "replacement"]).default("initial"),
-  resubmissionRequestId: z.string().optional(),
+  resubmissionRequestId: z.string().trim().min(1).optional(),
   files: z.array(z.object({
     originalName: z.string().min(1).max(250),
-    contentType: z.string().min(1).max(120),
-    size: z.number().positive().max(50 * 1024 * 1024),
+    contentType: z.string().min(1).max(120).refine(value => value === "application/pdf" || /^image\/[^\s/;]+$/.test(value), { message: "画像またはPDFを選択してください。" }),
+    size: z.number().int().positive().max(50 * 1024 * 1024),
   })).min(1).max(20),
 });
 
 export const createUploadSession = onCall(async (request) => {
   const session = requireAuth(request);
   const input = CreateSchema.parse(request.data);
+  if ((input.purpose === "replacement") !== Boolean(input.resubmissionRequestId)) {
+    throw new HttpsError("invalid-argument", "差替提出には再提出依頼IDが必要です。通常提出には指定できません。");
+  }
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
   const staffId = staffFromClaims(session.token);
-  const jobSnap = await db.collection("jobs").doc(input.jobId).get();
-
-  if (!jobSnap.exists) {
-    throw new HttpsError("not-found", "案件が見つかりません。");
-  }
-  const job = jobSnap.data() as Record<string, unknown>;
-  if (job.companyId !== companyId || job.assignedStaffId !== staffId) {
-    throw new HttpsError("permission-denied", "この案件へ提出できません。");
-  }
-
-  let resubmission: FirebaseFirestore.DocumentData | null = null;
-  if (input.resubmissionRequestId) {
-    const requestSnap = await db.collection("resubmissionRequests").doc(input.resubmissionRequestId).get();
-    if (!requestSnap.exists) throw new HttpsError("not-found", "再提出依頼が見つかりません。");
-    resubmission = requestSnap.data() ?? null;
-    if (resubmission?.companyId !== companyId || resubmission?.staffId !== staffId || resubmission?.jobId !== input.jobId || resubmission?.type !== input.type || resubmission?.status !== "open") {
-      throw new HttpsError("failed-precondition", "この再提出依頼には送信できません。");
-    }
-    if (resubmission.sourceFileId && input.files.length !== 1) {
-      throw new HttpsError("invalid-argument", "画像単位の再送は1ファイルだけ選んでください。");
-    }
-  }
-
   const submissionRef = db.collection("submissions").doc();
   const now = Timestamp.now();
   const fileRecords = input.files.map((file) => {
@@ -69,43 +49,70 @@ export const createUploadSession = onCall(async (request) => {
     return { fileId, storagePath, ...file };
   });
 
-  const batch = db.batch();
-  batch.set(submissionRef, {
-    companyId,
-    jobId: input.jobId,
-    staffId,
-    uid: session.uid,
-    type: input.type,
-    purpose: input.purpose,
-    resubmissionRequestId: input.resubmissionRequestId ?? null,
-    status: "uploading",
-    totalFiles: fileRecords.length,
-    completedFiles: 0,
-    createdAt: now,
-    updatedAt: now,
-  });
+  await db.runTransaction(async (tx) => {
+    const jobSnap = await tx.get(db.collection("jobs").doc(input.jobId));
 
-  for (const record of fileRecords) {
-    batch.set(submissionRef.collection("files").doc(record.fileId), {
+    if (!jobSnap.exists) {
+      throw new HttpsError("not-found", "案件が見つかりません。");
+    }
+    const job = jobSnap.data() as Record<string, unknown>;
+    if (job.companyId !== companyId || job.assignedStaffId !== staffId) {
+      throw new HttpsError("permission-denied", "この案件へ提出できません。");
+    }
+
+    if (job.cancelled === true || job.status === "cancelled") throw new HttpsError("failed-precondition", "キャンセル済みの案件です。");
+
+    if (job.status !== "assigned") throw new HttpsError("failed-precondition", "確定済みの案件だけ提出できます。");
+
+    let resubmission: FirebaseFirestore.DocumentData | null = null;
+    if (input.resubmissionRequestId) {
+      const requestSnap = await tx.get(db.collection("resubmissionRequests").doc(input.resubmissionRequestId));
+      if (!requestSnap.exists) throw new HttpsError("not-found", "再提出依頼が見つかりません。");
+      resubmission = requestSnap.data() ?? null;
+      if (resubmission?.companyId !== companyId || resubmission?.staffId !== staffId || resubmission?.jobId !== input.jobId || resubmission?.type !== input.type || resubmission?.status !== "open") {
+        throw new HttpsError("failed-precondition", "この再提出依頼には送信できません。");
+      }
+      if (resubmission.sourceFileId && input.files.length !== 1) {
+        throw new HttpsError("invalid-argument", "画像単位の再送は1ファイルだけ選んでください。");
+      }
+    }
+
+    tx.create(submissionRef, {
       companyId,
       jobId: input.jobId,
       staffId,
       uid: session.uid,
-      submissionId: submissionRef.id,
       type: input.type,
       purpose: input.purpose,
       resubmissionRequestId: input.resubmissionRequestId ?? null,
-      replacesFileId: resubmission?.sourceFileId ?? null,
-      replacesSubmissionId: resubmission?.sourceSubmissionId ?? null,
-      status: "waiting_upload",
-      storagePath: record.storagePath,
-      originalName: record.originalName,
-      contentType: record.contentType,
-      size: record.size,
+      status: "uploading",
+      totalFiles: fileRecords.length,
+      completedFiles: 0,
       createdAt: now,
+      updatedAt: now,
     });
-  }
-  await batch.commit();
+
+    for (const record of fileRecords) {
+      tx.create(submissionRef.collection("files").doc(record.fileId), {
+        companyId,
+        jobId: input.jobId,
+        staffId,
+        uid: session.uid,
+        submissionId: submissionRef.id,
+        type: input.type,
+        purpose: input.purpose,
+        resubmissionRequestId: input.resubmissionRequestId ?? null,
+        replacesFileId: resubmission?.sourceFileId ?? null,
+        replacesSubmissionId: resubmission?.sourceSubmissionId ?? null,
+        status: "waiting_upload",
+        storagePath: record.storagePath,
+        originalName: record.originalName,
+        contentType: record.contentType,
+        size: record.size,
+        createdAt: now,
+      });
+    }
+  });
 
   return {
     submissionId: submissionRef.id,
@@ -154,6 +161,11 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
 
   assertSubmissionFile(submissionSnap.data(), meta, submissionId);
 
+  // 復旧記録の保存先が欠ける場合は、新規転送として扱わない。
+  const hasTransferRecord = meta.driveFileId != null || meta.transferCompletedAt != null || meta.completionCounted === true || meta.status === "completed";
+  if (hasTransferRecord && (typeof meta.driveFileId !== "string" || !meta.driveFileId.trim())) {
+    throw new HttpsError("failed-precondition", "転送済み情報の保存先を確認できません。提出記録を確認してから再処理してください。");
+  }
   // 旧版の転送済みデータは加算済みか判別できないため、自動再加算しない。
   if (meta.driveFileId && !(meta.transferCompletedAt instanceof Timestamp) && meta.completionCounted !== true) {
     throw new HttpsError("failed-precondition", "旧版の転送済み提出です。完了数を確認してから再処理してください。");
@@ -163,6 +175,7 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
     throw new HttpsError("failed-precondition", "転送元と提出メタデータが一致しません。");
   }
   assertTransferSource(meta.driveTransferPlan, source);
+  if (hasTransferRecord) assertTransferCheckpoint(meta);
   const gcsFile = storage.bucket(object.bucket).file(path, { generation: source.generation });
   const jobRef = db.collection("jobs").doc(String(meta.jobId));
   const staffRef = db.collection("staffProfiles").doc(String(meta.staffId));

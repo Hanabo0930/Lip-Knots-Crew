@@ -42,6 +42,18 @@ export function assertTransferSource(plan: unknown, source: TransferSource): voi
     throw new HttpsError("failed-precondition", "保存済み転送計画と転送元が一致しません。");
   }
 }
+export function assertTransferCheckpoint(meta: Record<string, unknown>): void {
+  if (typeof meta.driveName !== "string" || !meta.driveName.trim() ||
+      !Number.isSafeInteger(meta.sequence) || Number(meta.sequence) < 1) {
+    throw new HttpsError("failed-precondition", "転送済みの名前・連番を確認できません。提出記録を確認してください。");
+  }
+  if (meta.driveTransferPlan !== undefined) {
+    const plan = PlanSchema.parse(meta.driveTransferPlan);
+    if (meta.driveFileId !== plan.id || meta.driveName !== plan.name || meta.sequence !== plan.sequence) {
+      throw new HttpsError("failed-precondition", "転送済み情報と保存済み計画が一致しません。提出記録を確認してください。");
+    }
+  }
+}
 function statusCode(error: unknown): number {
   const value = error as { response?: { status?: number }; code?: number | string };
   return Number(value?.response?.status ?? value?.code);

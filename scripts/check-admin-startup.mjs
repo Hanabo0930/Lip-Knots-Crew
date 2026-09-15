@@ -29,7 +29,7 @@ const checks = [
   {
     label: "primary startup excludes direct jobs and staff loaders",
     ok:
-      /primaryResults\s*=\s*await Promise\.allSettled\(\[\s*loadSheetIssues\(isCurrentRun\),\s*loadDashboard\(dashboardMonth,isCurrentRun\),\s*loadResubmissions\(isCurrentRun\),\s*\]\)/.test(source),
+      /primaryResults\s*=\s*await Promise\.allSettled\(\[\s*loadSheetIssues\(isCurrentRun\),\s*loadDashboard\(dashboardMonthRef\.current,isCurrentRun\),\s*loadResubmissions\(isCurrentRun\),\s*\]\)/.test(source),
   },
   {
     label: "non-critical startup work is deferred until browser idle",
@@ -41,7 +41,7 @@ const checks = [
   },
   {
     label: "live dashboard uses a truthful empty state",
-    ok: source.includes("const monthly = dashboard ?? emptyDashboard(dashboardMonth);"),
+    ok: source.includes("const monthly = dashboard;") && source.includes("この月は未集計です。") && source.includes("集計対象：{monthly.month}"),
   },
   {
     label: "hard-coded acceptance-test footer figures are removed",
@@ -89,7 +89,7 @@ const checks = [
   {
     label: "deferred startup loaders and push status stay in the active auth run",
     ok:
-      source.includes(".then((enabled)=>{if(isCurrentRun())setPushEnabled(enabled);})") &&
+      source.includes(".then((enabled)=>{if(isCurrentRun()&&pushVersion===pushActionVersionRef.current)setPushEnabled(enabled);})") &&
       [
         "loadPilotReadiness(isCurrentRun)",
         "loadProductionControlStatus(isCurrentRun)",

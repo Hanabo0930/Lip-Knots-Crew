@@ -5,6 +5,14 @@ import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
 const dependency = createRequire(process.env.LKC_TEST_DEPENDENCY_ROOT ? path.join(process.env.LKC_TEST_DEPENDENCY_ROOT, 'package.json') : import.meta.url);
 const ts = dependency('typescript');
+const loaded = new Map();
+function loadState(name) {
+  assert.ok(['./sheet-write-core','./netprint-state-core','./assignment-preparation-core','./admin-edit-state-core','./job-management-core'].includes(name));
+  if(loaded.has(name))return loaded.get(name);const exports={};loaded.set(name,exports);
+  runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../functions/src/'+name.slice(2)+'.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports,require:loadState});return exports;
+}
+const {assignmentPreparationPatch}=loadState('./assignment-preparation-core');
+const {prepareAdminEditIntent,adminEditValueMatches,currentAdminEditValues}=loadState('./admin-edit-state-core');
 const source = fs.readFileSync(new URL('../functions/src/job-management.ts', import.meta.url), 'utf8');
 const schemaStart = source.indexOf('const EditSchema =');
 const schemaEnd = source.indexOf('export const createAdminJobGroup', schemaStart);
@@ -46,7 +54,7 @@ function setup(lock, options = {}) {
   };
   const exports = {};
   runInNewContext(code, {
-    exports, db, z: dependency('zod').z, HttpsError, onCall: callback => callback,
+    exports, db, assignmentPreparationPatch, prepareAdminEditIntent, adminEditValueMatches, currentAdminEditValues, z: dependency('zod').z, HttpsError, onCall: callback => callback,
     requireAdmin: request => { if (request.auth.token.role !== 'admin') throw new HttpsError('permission-denied', 'admin required'); return request.auth; },
     companyFromClaims: token => token.companyId, assertProductionOperational: async () => {},
     Timestamp: { now: () => 12345 }, FieldValue: { delete: () => '__deleted__' },
@@ -131,5 +139,30 @@ for (const newLock of [{ ...targetLock, jobId: 'concurrent-job' }, { ...targetLo
   await assert.rejects(test.run({ assignedStaffId: 'staff-b' }), { code: 'failed-precondition' });
   assert.equal(test.attempts.length, 2); assert.equal(test.commits.length, 0);
   assert.deepEqual(test.records.get(oldPath), ownLock); assert.deepEqual(test.records.get(newPath), newLock); passed++;
+}
+for (const assignedStaffId of ['staff-b',null,'staff-a']) {
+  const test = setup(ownLock, {job:{assignedStaffName:'Synthetic A',netPrint:{items:[{id:'printed-item',number:'12345678',printed:true,printedAt:1234,printedByStaffId:'staff-a',printOperationId:'old-print'}],syncPending:true,writeOperationId:'old-update'}}});
+  await test.run({assignedStaffId}); const current=test.records.get('jobs/job-a').netPrint;
+  assert.equal(current.items[0].printed,assignedStaffId==='staff-a');
+  assert.equal(current.items[0].number,'12345678');
+  if(assignedStaffId!=='staff-a'){assert.equal(current.items[0].printedAt,undefined);assert.equal(current.items[0].printOperationId,undefined);}
+  assert.equal(current.syncPending,true);assert.equal(current.writeOperationId,'old-update');passed++;
+}
+for (const assignedStaffId of ['staff-b',null,'staff-a']) {
+  const contact={temperature:36.7,arrivalTime:'08:00',submittedAt:1234};
+  const test=setup(ownLock,{job:{assignedStaffName:'Synthetic A',preContact:contact,preContactSyncPending:true}});
+  await test.run({assignedStaffId});const current=test.records.get('jobs/job-a');
+  if(assignedStaffId==='staff-a'){assert.deepEqual(current.preContact,contact);assert.equal(current.preContactSyncPending,true);}
+  else{assert.equal(current.preContact,null);assert.equal(current.preContactNeedsReview,true);assert.equal(current.preContactSyncPending,false);}
+  passed++;
+}
+{
+  const contact={temperature:36.7,arrivalTime:'08:00',submittedAt:1234};
+  const test=setup(ownLock,{job:{preContact:contact,preContactSyncPending:true}});
+  await test.run({storeAddress:'Updated address'});assert.deepEqual(test.records.get('jobs/job-a').preContact,contact);assert.equal(test.records.get('jobs/job-a').preContactSyncPending,true);passed++;
+}
+for(const fields of [{assignedStaffId:'staff-b'},{assignedStaffId:null},{storeAddress:'Changed'}]){
+ const proof={queueId:'old-app-queue',identity:'old-identity'};const test=setup(ownLock,{job:{assignedStaffName:'Synthetic A',assignmentSheetWrite:proof}});await test.run(fields);
+ if(Object.hasOwn(fields,'assignedStaffId'))assert.equal(test.records.get('jobs/job-a').assignmentSheetWrite,null);else assert.deepEqual(test.records.get('jobs/job-a').assignmentSheetWrite,proof);passed++;
 }
 console.log(`Admin reassignment lock ownership: ${passed} cases passed (SDK mocks; no external writes).`);

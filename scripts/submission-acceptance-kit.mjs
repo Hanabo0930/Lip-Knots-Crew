@@ -52,10 +52,10 @@ export function evaluateSubmissionAcceptanceEvidence(kit, evidence, now = Date.n
   if (!Number.isFinite(now) || !Number.isFinite(readAt) || readAt > now || now - readAt > 10 * 60_000) missing.push('read evidence within 10 minutes');
   if (!kit.drive.rootFolderId) missing.push('dedicated Drive folder ID');
   if (evidence?.drive?.parentId !== STAGING_DRIVE_PARENT || evidence?.drive?.rootName !== kit.companyId || evidence?.drive?.rootFolderId !== kit.drive.rootFolderId || evidence?.drive?.runtimeCanAddChildren !== true || evidence?.drive?.runtimeIdentity !== '740154137290-compute@developer.gserviceaccount.com') missing.push('runtime Drive access for the dedicated folder');
-  if (evidence?.storage?.bucket !== kit.storageBucket || evidence?.storage?.prefix !== kit.storagePrefix || evidence?.storage?.empty !== true) missing.push('empty dedicated Storage prefix');
+  if (evidence?.storage?.bucket !== kit.storageBucket || evidence?.storage?.prefix !== kit.storagePrefix || evidence?.storage?.empty !== true || evidence?.storage?.listingsComplete !== true) missing.push('empty dedicated Storage prefix');
   if (!Array.isArray(evidence?.documents) || !evidence.documents.every(item => item && typeof item.path === 'string' && typeof item.exists === 'boolean') || evidence.documents.length !== kit.absencePaths.length || new Set(evidence.documents.map(item => item.path)).size !== kit.absencePaths.length || kit.absencePaths.some(path => !evidence.documents.some(item => item.path === path && item.exists === false))) missing.push('all 12 dedicated document paths absent');
   for (const collection of ['notificationQueue', 'pushTokens', 'sheetSyncQueue', 'jobs', 'staffProfiles', 'submissions']) {
-    if (evidence?.counts?.[collection]?.companyId !== kit.companyId || evidence?.counts?.[collection]?.count !== 0) missing.push(`${collection} company-scoped count is zero`);
+    if (evidence?.counts?.[collection]?.companyId !== kit.companyId || evidence?.counts?.[collection]?.count !== 0 || evidence?.counts?.[collection]?.listingsComplete !== true) missing.push(`${collection} company-scoped complete count is zero`);
   }
   return { mode: 'local-review-only', preflightChecksPassed: missing.length === 0, missing,
     cloudExecutionAuthorized: false, next: 'Obtain explicit data-operation approval and a reviewed execution procedure; this tool never applies cloud changes.' };

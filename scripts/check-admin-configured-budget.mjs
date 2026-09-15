@@ -6,7 +6,7 @@ import {createRequire} from 'node:module';
 import {gzipSync} from 'node:zlib';
 const require=createRequire(import.meta.url);
 const vite=resolve(dirname(require.resolve('vite/package.json')),'bin/vite.js');
-const output=resolve('release-evidence/configured-admin-budget');
+const output=resolve(process.env.LKC_CONFIGURED_BUDGET_DIR||'release-evidence/configured-admin-budget');
 // 合成の公開設定でビルドのみ実行する。配信・認証・API呼出・デプロイは行わない。
 const env={...process.env,VITE_APP_ENVIRONMENT:'staging',VITE_EXPECTED_FIREBASE_PROJECT_ID:'lip-knots-crew-staging',VITE_FUNCTIONS_REGION:'asia-northeast1',VITE_USE_EMULATORS:'false',VITE_FIREBASE_API_KEY:'fixture-not-a-real-key-00000000000000000',VITE_FIREBASE_PROJECT_ID:'lip-knots-crew-staging',VITE_FIREBASE_AUTH_DOMAIN:'lip-knots-crew-staging.firebaseapp.com',VITE_FIREBASE_STORAGE_BUCKET:'lip-knots-crew-staging.firebasestorage.app',VITE_FIREBASE_MESSAGING_SENDER_ID:'000000000000',VITE_FIREBASE_APP_ID:'1:000000000000:web:0000000000000000000000'};
 try{execFileSync(process.execPath,[vite,'build','--mode','staging','--outDir',output],{cwd:resolve('apps/admin'),env,stdio:'pipe'});}catch(error){throw new Error('Configured Admin fixture build failed: '+String(error.stderr??error.message));}

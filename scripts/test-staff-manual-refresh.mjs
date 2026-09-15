@@ -30,7 +30,7 @@ function harness(options={}){
 }
 {
  const {refresh,state,scope}=harness({read:()=>{throw Error('offline');}});
- await refresh(true);assert.equal(state.status,'ready');assert.equal(state.source,'cached');
+ await refresh(true);assert.equal(state.status,'ready');assert.equal(state.source,'stale');
  assert.match(state.messages[0],/応募結果は未確認/);assert.equal(state.refreshing,false);
  assert.equal(scope.lastBusinessDataRefreshAt,0);await refresh(true);assert.equal(state.calls.length,2);
 }
@@ -48,5 +48,19 @@ for(const overrides of [{submissionEditPending:true},{businessDataStatus:'loadin
  assert.equal(state.calls.length,0);assert.match(state.messages[0],/デモ/);
 }
 assert.match(app,/readJobs=serverOnly\?getDocsFromServer:getDocs/);
-assert.match(app,/fetchMyJobs\(sid,cid,serverOnly\),fetchTasks\(\)/);
+assert.match(app,/const pendingTasks=fetchTasks\(\);[\s\S]*fetchMyJobs\(sid,cid,serverOnly,pendingTasks\)/);
 console.log('Manual refresh passed: server-only forwarding, auto throttle, duplicate suppression, failure/retry, stale auth, edit/loading/application/auth guards and demo.');
+
+for(const automatic of [false,true]){
+ let fail=true;const {refresh,state}=harness({scope:{lastBusinessDataRefreshAt:0},read:()=>{if(fail)throw Error('offline');return true;}});state.source='live';
+ await refresh(!automatic);assert.equal(state.source,'stale');if(automatic)assert.equal(state.messages.length,0);
+ fail=false;await refresh(true);assert.equal(state.source,'live');
+}
+console.log('Business freshness: manual/automatic failures revoke latest label; successful retry restores it without automatic error notifications.');
+
+for(const status of ['idle','error']){
+ let failing=true;const {refresh,state}=harness({scope:{businessDataStatus:status},read:()=>{if(failing)throw Error('offline');return true;}});
+ await refresh(true);assert.match(state.messages.at(-1),/シフト一覧を取得できません/);assert.doesNotMatch(state.messages.at(-1),/前の一覧/);assert.equal(state.refreshing,false);
+ failing=false;await refresh(true);assert.equal(state.status,'ready');assert.equal(state.source,'live');assert.match(state.messages.at(-1),/シフトを更新しました/);
+}
+console.log('Manual refresh without prior list: idle/error failures avoid claiming a previous list; retry restores ready/live.');

@@ -1,3 +1,5 @@
+import {createSubmissionAcceptanceKit} from './submission-acceptance-kit.mjs';
+import {verifySubmissionAcceptanceResult} from './submission-acceptance-result.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,15 +15,16 @@ function merge(old,data){
   for(const [k,v] of Object.entries(data)){
     assert.notEqual(v,undefined,'undefined DB field');
     if(v===deleted)delete next[k];
+    else if(v?.__increment!==undefined)next[k]=Number(next[k]??0)+v.__increment;
     else if(v?.__union){const a=next[k]??[];next[k]=[...a,...v.__union.filter(x=>!a.some(y=>JSON.stringify(x)===JSON.stringify(y)))].map(copy);}
     else if(v&&typeof v==='object'&&!Array.isArray(v)&&!(v instanceof Timestamp))next[k]=merge(next[k],v);
     else next[k]=copy(v);
   }
   return next;
 }
-function harness(){
+function harness(sourceFiles=null,compiledFiles=null){
   const records=new Map(),modules=new Map(),versions=new Map();let serial=0,allocated=0;
-  const h={records,copies:0,deletes:0,failDelete:false,failCopy:false,failWrite:null,loseCopyResponse:false,getError:null,conflictMismatch:false,beforeCopy:null,afterCopy:null,loaded:[],driveFiles:new Map()};
+  const h={records,documentReads:0,queryReads:0,returnedDocuments:0,copies:0,deletes:0,failDelete:false,failCopy:false,failWrite:null,loseCopyResponse:false,getError:null,conflictMismatch:false,beforeCopy:null,afterCopy:null,loaded:[],driveFiles:new Map()};
   const snap=ref=>{const value=copy(records.get(ref.path));return {ref,id:ref.id,exists:records.has(ref.path),data:()=>copy(value)};};
   function commit(writes){
     const next=new Map(records);
@@ -37,23 +40,26 @@ function harness(){
     }
     records.clear();for(const [k,v]of next)records.set(k,v);for(const w of writes)versions.set(w.ref.path,(versions.get(w.ref.path)??0)+1);
   }
-  const ref=p=>({path:p,id:p.split('/').at(-1),collection:n=>collection(`${p}/${n}`),get:async()=>snap(ref(p)),set:async(data,opts)=>commit([{ref:ref(p),data,merge:opts?.merge}]),update:async data=>commit([{ref:ref(p),data,mode:"update"}])});
+  const ref=p=>({path:p,id:p.split('/').at(-1),collection:n=>collection(`${p}/${n}`),get:async()=>{h.documentReads++;return snap(ref(p));},set:async(data,opts)=>{if(p.startsWith("resubmissionRequests/"))await h.beforeRequestWrite?.();commit([{ref:ref(p),data,merge:opts?.merge}]);},update:async data=>commit([{ref:ref(p),data,mode:"update"}])});
   const field=(v,k)=>k.split('.').reduce((x,p)=>x?.[p],v);
   const collection=(name,filters=[],ordering=null,max=Infinity)=>({
     doc:(id=`synthetic-${++serial}`)=>ref(`${name}/${id}`),
-    where:(f,op,v)=>{assert.ok(['==','in'].includes(op));return collection(name,[...filters,[f,op,v]],ordering,max);},
+    add:async data=>{const r=ref(`${name}/synthetic-${++serial}`);await r.set(data);return r;},
+    where:(f,op,v)=>{assert.ok(['==','in','>=','<='].includes(op));return collection(name,[...filters,[f,op,v]],ordering,max);},
     orderBy:(f,d)=>collection(name,filters,[f,d],max),limit:n=>collection(name,filters,ordering,n),
     get:async()=>{
-      let entries=[...records].filter(([k,v])=>k.startsWith(name+'/')&&!k.slice(name.length+1).includes('/')&&filters.every(([f,op,x])=>op==='=='?field(v,f)===x:x.includes(field(v,f))));
+      h.queryReads++;let entries=[...records].filter(([k,v])=>k.startsWith(name+'/')&&!k.slice(name.length+1).includes('/')&&filters.every(([f,op,x])=>op==='=='?field(v,f)===x:op==='>='?field(v,f)>=x:op==='<='?field(v,f)<=x:x.includes(field(v,f))));
       if(ordering)entries.sort((a,b)=>{const val=x=>{const v=field(x[1],ordering[0]);return v instanceof Timestamp?v.toMillis():v;};return (val(a)>val(b)?1:val(a)<val(b)?-1:0)*(ordering[1]==='desc'?-1:1);});
-      return {docs:entries.slice(0,max).map(([k])=>snap(ref(k)))};
+      h.returnedDocuments+=Math.min(entries.length,max);return {docs:entries.slice(0,max).map(([k])=>snap(ref(k)))};
     },
   });
   const writer=w=>({set:(ref,data,opts)=>w.push({ref,data,merge:opts?.merge}),update:(ref,data)=>w.push({ref,data,mode:'update'}),create:(ref,data)=>w.push({ref,data,mode:'create'})});
-  const db={collection,doc:ref,batch:()=>{const w=[];return {...writer(w),commit:async()=>commit(w)};},runTransaction:async callback=>{
+  const db={collection,doc:ref,getAll:(...refs)=>Promise.all(refs.map(r=>r.get())),batch:()=>{const w=[];return {...writer(w),commit:async()=>{await h.beforeCommit?.();commit(w);}};},runTransaction:async callback=>{
+    await h.beforeRequestWrite?.();
     for(let attempt=0;attempt<10;attempt++){
       const w=[],reads=new Map();const get=async r=>{assert.equal(w.length,0,'read after write');reads.set(r.path,versions.get(r.path)??0);return snap(r);};
       const result=await callback({...writer(w),get,getAll:(...refs)=>Promise.all(refs.map(get))});
+      await h.beforeCommit?.();
       if([...reads].some(([k,v])=>(versions.get(k)??0)!==v))continue;
       commit(w);return result;
     }
@@ -62,24 +68,25 @@ function harness(){
   const drive={files:{
     generateIds:async()=>({data:{ids:[`allocated-${++allocated}`]}}),
     get:async({fileId})=>{if(h.getError)throw {code:h.getError};const data=h.driveFiles.get(fileId);if(!data)throw {code:404};return {data:copy(data)};},
-    list:async()=>({data:{files:[{id:'synthetic-folder'}]}}),
+    list:async input=>h.driveList?h.driveList(input):({data:{files:[{id:'synthetic-folder'}]}}),
     create:async input=>{
       assert.ok(input.media,'test expects only file copies');await h.beforeCopy?.();if(h.failCopy)throw new Error('synthetic transfer failure');
       const id=input.requestBody.id??`synthetic-drive-${h.copies+1}`;
       if(h.conflictMismatch){h.driveFiles.set(id,{id,name:'unrelated',size:'100'});throw {code:409};}
       if(h.driveFiles.has(id))throw {code:409};
       h.copies++;const data={...input.requestBody,id,size:'100',mimeType:'image/png',md5Checksum:'00000000000000000000000000000000',createdTime:h.driveCreatedAt??'2099-09-20T02:00:00.000Z'};
-      h.driveFiles.set(id,data);await h.afterCopy?.();if(h.loseCopyResponse)throw new Error('synthetic lost response');return {data:copy(data)};
+      if(h.drivePayload)Object.assign(data,h.drivePayload(input));h.driveFiles.set(id,data);await h.afterCopy?.();if(h.loseCopyResponse)throw new Error('synthetic lost response');return {data:copy(data)};
     },
   }};
-  const storage={bucket:name=>{assert.equal(name,'synthetic-bucket');return {file:(p,options)=>({createReadStream:()=>{assert.equal(options?.generation,'1');return {syntheticPath:p};},delete:async()=>{h.deletes++;if(h.failDelete)throw new Error('synthetic cleanup failure');}})};}};
-  const boundaries={'./firebase':{db,storage},'./google-drive-client':{getWritableDriveClient:()=>drive,getReadonlyDriveClient:()=>{throw new Error('Network refused');}},'firebase-admin/firestore':{Timestamp,FieldValue:{serverTimestamp:()=>Timestamp.now(),delete:()=>deleted,arrayUnion:(...v)=>({__union:v})}},'firebase-functions/v2/https':{HttpsError,onCall:fn=>fn,onRequest:fn=>fn},'firebase-functions/v2/storage':{onObjectFinalized:fn=>fn},'firebase-functions/params':{defineString:(name,options)=>({value:()=>options.default})},zod:dependency('zod'),'node:path':path,'node:crypto':crypto,'node:buffer':{Buffer}};
+  const storage={bucket:name=>{assert.equal(name,h.storageBucket??'synthetic-bucket');return {file:(p,options)=>({createReadStream:()=>{if(h.allowLegacyUnversionedRead&&options?.generation===undefined)h.unversionedReads=(h.unversionedReads??0)+1;else assert.equal(options?.generation,'1');return {syntheticPath:p};},delete:async()=>{h.deletedPaths??=[];h.deletedPaths.push(p);h.deletes++;if(h.failDelete)throw new Error('synthetic cleanup failure');}})};}};
+  const boundaries={'firebase-functions/v2/firestore':{onDocumentWritten:(_path,fn)=>fn},'firebase-functions/v2/scheduler':{onSchedule:(_options,fn)=>fn},googleapis:{google:{auth:{GoogleAuth:class{}},monitoring:()=>({}),sheets:()=>{throw Error('External Sheets access refused');}}},'./firebase':{db,storage},'./google-drive-client':{getWritableDriveClient:()=>drive,getReadonlyDriveClient:()=>({files:{get:async()=>{h.previewReads=(h.previewReads??0)+1;const stream={on:()=>stream,pipe:response=>response.end()};return {data:stream};}}})},'firebase-admin/firestore':{Timestamp,FieldValue:{serverTimestamp:()=>Timestamp.now(),delete:()=>deleted,increment:value=>({__increment:value}),arrayUnion:(...v)=>({__union:v})}},'firebase-functions/v2/https':{HttpsError,onCall:fn=>fn,onRequest:fn=>fn},'firebase-functions/v2/storage':{onObjectFinalized:fn=>fn},'firebase-functions/params':{defineString:(name,options)=>({value:()=>name==='FILE_PREVIEW_GATEWAY_URL'?(h.previewBase??options.default):options.default})},zod:dependency('zod'),'node:path':path,'node:crypto':crypto,'node:buffer':{Buffer}};
   function load(name){
     if(Object.hasOwn(boundaries,name))return boundaries[name];assert.match(name,/^\.\/[a-z0-9-]+$/,'External import refused');if(modules.has(name))return modules.get(name);
-    const source=fs.readFileSync(new URL(`../functions/src/${name.slice(2)}.ts`,import.meta.url),'utf8');const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+    const filename=name.slice(2),source=compiledFiles?compiledFiles[filename+'.js']:sourceFiles?sourceFiles[filename+'.ts']:fs.readFileSync(new URL('../functions/src/'+filename+'.ts',import.meta.url),'utf8');if(typeof source!=='string')throw Error('Historical module missing: '+name);const code=compiledFiles?source:ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
     const exports={};modules.set(name,exports);h.loaded.push(name);runInNewContext(code,{exports,require:load,process:{env:{APP_ENVIRONMENT:'development'}}},{timeout:5000});return exports;
   }
-  h.status=load('./submission-status');h.uploads=load('./uploads');h.requests=load('./resubmissions');h.views=load('./submission-files');
+  h.loadModule=load;h.snapshot=p=>snap(ref(p));h.updateRecord=(p,data)=>ref(p).update(data);
+  h.status=load('./submission-status');h.uploads=load('./uploads');h.requests=load('./resubmissions');h.views=load('./submission-files');h.tasks=load('./staff-tasks');h.netprint=load('./netprint');h.precontact=load('./precontact');
   h.staff={uid:'synthetic-user',token:{companyId:'synthetic-company',staffId:'synthetic-staff',role:'staff'}};h.admin={uid:'synthetic-admin',token:{companyId:'synthetic-company',role:'admin'}};
   records.set('jobs/synthetic-job',{companyId:'synthetic-company',assignedStaffId:'synthetic-staff',status:'assigned',dateKey:'2099-09-20',storeName:'Synthetic Store',clientName:'Synthetic Client'});
   records.set('staffProfiles/synthetic-staff',{companyId:'synthetic-company',displayName:'Synthetic Staff'});
@@ -90,8 +97,10 @@ function harness(){
   h.list=name=>[...records].filter(([k])=>k.startsWith(name+'/')&&!k.slice(name.length+1).includes('/')).map(([k,v])=>({id:k.split('/').at(-1),...v}));
   return h;
 }
-const results=[];
-async function test(name,run){try{await run();results.push({name,ok:true});}catch(e){results.push({name,ok:false,error:e.message});}}
+const deployedOnly=process.argv.includes('--deployed-rollback-only');
+if(deployedOnly&&!process.env.LKC_DEPLOYED_TRANSFER_BUNDLE)throw Error('Deployed rollback bundle is required.');
+const results=[],deployedObservations=[];
+async function test(name,run){if(deployedOnly&&!name.startsWith('deployed rollback '))return;try{await run();results.push({name,ok:true});}catch(e){results.push({name,ok:false,error:e.message});}}
 await test('initial report -> admin review -> replacement -> comparison -> completed',async()=>{
   const h=harness(),initial=await h.start();await h.finish(initial.files[0]);assert.equal((await h.state(initial.submissionId)).status,'completed');
   const created=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:initial.submissionId,sourceFileId:initial.files[0].fileId,reasons:['その他']}});
@@ -231,4 +240,307 @@ await test('foreign source file metadata cannot create a resubmission request',a
 
 await test('parallel files of one replacement keep both files and one completion',async()=>{const h=harness(),r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}),s=await h.start(2,{purpose:'replacement',resubmissionRequestId:r.requestId});await Promise.all(s.files.map(f=>h.finish(f)));const request=h.records.get('resubmissionRequests/'+r.requestId);assert.equal(request.replacementFiles.length,2);assert.equal(request.status,'submitted');assert.equal((await h.state(s.submissionId)).completedFiles,2);assert.equal(h.copies,2);assert.equal(h.list('sheetSyncQueue').length,1);await h.requests.completeResubmissionRequest({auth:h.admin,data:r});});
 
+
+for(const [name,change] of [['job deletion',h=>h.records.delete('jobs/synthetic-job')],['job company',h=>h.records.get('jobs/synthetic-job').companyId='other'],['job staff',h=>h.records.get('jobs/synthetic-job').assignedStaffId='other']])await test('create request rejects '+name+' before save',async()=>{const h=harness();h.beforeRequestWrite=async()=>{h.beforeRequestWrite=null;change(h);};await assert.rejects(h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}));assert.equal(h.list('resubmissionRequests').length,0);});
+await test('create request rechecks source company before save',async()=>{const h=harness(),initial=await h.start();await h.finish(initial.files[0]);h.beforeRequestWrite=async()=>{h.beforeRequestWrite=null;h.records.get('submissions/'+initial.submissionId).companyId='other';};await assert.rejects(h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:initial.submissionId,sourceFileId:initial.files[0].fileId,reasons:['その他']}}));assert.equal(h.list('resubmissionRequests').length,0);});
+
+for(const mode of ['deleted','status'])await test('create request rechecks source file '+mode,async()=>{const h=harness(),initial=await h.start();await h.finish(initial.files[0]);const filePath='submissions/'+initial.submissionId+'/files/'+initial.files[0].fileId;h.beforeRequestWrite=async()=>{h.beforeRequestWrite=null;if(mode==='deleted')h.records.delete(filePath);else h.records.get(filePath).status='error';};await assert.rejects(h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:initial.submissionId,sourceFileId:initial.files[0].fileId,reasons:['その他']}}));assert.equal(h.list('resubmissionRequests').length,0);});
+
+await test('request notification write failure leaves no orphan request',async()=>{const h=harness();h.failWrite=w=>w.ref.path.startsWith('notificationQueue/');await assert.rejects(h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}));assert.equal(h.list('resubmissionRequests').length,0);assert.equal(h.list('notificationQueue').length,0);});
+
+await test('request write failure leaves no orphan notification',async()=>{const h=harness();h.failWrite=w=>w.ref.path.startsWith('resubmissionRequests/');await assert.rejects(h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}));assert.equal(h.list('resubmissionRequests').length,0);assert.equal(h.list('notificationQueue').length,0);});
+await test('request notification preserves target route and deterministic ID',async()=>{const h=harness(),r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他'],note:'synthetic'}});const notices=h.list('notificationQueue');assert.equal(notices.length,1);const n=notices[0];assert.equal(n.id,'nq_'+crypto.createHash('sha256').update('synthetic-company|staff:synthetic-staff|resubmission_request|'+r.requestId).digest('hex').slice(0,36));assert.equal(n.targetStaffId,'synthetic-staff');assert.equal(n.route,'/resubmissions/'+r.requestId);assert.equal(n.body,'その他 / synthetic');assert.equal(n.status,'queued');});
+
+for(const field of ['companyId','jobId','type'])await test('comparison rejects mismatched source '+field+' without issuing preview',async()=>{
+ const h=harness(),initial=await h.start();await h.finish(initial.files[0]);const request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:initial.submissionId,sourceFileId:initial.files[0].fileId,reasons:['その他']}});
+ h.records.get('submissions/'+initial.submissionId)[field]='foreign';const before=h.list('filePreviewTokens').length;
+ await assert.rejects(h.views.getResubmissionComparison({auth:h.admin,data:request}));assert.equal(h.list('filePreviewTokens').length,before);
+});
+for(const field of ['companyId','submissionId','staffId'])await test('comparison rejects source file identity '+field,async()=>{
+ const h=harness(),initial=await h.start();await h.finish(initial.files[0]);const request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:initial.submissionId,sourceFileId:initial.files[0].fileId,reasons:['その他']}});
+ h.records.get('submissions/'+initial.submissionId+'/files/'+initial.files[0].fileId)[field]='foreign';
+ await assert.rejects(h.views.getResubmissionComparison({auth:h.admin,data:request}));assert.equal(h.list('filePreviewTokens').length,0);
+});
+await test('comparison rejects replacement linked to a different request before source preview',async()=>{
+ const h=harness(),initial=await h.start();await h.finish(initial.files[0]);const request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:initial.submissionId,sourceFileId:initial.files[0].fileId,reasons:['その他']}});
+ const replacement=await h.start(1,{purpose:'replacement',resubmissionRequestId:request.requestId});await h.finish(replacement.files[0]);h.records.get('submissions/'+replacement.submissionId).resubmissionRequestId='foreign';
+ await assert.rejects(h.views.getResubmissionComparison({auth:h.admin,data:request}));assert.equal(h.list('filePreviewTokens').length,0);
+});
+await test('comparison denies former staff after reassignment',async()=>{
+ const h=harness(),request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});h.records.get('jobs/synthetic-job').assignedStaffId='new-staff';
+ await assert.rejects(h.views.getResubmissionComparison({auth:h.staff,data:request}),{code:'permission-denied'});
+});
+await test('timeline rejects mismatched file before any previews',async()=>{
+ const h=harness(),initial=await h.start(2);await h.finish(initial.files[0]);await h.finish(initial.files[1]);h.records.get('submissions/'+initial.submissionId+'/files/'+initial.files[1].fileId).companyId='foreign';
+ await assert.rejects(h.views.getSubmissionTimeline({auth:h.admin,data:{jobId:'synthetic-job',type:'report'}}));assert.equal(h.list('filePreviewTokens').length,0);
+});
+
+for(const missing of ['parent','file'])await test('comparison source deletion '+missing,async()=>{
+ const h=harness(),initial=await h.start();await h.finish(initial.files[0]);const request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:initial.submissionId,sourceFileId:initial.files[0].fileId,reasons:['その他']}});
+ h.records.delete('submissions/'+initial.submissionId+(missing==='file'?'/files/'+initial.files[0].fileId:''));
+ if(missing==='parent')await assert.rejects(h.views.getResubmissionComparison({auth:h.admin,data:request}));
+ else assert.equal((await h.views.getResubmissionComparison({auth:h.admin,data:request})).source,null);
+ assert.equal(h.list('filePreviewTokens').length,0);
+});
+await test('comparison without source remains readable by assigned staff',async()=>{
+ const h=harness(),request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});
+ const result=await h.views.getResubmissionComparison({auth:h.staff,data:request});assert.equal(result.request.id,request.requestId);assert.equal(result.source,null);assert.equal(result.replacements.length,0);
+});
+for(const field of ['companyId','jobId','staffId','type'])await test('comparison replacement parent '+field+' mismatch issues no token',async()=>{
+ const h=harness(),request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});
+ const replacement=await h.start(1,{purpose:'replacement',resubmissionRequestId:request.requestId});await h.finish(replacement.files[0]);h.records.get('submissions/'+replacement.submissionId)[field]='foreign';
+ await assert.rejects(h.views.getResubmissionComparison({auth:h.admin,data:request}));assert.equal(h.list('filePreviewTokens').length,0);
+});
+
+for(const [total,completed] of [[0,0],[2,3],[2,-1],[2,0.5],['2',1],[2,'1']])await test('processing status rejects invalid counters '+JSON.stringify([total,completed]),async()=>{
+ const h=harness(),session=await h.start();Object.assign(h.records.get('submissions/'+session.submissionId),{totalFiles:total,completedFiles:completed});await assert.rejects(h.state(session.submissionId),{code:'failed-precondition'});
+});
+await test('processing status waits for job status application',async()=>{
+ const h=harness(),session=await h.start();await h.finish(session.files[0]);h.records.get('submissions/'+session.submissionId).jobStatusApplied=false;
+ assert.equal((await h.state(session.submissionId)).status,'processing');
+});
+await test('processing status rejects premature completed counter',async()=>{
+ const h=harness(),session=await h.start(2);Object.assign(h.records.get('submissions/'+session.submissionId),{status:'completed',completedFiles:1,jobStatusApplied:true});await assert.rejects(h.state(session.submissionId),{code:'failed-precondition'});
+});
+for(const mode of ['open','foreign','missing'])await test('processing status checks replacement request '+mode,async()=>{
+ const h=harness(),request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});
+ const session=await h.start(1,{purpose:'replacement',resubmissionRequestId:request.requestId});await h.finish(session.files[0]);const key='resubmissionRequests/'+request.requestId;
+ if(mode==='missing')h.records.delete(key);else if(mode==='foreign')h.records.get(key).companyId='foreign';else Object.assign(h.records.get(key),{status:'open',replacementSubmissionId:null});
+ if(mode==='open')assert.equal((await h.state(session.submissionId)).status,'processing');else await assert.rejects(h.state(session.submissionId),{code:'failed-precondition'});
+});
+
+for(const mode of ['valid','expired','inactive','file-missing','parent-missing','parent-company','file-company','file-submission','drive-changed','file-status'])await test('preview gateway rechecks source '+mode,async()=>{
+ const h=harness(),session=await h.start();await h.finish(session.files[0]);const parent='submissions/'+session.submissionId,file=parent+'/files/'+session.files[0].fileId,raw='synthetic-preview-token-that-is-long-enough-123';
+ const token={companyId:'synthetic-company',submissionId:session.submissionId,fileId:session.files[0].fileId,driveFileId:h.records.get(file).driveFileId,active:true,expiresAt:Timestamp.fromMillis(Date.now()+60000),contentType:'image/png',fileName:'synthetic.png'};
+ if(mode==='expired')token.expiresAt=Timestamp.fromMillis(1);if(mode==='inactive')token.active=false;
+ if(mode==='file-missing')h.records.delete(file);if(mode==='parent-missing')h.records.delete(parent);
+ if(mode==='parent-company')h.records.get(parent).companyId='foreign';if(mode==='file-company')h.records.get(file).companyId='foreign';if(mode==='file-submission')h.records.get(file).submissionId='foreign';if(mode==='drive-changed')h.records.get(file).driveFileId='changed';if(mode==='file-status')h.records.get(file).status='error';
+ h.records.set('filePreviewTokens/'+crypto.createHash('sha256').update(raw).digest('hex'),token);
+ const response={code:200,headersSent:false,status(code){this.code=code;return this;},send(){return this;},setHeader(){},end(){}};
+ await h.views.driveFilePreview({query:{token:raw}},response);
+ assert.equal(response.code,mode==='valid'?200:410);assert.equal(h.previewReads??0,mode==='valid'?1:0);
+});
+
+for(const count of [0,1,100,101,150])await test('timeline returns latest 100 of '+count+' submissions',async()=>{
+ const h=harness();for(let i=0;i<count;i++)h.records.set('submissions/history-'+String(i).padStart(3,'0'),{companyId:'synthetic-company',jobId:'synthetic-job',type:'report',staffId:'synthetic-staff',uid:'synthetic-user',createdAt:Timestamp.fromMillis(1000+i),status:'uploading',purpose:'additional'});
+ h.records.set('submissions/foreign',{companyId:'foreign',jobId:'synthetic-job',type:'report',createdAt:Timestamp.fromMillis(999999)});
+ const result=await h.views.getSubmissionTimeline({auth:h.staff,data:{jobId:'synthetic-job',type:'report'}});
+ assert.equal(result.submissions.length,Math.min(100,count));
+ assert.deepEqual(Array.from(result.submissions,x=>x.id),Array.from({length:Math.min(100,count)},(_,index)=>'history-'+String(count-1-index).padStart(3,'0')));
+});
+
+for(const submitted of [0,99,100,150])await test('open staff task survives '+submitted+' submitted requests',async()=>{
+ const h=harness();for(let i=0;i<submitted;i++)h.records.set('resubmissionRequests/old-'+i,{companyId:'synthetic-company',staffId:'synthetic-staff',jobId:'synthetic-job',type:'report',status:'submitted',createdAt:Timestamp.now()});
+ h.records.set('resubmissionRequests/actionable',{companyId:'synthetic-company',staffId:'synthetic-staff',jobId:'synthetic-job',type:'report',status:'open',reasons:['その他'],createdAt:Timestamp.now()});
+ h.records.set('resubmissionRequests/foreign',{companyId:'other',staffId:'synthetic-staff',jobId:'synthetic-job',type:'report',status:'open',createdAt:Timestamp.now()});
+ const result=await h.tasks.getMyTasks({auth:h.staff,data:{}});const requests=result.tasks.filter(task=>task.kind==='resubmission');assert.equal(requests.length,1);assert.equal(requests[0].metadata.requestId,'actionable');
+});
+
+for(const target of ['sheetSyncQueue/','notificationQueue/'])await test('netprint update atomically saves '+target,async()=>{
+ const h=harness(),before=JSON.stringify(h.records.get('jobs/synthetic-job'));h.failWrite=w=>w.ref.path.startsWith(target);
+ await assert.rejects(h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:'synthetic-job',numbers:['12345678']}}));assert.equal(JSON.stringify(h.records.get('jobs/synthetic-job')),before);assert.equal(h.list('sheetSyncQueue').length,0);assert.equal(h.list('notificationQueue').length,0);
+});
+function printedJob(h,printed=false){h.records.get('jobs/synthetic-job').netPrint={items:[{id:'item',number:'12345678',position:1,version:1,printed,...(printed?{printedAt:Timestamp.fromMillis(1234)}:{})}]};}
+await test('netprint printed atomic queue failure',async()=>{const h=harness();printedJob(h);const before=JSON.stringify(h.records.get('jobs/synthetic-job'));h.failWrite=w=>w.ref.path.startsWith('sheetSyncQueue/');await assert.rejects(h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:'synthetic-job',itemId:'item'}}));assert.equal(JSON.stringify(h.records.get('jobs/synthetic-job')),before);});
+await test('netprint printed replay preserves first time and queue count',async()=>{const h=harness();printedJob(h);await h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:'synthetic-job',itemId:'item'}});const first=JSON.stringify(h.records.get('jobs/synthetic-job'));await h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:'synthetic-job',itemId:'item'}});assert.equal(JSON.stringify(h.records.get('jobs/synthetic-job')),first);assert.equal(h.list('sheetSyncQueue').length,1);});
+await test('netprint printed sync guards exact number',async()=>{const h=harness();printedJob(h);await h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:'synthetic-job',itemId:'item'}});assert.equal(h.list('sheetSyncQueue')[0].expected?.netPrint1?.value,'12345678');});
+await test('netprint unchanged current-owner printed number retains sheet highlight',async()=>{const h=harness();printedJob(h);await h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:'synthetic-job',itemId:'item'}});const proof=h.records.get('jobs/synthetic-job').netPrint.items[0].printOperationId;await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:'synthetic-job',numbers:['12345678']}});assert.equal(h.records.get('jobs/synthetic-job').netPrint.items[0].printed,true);assert.equal(h.records.get('jobs/synthetic-job').netPrint.items[0].printOperationId,proof);assert.equal(h.list('sheetSyncQueue').find(queue=>queue.operation==='netprint.update').styles.netPrint1.background,'#fff2cc');});
+await test('netprint legacy printed registration requires current-owner reconfirmation',async()=>{const h=harness();printedJob(h,true);await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:'synthetic-job',numbers:['12345678']}});const item=h.records.get('jobs/synthetic-job').netPrint.items[0];assert.equal(item.printed,false);assert.equal(item.printedAt,undefined);assert.equal(h.list('sheetSyncQueue')[0].styles.netPrint1.background,'#ffffff');});
+
+for(const secondTime of ['09:00','9:00'])await test('identical precontact preserves first receipt '+secondTime,async()=>{
+ const h=harness();await h.precontact.submitPreContact({auth:h.staff,data:{jobId:'synthetic-job',temperature:36.5,arrivalTime:'09:00'}});const before=JSON.stringify([...h.records]);await h.precontact.submitPreContact({auth:h.staff,data:{jobId:'synthetic-job',temperature:36.5,arrivalTime:secondTime}});assert.equal(JSON.stringify([...h.records]),before);
+});
+await test('changed precontact records revision and expected old values',async()=>{
+ const h=harness();await h.precontact.submitPreContact({auth:h.staff,data:{jobId:'synthetic-job',temperature:36.5,arrivalTime:'09:00'}});await h.precontact.submitPreContact({auth:h.staff,data:{jobId:'synthetic-job',temperature:36.6,arrivalTime:'09:30'}});assert.equal(h.records.get('jobs/synthetic-job').preContact.revised,true);assert.equal(h.list('sheetSyncQueue').length,2);assert.equal(h.list('sheetSyncQueue')[1].expected.arrivalTime.value,'09:00');assert.equal(h.list('auditLogs').length,2);
+});
+for(const mode of ['cancelled','staff-changed','queue-failure'])await test('precontact '+mode+' keeps state',async()=>{
+ const h=harness();if(mode==='cancelled')h.records.get('jobs/synthetic-job').cancelled=true;if(mode==='staff-changed')h.records.get('jobs/synthetic-job').assignedStaffId='other';if(mode==='queue-failure')h.failWrite=w=>w.ref.path.startsWith('sheetSyncQueue/');const before=JSON.stringify([...h.records]);await assert.rejects(h.precontact.submitPreContact({auth:h.staff,data:{jobId:'synthetic-job',temperature:36.5,arrivalTime:'09:00'}}));assert.equal(JSON.stringify([...h.records]),before);
+});
+
+await test('netprint replacing number resets only changed item',async()=>{const h=harness();printedJob(h,true);const response=await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:'synthetic-job',numbers:['87654321']}});const item=h.records.get('jobs/synthetic-job').netPrint.items[0];assert.equal(response.changedCount,1);assert.equal(item.printed,false);assert.notEqual(item.id,'item');assert.equal(item.printedAt,undefined);assert.equal(h.list('notificationQueue').length,1);});
+await test('netprint removal counted with accurate notice',async()=>{const h=harness();printedJob(h,true);const response=await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:'synthetic-job',numbers:[]}});assert.equal(response.changedCount,1);assert.equal(h.records.get('jobs/synthetic-job').netPrint.items.length,0);assert.equal(h.list('sheetSyncQueue')[0].updates.netPrint1,'');assert.match(h.list('notificationQueue')[0].title,/取り消/);});
+for(const mode of ['foreign-staff','missing-item','invalid-position'])await test('netprint print rejects '+mode,async()=>{const h=harness();printedJob(h);if(mode==='foreign-staff')h.records.get('jobs/synthetic-job').assignedStaffId='other';if(mode==='invalid-position')h.records.get('jobs/synthetic-job').netPrint.items[0].position=0;const before=JSON.stringify(h.records.get('jobs/synthetic-job'));await assert.rejects(h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:'synthetic-job',itemId:mode==='missing-item'?'other':'item'}}));assert.equal(JSON.stringify(h.records.get('jobs/synthetic-job')),before);assert.equal(h.list('sheetSyncQueue').length,0);});
+
+for(const submitted of [true,false])await test('client submission replay preserves receipt '+submitted,async()=>{const h=harness();await h.status.setSalesFloorClientSubmitted({auth:h.staff,data:{jobId:'synthetic-job',submitted}});const before=JSON.stringify([...h.records]);await h.status.setSalesFloorClientSubmitted({auth:h.staff,data:{jobId:'synthetic-job',submitted}});assert.equal(JSON.stringify([...h.records]),before);});
+await test('cancelled job rejects client submission',async()=>{const h=harness();h.records.get('jobs/synthetic-job').cancelled=true;const before=JSON.stringify([...h.records]);await assert.rejects(h.status.setSalesFloorClientSubmitted({auth:h.staff,data:{jobId:'synthetic-job',submitted:true}}),{code:'failed-precondition'});assert.equal(JSON.stringify([...h.records]),before);});
+for(const transferred of [true,false])await test('client cancellation retains transferred completion '+transferred,async()=>{const h=harness();h.records.get('jobs/synthetic-job').submissionStatus={salesFloor:{lipKnotsSubmitted:transferred}};await h.status.setSalesFloorClientSubmitted({auth:h.staff,data:{jobId:'synthetic-job',submitted:true}});await h.status.setSalesFloorClientSubmitted({auth:h.staff,data:{jobId:'synthetic-job',submitted:false}});const status=h.records.get('jobs/synthetic-job').submissionStatus.salesFloor;assert.equal(status.completed,transferred);assert.equal(status.clientSubmittedAt,undefined);assert.equal(h.list('sheetSyncQueue').at(-1).updates.salesFloorSubmitted,transferred?'リップ':'');});
+
+for(const state of [{cancelled:true},{status:'cancelled'}])for(const action of ['printed','precontact','client'])await test('cancelled business mutation rejected '+action+' '+Object.keys(state)[0],async()=>{const h=harness();printedJob(h);Object.assign(h.records.get('jobs/synthetic-job'),state);const before=JSON.stringify([...h.records]);const run=action==='printed'?()=>h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:'synthetic-job',itemId:'item'}}):action==='precontact'?()=>h.precontact.submitPreContact({auth:h.staff,data:{jobId:'synthetic-job',temperature:36.5,arrivalTime:'09:00'}}):()=>h.status.setSalesFloorClientSubmitted({auth:h.staff,data:{jobId:'synthetic-job',submitted:true}});await assert.rejects(run,{code:'failed-precondition'});assert.equal(JSON.stringify([...h.records]),before);});
+for(const state of [{cancelled:true},{status:'cancelled'}])await test('cancelled printed replay still refuses '+Object.keys(state)[0],async()=>{const h=harness();printedJob(h,true);Object.assign(h.records.get('jobs/synthetic-job'),state);const before=JSON.stringify([...h.records]);await assert.rejects(()=>h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:'synthetic-job',itemId:'item'}}),{code:'failed-precondition'});assert.equal(JSON.stringify([...h.records]),before);});
+
+for(const action of ['upload','request'])for(const field of ['cancelled','status'])for(const timing of ['before','commit'])await test('new submission rejects cancellation '+action+' '+field+' '+timing,async()=>{const h=harness(),change=field==='cancelled'?{cancelled:true}:{status:'cancelled'};if(timing==='before')Object.assign(h.records.get('jobs/synthetic-job'),change);else h.beforeCommit=async()=>{h.beforeCommit=null;await h.updateRecord('jobs/synthetic-job',change);};await assert.rejects(action==='upload'?()=>h.start():()=>h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}),{code:'failed-precondition'});assert.equal(h.list('submissions').length,0);assert.equal(h.list('resubmissionRequests').length,0);assert.equal(h.list('notificationQueue').length,0);});
+for(const field of ['companyId','assignedStaffId'])await test('upload rechecks changed '+field+' at commit',async()=>{const h=harness();h.beforeCommit=async()=>{h.beforeCommit=null;await h.updateRecord('jobs/synthetic-job',{[field]:'other'});};await assert.rejects(()=>h.start(),{code:'permission-denied'});assert.equal(h.list('submissions').length,0);});
+await test('upload rechecks replacement request at commit',async()=>{const h=harness(),r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});h.beforeCommit=async()=>{h.beforeCommit=null;await h.updateRecord('resubmissionRequests/'+r.requestId,{status:'completed'});};await assert.rejects(()=>h.start(1,{purpose:'replacement',resubmissionRequestId:r.requestId}),{code:'failed-precondition'});assert.equal(h.list('submissions').length,0);});
+await test('upload parent and files stay atomic on file write failure',async()=>{const h=harness();h.failWrite=w=>w.ref.path.includes('/files/');await assert.rejects(()=>h.start(2));assert.equal([...h.records.keys()].some(k=>k.startsWith('submissions/')),false);});
+
+for(const mode of ['replacement-without-id','replacement-empty-id','replacement-whitespace-id','initial-with-id','additional-with-id','default-with-id','initial-empty-id'])await test('upload rejects inconsistent purpose '+mode,async()=>{const h=harness(),r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});let patch;if(mode==='replacement-without-id')patch={purpose:'replacement'};else if(mode==='replacement-empty-id')patch={purpose:'replacement',resubmissionRequestId:''};else if(mode==='replacement-whitespace-id')patch={purpose:'replacement',resubmissionRequestId:'   '};else if(mode==='initial-empty-id')patch={purpose:'initial',resubmissionRequestId:''};else patch={...(mode==='default-with-id'?{}:{purpose:mode.split('-')[0]}),resubmissionRequestId:r.requestId};const before=JSON.stringify([...h.records]);await assert.rejects(()=>h.start(1,patch));assert.equal(JSON.stringify([...h.records]),before);});
+
+for(const action of ['printed','precontact','client'])for(const status of ['open','draft',null])for(const replay of [false,true])await test('staff operation requires assigned '+action+' '+status+' replay='+replay,async()=>{
+ const h=harness();printedJob(h);
+ const run=action==='printed'?()=>h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:'synthetic-job',itemId:'item'}}):action==='precontact'?()=>h.precontact.submitPreContact({auth:h.staff,data:{jobId:'synthetic-job',temperature:36.5,arrivalTime:'09:00'}}):()=>h.status.setSalesFloorClientSubmitted({auth:h.staff,data:{jobId:'synthetic-job',submitted:true}});
+ if(replay)await run();
+ const job=h.records.get('jobs/synthetic-job');if(status===null)delete job.status;else job.status=status;
+ const before=JSON.stringify([...h.records]);await assert.rejects(run,{code:'failed-precondition'});assert.equal(JSON.stringify([...h.records]),before);
+});
+
+for(const mode of ['own-outside-window','cancelled','cancelled-status','open','missing','foreign-company','foreign-staff','bad-type','bad-job-id'])await test('actionable resubmission task validates current job '+mode,async()=>{
+ const h=harness(),job=h.records.get('jobs/synthetic-job');
+ h.records.set('resubmissionRequests/pending',{companyId:'synthetic-company',staffId:'synthetic-staff',jobId:mode==='bad-job-id'?'invalid/path':'synthetic-job',type:mode==='bad-type'?'unknown':'report',status:'open',reasons:['その他'],createdAt:Timestamp.now()});
+ if(mode==='cancelled')job.cancelled=true;if(mode==='cancelled-status')job.status='cancelled';if(mode==='open')job.status='open';
+ if(mode==='missing')h.records.delete('jobs/synthetic-job');if(mode==='foreign-company')job.companyId='other';if(mode==='foreign-staff')job.assignedStaffId='other';
+ const before=JSON.stringify([...h.records]);const result=await h.tasks.getMyTasks({auth:h.staff,data:{}});
+ assert.equal(result.tasks.filter(t=>t.kind==='resubmission').length,mode==='own-outside-window'?1:0);assert.equal(JSON.stringify([...h.records]),before);
+});
+for(const status of ['open','draft',null])for(const timing of ['before','commit'])await test('resubmission creation rejects unassigned state '+status+' '+timing,async()=>{
+ const h=harness();const change={status};if(timing==='before')Object.assign(h.records.get('jobs/synthetic-job'),change);else h.beforeCommit=async()=>{h.beforeCommit=null;await h.updateRecord('jobs/synthetic-job',change);};
+ await assert.rejects(()=>h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}),{code:'failed-precondition'});
+ assert.equal(h.list('resubmissionRequests').length,0);assert.equal(h.list('notificationQueue').length,0);assert.equal(h.records.get('jobs/synthetic-job').status,status);
+});
+for(const purpose of ['initial','additional','replacement'])for(const status of ['open','draft',null])for(const timing of ['before','commit'])await test('upload start rejects unassigned job '+purpose+' '+status+' '+timing,async()=>{
+ const h=harness();const patch={purpose};if(purpose==='replacement'){const r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});patch.resubmissionRequestId=r.requestId;}
+ const requestsBefore=JSON.stringify(h.list('resubmissionRequests')),noticesBefore=JSON.stringify(h.list('notificationQueue'));const change={status};if(timing==='before')Object.assign(h.records.get('jobs/synthetic-job'),change);else h.beforeCommit=async()=>{h.beforeCommit=null;await h.updateRecord('jobs/synthetic-job',change);};
+ await assert.rejects(()=>h.start(1,patch),{code:'failed-precondition'});assert.equal(h.list('submissions').length,0);assert.equal([...h.records.keys()].filter(k=>k.startsWith('submissions/')).length,0);assert.equal(h.copies,0);assert.equal(JSON.stringify(h.list('resubmissionRequests')),requestsBefore);assert.equal(JSON.stringify(h.list('notificationQueue')),noticesBefore);assert.equal(h.records.get('jobs/synthetic-job').status,status);
+});
+for(const contentType of ['text/plain','application/octet-stream','application/vnd.google-apps.document','image/','image/png; charset=utf-8'])await test('upload rejects unsupported mime '+contentType,async()=>{const h=harness(),before=JSON.stringify([...h.records]);await assert.rejects(()=>h.start(1,{files:[{originalName:'synthetic.png',contentType,size:100}]}));assert.equal(JSON.stringify([...h.records]),before);});
+for(const size of [0.5,100.5,0,50*1024*1024+1])await test('upload rejects invalid byte size '+size,async()=>{const h=harness(),before=JSON.stringify([...h.records]);await assert.rejects(()=>h.start(1,{files:[{originalName:'synthetic.png',contentType:'image/png',size}]}));assert.equal(JSON.stringify([...h.records]),before);});
+for(const contentType of ['image/png','image/jpeg','image/heic','application/pdf'])for(const size of [1,50*1024*1024])await test('upload accepts supported mime and boundary '+contentType+' '+size,async()=>{const h=harness();const r=await h.start(1,{files:[{originalName:'synthetic.file',contentType,size}]});assert.equal(r.files.length,1);const stored=h.records.get('submissions/'+r.submissionId+'/files/'+r.files[0].fileId);assert.equal(stored.contentType,contentType);assert.equal(stored.size,size);});
+for(const configured of [false,true])await test('preview token requires configured gateway '+configured,async()=>{const h=harness();if(configured)h.previewBase='https://preview.invalid/files';const session=await h.start();await h.finish(session.files[0]);if(!configured)h.failWrite=w=>w.ref.path.startsWith('filePreviewTokens/');const result=await h.views.getSubmissionTimeline({auth:h.staff,data:{jobId:'synthetic-job',type:'report'}});const file=result.submissions[0].files[0];assert.equal(h.list('filePreviewTokens').length,configured?1:0);if(configured){assert.ok(file.previewUrl.startsWith(h.previewBase+'?token='));const raw=new URL(file.previewUrl).searchParams.get('token');assert.ok(h.records.has('filePreviewTokens/'+crypto.createHash('sha256').update(raw).digest('hex')));}else assert.equal(file.previewUrl,null);});
+for(const api of ['timeline','processing','comparison'])for(const identity of ['missing','empty','null','admin'])await test('submission read requires staff identity '+api+' '+identity,async()=>{
+ const h=harness();h.records.get('jobs/synthetic-job').assignedStaffId='';h.records.set('submissions/pending',{companyId:'synthetic-company',jobId:'synthetic-job',staffId:'',type:'report',status:'uploading',totalFiles:1,completedFiles:0,createdAt:Timestamp.now()});h.records.set('resubmissionRequests/pending',{companyId:'synthetic-company',jobId:'synthetic-job',staffId:'',type:'report',status:'open'});
+ const auth=identity==='admin'?h.admin:{uid:'synthetic-user',token:{companyId:'synthetic-company',role:'staff',...(identity==='empty'?{staffId:''}:identity==='null'?{staffId:null}:{})}};const before=JSON.stringify([...h.records]);const read=()=>api==='timeline'?h.views.getSubmissionTimeline({auth,data:{jobId:'synthetic-job',type:'report'}}):api==='processing'?h.views.getSubmissionProcessingStatus({auth,data:{jobId:'synthetic-job',submissionId:'pending'}}):h.views.getResubmissionComparison({auth,data:{requestId:'pending'}});
+ if(identity==='admin')await read();else await assert.rejects(read,{code:'permission-denied'});assert.equal(JSON.stringify([...h.records]),before);
+});
+for(const marker of ['counted','checkpoint','completed'])for(const id of [undefined,'',' ',123])await test('incomplete recovery identity stops before mutation '+marker+' '+String(id),async()=>{
+ const h=harness(),session=await h.start(),file=h.records.get('submissions/'+session.submissionId+'/files/'+session.files[0].fileId);
+ if(marker==='counted')file.completionCounted=true;else if(marker==='checkpoint')file.transferCompletedAt=Timestamp.now();else file.status='completed';
+ if(id!==undefined)file.driveFileId=id;const before=JSON.stringify([...h.records]);await assert.rejects(h.finish(session.files[0]),{code:'failed-precondition'});assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.copies,0);assert.equal(h.deletes,0);assert.equal(h.driveFiles.size,0);
+});
+for(const [label,mutate] of [
+ ['missing name',f=>delete f.driveName],['blank name',f=>f.driveName=' '],['numeric name',f=>f.driveName=123],
+ ['missing sequence',f=>delete f.sequence],['zero sequence',f=>f.sequence=0],['fractional sequence',f=>f.sequence=1.5],['string sequence',f=>f.sequence='1'],
+ ['plan id mismatch',f=>f.driveFileId='unrelated-drive-id'],['plan name mismatch',f=>f.driveName='unrelated-name'],['plan sequence mismatch',f=>f.sequence=2]
+])await test('completed recovery rejects '+label+' before mutation',async()=>{
+ const h=harness(),session=await h.start();await h.finish(session.files[0]);const file=h.records.get('submissions/'+session.submissionId+'/files/'+session.files[0].fileId);mutate(file);const before=JSON.stringify([...h.records]),copies=h.copies,deletes=h.deletes;
+ await assert.rejects(h.finish(session.files[0]),{code:'failed-precondition'});assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.copies,copies);assert.equal(h.deletes,deletes);
+});
+await test('legacy valid checkpoint without stable plan remains replayable',async()=>{const h=harness(),session=await h.start();await h.finish(session.files[0]);delete h.records.get('submissions/'+session.submissionId+'/files/'+session.files[0].fileId).driveTransferPlan;await h.finish(session.files[0]);assert.equal(h.copies,1);assert.equal((await h.state(session.submissionId)).completedFiles,1);assert.equal(h.list('sheetSyncQueue').length,1);});
+for(const failure of ['none','response-loss','checkpoint-loss'])await test('acceptance kit -> actual transfer -> disabled worker -> result verifier '+failure,async()=>{
+ const kit=createSubmissionAcceptanceKit({driveRootId:'synthetic-isolated-root'}),h=harness(),now=Date.now();h.records.clear();for(const seed of kit.seedDocuments)h.records.set(seed.path,copy(seed.data));h.storageBucket=kit.storageBucket;h.driveCreatedAt=new Date(now).toISOString();
+ const folders=[{id:kit.drive.rootFolderId,name:kit.companyId,parents:[kit.drive.parentId]},{id:'acceptance-client',name:kit.drive.childFolders[0],parents:[kit.drive.rootFolderId]},{id:'acceptance-month',name:kit.drive.childFolders[1],parents:['acceptance-client']}].map(f=>({...f,mimeType:'application/vnd.google-apps.folder',trashed:false}));
+ h.driveList=({q})=>({data:{files:folders.filter(f=>q.includes("'"+f.parents[0]+"' in parents")&&q.includes("name='"+f.name+"'"))}});
+ h.drivePayload=input=>{const f=kit.files.find(f=>f.storagePath===input.media.body.syntheticPath);assert.ok(f);return {size:String(f.size),mimeType:f.contentType,md5Checksum:Buffer.from(f.md5Base64,'base64').toString('hex'),trashed:false};};
+ const finish=f=>h.uploads.finalizeStagedUpload({data:{name:f.storagePath,bucket:kit.storageBucket,contentType:f.contentType,size:f.size,generation:1,md5Hash:f.md5Base64}});
+ if(failure!=='none'){if(failure==='response-loss')h.loseCopyResponse=true;else h.failWrite=w=>!!w.data.transferCompletedAt;await assert.rejects(finish(kit.files[0]));assert.equal(h.driveFiles.size,1);h.loseCopyResponse=false;h.failWrite=null;}
+ for(const f of kit.files)await finish(f);
+ const queue=h.list('sheetSyncQueue');assert.equal(queue.length,1);const worker=h.loadModule('./safe-sheet-writes');await worker.processSafeSheetWrite({data:{after:h.snapshot('sheetSyncQueue/'+queue[0].id)}});
+ const normalize=v=>v instanceof Timestamp?v.toDate().toISOString():Array.isArray(v)?v.map(normalize):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,normalize(x)])):v;
+ const result={project:kit.project,kitFingerprint:kit.fingerprint,startedAt:new Date(now-1000).toISOString(),readAt:new Date(Date.now()).toISOString(),documents:[...h.records].map(([path,data])=>({path,data:normalize(data)})),drive:{folders,files:[...h.driveFiles.values()]},storage:kit.files.map(f=>({bucket:kit.storageBucket,path:f.storagePath,generation:'1',size:String(f.size),contentType:f.contentType,md5Base64:f.md5Base64,exists:!h.deletedPaths.includes(f.storagePath)})),counts:Object.fromEntries(['notificationQueue','pushTokens'].map(c=>[c,{companyId:kit.companyId,count:h.list(c).length}])),listingsComplete:true};
+ const check=verifySubmissionAcceptanceResult(kit,result,Date.parse(result.readAt));assert.deepEqual(check.issues,[]);assert.equal(check.passed,true);assert.equal(check.actualCloudAcceptanceVerified,false);assert.equal(check.cloudExecutionAuthorized,false);assert.equal(h.copies,2);assert.equal(h.deletes,2);
+});
+if(process.env.LKC_ROLLBACK_SOURCE_BUNDLE){
+ const candidates=JSON.parse(fs.readFileSync(process.env.LKC_ROLLBACK_SOURCE_BUNDLE,'utf8'));
+ for(const candidate of candidates)await test('historical rollback transfer compatibility '+candidate.sha,async()=>{
+  const current=harness(),session=await current.start();current.loseCopyResponse=true;await assert.rejects(current.finish(session.files[0]));assert.equal(current.copies,1);
+  const old=harness(candidate.files);old.allowLegacyUnversionedRead=true;old.records.clear();for(const [key,value]of current.records)old.records.set(key,copy(value));old.driveFiles=new Map([...current.driveFiles].map(([key,value])=>[key,copy(value)]));old.copies=current.copies;
+  await old.finish(session.files[0]);const sameFile=old.copies===1&&old.driveFiles.size===1&&old.list('fileCounters')[0].value===1;
+  assert.equal(sameFile,candidate.expectedStableIdCompatibility);assert.equal(old.copies,candidate.expectedStableIdCompatibility?1:2);
+  console.log(JSON.stringify({historicalSourceSha:candidate.sha,stableIdRecoveryCompatible:sameFile,unversionedSourceReads:old.unversionedReads??0,realRollbackArtifactVerified:false,cloudExecutionAuthorized:false}));
+ });
+}
+if(process.env.LKC_DEPLOYED_TRANSFER_BUNDLE){
+ const candidate=JSON.parse(fs.readFileSync(process.env.LKC_DEPLOYED_TRANSFER_BUNDLE,'utf8'));
+ assert.equal(candidate.function,'finalizeStagedUpload');assert.equal(candidate.project,'lip-knots-crew-staging');
+ assert.match(candidate.revision,/^finalizestagedupload-[0-9]+-[a-z0-9]+$/);assert.match(candidate.archiveSha256,/^[a-f0-9]{64}$/);
+ for(const format of ['source','compiled','current']){
+  if(format!=='current'){
+  const files=candidate[format==='source'?'files':'compiledFiles'];assert.ok(files&&Object.keys(files).length>0);
+  for(const [name,source]of Object.entries(files)){
+   assert.match(name,format==='source'?/^[a-z0-9-]+[.]ts$/:/^[a-z0-9-]+[.]js$/);assert.equal(typeof source,'string');
+   assert.equal(crypto.createHash('sha256').update(source).digest('hex'),candidate.hashes[format][name]);
+  }
+  }
+  for(const failure of ['response-loss','checkpoint-loss','accounting-loss','completed-replay'])await test('deployed rollback '+format+' '+failure,async()=>{
+   const current=harness(),session=await current.start();
+   if(failure==='response-loss')current.loseCopyResponse=true;
+   if(failure==='checkpoint-loss')current.failWrite=w=>!!w.data.transferCompletedAt;
+   if(failure==='accounting-loss')current.failWrite=w=>w.ref.path.startsWith('sheetSyncQueue/');
+   if(failure==='completed-replay')await current.finish(session.files[0]);else await assert.rejects(current.finish(session.files[0]));
+   const filePath='submissions/'+session.submissionId+'/files/'+session.files[0].fileId,original=copy(current.records.get(filePath));
+   assert.equal(current.copies,1);assert.ok(original.driveTransferPlan?.id);
+   const old=harness(format==='source'?candidate.files:null,format==='compiled'?candidate.compiledFiles:null);
+   old.allowLegacyUnversionedRead=true;old.records.clear();
+   for(const [key,value]of current.records)old.records.set(key,copy(value));
+   old.driveFiles=new Map([...current.driveFiles].map(([key,value])=>[key,copy(value)]));old.copies=current.copies;
+   await old.finish(session.files[0]);
+   const file=old.records.get(filePath),parent=old.records.get('submissions/'+session.submissionId);
+   const value={format,failure,driveCopies:old.copies,driveFiles:old.driveFiles.size,counter:old.list('fileCounters')[0]?.value??null,
+    originalDriveIdPreserved:file.driveFileId===original.driveTransferPlan.id,completedFiles:parent.completedFiles,
+    queueCount:old.list('sheetSyncQueue').length,unversionedSourceReads:old.unversionedReads??0};
+   value.stableIdRecoveryCompatible=value.driveCopies===1&&value.driveFiles===1&&value.counter===1&&value.originalDriveIdPreserved&&value.completedFiles===1&&value.queueCount===1;
+   if(format==='current')assert.equal(value.stableIdRecoveryCompatible,true,'Current control must recover without duplication');
+   deployedObservations.push(value);
+   console.log(JSON.stringify({deployedRollbackObservation:value,archiveSha256:candidate.archiveSha256,revision:candidate.revision,actualCloudRollbackVerified:false}));
+  });
+ }
+ await test('deployed rollback source and compiled observations agree',async()=>{
+  for(const failure of ['response-loss','checkpoint-loss','accounting-loss','completed-replay']){
+   const source=deployedObservations.find(v=>v.format==='source'&&v.failure===failure),compiled=deployedObservations.find(v=>v.format==='compiled'&&v.failure===failure);
+   assert.ok(source&&compiled);assert.deepEqual({...source,format:'same'},{...compiled,format:'same'});
+  }
+ });
+ if(process.env.LKC_DEPLOYED_TRANSFER_RESULT){
+  const result={project:candidate.project,function:candidate.function,revision:candidate.revision,generation:candidate.generation,archiveSha256:candidate.archiveSha256,
+   observations:deployedObservations,complete:deployedObservations.length===12,allScenariosCompatible:deployedObservations.length===12&&deployedObservations.every(v=>v.stableIdRecoveryCompatible),currentControlPassed:deployedObservations.filter(v=>v.format==="current").length===4&&deployedObservations.filter(v=>v.format==="current").every(v=>v.stableIdRecoveryCompatible),
+   actualCloudRollbackVerified:false,dependencyInstallReproduced:false,cloudResourcesChanged:false};
+  fs.writeFileSync(process.env.LKC_DEPLOYED_TRANSFER_RESULT,JSON.stringify(result,null,2),{flag:'wx'});
+ }
+}
+for(const mode of ['valid','expired','foreign','unsupported','unfinished'])await test('PDF preview uses existing protected gateway '+mode,async()=>{
+ const h=harness();h.previewBase='https://preview.invalid/files';h.drivePayload=input=>({mimeType:input.requestBody.mimeType});
+ const session=await h.start(1,{files:[{originalName:'synthetic-report.pdf',contentType:'application/pdf',size:100}]});await h.finish(session.files[0],{contentType:'application/pdf'});
+ const filePath='submissions/'+session.submissionId+'/files/'+session.files[0].fileId;
+ if(mode==='unsupported')h.records.get(filePath).contentType='text/html';if(mode==='unfinished')h.records.get(filePath).status='processing';
+ const timeline=await h.views.getSubmissionTimeline({auth:h.admin,data:{jobId:'synthetic-job',type:'report'}}),file=timeline.submissions[0].files[0];
+ if(['unsupported','unfinished'].includes(mode)){assert.equal(file.previewUrl,null);assert.equal(h.list('filePreviewTokens').length,0);return;}
+ assert.ok(file.previewUrl,'Completed PDF needs a protected preview URL');const raw=new URL(file.previewUrl).searchParams.get('token'),record=h.records.get('filePreviewTokens/'+crypto.createHash('sha256').update(raw).digest('hex'));assert.equal(record.contentType,'application/pdf');assert.equal(record.actorUid,h.admin.uid);assert.ok(record.expiresAt.toMillis()<=Date.now()+900000);
+ if(mode==='expired')record.expiresAt=Timestamp.fromMillis(1);if(mode==='foreign')h.records.get(filePath).companyId='foreign';
+ const headers={},response={code:200,headersSent:false,status(code){this.code=code;return this;},send(){return this;},setHeader(name,value){headers[name]=value;},end(){}};await h.views.driveFilePreview({query:{token:raw}},response);
+ assert.equal(response.code,mode==='valid'?200:410);assert.equal(h.previewReads??0,mode==='valid'?1:0);if(mode==='valid'){assert.equal(headers['Content-Type'],'application/pdf');assert.match(headers['Content-Disposition'],/^inline;/);assert.equal(headers['X-Content-Type-Options'],'nosniff');}
+});
+for(const role of ['staff','admin'])for(const mode of ['valid','parent-missing','file-missing','company','job','type','file-company','file-parent','file-owner','unassigned','unfinished','unsupported','pdf'])await test('targeted preview '+role+' '+mode,async()=>{
+ const h=harness();h.previewBase='https://preview.invalid/files';const session=await h.start();await h.finish(session.files[0]);
+ const parentPath='submissions/'+session.submissionId,filePath=parentPath+'/files/'+session.files[0].fileId,parent=h.records.get(parentPath),file=h.records.get(filePath);
+ if(mode==='parent-missing')h.records.delete(parentPath);if(mode==='file-missing')h.records.delete(filePath);
+ if(mode==='company')parent.companyId='foreign';if(mode==='job')parent.jobId='other';if(mode==='type')parent.type='sales_floor';
+ if(mode==='file-company')file.companyId='foreign';if(mode==='file-parent')file.submissionId='other';if(mode==='file-owner')file.uid='other';
+ if(mode==='unassigned')h.records.get('jobs/synthetic-job').assignedStaffId='other';
+ if(mode==='unfinished')file.status='processing';if(mode==='unsupported')file.contentType='text/html';if(mode==='pdf')file.contentType='application/pdf';
+ const read=()=>h.views.getSubmissionTimeline({auth:h[role],data:{jobId:'synthetic-job',type:'report',previewFile:{submissionId:session.submissionId,fileId:session.files[0].fileId}}});
+ const allowed=['valid','unfinished','unsupported','pdf'].includes(mode)||(mode==='unassigned'&&role==='admin');
+ if(['parent-missing','file-missing','company','job','type'].includes(mode)){assert.equal((await read()).submissions.length,0);assert.equal(h.list('filePreviewTokens').length,0);return;}
+ if(!allowed){await assert.rejects(read);assert.equal(h.list('filePreviewTokens').length,0);return;}
+ const result=await read();assert.equal(result.submissions.length,1);assert.equal(result.submissions[0].files.length,1);
+ assert.equal(result.submissions[0].files[0].id,session.files[0].fileId);
+ assert.equal(h.list('filePreviewTokens').length,['unfinished','unsupported'].includes(mode)?0:1);
+});
+for(const key of ['submissionId','fileId'])for(const value of ['', ' ', 'a/b', null])await test('targeted preview rejects invalid '+key+' '+JSON.stringify(value),async()=>{
+ const h=harness();h.previewBase='https://preview.invalid/files';
+ await assert.rejects(h.views.getSubmissionTimeline({auth:h.staff,data:{jobId:'synthetic-job',type:'report',previewFile:{submissionId:'parent',fileId:'file',[key]:value}}}));
+ assert.equal(h.documentReads,0);assert.equal(h.list('filePreviewTokens').length,0);
+});
+await test('targeted preview operation count with 100 submissions and 2000 files',async()=>{
+ const h=harness();h.previewBase='https://preview.invalid/files';const session=await h.start();await h.finish(session.files[0]);
+ const parent=copy(h.records.get('submissions/'+session.submissionId)),file=copy(h.records.get('submissions/'+session.submissionId+'/files/'+session.files[0].fileId));
+ for(const key of [...h.records.keys()])if(key.startsWith('submissions/'))h.records.delete(key);
+ for(let s=0;s<100;s++){h.records.set('submissions/parent-'+s,{...parent,createdAt:Timestamp.fromMillis(s+1)});for(let f=0;f<20;f++)h.records.set('submissions/parent-'+s+'/files/file-'+f,{...file,submissionId:'parent-'+s});}
+ const measurements=[];
+ for(const targeted of [false,true]){
+  h.documentReads=0;h.queryReads=0;h.returnedDocuments=0;const tokens=h.list('filePreviewTokens').length;
+  const result=await h.views.getSubmissionTimeline({auth:h.staff,data:{jobId:'synthetic-job',type:'report',...(targeted?{previewFile:{submissionId:'parent-42',fileId:'file-7'}}:{})}});
+  measurements.push({targeted,documentReads:h.documentReads,queryReads:h.queryReads,returnedDocuments:h.returnedDocuments,tokenWrites:h.list('filePreviewTokens').length-tokens,groups:result.submissions.length,files:result.submissions.reduce((n,g)=>n+g.files.length,0)});
+ }
+ console.log(JSON.stringify({syntheticPreviewOperationCounts:measurements,realBillingOrLatencyMeasurement:false}));
+ assert.deepEqual(measurements[0],{targeted:false,documentReads:1,queryReads:101,returnedDocuments:2100,tokenWrites:2000,groups:100,files:2000});
+ assert.deepEqual(measurements[1],{targeted:true,documentReads:3,queryReads:0,returnedDocuments:0,tokenWrites:1,groups:1,files:1});
+});
 console.log(JSON.stringify({passed:results.filter(r=>r.ok).length,results,boundary:'Complete actual modules, synthetic callable/Storage/Drive and in-memory DB. No external network, real login, emulator, concurrent SDK transactions or delivery.'},null,2));if(results.some(r=>!r.ok))process.exitCode=1;

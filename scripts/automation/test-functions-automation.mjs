@@ -1,3 +1,4 @@
+import './test-resubmission-auth-guard.mjs';
 import './test-confirm-application-auth-guard.mjs';
 import "./test-transfer-auth-guard.mjs";
 import "./test-staging-transfer-mode.mjs";

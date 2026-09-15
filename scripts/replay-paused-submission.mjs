@@ -21,7 +21,7 @@ function verifyFunction(fn,revision){
  fn.serviceConfig?.serviceAccountEmail!=='740154137290-compute@developer.gserviceaccount.com'||
  fn.serviceConfig?.environmentVariables?.EXPECTED_FIREBASE_PROJECT_ID!==ACCEPTANCE_PROJECT||
  fn.serviceConfig?.environmentVariables?.APP_ENVIRONMENT!=='staging'||
- fn.serviceConfig?.environmentVariables?.LKC_SUBMISSION_TRANSFER_MODE!=='active'||
+ fn.serviceConfig?.environmentVariables?.LKC_SUBMISSION_TRANSFER_MODE!=='acceptance'||
  !/^https:\/\/finalizestagedupload-[a-z0-9-]+[.]a[.]run[.]app$/.test(fn.serviceConfig?.uri??'')||
  fn.eventTrigger?.eventType!=='google.cloud.storage.object.v1.finalized'||
  !fn.eventTrigger?.eventFilters?.some(filter=>filter.attribute==='bucket'&&filter.value===kit.storageBucket))fail('FUNCTION_REVISION_OR_CONTROL_MISMATCH');
@@ -107,7 +107,7 @@ export async function preparePausedReplay({transport,fileIndex,revision,now=()=>
  const event={bucket:kit.storageBucket,name:file.storagePath,generation:source.generation,size:String(file.size),contentType:file.contentType,md5Hash:file.md5Base64};
  if(!object||Object.keys(event).some(key=>String(object[key])!==event[key]))fail('STORAGE_SOURCE_MISMATCH');
  if(stored.driveTransferPlan?.sourceKey&&stored.driveTransferPlan.sourceKey!==hash(expected))fail('TRANSFER_PLAN_SOURCE_MISMATCH');
- const plan={version:1,project:ACCEPTANCE_PROJECT,region:'asia-northeast1',revision,uri,fileIndex,event,
+ const plan={version:1,transferMode:'acceptance',project:ACCEPTANCE_PROJECT,region:'asia-northeast1',revision,uri,fileIndex,event,
  recordVersions:{parent:records.parent.updateTime,file:records.file.updateTime,drive:records.drive.updateTime,otherFile:records.otherFile.updateTime}};
  return {...plan,fingerprint:hash(plan),preparedAt:new Date(now()).toISOString()};
 }

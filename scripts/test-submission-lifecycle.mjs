@@ -147,7 +147,7 @@ await test('transfer pause write failure is atomic and retains retryable source'
  pauseTransfers(h);const before=JSON.stringify([...h.records]);h.failWrite=w=>w.ref.path===parent;
  await assert.rejects(h.finish(file));assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.copies,0);assert.equal(h.deletes,0);
 });
-for(const mode of ['paused','', 'ACTIVE','invalid'])await test('transfer configuration stops new and existing submissions: '+JSON.stringify(mode),async()=>{
+for(const mode of ['paused','', 'ACTIVE','invalid','acceptance'])await test('transfer configuration stops new and existing submissions: '+JSON.stringify(mode),async()=>{
  const h=harness(),s=await h.start(),file=s.files[0];
  h.env.APP_ENVIRONMENT='staging';h.env.LKC_SUBMISSION_TRANSFER_MODE=mode;
  const before=h.records.size;await assert.rejects(h.start(),{code:'failed-precondition'});assert.equal(h.records.size,before);
@@ -157,6 +157,19 @@ for(const mode of ['paused','', 'ACTIVE','invalid'])await test('transfer configu
  assert.equal((await h.state(s.submissionId)).status,'paused_global');assert.equal(h.copies,0);assert.equal(h.deletes,0);
  h.env.LKC_SUBMISSION_TRANSFER_MODE='active';await h.finish(file);
  assert.equal((await h.state(s.submissionId)).status,'completed');assert.equal(h.copies,1);
+});
+for(const [environment,project,company,paused] of [
+ ['staging','lip-knots-crew-staging','lkc-transfer-acceptance-20260908',false],
+ ['production','lip-knots-crew-staging','lkc-transfer-acceptance-20260908',true],
+ ['development','lip-knots-crew-staging','lkc-transfer-acceptance-20260908',true],
+ ['','lip-knots-crew-staging','lkc-transfer-acceptance-20260908',true],
+ ['staging','','lkc-transfer-acceptance-20260908',true],
+ ['staging','other','lkc-transfer-acceptance-20260908',true],
+ ['staging','lip-knots-crew-staging','synthetic-company',true],
+ ['staging','lip-knots-crew-staging','lkc-transfer-acceptance-20260908-other',true],
+])await test('acceptance isolation: '+[environment,project,company].join('/'),async()=>{
+ const h=harness();Object.assign(h.env,{APP_ENVIRONMENT:environment,EXPECTED_FIREBASE_PROJECT_ID:project,LKC_SUBMISSION_TRANSFER_MODE:'acceptance'});
+ assert.equal(await h.loadModule('./submission-transfer-control').submissionTransferPaused(company),paused);
 });
 await test('active transfer configuration cannot bypass production emergency lock',async()=>{
  const h=harness(),s=await h.start();pauseTransfers(h);h.env.LKC_SUBMISSION_TRANSFER_MODE='active';
@@ -513,12 +526,23 @@ for(const failure of ['none','response-loss','checkpoint-loss','paused-reviewed-
   h.env.LKC_SUBMISSION_TRANSFER_MODE='paused';
   for(const f of kit.files)await finish(f);
   assert.equal(h.copies,0);assert.equal(h.deletes,0);
-  h.env.LKC_SUBMISSION_TRANSFER_MODE='active';
+  Object.assign(h.env,{APP_ENVIRONMENT:'staging',EXPECTED_FIREBASE_PROJECT_ID:kit.project,LKC_SUBMISSION_TRANSFER_MODE:'acceptance'});
+  // 同じ転送処理へ通常会社のイベントが来ても、コピーも加算も行わない。
+  const ordinaryId='ordinary-isolated-submission',ordinaryFile='ordinary-isolated-file';
+  const ordinaryPath='submissions/'+ordinaryId,ordinaryFilePath=ordinaryPath+'/files/'+ordinaryFile;
+  const ordinaryStorage='staging/ordinary-company/ordinary-user/'+ordinaryId+'/'+ordinaryFile+'/fixture.txt';
+  h.records.set(ordinaryPath,{...copy(h.records.get('submissions/'+kit.submissionId)),companyId:'ordinary-company',uid:'ordinary-user',jobId:'ordinary-job',staffId:'ordinary-staff',status:'uploading',totalFiles:1,completedFiles:0});
+  h.records.set(ordinaryFilePath,{...copy(h.records.get('submissions/'+kit.submissionId+'/files/'+kit.files[0].fileId)),companyId:'ordinary-company',uid:'ordinary-user',jobId:'ordinary-job',staffId:'ordinary-staff',submissionId:ordinaryId,status:'waiting_upload',storagePath:ordinaryStorage,size:100,pausedTransferSource:undefined});
+  delete h.records.get(ordinaryFilePath).pausedTransferSource;
+  const finishOrdinary=()=>h.uploads.finalizeStagedUpload({data:{name:ordinaryStorage,bucket:kit.storageBucket,contentType:'text/plain',size:100,generation:1,md5Hash:'AAAAAAAAAAAAAAAAAAAAAA=='}});
+  await finishOrdinary();assert.equal(h.copies,0);assert.equal(h.deletes,0);
+  assert.equal(h.records.get(ordinaryFilePath).status,'paused_global');assert.equal(h.records.get(ordinaryPath).completedFiles,0);
+  h.verifyOrdinary=async()=>{await finishOrdinary();assert.equal(h.records.get(ordinaryFilePath).status,'paused_global');assert.equal(h.records.get(ordinaryPath).completedFiles,0);};
   const revision='finalizestagedupload-00006-test',record=p=>({data:copy(h.records.get(p)),updateTime:new Date(now).toISOString()});
   const transport={
    readFunction:async()=>({name:'projects/'+kit.project+'/locations/asia-northeast1/functions/finalizeStagedUpload',state:'ACTIVE',environment:'GEN_2',
     serviceConfig:{revision,allTrafficOnLatestRevision:true,serviceAccountEmail:'740154137290-compute@developer.gserviceaccount.com',uri:'https://finalizestagedupload-example-an.a.run.app',
-     environmentVariables:{APP_ENVIRONMENT:'staging',EXPECTED_FIREBASE_PROJECT_ID:kit.project,LKC_SUBMISSION_TRANSFER_MODE:'active'}},
+     environmentVariables:{APP_ENVIRONMENT:'staging',EXPECTED_FIREBASE_PROJECT_ID:kit.project,LKC_SUBMISSION_TRANSFER_MODE:'acceptance'}},
     eventTrigger:{eventType:'google.cloud.storage.object.v1.finalized',eventFilters:[{attribute:'bucket',value:kit.storageBucket}]}}),
    readRecords:async i=>({parent:record('submissions/'+kit.submissionId),file:record('submissions/'+kit.submissionId+'/files/'+kit.files[i-1].fileId),drive:record('companies/'+kit.companyId+'/settings/drive'),otherFile:record('submissions/'+kit.submissionId+'/files/'+kit.files[i===1?1:0].fileId)}),
    readObject:async(i,g)=>{const f=kit.files[i-1];assert.equal(g,'1');return {bucket:kit.storageBucket,name:f.storagePath,generation:g,size:String(f.size),contentType:f.contentType,md5Hash:f.md5Base64};},
@@ -536,9 +560,10 @@ for(const failure of ['none','response-loss','checkpoint-loss','paused-reviewed-
    await assert.rejects(preparePausedReplay({transport,fileIndex,revision}),/RECORD_NOT_REPLAYABLE/);
   }
  }else for(const f of kit.files)await finish(f);
+ await h.verifyOrdinary?.();
  const queue=h.list('sheetSyncQueue');assert.equal(queue.length,1);const worker=h.loadModule('./safe-sheet-writes');await worker.processSafeSheetWrite({data:{after:h.snapshot('sheetSyncQueue/'+queue[0].id)}});
  const normalize=v=>v instanceof Timestamp?v.toDate().toISOString():Array.isArray(v)?v.map(normalize):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,normalize(x)])):v;
- const result={project:kit.project,kitFingerprint:kit.fingerprint,startedAt:new Date(now-1000).toISOString(),readAt:new Date(Date.now()).toISOString(),documents:[...h.records].map(([path,data])=>({path,data:normalize(data)})),drive:{folders,files:[...h.driveFiles.values()]},storage:kit.files.map(f=>({bucket:kit.storageBucket,path:f.storagePath,generation:'1',size:String(f.size),contentType:f.contentType,md5Base64:f.md5Base64,exists:!h.deletedPaths.includes(f.storagePath)})),counts:Object.fromEntries(['notificationQueue','pushTokens'].map(c=>[c,{companyId:kit.companyId,count:h.list(c).length}])),listingsComplete:true};
+ const result={project:kit.project,kitFingerprint:kit.fingerprint,startedAt:new Date(now-1000).toISOString(),readAt:new Date(Date.now()).toISOString(),documents:[...h.records].filter(([,data])=>data.companyId!=='ordinary-company').map(([path,data])=>({path,data:normalize(data)})),drive:{folders,files:[...h.driveFiles.values()]},storage:kit.files.map(f=>({bucket:kit.storageBucket,path:f.storagePath,generation:'1',size:String(f.size),contentType:f.contentType,md5Base64:f.md5Base64,exists:!h.deletedPaths.includes(f.storagePath)})),counts:Object.fromEntries(['notificationQueue','pushTokens'].map(c=>[c,{companyId:kit.companyId,count:h.list(c).length}])),listingsComplete:true};
  const check=verifySubmissionAcceptanceResult(kit,result,Date.parse(result.readAt));assert.deepEqual(check.issues,[]);assert.equal(check.passed,true);assert.equal(check.actualCloudAcceptanceVerified,false);assert.equal(check.cloudExecutionAuthorized,false);assert.equal(h.copies,2);assert.equal(h.deletes,2);
 });
 if(process.env.LKC_ROLLBACK_SOURCE_BUNDLE){

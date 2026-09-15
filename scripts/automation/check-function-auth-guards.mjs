@@ -192,7 +192,8 @@ function checkFinalizeStagedUpload() {
   const scopedOperationalGate = usesTransferControl
     && /export async function submissionTransferPaused\(companyId: string\): Promise<boolean>/.test(control)
     && /const mode = process\.env\.LKC_SUBMISSION_TRANSFER_MODE \?\? "active";/.test(control)
-    && /if \(mode !== "active"\) return true;/.test(control)
+    && (/if \(mode !== "active"\) return true;/.test(control)
+      || /const acceptanceOnly = mode === "acceptance"\s*&& process\.env\.APP_ENVIRONMENT === "staging"\s*&& process\.env\.EXPECTED_FIREBASE_PROJECT_ID === "lip-knots-crew-staging"\s*&& companyId === "lkc-transfer-acceptance-20260908";\s*if \(mode !== "active" && !acceptanceOnly\) return true;/.test(control))
     && /return !\(await getProductionOperationalState\(companyId\)\)\.operational;/.test(control)
     && /import \{ getProductionOperationalState \} from "\.\/system-safety";/.test(control);
   const checks = {

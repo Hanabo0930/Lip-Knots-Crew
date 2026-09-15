@@ -24,18 +24,10 @@ export async function enqueueNotification(
   input: QueueNotificationInput
 ): Promise<{ queued: boolean; queueId: string }> {
   const preferred = input.preferredAt ?? Timestamp.now();
-  const timing = input.bypassQuietHours
+  const timing = input.bypassQuietHours === true
     ? { deliverAt: preferred, quietDeferred: false }
     : applyQuietHours(preferred);
-  const targetKey = "targetStaffId" in input
-    ? `staff:${input.targetStaffId}`
-    : "targetRole" in input
-      ? `role:${input.targetRole}`
-      : `uid:${input.targetUid}`;
-  const queueId = `nq_${hashText(
-    `${input.companyId}|${targetKey}|${input.category}|${input.dedupeKey}`,
-    36
-  )}`;
+  const queueId = notificationQueueId(input);
   const ref = db.collection("notificationQueue").doc(queueId);
 
   const queued = await db.runTransaction(async (tx) => {
@@ -53,6 +45,7 @@ export async function enqueueNotification(
       status: "queued",
       deliverAt: timing.deliverAt,
       quietDeferred: timing.quietDeferred,
+      bypassQuietHours: input.bypassQuietHours === true,
       attempts: 0,
       createdAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
@@ -65,7 +58,7 @@ export async function enqueueNotification(
 
 export function queueDocumentData(input: QueueNotificationInput) {
   const preferred = input.preferredAt ?? Timestamp.now();
-  const timing = input.bypassQuietHours
+  const timing = input.bypassQuietHours === true
     ? { deliverAt: preferred, quietDeferred: false }
     : applyQuietHours(preferred);
   return {
@@ -80,6 +73,7 @@ export function queueDocumentData(input: QueueNotificationInput) {
     status: "queued",
     deliverAt: timing.deliverAt,
     quietDeferred: timing.quietDeferred,
+    bypassQuietHours: input.bypassQuietHours === true,
     attempts: 0,
     createdAt: Timestamp.now(),
     updatedAt: Timestamp.now(),
@@ -101,4 +95,16 @@ function targetFields(input: QueueNotificationInput): Record<string, string> {
 
 function hashText(value: string, length: number): string {
   return createHash("sha256").update(value, "utf8").digest("hex").slice(0, length);
+}
+
+export function notificationQueueId(input: QueueNotificationInput): string {
+  const targetKey = "targetStaffId" in input
+    ? `staff:${input.targetStaffId}`
+    : "targetRole" in input
+      ? `role:${input.targetRole}`
+      : `uid:${input.targetUid}`;
+  return `nq_${hashText(
+    `${input.companyId}|${targetKey}|${input.category}|${input.dedupeKey}`,
+    36
+  )}`;
 }

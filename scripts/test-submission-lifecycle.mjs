@@ -1,4 +1,5 @@
 import {createSubmissionAcceptanceKit} from './submission-acceptance-kit.mjs';
+import {preparePausedReplay,executePausedReplay,REPLAY_DRIVE_ROOT} from './replay-paused-submission.mjs';
 import {verifySubmissionAcceptanceResult} from './submission-acceptance-result.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -24,7 +25,7 @@ function merge(old,data){
 }
 function harness(sourceFiles=null,compiledFiles=null){
   const records=new Map(),modules=new Map(),versions=new Map();let serial=0,allocated=0;
-  const h={records,documentReads:0,queryReads:0,returnedDocuments:0,copies:0,deletes:0,failDelete:false,failCopy:false,failWrite:null,loseCopyResponse:false,getError:null,conflictMismatch:false,beforeCopy:null,afterCopy:null,loaded:[],driveFiles:new Map()};
+  const h={records,env:{APP_ENVIRONMENT:'development'},documentReads:0,queryReads:0,returnedDocuments:0,copies:0,deletes:0,failDelete:false,failCopy:false,failWrite:null,loseCopyResponse:false,getError:null,conflictMismatch:false,beforeCopy:null,afterCopy:null,loaded:[],driveFiles:new Map()};
   const snap=ref=>{const value=copy(records.get(ref.path));return {ref,id:ref.id,exists:records.has(ref.path),data:()=>copy(value)};};
   function commit(writes){
     const next=new Map(records);
@@ -83,7 +84,7 @@ function harness(sourceFiles=null,compiledFiles=null){
   function load(name){
     if(Object.hasOwn(boundaries,name))return boundaries[name];assert.match(name,/^\.\/[a-z0-9-]+$/,'External import refused');if(modules.has(name))return modules.get(name);
     const filename=name.slice(2),source=compiledFiles?compiledFiles[filename+'.js']:sourceFiles?sourceFiles[filename+'.ts']:fs.readFileSync(new URL('../functions/src/'+filename+'.ts',import.meta.url),'utf8');if(typeof source!=='string')throw Error('Historical module missing: '+name);const code=compiledFiles?source:ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
-    const exports={};modules.set(name,exports);h.loaded.push(name);runInNewContext(code,{exports,require:load,process:{env:{APP_ENVIRONMENT:'development'}}},{timeout:5000});return exports;
+    const exports={};modules.set(name,exports);h.loaded.push(name);runInNewContext(code,{exports,require:load,process:{env:h.env}},{timeout:5000});return exports;
   }
   h.loadModule=load;h.snapshot=p=>snap(ref(p));h.updateRecord=(p,data)=>ref(p).update(data);
   h.status=load('./submission-status');h.uploads=load('./uploads');h.requests=load('./resubmissions');h.views=load('./submission-files');h.tasks=load('./staff-tasks');h.netprint=load('./netprint');h.precontact=load('./precontact');
@@ -101,6 +102,83 @@ const deployedOnly=process.argv.includes('--deployed-rollback-only');
 if(deployedOnly&&!process.env.LKC_DEPLOYED_TRANSFER_BUNDLE)throw Error('Deployed rollback bundle is required.');
 const results=[],deployedObservations=[];
 async function test(name,run){if(deployedOnly&&!name.startsWith('deployed rollback '))return;try{await run();results.push({name,ok:true});}catch(e){results.push({name,ok:false,error:e.message});}}
+function pauseTransfers(h){h.env.APP_ENVIRONMENT='production';h.records.set('productionControls/synthetic-company',{productionEnabled:true,emergencyLock:true});}
+await test('transfer pause updates canonical records and resumes the same submission',async()=>{
+ const h=harness(),s=await h.start(),file=s.files[0],parent='submissions/'+s.submissionId,key=parent+'/files/'+file.fileId;
+ pauseTransfers(h);await h.finish(file);
+ assert.equal(h.records.get(key).status,'paused_global');assert.equal((await h.state(s.submissionId)).status,'paused_global');
+ assert.equal(h.list('submissionFiles').length,0);assert.equal(h.copies,0);assert.equal(h.deletes,0);
+ assert.equal(h.list('fileCounters').length,0);assert.equal(h.list('sheetSyncQueue').length,0);
+ h.records.get('productionControls/synthetic-company').emergencyLock=false;await h.finish(file);
+ assert.equal((await h.state(s.submissionId)).status,'completed');assert.equal(h.copies,1);assert.equal(h.records.get(parent).completedFiles,1);
+});
+for(const state of ['completed','partial-counted','error'])await test('transfer pause preserves '+state+' evidence',async()=>{
+ const h=harness(),s=await h.start(state==='partial-counted'?2:1),file=s.files[0],parent='submissions/'+s.submissionId,key=parent+'/files/'+file.fileId;
+ if(state==='error'){h.failCopy=true;await assert.rejects(h.finish(file));h.failCopy=false;}
+ else await h.finish(file);
+ pauseTransfers(h);const before=copy(h.records.get(parent)),fileBefore=copy(h.records.get(key)),copies=h.copies,deletes=h.deletes;
+ await h.finish(file);
+ assert.equal(h.copies,copies);assert.equal(h.deletes,deletes);assert.equal(h.records.get(parent).completedFiles,before.completedFiles);
+ if(state==='error'){assert.equal(h.records.get(parent).status,'error');assert.equal(h.records.get(parent).errorMessage,before.errorMessage);assert.equal(h.records.get(key).status,'paused_global');assert.deepEqual(h.records.get(key).driveTransferPlan,fileBefore.driveTransferPlan);}
+ else{assert.deepEqual(h.records.get(parent),before);assert.deepEqual(h.records.get(key),fileBefore);}
+ assert.equal(h.list('submissionFiles').length,0);
+});
+for(const mutation of ['missing-parent','missing-file','foreign-company','foreign-uid','foreign-parent','wrong-storage-path'])await test('transfer pause rejects or ignores '+mutation+' without writes',async()=>{
+ const h=harness(),s=await h.start(),file=s.files[0],parent='submissions/'+s.submissionId,key=parent+'/files/'+file.fileId;
+ if(mutation==='missing-parent')h.records.delete(parent);
+ if(mutation==='missing-file')h.records.delete(key);
+ if(mutation==='foreign-company')h.records.get(key).companyId='foreign';
+ if(mutation==='foreign-uid')h.records.get(key).uid='foreign';
+ if(mutation==='foreign-parent')h.records.get(parent).companyId='foreign';
+ if(mutation==='wrong-storage-path')h.records.get(key).storagePath+='-other';
+ pauseTransfers(h);const before=JSON.stringify([...h.records]);
+ if(mutation.startsWith('missing'))await h.finish(file);else await assert.rejects(h.finish(file),{code:'failed-precondition'});
+ assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.copies,0);assert.equal(h.deletes,0);
+});
+await test('transfer pause cannot overwrite completion committed concurrently',async()=>{
+ const h=harness(),s=await h.start(),file=s.files[0],parent='submissions/'+s.submissionId,key=parent+'/files/'+file.fileId;
+ pauseTransfers(h);h.beforeCommit=async()=>{h.beforeCommit=null;await h.updateRecord(key,{status:'completed',completionCounted:true,driveFileId:'preserved-id'});await h.updateRecord(parent,{status:'completed',completedFiles:1,jobStatusApplied:true});};
+ await h.finish(file);
+ assert.equal(h.records.get(parent).status,'completed');assert.equal(h.records.get(key).status,'completed');assert.equal(h.records.get(key).driveFileId,'preserved-id');
+ assert.equal(h.copies,0);assert.equal(h.deletes,0);assert.equal(h.list('submissionFiles').length,0);
+});
+await test('transfer pause write failure is atomic and retains retryable source',async()=>{
+ const h=harness(),s=await h.start(),file=s.files[0],parent='submissions/'+s.submissionId;
+ pauseTransfers(h);const before=JSON.stringify([...h.records]);h.failWrite=w=>w.ref.path===parent;
+ await assert.rejects(h.finish(file));assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.copies,0);assert.equal(h.deletes,0);
+});
+for(const mode of ['paused','', 'ACTIVE','invalid'])await test('transfer configuration stops new and existing submissions: '+JSON.stringify(mode),async()=>{
+ const h=harness(),s=await h.start(),file=s.files[0];
+ h.env.APP_ENVIRONMENT='staging';h.env.LKC_SUBMISSION_TRANSFER_MODE=mode;
+ const before=h.records.size;await assert.rejects(h.start(),{code:'failed-precondition'});assert.equal(h.records.size,before);
+ await h.finish(file);const saved=h.records.get('submissions/'+s.submissionId+'/files/'+file.fileId);
+ assert.equal(saved.status,'paused_global');assert.equal(saved.pausedTransferSource.generation,'1');
+ assert.equal(saved.pausedTransferSource.md5,'00000000000000000000000000000000');
+ assert.equal((await h.state(s.submissionId)).status,'paused_global');assert.equal(h.copies,0);assert.equal(h.deletes,0);
+ h.env.LKC_SUBMISSION_TRANSFER_MODE='active';await h.finish(file);
+ assert.equal((await h.state(s.submissionId)).status,'completed');assert.equal(h.copies,1);
+});
+await test('active transfer configuration cannot bypass production emergency lock',async()=>{
+ const h=harness(),s=await h.start();pauseTransfers(h);h.env.LKC_SUBMISSION_TRANSFER_MODE='active';
+ await assert.rejects(h.start(),{code:'failed-precondition'});await h.finish(s.files[0]);
+ assert.equal((await h.state(s.submissionId)).status,'paused_global');assert.equal(h.copies,0);
+});
+for(const patch of [{generation:2},{size:101},{contentType:'image/jpeg'},{md5Hash:'AQEBAQEBAQEBAQEBAQEBAQ=='},{bucket:'other-bucket'}])for(const resumed of [false,true])await test('paused source cannot switch content '+JSON.stringify(patch)+' resumed='+resumed,async()=>{
+ const h=harness(),s=await h.start(),file=s.files[0];h.env.LKC_SUBMISSION_TRANSFER_MODE='paused';await h.finish(file);
+ const before=JSON.stringify([...h.records]);if(resumed)h.env.LKC_SUBMISSION_TRANSFER_MODE='active';
+ await assert.rejects(h.finish(file,patch),{code:'failed-precondition'});
+ assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.copies,0);assert.equal(h.deletes,0);
+});
+await test('paused source survives lost Drive response and reuses the planned ID',async()=>{
+ const h=harness(),s=await h.start(),file=s.files[0],key='submissions/'+s.submissionId+'/files/'+file.fileId;
+ h.env.LKC_SUBMISSION_TRANSFER_MODE='paused';await h.finish(file);const source=copy(h.records.get(key).pausedTransferSource);
+ h.env.LKC_SUBMISSION_TRANSFER_MODE='active';h.loseCopyResponse=true;await assert.rejects(h.finish(file));
+ const plan=copy(h.records.get(key).driveTransferPlan);h.loseCopyResponse=false;
+ h.env.LKC_SUBMISSION_TRANSFER_MODE='paused';await h.finish(file);
+ assert.deepEqual(h.records.get(key).pausedTransferSource,source);assert.deepEqual(h.records.get(key).driveTransferPlan,plan);
+ h.env.LKC_SUBMISSION_TRANSFER_MODE='active';await h.finish(file);await h.finish(file);
+ assert.equal(h.copies,1);assert.equal(h.records.get(key).driveFileId,plan.id);assert.equal((await h.state(s.submissionId)).completedFiles,1);
+});
 await test('initial report -> admin review -> replacement -> comparison -> completed',async()=>{
   const h=harness(),initial=await h.start();await h.finish(initial.files[0]);assert.equal((await h.state(initial.submissionId)).status,'completed');
   const created=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:initial.submissionId,sourceFileId:initial.files[0].fileId,reasons:['その他']}});
@@ -424,14 +502,40 @@ for(const [label,mutate] of [
  await assert.rejects(h.finish(session.files[0]),{code:'failed-precondition'});assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.copies,copies);assert.equal(h.deletes,deletes);
 });
 await test('legacy valid checkpoint without stable plan remains replayable',async()=>{const h=harness(),session=await h.start();await h.finish(session.files[0]);delete h.records.get('submissions/'+session.submissionId+'/files/'+session.files[0].fileId).driveTransferPlan;await h.finish(session.files[0]);assert.equal(h.copies,1);assert.equal((await h.state(session.submissionId)).completedFiles,1);assert.equal(h.list('sheetSyncQueue').length,1);});
-for(const failure of ['none','response-loss','checkpoint-loss'])await test('acceptance kit -> actual transfer -> disabled worker -> result verifier '+failure,async()=>{
- const kit=createSubmissionAcceptanceKit({driveRootId:'synthetic-isolated-root'}),h=harness(),now=Date.now();h.records.clear();for(const seed of kit.seedDocuments)h.records.set(seed.path,copy(seed.data));h.storageBucket=kit.storageBucket;h.driveCreatedAt=new Date(now).toISOString();
+for(const failure of ['none','response-loss','checkpoint-loss','paused-reviewed-replay','paused-reviewed-response-loss'])await test('acceptance kit -> actual transfer -> disabled worker -> result verifier '+failure,async()=>{
+ const kit=createSubmissionAcceptanceKit({driveRootId:failure.startsWith('paused-')?REPLAY_DRIVE_ROOT:'synthetic-isolated-root'}),h=harness(),now=Date.now();h.records.clear();for(const seed of kit.seedDocuments)h.records.set(seed.path,copy(seed.data));h.storageBucket=kit.storageBucket;h.driveCreatedAt=new Date(now).toISOString();
  const folders=[{id:kit.drive.rootFolderId,name:kit.companyId,parents:[kit.drive.parentId]},{id:'acceptance-client',name:kit.drive.childFolders[0],parents:[kit.drive.rootFolderId]},{id:'acceptance-month',name:kit.drive.childFolders[1],parents:['acceptance-client']}].map(f=>({...f,mimeType:'application/vnd.google-apps.folder',trashed:false}));
  h.driveList=({q})=>({data:{files:folders.filter(f=>q.includes("'"+f.parents[0]+"' in parents")&&q.includes("name='"+f.name+"'"))}});
  h.drivePayload=input=>{const f=kit.files.find(f=>f.storagePath===input.media.body.syntheticPath);assert.ok(f);return {size:String(f.size),mimeType:f.contentType,md5Checksum:Buffer.from(f.md5Base64,'base64').toString('hex'),trashed:false};};
  const finish=f=>h.uploads.finalizeStagedUpload({data:{name:f.storagePath,bucket:kit.storageBucket,contentType:f.contentType,size:f.size,generation:1,md5Hash:f.md5Base64}});
- if(failure!=='none'){if(failure==='response-loss')h.loseCopyResponse=true;else h.failWrite=w=>!!w.data.transferCompletedAt;await assert.rejects(finish(kit.files[0]));assert.equal(h.driveFiles.size,1);h.loseCopyResponse=false;h.failWrite=null;}
- for(const f of kit.files)await finish(f);
+ if(['response-loss','checkpoint-loss'].includes(failure)){if(failure==='response-loss')h.loseCopyResponse=true;else h.failWrite=w=>!!w.data.transferCompletedAt;await assert.rejects(finish(kit.files[0]));assert.equal(h.driveFiles.size,1);h.loseCopyResponse=false;h.failWrite=null;}
+ if(failure.startsWith('paused-')){
+  h.env.LKC_SUBMISSION_TRANSFER_MODE='paused';
+  for(const f of kit.files)await finish(f);
+  assert.equal(h.copies,0);assert.equal(h.deletes,0);
+  h.env.LKC_SUBMISSION_TRANSFER_MODE='active';
+  const revision='finalizestagedupload-00006-test',record=p=>({data:copy(h.records.get(p)),updateTime:new Date(now).toISOString()});
+  const transport={
+   readFunction:async()=>({name:'projects/'+kit.project+'/locations/asia-northeast1/functions/finalizeStagedUpload',state:'ACTIVE',environment:'GEN_2',
+    serviceConfig:{revision,allTrafficOnLatestRevision:true,serviceAccountEmail:'740154137290-compute@developer.gserviceaccount.com',uri:'https://finalizestagedupload-example-an.a.run.app',
+     environmentVariables:{APP_ENVIRONMENT:'staging',EXPECTED_FIREBASE_PROJECT_ID:kit.project,LKC_SUBMISSION_TRANSFER_MODE:'active'}},
+    eventTrigger:{eventType:'google.cloud.storage.object.v1.finalized',eventFilters:[{attribute:'bucket',value:kit.storageBucket}]}}),
+   readRecords:async i=>({parent:record('submissions/'+kit.submissionId),file:record('submissions/'+kit.submissionId+'/files/'+kit.files[i-1].fileId),drive:record('companies/'+kit.companyId+'/settings/drive'),otherFile:record('submissions/'+kit.submissionId+'/files/'+kit.files[i===1?1:0].fileId)}),
+   readObject:async(i,g)=>{const f=kit.files[i-1];assert.equal(g,'1');return {bucket:kit.storageBucket,name:f.storagePath,generation:g,size:String(f.size),contentType:f.contentType,md5Hash:f.md5Base64};},
+   invoke:async plan=>{await h.uploads.finalizeStagedUpload({data:plan.event});return {accepted:true};},
+  };
+  for(const fileIndex of [1,2]){
+   let plan=await preparePausedReplay({transport,fileIndex,revision});
+   if(fileIndex===1&&failure==='paused-reviewed-response-loss'){
+    h.loseCopyResponse=true;
+    await assert.rejects(executePausedReplay({transport,plan,approvedFingerprint:plan.fingerprint}));
+    assert.equal(h.copies,1);assert.equal(h.records.get('submissions/'+kit.submissionId).completedFiles,0);
+    h.loseCopyResponse=false;plan=await preparePausedReplay({transport,fileIndex,revision});
+   }
+   await executePausedReplay({transport,plan,approvedFingerprint:plan.fingerprint});
+   await assert.rejects(preparePausedReplay({transport,fileIndex,revision}),/RECORD_NOT_REPLAYABLE/);
+  }
+ }else for(const f of kit.files)await finish(f);
  const queue=h.list('sheetSyncQueue');assert.equal(queue.length,1);const worker=h.loadModule('./safe-sheet-writes');await worker.processSafeSheetWrite({data:{after:h.snapshot('sheetSyncQueue/'+queue[0].id)}});
  const normalize=v=>v instanceof Timestamp?v.toDate().toISOString():Array.isArray(v)?v.map(normalize):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,normalize(x)])):v;
  const result={project:kit.project,kitFingerprint:kit.fingerprint,startedAt:new Date(now-1000).toISOString(),readAt:new Date(Date.now()).toISOString(),documents:[...h.records].map(([path,data])=>({path,data:normalize(data)})),drive:{folders,files:[...h.driveFiles.values()]},storage:kit.files.map(f=>({bucket:kit.storageBucket,path:f.storagePath,generation:'1',size:String(f.size),contentType:f.contentType,md5Base64:f.md5Base64,exists:!h.deletedPaths.includes(f.storagePath)})),counts:Object.fromEntries(['notificationQueue','pushTokens'].map(c=>[c,{companyId:kit.companyId,count:h.list(c).length}])),listingsComplete:true};

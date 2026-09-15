@@ -186,12 +186,21 @@ function checkDriveFilePreview() {
 function checkFinalizeStagedUpload() {
   const source = sourceFile("functions/src/uploads.ts");
   const block = functionBlock(source, "finalizeStagedUpload");
+  const usesTransferControl = /if\s*\(\s*await submissionTransferPaused\(companyId\)\s*\)/.test(block)
+    && /import\s*\{[^}]*\bsubmissionTransferPaused\b[^}]*\}\s*from\s*"\.\/submission-transfer-control"/.test(source);
+  const control = usesTransferControl ? sourceFile("functions/src/submission-transfer-control.ts").split("\nexport function")[0] : "";
+  const scopedOperationalGate = usesTransferControl
+    && /export async function submissionTransferPaused\(companyId: string\): Promise<boolean>/.test(control)
+    && /const mode = process\.env\.LKC_SUBMISSION_TRANSFER_MODE \?\? "active";/.test(control)
+    && /if \(mode !== "active"\) return true;/.test(control)
+    && /return !\(await getProductionOperationalState\(companyId\)\)\.operational;/.test(control)
+    && /import \{ getProductionOperationalState \} from "\.\/system-safety";/.test(control);
   const checks = {
     storageEventOnly: /onObjectFinalized\s*\(/.test(block),
     stagingPathOnly: /parts\[0\]\s*!==\s*"staging"/.test(block),
     completeIdentity: /!companyId\s*\|\|\s*!uid\s*\|\|\s*!submissionId\s*\|\|\s*!fileId/.test(block),
     metadataScope: /meta\.uid\s*!==\s*uid\s*\|\|\s*meta\.companyId\s*!==\s*companyId/.test(block),
-    operationalGate: /getProductionOperationalState\s*\(\s*companyId\s*\)/.test(block),
+    operationalGate: /getProductionOperationalState\s*\(\s*companyId\s*\)/.test(block) || scopedOperationalGate,
   };
   return Object.values(checks).every(Boolean);
 }

@@ -16,7 +16,7 @@ import {
   requestId,
   staffFromClaims,
 } from "./utils";
-import { assertProductionOperational, getProductionOperationalState } from "./system-safety";
+import { submissionTransferPaused, assertPausedTransferSource } from "./submission-transfer-control";
 
 const CreateSchema = z.object({
   jobId: z.string().min(1),
@@ -37,7 +37,7 @@ export const createUploadSession = onCall(async (request) => {
     throw new HttpsError("invalid-argument", "差替提出には再提出依頼IDが必要です。通常提出には指定できません。");
   }
   const companyId = companyFromClaims(session.token);
-  await assertProductionOperational(companyId);
+  if (await submissionTransferPaused(companyId)) throw new HttpsError("failed-precondition", "提出転送を一時停止しています。再開後に同じ提出を確認してください。");
   const staffId = staffFromClaims(session.token);
   const submissionRef = db.collection("submissions").doc();
   const now = Timestamp.now();
@@ -135,16 +135,36 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
   if (!companyId || !uid || !submissionId || !fileId) {
     return;
   }
-  if (!(await getProductionOperationalState(companyId)).operational) {
-    await db.collection("submissionFiles").doc(fileId).set({
-      status: "paused_global",
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
+  const fileRef = db.collection("submissions").doc(submissionId)
+    .collection("files").doc(fileId);
+  if (await submissionTransferPaused(companyId)) {
+    // 正規の提出記録へ停止状態を保存し、同時実行で完了した結果は戻さない。
+    await db.runTransaction(async tx => {
+      const submissionRef = db.collection("submissions").doc(submissionId);
+      const [parentSnap, fileSnap] = await Promise.all([tx.get(submissionRef), tx.get(fileRef)]);
+      if (!parentSnap.exists || !fileSnap.exists) return;
+      const parent = parentSnap.data()!, file = fileSnap.data()!;
+      assertSubmissionFile(parent, file, submissionId);
+      if (file.companyId !== companyId || file.uid !== uid || file.storagePath !== path) {
+        throw new HttpsError("failed-precondition", "停止対象と提出ファイルの所属情報が一致しません。");
+      }
+      if (file.completionCounted === true || file.status === "completed") return;
+      const pausedSource = transferSource(object);
+      if (String(file.size) !== pausedSource.size || file.contentType !== pausedSource.contentType) {
+        throw new HttpsError("failed-precondition", "停止対象と元ファイルの内容が一致しません。");
+      }
+      assertTransferSource(file.driveTransferPlan, pausedSource);
+      assertPausedTransferSource(file.pausedTransferSource, pausedSource);
+      const updatedAt = FieldValue.serverTimestamp();
+      tx.update(fileRef, { status: "paused_global", pausedTransferSource: pausedSource, updatedAt });
+      // 他ファイルのエラーや完了の証跡を、一時停止表示で覆わない。
+      if (parent.status !== "completed" && parent.status !== "error") {
+        tx.update(submissionRef, { status: "paused_global", updatedAt });
+      }
+    });
     return;
   }
 
-  const fileRef = db.collection("submissions").doc(submissionId)
-    .collection("files").doc(fileId);
   const [fileSnap, submissionSnap] = await Promise.all([
     fileRef.get(),
     db.collection("submissions").doc(submissionId).get(),
@@ -171,6 +191,7 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
     throw new HttpsError("failed-precondition", "旧版の転送済み提出です。完了数を確認してから再処理してください。");
   }
   const source = transferSource(object);
+  assertPausedTransferSource(meta.pausedTransferSource, source);
   if (meta.storagePath !== path || String(meta.size) !== source.size || meta.contentType !== source.contentType) {
     throw new HttpsError("failed-precondition", "転送元と提出メタデータが一致しません。");
   }
@@ -189,6 +210,7 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
     ]);
     const file = latest.data();
     assertSubmissionFile(parent.data(), file, submissionId);
+    assertPausedTransferSource(file?.pausedTransferSource, source);
     if (["companyId", "uid", "jobId", "staffId", "type", "submissionId", "storagePath", "size", "contentType", "resubmissionRequestId"].some(key => file?.[key] !== meta[key])) {
       throw new HttpsError("failed-precondition", "転送開始前に提出情報が変更されました。");
     }

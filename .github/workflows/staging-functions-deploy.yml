@@ -21,6 +21,15 @@ on:
         required: true
         type: string
         default: bootstrapSession
+      transfer_mode:
+        description: Preserve transfer state; active/paused requires finalizeStagedUpload only
+        required: true
+        type: choice
+        options:
+          - preserve
+          - active
+          - paused
+        default: preserve
       confirmation:
         description: Type the confirmation required by the selected operation
         required: true
@@ -206,6 +215,13 @@ jobs:
           chmod 600 "$dotenv_path"
           echo "STAGING_DOTENV=READY"
           echo "STAGING_DOTENV_KEY_COUNT=13"
+      - name: Preserve or explicitly set submission transfer mode
+        working-directory: guardrails
+        env:
+          LKC_TRANSFER_MODE_REQUESTED: ${{ inputs.transfer_mode }}
+          LKC_FUNCTIONS: ${{ inputs.functions }}
+          LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
+        run: node scripts/automation/materialize-staging-transfer-mode.mjs
       - name: Deploy only the explicit Functions allowlist
         working-directory: guardrails
         env:

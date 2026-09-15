@@ -176,6 +176,7 @@ try{
   await issuePanel.locator('article').nth(1).waitFor();
   assert.equal(await issuePanel.locator('article').count(),2);
   await issuePanel.getByRole('button',{name:'再試行',exact:true}).click();
+  await page.getByText('デモ：再試行を受け付けました。',{exact:true}).waitFor();
   assert.equal(await issuePanel.locator('article').count(),1);
   page.once('dialog',dialog=>dialog.dismiss());
   await issuePanel.getByRole('button',{name:'確認メモを記録',exact:true}).click();

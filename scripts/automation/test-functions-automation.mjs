@@ -1,3 +1,5 @@
+import "./test-transfer-auth-guard.mjs";
+import "./test-staging-transfer-mode.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";

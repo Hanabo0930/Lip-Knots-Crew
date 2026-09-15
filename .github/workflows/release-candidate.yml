@@ -54,6 +54,7 @@ jobs:
           node scripts/test-staff-submission-flow.mjs --browser
           node scripts/test-staff-shift-rendering.mjs
           node scripts/test-admin-workspace.mjs --browser
+          node scripts/test-admin-import-snapshot.mjs
       - name: Run release orchestration regressions
         run: |
           npm run test:preview-demo

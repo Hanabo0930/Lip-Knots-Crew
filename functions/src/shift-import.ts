@@ -1,3 +1,4 @@
+import { assertProductionOperational } from "./system-safety";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
@@ -183,6 +184,7 @@ async function executeShiftImport(
   mode: ImportMode,
   requestedSheets?: string[]
 ): Promise<ImportExecutionResult> {
+  if (mode === "commit") await assertProductionOperational(companyId);
   const config = await loadConfig(companyId);
   if (!config.enabled && mode === "commit") {
     throw new HttpsError(

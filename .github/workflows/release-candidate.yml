@@ -110,6 +110,7 @@ jobs:
           node scripts/test-expense-completion-integrity.mjs
           node scripts/test-emulator-seed-safety.mjs
           node scripts/test-shift-import-lease.mjs
+          node scripts/test-staff-import-revocation.mjs
           node scripts/test-shift-integrity-diagnostics.mjs
           node scripts/test-staging-shift-integrity-reader.mjs
           node scripts/test-admin-reassignment-locks.mjs

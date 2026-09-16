@@ -237,3 +237,6 @@ assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",
 
 const adminCoreFunctions=["getSheetWriteIssues","getOperationsDashboard","getStaffPerformance","createAdminJobGroup","updateJobPublication","adminEditJobInputs","generateJobExport","updateNetPrintNumbers","adminSetJobCancellation","adminRestoreCancelledJob"];
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:adminCoreFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,adminCoreFunctions);
+
+const importIssueFunctions=["previewStaffImport","syncStaffDirectoryReadOnly","previewShiftImport","syncShiftSheetsReadOnly","retrySheetWriteIssue","acknowledgeSheetWriteIssue"];
+assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:importIssueFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,importIssueFunctions);

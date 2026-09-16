@@ -23,7 +23,7 @@ function row(store,staff='',cancelled=false){
 // 実モジュール全体を接続する。許可したSDK境界以外のimportは即時拒否する。
 function harness(rows,clock){
   const records=new Map(),modules=new Map(),loaded=new Set();let serial=0;
-  const h={rows,records,loaded,commits:[],beforeCommit:null,afterCommit:null,reads:0,failRead:false,secondTab:false};
+  const h={rows,records,loaded,commits:[],beforeCommit:null,afterCommit:null,reads:0,failRead:false,secondTab:false,environment:'development'};
   const snap=ref=>({id:ref.id,exists:records.has(ref.path),data:()=>records.has(ref.path)?clone(records.get(ref.path)):undefined});
   const apply=pending=>{
     const next=new Map(records);
@@ -37,7 +37,7 @@ function harness(rows,clock){
     records.clear();for(const [k,v] of next)records.set(k,v);
   };
   const ref=(name,id=`generated-${++serial}`)=>({id,path:`${name}/${id}`,get:async function(){return snap(this);},set:async function(data,options){apply([{ref:this,data,merge:options?.merge}]);}});
-  const collection=(name,filters=[])=>({add:async data=>{const r=ref(name);await r.set(data);return r;},doc:id=>ref(name,id),where:(field,op,value)=>{assert.equal(op,'==');return collection(name,[...filters,[field,value]]);},get:async()=>({docs:[...records].filter(([k,v])=>k.startsWith(name+'/')&&filters.every(([f,x])=>v[f]===x)).map(([k])=>snap(ref(name,k.slice(name.length+1))))})});
+  const collection=(name,filters=[])=>({add:async data=>{const r=ref(name);await r.set(data);return r;},doc:id=>ref(name,id),where:(field,op,value)=>{assert.equal(op,'==');return collection(name,[...filters,[field,value]]);},limit:()=>collection(name,filters),get:async()=>({docs:[...records].filter(([k,v])=>k.startsWith(name+'/')&&filters.every(([f,x])=>v[f]===x)).map(([k])=>snap(ref(name,k.slice(name.length+1))))})});
   const db={collection,runTransaction:async callback=>{
     const pending=[];const get=async r=>{assert.equal(pending.length,0,'transaction read after write');return snap(r);};
     const result=await callback({get,getAll:(...refs)=>Promise.all(refs.map(get)),set:(ref,data,options)=>pending.push({ref,data,merge:options?.merge}),update:(ref,data)=>pending.push({ref,data,merge:true,update:true}),delete:ref=>pending.push({ref,remove:true})});
@@ -55,13 +55,13 @@ function harness(rows,clock){
     const source=fs.readFileSync(new URL(`../functions/src/${name.slice(2)}.ts`,import.meta.url),'utf8');
     const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
     const exports={};modules.set(name,exports);loaded.add(name);
-    runInNewContext(code,{exports,require:load,...(clock?{Date:class extends Date{constructor(...args){super(...(args.length?args:[clock.now]));}static now(){return new Date(clock.now).getTime();}}}:{}),process:{env:{APP_ENVIRONMENT:'development'}},console:{warn:()=>{},error:()=>{}},setTimeout:callback=>{callback();return 0;}},{timeout:5000});return exports;
+    runInNewContext(code,{exports,require:load,...(clock?{Date:class extends Date{constructor(...args){super(...(args.length?args:[clock.now]));}static now(){return new Date(clock.now).getTime();}}}:{}),process:{env:{get APP_ENVIRONMENT(){return h.environment;}}},console:{warn:()=>{},error:()=>{}},setTimeout:callback=>{callback();return 0;}},{timeout:5000});return exports;
   }
   const importer=load('./shift-import'),jobs=load('./jobs'),precontact=load('./precontact');
   records.set(`sheetImportConfigs/${companyId}`,{companyId,enabled:true,spreadsheetId:sheetId,headerRow:1,dataStartRow:2,readRangeEndColumn:'BC',columns:{workDate:'A',staffName:'B',temperature:'G',arrivalTime:'H',clientName:'J',storeName:'K',makerName:'L',menuName:'M',workTime:'O',cancelled:'BC'}});
   records.set(`staffProfiles/${staffId}`,{companyId,active:true,displayName:'Synthetic Staff'});
   const admin={uid:'synthetic-admin',token:{companyId,role:'admin'}},staff={uid:'synthetic-user',token:{companyId,role:'staff',staffId}};
-  return Object.assign(h,{edit:(jobId,fields,revision=records.get("jobs/"+jobId).revision??0)=>load("./job-management").adminEditJobInputs({auth:admin,data:{jobId,fields,revision}}),tasks:()=>load("./task-core").deriveStaffTasks({jobs:[...records].filter(([key])=>key.startsWith("jobs/")).map(([key,value])=>({id:key.split("/")[1],...value})),resubmissions:[],nowMs:Date.parse("2099-09-19T00:00:00Z")}),precontact:(jobId,values={temperature:36.5,arrivalTime:'09:30'},auth=staff)=>precontact.submitPreContact({auth,data:{jobId,...values}}),sync:()=>importer.syncShiftSheetsReadOnly({auth:admin,data:{}}),preview:()=>importer.previewShiftImport({auth:admin,data:{}}),apply:(jobId,requestId='request-0001',auth=staff)=>jobs.applyToJob({auth,data:{jobId,requestId}}),cancel:jobId=>jobs.adminCancelJob({auth:admin,data:{jobId,reason:'Synthetic cancellation'}}),list:name=>[...records].filter(([k])=>k.startsWith(name+'/')).map(([k,v])=>({id:k.slice(name.length+1),...v}))});
+  return Object.assign(h,{edit:(jobId,fields,revision=records.get("jobs/"+jobId).revision??0)=>load("./job-management").adminEditJobInputs({auth:admin,data:{jobId,fields,revision}}),tasks:()=>load("./task-core").deriveStaffTasks({jobs:[...records].filter(([key])=>key.startsWith("jobs/")).map(([key,value])=>({id:key.split("/")[1],...value})),resubmissions:[],nowMs:Date.parse("2099-09-19T00:00:00Z")}),precontact:(jobId,values={temperature:36.5,arrivalTime:'09:30'},auth=staff)=>precontact.submitPreContact({auth,data:{jobId,...values}}),scheduled:()=>importer.syncShiftSheetsScheduled(),sync:()=>importer.syncShiftSheetsReadOnly({auth:admin,data:{}}),preview:()=>importer.previewShiftImport({auth:admin,data:{}}),apply:(jobId,requestId='request-0001',auth=staff)=>jobs.applyToJob({auth,data:{jobId,requestId}}),cancel:jobId=>jobs.adminCancelJob({auth:admin,data:{jobId,reason:'Synthetic cancellation'}}),list:name=>[...records].filter(([k])=>k.startsWith(name+'/')).map(([k,v])=>({id:k.slice(name.length+1),...v}))});
 }
 const results=[];
 async function test(name,callback){try{await callback();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.message});}}
@@ -297,5 +297,19 @@ await test('external import advances edit revision while unchanged import preser
  const h=await adminImportHarness();const original=h.current().revision;await h.sync();assert.equal(h.current().revision,original);h.rows[0][10]='External update';await h.sync();assert.equal(h.current().revision,original+1);await assert.rejects(h.edit(h.id,{storeName:'Old screen save'},original),{code:'aborted'});assert.equal(h.current().storeName,'External update');
 const latest=h.current().revision;await h.sync();assert.equal(h.current().revision,latest);
 });
+
+for(const entry of ['preview','commit','scheduled'])for(const control of [undefined,{productionEnabled:false},{productionEnabled:true,emergencyLock:true}]){
+ await test('production pause '+entry+' '+JSON.stringify(control),async()=>{
+  const h=harness([row('Paused')]);h.environment='production';h.records.get('sheetImportConfigs/'+companyId).scheduleEnabled=true;
+  if(control)h.records.set('productionControls/'+companyId,control);
+  const before=JSON.stringify([...h.records]);
+  if(entry==='preview')await h.preview();else if(entry==='commit')await assert.rejects(h.sync(),{code:'failed-precondition'});else await h.scheduled();
+  assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.commits.length,0);if(entry!=='preview')assert.equal(h.reads,0);
+ });
+}
+await test('production enabled permits guarded import',async()=>{
+ const h=harness([row('Enabled')]);h.environment='production';h.records.set('productionControls/'+companyId,{productionEnabled:true,emergencyLock:false});await h.sync();assert.equal(h.list('jobs').length,1);
+});
+
 console.log(JSON.stringify({passed:results.filter(r=>r.ok).length,results,boundary:'Full TypeScript modules; in-memory DB and Google API; network-capable application imports refused. No emulator, token validation, SDK concurrency or actual delivery.'},null,2));
 if(results.some(r=>!r.ok))process.exitCode=1;

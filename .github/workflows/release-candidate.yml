@@ -112,6 +112,7 @@ jobs:
           node scripts/test-shift-import-lease.mjs
           node scripts/test-staff-import-revocation.mjs
           node scripts/test-login-link-identity.mjs
+          node scripts/test-bootstrap-session-identity.mjs
           node scripts/test-month-sheet-lifecycle.mjs
           node scripts/test-sheet-write-review.mjs
           node scripts/test-readiness-company-boundaries.mjs

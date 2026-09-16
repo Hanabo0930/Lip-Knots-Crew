@@ -20,6 +20,7 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "loginGateway",
   "submitPilotOutcome",
   "decidePilotExpansion",
   "getPilotReadiness",
@@ -707,6 +708,7 @@ function checkConfirmApplication() {
 function checkBootstrapSession() {
   const source = sourceFile("functions/src/auth.ts");
   const bootstrap = functionBlock(source, "bootstrapSession");
+  const compact = bootstrap.replace(/\s+/g, "");
   const checks = {
     authenticated: /requireAuth\s*\(\s*request\s*\)/.test(bootstrap),
     verifiedEmail: /user\.emailVerified/.test(bootstrap),
@@ -723,8 +725,23 @@ function checkBootstrapSession() {
       /async function fetchAdminDirectory\s*\(\s*companyId\s*:\s*string\s*\)/.test(source)
       && (source.match(/\.where\s*\(\s*"companyId"\s*,\s*"=="\s*,\s*companyId\s*\)/g) ?? []).length === 2,
     noClientCompanyScope: !/input\.companyId/.test(bootstrap),
+    indexIdentity: compact.includes('db.collection("emailIndex").doc(emailHash(email)).get()')
+      && compact.includes('index.active!==true')
+      && compact.includes('[index.companyId,index.staffId].some(value=>typeofvalue!=="string"||!value.trim()||')
+      && compact.includes(String.raw`/[\/\\\u0000-\u001f\u007f]/.test(value)`),
+    staffProfileIdentity: compact.includes('db.collection("staffProfiles").doc(index.staffId).get()')
+      && compact.includes('!profileSnap.exists||profileSnap.data()?.active!==true||profileSnap.data()?.companyId!==index.companyId'),
+    staffClaimsFromIndex: /constclaims=\{role:"staff",companyId:index\.companyId,staffId:index\.staffId,?\};/.test(compact),
+    claimUpdatesForAuthenticatedUser: (compact.match(/auth\.setCustomUserClaims\(session\.uid,claims\)/g) ?? []).length === 2,
   };
   return Object.values(checks).every(Boolean);
+}
+
+function checkLoginGateway() {
+  const source=sourceFile("functions/src/login-links.ts"),start=source.indexOf("export const loginGateway"),end=source.indexOf("\n});",start);
+  if(start<0||end<start)return false;
+  const block=source.slice(start,end+4).replace(/\s+/g,"");
+  return ['exportconstloginGateway=onRequest(async(request,response)=>{','/^[A-Za-z0-9_-]{30,120}$/.test(token)','consttokenHash=sha256(token)','db.collection("loginGatewayTokens").doc(tokenHash).get()','data.active!==true','!isLoginDocumentId(data.companyId)||!isLoginDocumentId(data.staffId)','/^[a-f0-9]{64}$/.test(data.emailHash)','data.expiresAt.toMillis()<=Date.now()','awaitassertProductionOperational(data.companyId)','constactionLink=awaitdb.runTransaction(asynctx=>{','tx.get(snap.ref)','tx.get(db.collection("emailIndex").doc(data.emailHash!))','tx.get(db.collection("staffProfiles").doc(data.staffId!))','current?.active!==true','current.actionLink!==data.actionLink','current.companyId!==data.companyId','current.staffId!==data.staffId','current.emailHash!==data.emailHash','!(current.expiresAtinstanceofTimestamp)||current.expiresAt.toMillis()<=Date.now()','index?.active!==true','index.companyId!==data.companyId','index.staffId!==data.staffId','profile?.active!==true','profile.companyId!==data.companyId','tx.set(snap.ref,','returncurrent.actionLink!','response.redirect(302,actionLink)'].every(x=>block.includes(x));
 }
 
 function checkRequestStaffLoginLink() {
@@ -732,6 +749,8 @@ function checkRequestStaffLoginLink() {
   const block = functionBlock(source, "requestStaffLoginLink");
   const rateLimitStart = source.indexOf("async function enforceLoginRateLimit");
   const rateLimit = rateLimitStart < 0 ? "" : source.slice(rateLimitStart);
+  const compact = source.replace(/\s+/g, "");
+  const send = compact.slice(compact.indexOf("asyncfunctionsendLoginLink("), compact.indexOf("functionrenderError("));
   const checks = {
     strictEmailInput:
       /RequestLoginSchema\.safeParse\s*\(\s*request\.data\s*\?\?\s*\{\}\s*\)/.test(block)
@@ -752,6 +771,13 @@ function checkRequestStaffLoginLink() {
     enumerationResistantResponse:
       /accepted\s*:\s*true/.test(block)
       && /登録済みのメールアドレスの場合/.test(block),
+    strictCompanyIdentity: [
+      'index?.active===true&&isLoginDocumentId(index.staffId)&&isLoginDocumentId(index.companyId)',
+      'profileSnap.data()?.active===true&&profileSnap.data()?.companyId===index.companyId',
+      'isLoginDocumentId(initial.loginCodeCompanyId)', 'isLoginDocumentId(initial.loginCodeStaffId)',
+      'profileSnap.data()?.companyId!==initial.loginCodeCompanyId',
+      'index.companyId!==input.companyId||index.staffId!==input.staffId',
+    ].every(value => compact.includes(value)) && send.includes('profile.companyId!==input.companyId'),
     mailSecretScoped: /secrets\s*:\s*\[gmailServiceAccountJson\]/.test(block),
   };
   return Object.values(checks).every(Boolean);
@@ -1160,6 +1186,7 @@ const checkers = {
   adminCancelJob: () => checkBusinessRecovery("adminCancelJob"),
   duplicateAdminJob: () => checkBusinessRecovery("duplicateAdminJob"),
   bootstrapSession: checkBootstrapSession,
+  loginGateway: checkLoginGateway,
   confirmApplication: checkConfirmApplication,
   completeResubmissionRequest: () => checkResubmission("completeResubmissionRequest"),
   getAdminResubmissionRequests: () => checkResubmission("getAdminResubmissionRequests"),

@@ -1,3 +1,5 @@
+import "./test-login-entrypoint-auth-guard.mjs";
+import "./test-bootstrap-auth-guard.mjs";
 import "./test-pilot-expansion-auth-guard.mjs";
 import "./test-readiness-auth-guard.mjs";
 import "./test-setup-audit-auth-guard.mjs";
@@ -108,6 +110,7 @@ const expectedFunctions = [
   "getProductionSloDashboard",
   "submitPilotOutcome",
   "decidePilotExpansion",
+  "loginGateway",
 ];
 
 assert.deepEqual(
@@ -198,6 +201,7 @@ for (const [functionName, serviceName] of [
   ["getProductionSloDashboard", "getproductionslodashboard"],
   ["submitPilotOutcome", "submitpilotoutcome"],
   ["decidePilotExpansion", "decidepilotexpansion"],
+  ["loginGateway", "logingateway"],
   ["previewStaffImport", "previewstaffimport"],
   ["syncStaffDirectoryReadOnly", "syncstaffdirectoryreadonly"],
   ["previewShiftImport", "previewshiftimport"],

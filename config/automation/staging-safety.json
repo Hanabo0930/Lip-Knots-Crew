@@ -95,7 +95,8 @@
     "getProductionControlStatus",
     "getProductionSloDashboard",
     "submitPilotOutcome",
-    "decidePilotExpansion"
+    "decidePilotExpansion",
+    "loginGateway"
   ],
   "allowedHostingTargets": [
     "staff",

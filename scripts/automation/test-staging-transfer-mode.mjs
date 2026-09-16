@@ -10,9 +10,15 @@ const current=mode=>({name:'projects/'+project+'/locations/'+region+'/functions/
 function check(name,run){run();passed++;}
 for(const [requested,saved,expected] of [
  ['preserve',undefined,'active'],['preserve','active','active'],['preserve','paused','paused'],
+ ['preserve','acceptance','acceptance'],['acceptance','paused','acceptance'],
  ['active','paused','active'],['paused','active','paused'],['paused',undefined,'paused'],
-])check('mode '+requested+'/'+saved,()=>assert.equal(resolveTransferMode({requested,functions:[target],current:current(saved),supportsControl:true}).mode,expected));
+])check('mode '+requested+'/'+saved,()=>assert.equal(resolveTransferMode({requested,functions:[target],current:current(saved),supportsControl:true,supportsAcceptance:true}).mode,expected));
 for(const values of [
+ {requested:'acceptance',supportsAcceptance:false},
+ {requested:'preserve',current:current('acceptance'),supportsAcceptance:false},
+ {requested:'acceptance',supportsControl:false},
+ {requested:'preserve',current:current('acceptance'),supportsControl:false},
+ {requested:'acceptance',functions:[target,'bootstrapSession']},
  {requested:'invalid'}, {requested:'preserve',current:current('invalid')},
  {requested:'paused',functions:['bootstrapSession']},
  {requested:'active',functions:[target,'bootstrapSession']},
@@ -22,7 +28,7 @@ for(const values of [
  {requested:'preserve',current:current('paused'),supportsControl:false},
  {requested:'preserve',current:{...current('active'),state:'DEPLOYING'}},
  {requested:'preserve',current:{...current('active'),name:'production'}},
-])check('reject '+JSON.stringify(values),()=>assert.throws(()=>resolveTransferMode({requested:'preserve',functions:[target],current:current('active'),supportsControl:true,...values})));
+])check('reject '+JSON.stringify(values),()=>assert.throws(()=>resolveTransferMode({requested:'preserve',functions:[target],current:current('active'),supportsControl:true,supportsAcceptance:true,...values})));
 check('other functions unchanged',()=>assert.equal(resolveTransferMode({requested:'preserve',functions:['bootstrapSession']}),null));
 const temp=fs.mkdtempSync(path.join(os.tmpdir(),'lkc-transfer-mode-test-'));
 fs.mkdirSync(path.join(temp,'functions/src'),{recursive:true});
@@ -47,6 +53,26 @@ check('wrong project never reads current function',()=>{
 });
 check('other functions never read or write transfer config',()=>{
  assert.equal(materializeTransferMode({...options,functions:'bootstrapSession',sourceDirectory:'unused',describe:()=>assert.fail('unexpected cloud read')}),null);
+});
+const controlPath=path.join(temp,'functions/src/submission-transfer-control.ts');
+const validControl=fs.readFileSync(new URL('../../functions/src/submission-transfer-control.ts',import.meta.url),'utf8');
+check('acceptance preserves isolation mode',()=>{
+ fs.writeFileSync(dotenv,base);fs.writeFileSync(controlPath,validControl);
+ assert.equal(materializeTransferMode({...options,describe:()=>current('acceptance')}).mode,'acceptance');
+ assert.equal(fs.readFileSync(dotenv,'utf8'),base+'LKC_SUBMISSION_TRANSFER_MODE=acceptance\n');
+});
+for(const condition of [
+ 'mode === "acceptance"',
+ 'process.env.APP_ENVIRONMENT === "staging"',
+ 'process.env.EXPECTED_FIREBASE_PROJECT_ID === "lip-knots-crew-staging"',
+ 'companyId === "lkc-transfer-acceptance-20260908"',
+ 'if (mode !== "active" && !acceptanceOnly) return true;',
+ '&& companyId ===',
+])check('acceptance source binding required '+condition,()=>{
+ assert.ok(validControl.includes(condition));
+ fs.writeFileSync(dotenv,base);fs.writeFileSync(controlPath,validControl.replace(condition,'false'));
+ assert.throws(()=>materializeTransferMode({...options,requested:'acceptance'}),/SOURCE_ACCEPTANCE_CONTROL_MISSING/);
+ assert.equal(fs.readFileSync(dotenv,'utf8'),base);
 });
 const workflow=fs.readFileSync(new URL('../../.github/workflows/staging-functions-deploy.yml',import.meta.url),'utf8');
 check('workflow defaults to preserve',()=>assert.match(workflow,/transfer_mode:[\s\S]*?default: preserve/));

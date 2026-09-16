@@ -15,13 +15,22 @@ function run(change){
  return {passed:lines.includes('SOURCE_GUARD_STATUS=PASS'),exitCode:process.exitCode};
 }
 assert.equal(run().passed,true);
+let passed=1;
 for(const change of [
  files=>files['functions/src/submission-transfer-control.ts']=files['functions/src/submission-transfer-control.ts'].replace('return !(await getProductionOperationalState(companyId)).operational;','return false;'),
- files=>files['functions/src/submission-transfer-control.ts']=files['functions/src/submission-transfer-control.ts'].replace('if (mode !== "active") return true;','if (mode === "paused") return true;'),
+ files=>files['functions/src/submission-transfer-control.ts']=files['functions/src/submission-transfer-control.ts'].replace('if (mode !== "active" && !acceptanceOnly) return true;','if (mode === "paused") return true;'),
+ ...[
+  'mode === "acceptance"',
+  'process.env.APP_ENVIRONMENT === "staging"',
+  'process.env.EXPECTED_FIREBASE_PROJECT_ID === "lip-knots-crew-staging"',
+  'companyId === "lkc-transfer-acceptance-20260908"',
+ ].map(condition=>files=>{const p='functions/src/submission-transfer-control.ts';assert.ok(files[p].includes(condition));files[p]=files[p].replace(condition,'true');}),
+ files=>{const p='functions/src/submission-transfer-control.ts';files[p]=files[p].replace('&& companyId ===','|| companyId ===');},
  files=>files['functions/src/submission-transfer-control.ts']=files['functions/src/submission-transfer-control.ts'].replace('from "./system-safety"','from "./other"'),
  files=>files['functions/src/uploads.ts']=files['functions/src/uploads.ts'].replaceAll('if (await submissionTransferPaused(companyId))','if (submissionTransferPaused(companyId))'),
  files=>files['functions/src/uploads.ts']=files['functions/src/uploads.ts'].replace('from "./submission-transfer-control"','from "./other"'),
 ]){
- const result=run(change);assert.equal(result.passed,false);assert.equal(result.exitCode,1);
+ const result=run(change);assert.equal(result.passed,false);assert.equal(result.exitCode,1);passed++;
 }
-console.log(JSON.stringify({transferAuthGuardTests:6}));
+assert.equal(run(files=>{const p='functions/src/submission-transfer-control.ts';files[p]=files[p].replace(/const acceptanceOnly =[\s\S]*?if \(mode !== "active" && !acceptanceOnly\) return true;/,'if (mode !== "active") return true;');}).passed,true);passed++;
+console.log(JSON.stringify({transferAuthGuardTests:passed}));

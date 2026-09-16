@@ -18,7 +18,7 @@ function fixture(index=1){
  records.otherFile=record('submissions/'+kit.submissionId+'/files/'+kit.files[index===1?1:0].fileId);
  const fn={name:root+'/locations/asia-northeast1/functions/finalizeStagedUpload',state:'ACTIVE',environment:'GEN_2',
   serviceConfig:{revision,allTrafficOnLatestRevision:true,serviceAccountEmail:'740154137290-compute@developer.gserviceaccount.com',
-   uri:'https://finalizestagedupload-example-an.a.run.app',environmentVariables:{APP_ENVIRONMENT:'staging',EXPECTED_FIREBASE_PROJECT_ID:kit.project,LKC_SUBMISSION_TRANSFER_MODE:'active'}},
+   uri:'https://finalizestagedupload-example-an.a.run.app',environmentVariables:{APP_ENVIRONMENT:'staging',EXPECTED_FIREBASE_PROJECT_ID:kit.project,LKC_SUBMISSION_TRANSFER_MODE:'acceptance'}},
   eventTrigger:{eventType:'google.cloud.storage.object.v1.finalized',eventFilters:[{attribute:'bucket',value:kit.storageBucket}]}};
  const object={bucket:kit.storageBucket,name:file.storagePath,generation:'101',size:String(file.size),contentType:file.contentType,md5Hash:file.md5Base64};
  const f={records,fn,object,reads:0,invokes:[],storageReads:0};
@@ -38,6 +38,7 @@ for(const [name,mutate] of [
  ['production',f=>f.fn.serviceConfig.environmentVariables.APP_ENVIRONMENT='production'],
  ['wrong project',f=>f.fn.name=f.fn.name.replace(kit.project,'other')],
  ['old revision',f=>f.fn.serviceConfig.revision='finalizestagedupload-00005-pep'],
+ ['active is not isolated',f=>f.fn.serviceConfig.environmentVariables.LKC_SUBMISSION_TRANSFER_MODE='active'],
  ['paused',f=>f.fn.serviceConfig.environmentVariables.LKC_SUBMISSION_TRANSFER_MODE='paused'],
  ['missing control',f=>delete f.fn.serviceConfig.environmentVariables.LKC_SUBMISSION_TRANSFER_MODE],
  ['traffic split',f=>f.fn.serviceConfig.allTrafficOnLatestRevision=false],

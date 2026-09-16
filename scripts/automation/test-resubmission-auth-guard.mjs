@@ -77,5 +77,5 @@ for(const before of [
  'Number(completed) > Number(total)',
 ])reject('completeResubmissionRequest',before,'false',integrityPath);
 const allowed=JSON.parse(read('config/automation/staging-safety.json')).allowedFunctions;
-assert.equal(names.some(name=>allowed.includes(name)),false);passed++;
-console.log(JSON.stringify({resubmissionAuthGuardTests:passed,deploymentAllowlistExpanded:false,cloudOperations:false}));
+assert.equal(names.every(name=>allowed.includes(name)),true);passed++;
+console.log(JSON.stringify({resubmissionAuthGuardTests:passed,deploymentAllowlistExpanded:true,cloudOperations:false}));

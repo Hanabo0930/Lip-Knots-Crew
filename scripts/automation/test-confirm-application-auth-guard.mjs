@@ -41,5 +41,5 @@ for(const [before,after] of [['from "./utils"','from "./other"'],['from "./syste
  assert.ok(original.includes(before));assert.deepEqual(run(original.replace(before,after)),{passed:false,exitCode:1});passed++;
 }
 const config=JSON.parse(read('config/automation/staging-safety.json'));
-assert.equal(config.allowedFunctions.includes('confirmApplication'),false,'Audit support must not silently grant deployment permission');passed++;
-console.log(JSON.stringify({confirmApplicationAuthGuardTests:passed,deploymentAllowlistExpanded:false,cloudOperations:false}));
+assert.equal(config.allowedFunctions.includes('confirmApplication'),true,'Approved confirmation recovery must be explicitly allowlisted');passed++;
+console.log(JSON.stringify({confirmApplicationAuthGuardTests:passed,deploymentAllowlistExpanded:true,cloudOperations:false}));

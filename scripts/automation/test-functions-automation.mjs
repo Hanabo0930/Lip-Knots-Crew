@@ -45,6 +45,7 @@ const expectedFunctions = [
   "markNetPrintPrinted",
   "adminCancelJob",
   "duplicateAdminJob",
+  "createUploadSession",
 ];
 
 assert.deepEqual(
@@ -102,6 +103,7 @@ assert.match(
   "listMyDevices must map to its exact Cloud Run service",
 );
 for (const [functionName, serviceName] of [
+  ["createUploadSession", "createuploadsession"],
   ["getExpenseReview", "getexpensereview"],
   ["saveExpenseReviewDraft", "saveexpensereviewdraft"],
   ["completeExpenseReview", "completeexpensereview"],

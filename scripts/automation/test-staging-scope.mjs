@@ -229,3 +229,5 @@ assert.throws(()=>validatePlan({...base,mode:"functions-deploy",functions:[...re
 
 const businessRecoveryFunctions=["getExpenseReview","saveExpenseReviewDraft","completeExpenseReview","getJobSheetLink","markNetPrintPrinted","adminCancelJob","duplicateAdminJob"];
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:businessRecoveryFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,businessRecoveryFunctions);
+
+assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:"createUploadSession,finalizeStagedUpload",confirmation:safetyConfig.confirmations.functionsDeploy}).functions,["createUploadSession","finalizeStagedUpload"]);

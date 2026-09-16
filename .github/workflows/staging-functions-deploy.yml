@@ -22,7 +22,7 @@ on:
         type: string
         default: bootstrapSession
       transfer_mode:
-        description: Preserve transfer state; active/paused/acceptance requires finalizeStagedUpload only
+        description: Preserve transfer state; explicit changes require finalizeStagedUpload, optionally with createUploadSession
         required: true
         type: choice
         options:

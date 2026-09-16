@@ -45,6 +45,7 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `getSubmissionProcessingStatus`
 - `getResubmissionComparison`
 - `driveFilePreview`
+- `createUploadSession`
 - `finalizeStagedUpload`
 - `registerDeviceSession`
 - `heartbeatDeviceSession`
@@ -80,6 +81,7 @@ guards cannot be changed by the deployment source branch.
 
 The only Cloud Run services whose Invoker IAM check may be changed are:
 
+- `createuploadsession`
 - `requeststaffloginlink`
 - `getsubmissionprocessingstatus`
 - `drivefilepreview`
@@ -198,3 +200,5 @@ Every agent result must state:
 The user authorizes work needed to finish the app and asks not to fragment it into repeated approvals. The recovery scope above adds exactly the five application-confirmation/resubmission Functions and their matching Cloud Run services. Use normal PR checks, merge, and protected staging deployment approval; do not bypass protection. Production and the real business shift sheet remain outside this recovery. Preserve the paused submission-transfer mode, and do not trigger real messages or mutate business records during deployment verification.
 
 The next approved recovery adds the seven HTTP Functions for expense review (read, draft, complete), source sheet link, printing completion, job cancellation, and job duplication. Restore them through the same protected staging workflow, with source authorization checks. Deployment verification must not invoke authenticated business operations or change the paused transfer mode.
+
+The upload entrypoint createUploadSession is included in the approved staging rollout. Preserve the verified finalizeStagedUpload transfer mode when deploying either entrypoint or transfer handler. Explicit mode changes may include only finalizeStagedUpload, optionally with createUploadSession. Prefer the two-function scope when changing both acceptance and transfer state; this does not authorize replaying existing business records.

@@ -2,16 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
-const PROJECT='lip-knots-crew-staging',REGION='asia-northeast1',TARGET='finalizeStagedUpload';
+const PROJECT='lip-knots-crew-staging',REGION='asia-northeast1',TARGET='finalizeStagedUpload',ENTRY='createUploadSession';
 const fail=code=>{throw Error(code);};
 export function resolveTransferMode({requested,functions,current,supportsControl,supportsAcceptance}){
  if(!['preserve','active','paused','acceptance'].includes(requested))fail('TRANSFER_MODE_INVALID');
  if(!Array.isArray(functions)||!functions.length||new Set(functions).size!==functions.length)fail('FUNCTION_SCOPE_INVALID');
- if(!functions.includes(TARGET)){
+ if(!functions.includes(TARGET)&&!functions.includes(ENTRY)){
   if(requested!=='preserve')fail('TRANSFER_MODE_REQUIRES_FINALIZE_ONLY');
   return null;
  }
- if(requested!=='preserve'&&(functions.length!==1||functions[0]!==TARGET))fail('TRANSFER_MODE_REQUIRES_FINALIZE_ONLY');
+ if(requested!=='preserve'&&(!functions.includes(TARGET)||functions.some(name=>![TARGET,ENTRY].includes(name))))fail('TRANSFER_MODE_REQUIRES_FINALIZE_ONLY');
  if(current?.name!=='projects/'+PROJECT+'/locations/'+REGION+'/functions/'+TARGET||current.state!=='ACTIVE'||
   typeof current.serviceConfig?.revision!=='string'||!/^finalizestagedupload-[0-9]+-[a-z0-9]+$/.test(current.serviceConfig.revision))fail('CURRENT_FUNCTION_UNVERIFIED');
  const saved=current.serviceConfig.environmentVariables?.LKC_SUBMISSION_TRANSFER_MODE;
@@ -25,11 +25,14 @@ export function materializeTransferMode({project,region,requested,functions,sour
  if(project!==PROJECT||region!==REGION)fail('STAGING_SCOPE_REQUIRED');
  const names=typeof functions==='string'?functions.split(','):[];
  if(!['preserve','active','paused','acceptance'].includes(requested)||!names.length||names.some(name=>!name))fail('TRANSFER_INPUT_INVALID');
- if(!names.includes(TARGET))return resolveTransferMode({requested,functions:names});
+ if(!names.includes(TARGET)&&!names.includes(ENTRY))return resolveTransferMode({requested,functions:names});
  const root=path.resolve(sourceDirectory),dotenv=path.join(root,'functions','.env.'+PROJECT);
  const uploads=fs.readFileSync(path.join(root,'functions/src/uploads.ts'),'utf8'),controlFile=path.join(root,'functions/src/submission-transfer-control.ts');
  const control=fs.existsSync(controlFile)?fs.readFileSync(controlFile,'utf8'):'';
- const supportsControl=control.includes('process.env.LKC_SUBMISSION_TRANSFER_MODE')&&uploads.includes('submissionTransferPaused(companyId)')&&uploads.includes('pausedTransferSource');
+ const handler=name=>{const start=uploads.indexOf('export const '+name+' ='),next=uploads.indexOf('\nexport const ',start+1);return start<0?'':uploads.slice(start,next<0?uploads.length:next);};
+ const supportsControl=control.includes('process.env.LKC_SUBMISSION_TRANSFER_MODE')
+  && (!names.includes(TARGET)||(handler(TARGET).includes('submissionTransferPaused(companyId)')&&handler(TARGET).includes('pausedTransferSource')))
+  && (!names.includes(ENTRY)||/if\s*\(\s*await submissionTransferPaused\(companyId\)\s*\)\s*throw/.test(handler(ENTRY)));
  const supportsAcceptance=/const acceptanceOnly = mode === "acceptance"\s*&& process\.env\.APP_ENVIRONMENT === "staging"\s*&& process\.env\.EXPECTED_FIREBASE_PROJECT_ID === "lip-knots-crew-staging"\s*&& companyId === "lkc-transfer-acceptance-20260908";\s*if \(mode !== "active" && !acceptanceOnly\) return true;/.test(control);
  const resolved=resolveTransferMode({requested,functions:names,current:describe(),supportsControl,supportsAcceptance});
  const contents=fs.readFileSync(dotenv,'utf8');

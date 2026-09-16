@@ -20,6 +20,7 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "createUploadSession",
   "getExpenseReview",
   "saveExpenseReviewDraft",
   "completeExpenseReview",
@@ -353,6 +354,40 @@ function checkDriveFilePreview() {
   return Object.values(checks).every(Boolean);
 }
 
+
+function checkCreateUploadSession() {
+  const source = sourceFile("functions/src/uploads.ts");
+  const compact = text => text.replace(/\s+/g, "");
+  const block = compact(functionBlock(source, "createUploadSession"));
+  const schema = compact(source.slice(source.indexOf("const CreateSchema"), source.indexOf("export const createUploadSession")));
+  const includes = items => items.every(item => block.includes(item));
+  return checkFinalizeStagedUpload()
+    && /import \{[^}]*\bcompanyFromClaims\b[^}]*\brequireAuth\b[^}]*\bstaffFromClaims\b[^}]*\} from "\.\/utils";/.test(source)
+    && includes([
+      'exportconstcreateUploadSession=onCall(async(request)=>{',
+      'constsession=requireAuth(request);', 'CreateSchema.parse(request.data)',
+      'constcompanyId=companyFromClaims(session.token);', 'conststaffId=staffFromClaims(session.token);',
+      'if(awaitsubmissionTransferPaused(companyId))throw',
+      'if((input.purpose==="replacement")!==Boolean(input.resubmissionRequestId))',
+      'awaitdb.runTransaction(async(tx)=>{',
+      'constjobSnap=awaittx.get(db.collection("jobs").doc(input.jobId));',
+      'if(!jobSnap.exists)', 'if(job.companyId!==companyId||job.assignedStaffId!==staffId)',
+      'if(job.cancelled===true||job.status==="cancelled")throw', 'if(job.status!=="assigned")throw',
+      'awaittx.get(db.collection("resubmissionRequests").doc(input.resubmissionRequestId))',
+      'if(resubmission?.companyId!==companyId||resubmission?.staffId!==staffId||resubmission?.jobId!==input.jobId||resubmission?.type!==input.type||resubmission?.status!=="open")',
+      'if(resubmission.sourceFileId&&input.files.length!==1)',
+      'tx.create(submissionRef,{', 'completedFiles:0,',
+      'tx.create(submissionRef.collection("files").doc(record.fileId),{',
+      'submissionId:submissionRef.id,type:input.type,', 'storagePath:record.storagePath,',
+    ])
+    && block.indexOf('if(awaitsubmissionTransferPaused(companyId))') < block.indexOf('db.collection("submissions")')
+    && (block.match(/companyId,jobId:input\.jobId,staffId,uid:session\.uid,/g) ?? []).length === 2
+    && !/(?:input|request\.data)\.(?:companyId|staffId|uid)/.test(block)
+    && schema.includes('size:z.number().int().positive().max(50*1024*1024)')
+    && schema.includes('})).min(1).max(20)')
+    && schema.includes('value==="application/pdf"||/^image\\/[^\\s/;]+$/.test(value)');
+}
+
 function checkFinalizeStagedUpload() {
   const source = sourceFile("functions/src/uploads.ts");
   const block = functionBlock(source, "finalizeStagedUpload");
@@ -607,6 +642,7 @@ function checkProcessNotificationQueue() {
 }
 
 const checkers = {
+  createUploadSession: checkCreateUploadSession,
   getExpenseReview: () => checkBusinessRecovery("getExpenseReview"),
   saveExpenseReviewDraft: () => checkBusinessRecovery("saveExpenseReviewDraft"),
   completeExpenseReview: () => checkBusinessRecovery("completeExpenseReview"),

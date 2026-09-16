@@ -40,7 +40,8 @@
     "getJobSheetLink",
     "markNetPrintPrinted",
     "adminCancelJob",
-    "duplicateAdminJob"
+    "duplicateAdminJob",
+    "createUploadSession"
   ],
   "allowedHostingTargets": [
     "staff",

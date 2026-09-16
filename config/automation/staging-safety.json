@@ -28,7 +28,12 @@
     "unregisterPushToken",
     "getPushStatus",
     "sendTestPush",
-    "processNotificationQueue"
+    "processNotificationQueue",
+    "confirmApplication",
+    "createResubmissionRequest",
+    "getMyResubmissionRequests",
+    "getAdminResubmissionRequests",
+    "completeResubmissionRequest"
   ],
   "allowedHostingTargets": [
     "staff",

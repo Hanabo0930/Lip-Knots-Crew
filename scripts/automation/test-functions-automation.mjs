@@ -1,3 +1,5 @@
+import './test-resubmission-auth-guard.mjs';
+import './test-confirm-application-auth-guard.mjs';
 import "./test-transfer-auth-guard.mjs";
 import "./test-staging-transfer-mode.mjs";
 import assert from "node:assert/strict";
@@ -30,6 +32,11 @@ const expectedFunctions = [
   "getPushStatus",
   "sendTestPush",
   "processNotificationQueue",
+  "confirmApplication",
+  "createResubmissionRequest",
+  "getMyResubmissionRequests",
+  "getAdminResubmissionRequests",
+  "completeResubmissionRequest",
 ];
 
 assert.deepEqual(
@@ -87,6 +94,11 @@ assert.match(
   "listMyDevices must map to its exact Cloud Run service",
 );
 for (const [functionName, serviceName] of [
+  ["confirmApplication", "confirmapplication"],
+  ["createResubmissionRequest", "createresubmissionrequest"],
+  ["getMyResubmissionRequests", "getmyresubmissionrequests"],
+  ["getAdminResubmissionRequests", "getadminresubmissionrequests"],
+  ["completeResubmissionRequest", "completeresubmissionrequest"],
   ["registerDeviceSession", "registerdevicesession"],
   ["heartbeatDeviceSession", "heartbeatdevicesession"],
   ["revokeMyDevice", "revokemydevice"],

@@ -67,6 +67,11 @@ for function_name in "${function_names[@]}"; do
     getPushStatus) service_name="getpushstatus" ;;
     sendTestPush) service_name="sendtestpush" ;;
     processNotificationQueue) service_name="" ;;
+    confirmApplication) service_name="confirmapplication" ;;
+    createResubmissionRequest) service_name="createresubmissionrequest" ;;
+    getMyResubmissionRequests) service_name="getmyresubmissionrequests" ;;
+    getAdminResubmissionRequests) service_name="getadminresubmissionrequests" ;;
+    completeResubmissionRequest) service_name="completeresubmissionrequest" ;;
     *)
       echo "DEPLOY_RESULT=FAIL"
       echo "DEPLOY_ERROR=UNMAPPED_FUNCTION_AFTER_GUARD"

@@ -21,6 +21,11 @@ const requestedFunctions = parseCsv(
 );
 const supportedFunctions = new Set([
   "bootstrapSession",
+  "confirmApplication",
+  "completeResubmissionRequest",
+  "getAdminResubmissionRequests",
+  "getMyResubmissionRequests",
+  "createResubmissionRequest",
   "getSubmissionTimeline",
   "requestStaffLoginLink",
   "getSubmissionProcessingStatus",
@@ -78,6 +83,90 @@ function functionBlock(source, exportName) {
   return source.slice(start, end);
 }
 
+function checkResubmission(name) {
+  const source = sourceFile("functions/src/resubmissions.ts");
+  const compact = text => text.replace(/\s+/g, "");
+  const block = compact(functionBlock(source, name).split("\nexport async function")[0]);
+  const includes = conditions => conditions.every(condition => block.includes(condition));
+  const staff = name === "getMyResubmissionRequests";
+  if (!/import \{[^}]*companyFromClaims[^}]*requireAdmin[^}]*requireAuth[^}]*staffFromClaims[^}]*\} from "\.\/utils";/.test(source)
+      || !includes([staff ? "requireAuth(request)" : "requireAdmin(request)", "companyFromClaims(session.token)"])
+      || /(?:input|request\.data)\.(?:companyId|staffId|uid|actorUid)/.test(block)) return false;
+  if (name === "getMyResubmissionRequests" || name === "getAdminResubmissionRequests") {
+    return includes(['db.collection("resubmissionRequests").where("companyId","==",companyId)',
+      '.where("status","in",["open","submitted"])', staff ? ".limit(100).get()" : ".limit(200).get()"])
+      && (!staff || includes(["staffFromClaims(session.token)", '.where("staffId","==",staffId)']))
+      && !/\.(?:add|create|delete|set|update)\(/.test(block);
+  }
+  if (!includes(["awaitassertProductionOperational(companyId);", "awaitdb.runTransaction(asynctx=>{"])
+      || !/import \{ assertProductionOperational \} from "\.\/system-safety";/.test(source)
+      || !/import \{[^}]*assertSubmissionFileIdentity[^}]*assertSubmissionCounters[^}]*assertReplacementRequest[^}]*\} from "\.\/submission-integrity";/.test(source)) return false;
+  if (name === "createResubmissionRequest") {
+    return includes([
+      "CreateSchema.parse(request.data??{})",
+      'if(!job.exists||job.data()?.companyId!==companyId)throw',
+      "constcurrent=awaittx.get(jobRef);",
+      'if(!current.exists||current.data()?.companyId!==companyId)throw',
+      'if(String(current.data()?.assignedStaffId??"")!==staffId)throw',
+      'if(current.data()?.cancelled===true||current.data()?.status==="cancelled")throw',
+      'if(current.data()?.status!=="assigned")throw',
+      'if(!source||source.companyId!==companyId||source.jobId!==input.jobId||source.type!==input.type)throw',
+      "assertSubmissionFileIdentity(source,file.data(),input.sourceSubmissionId);",
+      'if(file.data()?.status!=="completed")throw',
+      "tx.create(ref,{companyId,staffId,jobId:input.jobId,",
+      "createdBy:session.uid,",
+      "tx.create(notificationRef,{...queueDocumentData(notification),",
+    ]);
+  }
+  const helperStart = source.indexOf("function assertCompletedReplacement(");
+  const helper = compact(source.slice(helperStart, source.indexOf("\nexport async function", helperStart)));
+  const integrity = compact(sourceFile("functions/src/submission-integrity.ts"));
+  return includes([
+    "CompleteSchema.parse(request.data??{})",
+    'constref=db.collection("resubmissionRequests").doc(input.requestId);',
+    "constsnap=awaittx.get(ref);constdata=snap.data();",
+    "if(!data||data.companyId!==companyId)throw",
+    'if(!["submitted","completed"].includes(String(data.status))||!data.replacementSubmissionId)throw',
+    "if(submission.data()?.resubmissionRequestId!==input.requestId)throw",
+    "assertCompletedReplacement(data,submission.data(),String(data.replacementSubmissionId));",
+    'if(data.status==="completed")return;',
+    'tx.update(ref,{status:"completed",completedBy:session.uid,',
+  ]) && [
+    "assertReplacementRequest(request,submission,submissionId);",
+    "assertSubmissionCounters(submission);",
+    'if(submission.status!=="completed"||submission.completedFiles!==submission.totalFiles||submission.jobStatusApplied!==true)throw',
+  ].every(condition => helper.includes(condition))
+    && integrity.includes('["companyId","jobId","staffId","type"].some(key=>request[key]!==submission[key])')
+    && integrity.includes("request.replacementSubmissionId!==submissionId")
+    && integrity.includes("!Number.isInteger(total)")
+    && integrity.includes("!Number.isInteger(completed)")
+    && integrity.includes("Number(completed)>Number(total)");
+}
+function checkConfirmApplication() {
+  const source = sourceFile("functions/src/admin-operations.ts");
+  const block = functionBlock(source, "confirmApplication");
+  const checks = {
+    adminImport: /import \{[^}]*\brequireAdmin\b[^}]*\bcompanyFromClaims\b[^}]*\} from "\.\/utils";/.test(source)
+      || /import \{[^}]*\bcompanyFromClaims\b[^}]*\brequireAdmin\b[^}]*\} from "\.\/utils";/.test(source),
+    admin: /const session = requireAdmin\(request\);/.test(block),
+    claimsCompany: /const companyId = companyFromClaims\(session\.token\);/.test(block),
+    operational: /await assertProductionOperational\(companyId\);/.test(block)
+      && /import \{ assertProductionOperational \} from "\.\/system-safety";/.test(source),
+    validatedInput: /const input = JobSchema\.parse\(request\.data \?\? \{\}\);/.test(block),
+    jobReference: /const ref = db\.collection\("jobs"\)\.doc\(input\.jobId\);/.test(block),
+    initialCompany: /if \(!job\.exists \|\| job\.data\(\)\?\.companyId !== companyId\)/.test(block),
+    transaction: /await db\.runTransaction\(async \(tx\) =>/.test(block),
+    transactionRead: /const current = await tx\.get\(ref\);/.test(block),
+    transactionCompany: /if \(!current\.exists \|\| current\.data\(\)\?\.companyId !== companyId\)/.test(block),
+    assignmentStable: /data\.status !== "assigned" \|\| \(data\.assignedStaffId \?\? null\) !== \(job\.data\(\)\?\.assignedStaffId \?\? null\)/.test(block),
+    idempotent: /if \(data\.applicationAdminConfirmed === true\) return;/.test(block),
+    confirmedByActor: /tx\.update\(ref, \{\s*applicationAdminConfirmed: true,\s*applicationAdminConfirmedBy: session\.uid,/.test(block),
+    audit: /const auditRef = db\.collection\("auditLogs"\)\.doc\(\);/.test(block)
+      && /tx\.set\(auditRef, \{\s*companyId, actorUid: session\.uid, action: "application\.confirm",/.test(block),
+    noClientIdentity: !/input\.(?:companyId|uid|actorUid|assignedStaffId)/.test(block),
+  };
+  return Object.values(checks).every(Boolean);
+}
 function checkBootstrapSession() {
   const source = sourceFile("functions/src/auth.ts");
   const bootstrap = functionBlock(source, "bootstrapSession");
@@ -438,6 +527,11 @@ function checkProcessNotificationQueue() {
 
 const checkers = {
   bootstrapSession: checkBootstrapSession,
+  confirmApplication: checkConfirmApplication,
+  completeResubmissionRequest: () => checkResubmission("completeResubmissionRequest"),
+  getAdminResubmissionRequests: () => checkResubmission("getAdminResubmissionRequests"),
+  getMyResubmissionRequests: () => checkResubmission("getMyResubmissionRequests"),
+  createResubmissionRequest: () => checkResubmission("createResubmissionRequest"),
   requestStaffLoginLink: checkRequestStaffLoginLink,
   getSubmissionTimeline: checkSubmissionTimeline,
   getSubmissionProcessingStatus: checkSubmissionProcessingStatus,

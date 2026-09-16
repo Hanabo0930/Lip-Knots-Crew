@@ -222,3 +222,7 @@ for (const plan of rejectedPlans) {
 }
 
 console.log(`staging automation safety tests passed (${13 + rejectedPlans.length} cases)`);
+
+const recoveredFunctions=["confirmApplication","createResubmissionRequest","getMyResubmissionRequests","getAdminResubmissionRequests","completeResubmissionRequest"];
+assert.deepEqual(validatePlan({...base, sourceRef:"main", mode:"functions-deploy", functions:recoveredFunctions.join(","), confirmation:safetyConfig.confirmations.functionsDeploy}).functions,recoveredFunctions);
+assert.throws(()=>validatePlan({...base,mode:"functions-deploy",functions:[...recoveredFunctions,"completeExpenseReview"].join(","),confirmation:safetyConfig.confirmations.functionsDeploy}),/FUNCTIONS_NOT_ALLOWED:completeExpenseReview/);

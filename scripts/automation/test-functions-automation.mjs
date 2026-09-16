@@ -1,3 +1,4 @@
+import "./test-setup-audit-auth-guard.mjs";
 import "./test-staging-firebase-deploy.mjs";
 import "./test-external-handoff-auth-guard.mjs";
 import "./test-import-issues-auth-guard.mjs";
@@ -87,6 +88,18 @@ const expectedFunctions = [
   "getAutomationNoticeHandoff",
   "receiveCaseMailApplication",
   "receiveAutomationNoticeReceipt",
+  "inspectSetupWizard",
+  "saveSetupWizardDraft",
+  "getLoginInviteCandidates",
+  "sendLoginInvites",
+  "previewMonthSheetCreation",
+  "createMonthSheetSafe",
+  "getMonthCreationHistory",
+  "previewSheetRowCreation",
+  "listSheetWriteReviewRecords",
+  "runGasAudit",
+  "scanGasUploadSafety",
+  "exportGasAuditMarkdown",
 ];
 
 assert.deepEqual(
@@ -159,6 +172,18 @@ for (const [functionName, serviceName] of [
   ["getAutomationNoticeHandoff", "getautomationnoticehandoff"],
   ["receiveCaseMailApplication", "receivecasemailapplication"],
   ["receiveAutomationNoticeReceipt", "receiveautomationnoticereceipt"],
+  ["inspectSetupWizard", "inspectsetupwizard"],
+  ["saveSetupWizardDraft", "savesetupwizarddraft"],
+  ["getLoginInviteCandidates", "getlogininvitecandidates"],
+  ["sendLoginInvites", "sendlogininvites"],
+  ["previewMonthSheetCreation", "previewmonthsheetcreation"],
+  ["createMonthSheetSafe", "createmonthsheetsafe"],
+  ["getMonthCreationHistory", "getmonthcreationhistory"],
+  ["previewSheetRowCreation", "previewsheetrowcreation"],
+  ["listSheetWriteReviewRecords", "listsheetwritereviewrecords"],
+  ["runGasAudit", "rungasaudit"],
+  ["scanGasUploadSafety", "scangasuploadsafety"],
+  ["exportGasAuditMarkdown", "exportgasauditmarkdown"],
   ["previewStaffImport", "previewstaffimport"],
   ["syncStaffDirectoryReadOnly", "syncstaffdirectoryreadonly"],
   ["previewShiftImport", "previewshiftimport"],

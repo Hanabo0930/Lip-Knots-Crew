@@ -77,7 +77,19 @@
     "listAutomationNoticeReceipts",
     "getAutomationNoticeHandoff",
     "receiveCaseMailApplication",
-    "receiveAutomationNoticeReceipt"
+    "receiveAutomationNoticeReceipt",
+    "inspectSetupWizard",
+    "saveSetupWizardDraft",
+    "getLoginInviteCandidates",
+    "sendLoginInvites",
+    "previewMonthSheetCreation",
+    "createMonthSheetSafe",
+    "getMonthCreationHistory",
+    "previewSheetRowCreation",
+    "listSheetWriteReviewRecords",
+    "runGasAudit",
+    "scanGasUploadSafety",
+    "exportGasAuditMarkdown"
   ],
   "allowedHostingTargets": [
     "staff",

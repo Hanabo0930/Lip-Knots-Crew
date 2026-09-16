@@ -243,3 +243,6 @@ assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",
 
 const externalHandoffFunctions=["getAutomationRegistry","saveAutomationRegistry","cancelAutomationRegistryAttempt","listHeldMailApplications","getHeldMailApplication","recheckHeldMailApplication","cancelHeldMailApplicationReview","previewCaseMailCampaignRegistration","registerCaseMailCampaign","cancelCaseMailCampaignRegistration","getCaseMailImportSnapshot","listAutomationNoticeReceipts","getAutomationNoticeHandoff","receiveCaseMailApplication","receiveAutomationNoticeReceipt"];
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:externalHandoffFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,externalHandoffFunctions);
+
+const setupAuditFunctions=["inspectSetupWizard","saveSetupWizardDraft","getLoginInviteCandidates","sendLoginInvites","previewMonthSheetCreation","createMonthSheetSafe","getMonthCreationHistory","previewSheetRowCreation","listSheetWriteReviewRecords","runGasAudit","scanGasUploadSafety","exportGasAuditMarkdown"];
+assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:setupAuditFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,setupAuditFunctions);

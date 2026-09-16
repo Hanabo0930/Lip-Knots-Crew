@@ -20,6 +20,18 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "inspectSetupWizard",
+  "saveSetupWizardDraft",
+  "getLoginInviteCandidates",
+  "sendLoginInvites",
+  "previewMonthSheetCreation",
+  "createMonthSheetSafe",
+  "getMonthCreationHistory",
+  "previewSheetRowCreation",
+  "listSheetWriteReviewRecords",
+  "runGasAudit",
+  "scanGasUploadSafety",
+  "exportGasAuditMarkdown",
   "getAutomationRegistry",
   "saveAutomationRegistry",
   "cancelAutomationRegistryAttempt",
@@ -130,6 +142,49 @@ function functionBlock(source, exportName) {
 
 
 
+
+function checkSetupAudit(name) {
+  const modules = {inspectSetupWizard:'setup-wizard',saveSetupWizardDraft:'setup-wizard',getLoginInviteCandidates:'login-links',sendLoginInvites:'login-links',previewMonthSheetCreation:'month-sheet',createMonthSheetSafe:'month-sheet',getMonthCreationHistory:'month-sheet',previewSheetRowCreation:'sheet-row-creation',listSheetWriteReviewRecords:'sheet-write-review',runGasAudit:'gas-audit',scanGasUploadSafety:'gas-remediation',exportGasAuditMarkdown:'gas-remediation'};
+  const source=sourceFile('functions/src/'+modules[name]+'.ts'),start=source.indexOf('export const '+name);
+  const multi=['inspectSetupWizard','sendLoginInvites','previewMonthSheetCreation','createMonthSheetSafe','previewSheetRowCreation'].includes(name),marker=multi?'\n);':'\n});',end=source.indexOf(marker,start);
+  if(start<0||end<start)return false;
+  const compact=value=>value.replace(/\s+/g,''),block=compact(source.slice(start,end+marker.length)),whole=compact(source);
+  const has=items=>items.every(x=>block.includes(x)),all=items=>items.every(x=>whole.includes(x));
+  const prefix=new RegExp('^exportconst'+name+'=onCall\\((?:\\{[^{}]*\\},)?async\\(?request\\)?=>\\{(?:constsession=)?requireAdmin\\(request\\);');
+  const utils=source.match(/import\s*\{([^}]+)\}\s*from\s*"\.\/utils";/)?.[1]??'';
+  if(!prefix.test(block)||!/\brequireAdmin\b/.test(utils))return false;
+  if(name!=='scanGasUploadSafety'&&(!/\bcompanyFromClaims\b/.test(utils)||!block.includes('constcompanyId=companyFromClaims(session.token);')))return false;
+  const required={
+    inspectSetupWizard:['awaitcreateReadOnlyClient()','buildSafeDraft({companyId,','actorUid:session.uid','expiresAt','staffExcludedSheets'],
+    saveSetupWizardDraft:['inspection.data()?.companyId!==companyId','expiresAt.toMillis()<=Date.now()','db.collection("setupWizardDrafts").doc(companyId)','allEnabled:false','status:"draft_only"','savedBy:session.uid'],
+    getLoginInviteCandidates:['.where("companyId","==",companyId)','.where("status","==","assigned")','.limit(10000)','profile.companyId===companyId&&profile.active===true','!profile.lastLoginAt','staffId:profile.id'],
+    sendLoginInvites:['SendInvitesSchema.parse(request.data??{})','sendLoginInviteBatch({companyId,actorUid:session.uid,','secrets:[gmailServiceAccountJson]'],
+    previewMonthSheetCreation:['awaitloadMapping(companyId)','buildPreview(mapping,input.targetMonth,input.sourceMonth)'],
+    createMonthSheetSafe:['awaitensureMonthCreationEnabled(companyId,mapping)','awaitacquireLock(companyId,targetMonth)','verificationSucceeded=true','constcompletion=db.batch()','completion.set(runRef,','completion.set(db.collection("auditLogs").doc(),','awaitcompletion.commit()','if(verificationSucceeded){','reason:"completion_recording_uncertain"','verificationCompleted:true','awaitreleaseLock(lock)'],
+    getMonthCreationHistory:['.where("companyId","==",companyId)','.orderBy("startedAt","desc")','.limit(20)'],
+    previewSheetRowCreation:['awaitloadMapping(companyId)','awaitdateKeyFromGroup(companyId,input.groupId)','preflight(companyId,mapping,dateKey,input.rows,undefined,false)'],
+    listSheetWriteReviewRecords:['input.expectedCompanyId!==companyId||input.expectedActorUid!==session.uid','.where("companyId","==",companyId)','.orderBy(FieldPath.documentId(),"asc")','.select(...Fields)','.limit(input.limit+1)','data.companyId!==companyId','reviewMode:"metadata_only"','sourceWriteVerified:false','consistentSnapshot:false'],
+    runGasAudit:['.max(2_000_000)','.min(1).max(100)','auditGasSources(input.files)','ref.set({companyId,actorUid:session.uid,report,','action:"gas.audit.run"'],
+    scanGasUploadSafety:['files:z.array(FileSchema).min(1).max(100)','scanSourcesForSecrets(input.files)'],
+    exportGasAuditMarkdown:['audit.data()?.companyId!==companyId','markdownAuditReport({'],
+  };
+  if(!has(required[name]))return false;
+  if(name==="sendLoginInvites"&&(whole.match(/getProductionOperationalState\(input\.companyId\)/g)??[]).length!==2)return false;
+  if(name==="saveSetupWizardDraft"&&(block.match(/allEnabled:false/g)??[]).length!==2)return false;
+  if(name==="listSheetWriteReviewRecords"&&(block.match(/sourceWriteVerified:false/g)??[]).length!==2)return false;
+  if(['getLoginInviteCandidates','previewMonthSheetCreation','getMonthCreationHistory','previewSheetRowCreation','listSheetWriteReviewRecords','scanGasUploadSafety','exportGasAuditMarkdown'].includes(name)&&/\.(?:add|create|delete|set|update)\(/.test(block))return false;
+  if(name==='inspectSetupWizard'&&!all(['scopes:["https://www.googleapis.com/auth/spreadsheets.readonly"]']))return false;
+  if(name==='sendLoginInvites'&&!all(['awaitassertProductionOperational(input.companyId)','profiles.some(profile=>profile.companyId!==input.companyId)','getProductionOperationalState(input.companyId)','if(profile.active!==true)','awaitsendLoginLink({companyId:input.companyId,staffId:profile.id,']))return false;
+  if(['previewMonthSheetCreation','createMonthSheetSafe'].includes(name)&&!all(['db.doc(`companies/${companyId}/sheetMappings/shift`).get()','spreadsheets.readonly']))return false;
+  if(name==='createMonthSheetSafe'){
+    if((block.match(/awaitassertProductionOperational\(companyId\);/g)??[]).length!==3)return false;
+    if(!all(['confirmation:z.literal("検証コピーで作成")','mapping.enabled!==true','mapping.monthCreation?.enabled!==true','mapping.monthCreation?.verifiedSpreadsheetId!==mapping.spreadsheetId','feature.data()?.monthSheetCreationReady!==true','awaitdb.runTransaction(async(tx)=>{constsnap=awaittx.get(ref);constnow=Timestamp.now();','snap.data()?.token===lock.token']))return false;
+    const preserved=block.slice(block.indexOf('if(verificationSucceeded){'),block.indexOf('if(createdSheetId!==null){',block.indexOf('if(verificationSucceeded){')));
+    if(!preserved.includes('thrownewHttpsError(')||/deleteSheet\(|runRef\.set\(/.test(preserved))return false;
+  }
+  if(name==='previewSheetRowCreation'&&!all(['group.data()?.companyId!==companyId','db.doc(`companies/${companyId}/sheetMappings/shift`).get()']))return false;
+  return true;
+}
 
 function checkExternalHandoff(name) {
   const modules = {
@@ -1001,6 +1056,18 @@ function checkProcessNotificationQueue() {
 }
 
 const checkers = {
+  inspectSetupWizard: () => checkSetupAudit("inspectSetupWizard"),
+  saveSetupWizardDraft: () => checkSetupAudit("saveSetupWizardDraft"),
+  getLoginInviteCandidates: () => checkSetupAudit("getLoginInviteCandidates"),
+  sendLoginInvites: () => checkSetupAudit("sendLoginInvites"),
+  previewMonthSheetCreation: () => checkSetupAudit("previewMonthSheetCreation"),
+  createMonthSheetSafe: () => checkSetupAudit("createMonthSheetSafe"),
+  getMonthCreationHistory: () => checkSetupAudit("getMonthCreationHistory"),
+  previewSheetRowCreation: () => checkSetupAudit("previewSheetRowCreation"),
+  listSheetWriteReviewRecords: () => checkSetupAudit("listSheetWriteReviewRecords"),
+  runGasAudit: () => checkSetupAudit("runGasAudit"),
+  scanGasUploadSafety: () => checkSetupAudit("scanGasUploadSafety"),
+  exportGasAuditMarkdown: () => checkSetupAudit("exportGasAuditMarkdown"),
   getAutomationRegistry: () => checkExternalHandoff("getAutomationRegistry"),
   saveAutomationRegistry: () => checkExternalHandoff("saveAutomationRegistry"),
   cancelAutomationRegistryAttempt: () => checkExternalHandoff("cancelAutomationRegistryAttempt"),

@@ -32,6 +32,11 @@ const expectedFunctions = [
   "getPushStatus",
   "sendTestPush",
   "processNotificationQueue",
+  "confirmApplication",
+  "createResubmissionRequest",
+  "getMyResubmissionRequests",
+  "getAdminResubmissionRequests",
+  "completeResubmissionRequest",
 ];
 
 assert.deepEqual(
@@ -89,6 +94,11 @@ assert.match(
   "listMyDevices must map to its exact Cloud Run service",
 );
 for (const [functionName, serviceName] of [
+  ["confirmApplication", "confirmapplication"],
+  ["createResubmissionRequest", "createresubmissionrequest"],
+  ["getMyResubmissionRequests", "getmyresubmissionrequests"],
+  ["getAdminResubmissionRequests", "getadminresubmissionrequests"],
+  ["completeResubmissionRequest", "completeresubmissionrequest"],
   ["registerDeviceSession", "registerdevicesession"],
   ["heartbeatDeviceSession", "heartbeatdevicesession"],
   ["revokeMyDevice", "revokemydevice"],

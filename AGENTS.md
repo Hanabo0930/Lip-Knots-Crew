@@ -58,6 +58,11 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `getPushStatus`
 - `sendTestPush`
 - `processNotificationQueue`
+- `confirmApplication`
+- `createResubmissionRequest`
+- `getMyResubmissionRequests`
+- `getAdminResubmissionRequests`
+- `completeResubmissionRequest`
 
 Never use `firebase deploy --only functions`. Every Functions deployment must list
 each function explicitly and pass `scripts/automation/validate-staging-scope.mjs`.
@@ -82,6 +87,11 @@ The only Cloud Run services whose Invoker IAM check may be changed are:
 - `unregisterpushtoken`
 - `getpushstatus`
 - `sendtestpush`
+- `confirmapplication`
+- `createresubmissionrequest`
+- `getmyresubmissionrequests`
+- `getadminresubmissionrequests`
+- `completeresubmissionrequest`
 
 Do not add or remove `allUsers` or `allAuthenticatedUsers` IAM bindings. Do not
 change organization policy, project-wide IAM, Firestore data, Storage data,
@@ -169,3 +179,6 @@ Every agent result must state:
 ## 実業務シフト表の保護（2026-09-06のユーザー明示指示）
 
 ユーザーが共有したGoogle Sheets「シフト表」は最重要の実業務原本であり、現時点では読取専用。セル値・数式・背景色・タブ・共有設定の変更、アプリからの書戻し、実表を使う取込commit・同期起動を実行しない。通常PR/マージ/STAGING Hostingの包括承認を、この原本や実データの変更許可と解釈しない。検証はローカル合成データで行う。本人がこの原本の操作を別途明示的に許可するまで維持する。
+## Completion authorization (2026-09-16)
+
+The user authorizes work needed to finish the app and asks not to fragment it into repeated approvals. The recovery scope above adds exactly the five application-confirmation/resubmission Functions and their matching Cloud Run services. Use normal PR checks, merge, and protected staging deployment approval; do not bypass protection. Production and the real business shift sheet remain outside this recovery. Preserve the paused submission-transfer mode, and do not trigger real messages or mutate business records during deployment verification.

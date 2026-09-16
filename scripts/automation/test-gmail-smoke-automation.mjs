@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runInNewContext } from "node:vm";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -177,6 +178,30 @@ const workflow = readFileSync(
   "utf8",
 );
 assert.match(workflow, /gmail-smoke/u);
+// 配備だけでメールを送らず、明示操作と成功したガードがある場合だけ起動する。
+const smokeCondition = workflow.match(/^  gmail-smoke:\r?\n    if: >-\r?\n([\s\S]*?)\r?\n    needs:/m)?.[1];
+assert.ok(smokeCondition, "Gmail smoke condition must be explicit");
+const expression = smokeCondition.trim().replaceAll("needs.smoke-guard.result", "needs.smokeGuard.result");
+const smokeCases = [
+  { operation: "deploy", functions: "bootstrapSession,requestStaffLoginLink,loginGateway", expected: false },
+  { operation: "deploy", functions: "bootstrapSession", expected: false },
+  { operation: "gmail-smoke", expected: true },
+  { operation: "gmail-smoke", guardResult: "failure", expected: false },
+  { operation: "gmail-smoke", isCancelled: true, expected: false },
+  { operation: "gmail-smoke", ref: "refs/heads/automation/test", expected: false },
+  { operation: "unknown", expected: false },
+];
+for (const scenario of smokeCases) {
+  const actual = runInNewContext(expression, {
+    inputs: { operation: scenario.operation, functions: scenario.functions ?? "requestStaffLoginLink" },
+    github: { ref: scenario.ref ?? "refs/heads/main" },
+    needs: { deploy: { result: "success" }, smokeGuard: { result: scenario.guardResult ?? "success" } },
+    always: () => true, cancelled: () => scenario.isCancelled === true,
+    contains: (value, part) => value.includes(part),
+  }, { timeout: 1000 });
+  assert.equal(actual, scenario.expected, JSON.stringify(scenario));
+}
+
 assert.match(
   workflow,
   /LKC_GMAIL_SMOKE_RUN_ATTEMPT:\s*\$\{\{\s*github\.run_attempt\s*\}\}/u,
@@ -202,4 +227,4 @@ const bootstrap = readFileSync(
 );
 assert.match(bootstrap, /roles\/datastore\.viewer/u);
 
-console.log("Gmail smoke automation safety tests passed (23 cases)");
+console.log("Gmail smoke automation safety tests passed (30 cases)");

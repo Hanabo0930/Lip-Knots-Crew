@@ -268,18 +268,11 @@ jobs:
 
   gmail-smoke:
     if: >-
-      always() &&
+      !cancelled() &&
       github.ref == 'refs/heads/main' &&
-      (
-        (inputs.operation == 'gmail-smoke' &&
-          needs.smoke-guard.result == 'success') ||
-        (inputs.operation == 'deploy' &&
-          needs.deploy.result == 'success' &&
-          contains(inputs.functions, 'requestStaffLoginLink'))
-      )
+      inputs.operation == 'gmail-smoke' &&
+      needs.smoke-guard.result == 'success'
     needs:
-      - guard
-      - deploy
       - smoke-guard
     environment: lkc-staging-deploy
     runs-on: ubuntu-latest

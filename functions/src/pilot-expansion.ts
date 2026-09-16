@@ -89,9 +89,10 @@ export const getPilotExpansionReview = onCall(async (request) => {
   const rollout = await findRollout(companyId, input.rolloutId);
   if (!rollout) return { rollout: null, automated: null, review: null };
   const data = rollout.data() as PilotRolloutRecord;
-  const automated = await collectAutomatedMetrics(rollout.id, data);
+  const automated = await collectAutomatedMetrics(rollout.id, data, companyId);
   const reviewSnap = await db.collection("pilotExpansionReviews").doc(rollout.id).get();
-  const review = reviewSnap.exists ? reviewSnap.data() as ExpansionReviewRecord : null;
+  const review = reviewSnap.exists && reviewSnap.data()?.companyId === companyId
+    ? reviewSnap.data() as ExpansionReviewRecord : null;
   return {
     rollout: {
       rolloutId: rollout.id,
@@ -134,7 +135,7 @@ export const submitPilotOutcome = onCall(async (request) => {
   if (!outcome.evidenceRefs.length) {
     throw new HttpsError("invalid-argument", "証拠参照を1件以上入力してください。");
   }
-  const automated = await collectAutomatedMetrics(input.rolloutId, rollout);
+  const automated = await collectAutomatedMetrics(input.rolloutId, rollout, companyId);
   const gate = evaluatePilotExpansion(automated, outcome);
   const now = Timestamp.now();
   const reviewStatus = gate.eligible ? "pending_approval" : "blocked";
@@ -222,7 +223,7 @@ export const decidePilotExpansion = onCall(async (request) => {
   if (!review.outcome || !review.fingerprint) {
     throw new HttpsError("failed-precondition", "審査データが不足しています。結果を再提出してください。");
   }
-  const automated = await collectAutomatedMetrics(input.rolloutId, rollout);
+  const automated = await collectAutomatedMetrics(input.rolloutId, rollout, companyId);
   const gate = evaluatePilotExpansion(automated, review.outcome);
   if (input.decision === "approve" && (!gate.eligible || gate.fingerprint !== review.fingerprint)) {
     throw new HttpsError(
@@ -327,11 +328,12 @@ async function findRollout(companyId: string, rolloutId?: string) {
 
 async function collectAutomatedMetrics(
   rolloutId: string,
-  rollout: PilotRolloutRecord
+  rollout: PilotRolloutRecord,
+  companyId: string
 ): Promise<PilotExpansionAutomated> {
   const [healthRuns, alerts] = await Promise.all([
-    db.collection("pilotHealthRuns").where("rolloutId", "==", rolloutId).limit(5000).get(),
-    db.collection("pilotAlerts").where("rolloutId", "==", rolloutId).limit(2000).get(),
+    db.collection("pilotHealthRuns").where("companyId", "==", companyId).where("rolloutId", "==", rolloutId).limit(5000).get(),
+    db.collection("pilotAlerts").where("companyId", "==", companyId).where("rolloutId", "==", rolloutId).limit(2000).get(),
   ]);
   const startedMs = millis(rollout.startedAt);
   const endMs = millis(rollout.completedAt) || millis(rollout.endsAt) || Date.now();

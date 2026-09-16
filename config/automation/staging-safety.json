@@ -89,7 +89,11 @@
     "listSheetWriteReviewRecords",
     "runGasAudit",
     "scanGasUploadSafety",
-    "exportGasAuditMarkdown"
+    "exportGasAuditMarkdown",
+    "getPilotReadiness",
+    "getPilotExpansionReview",
+    "getProductionControlStatus",
+    "getProductionSloDashboard"
   ],
   "allowedHostingTargets": [
     "staff",

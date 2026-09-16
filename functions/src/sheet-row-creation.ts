@@ -228,7 +228,10 @@ export const getPilotReadiness = onCall(async (request) => {
     {
       key: "verified_copy",
       label: "検証コピー承認",
-      ok: mapping?.monthCreation?.verifiedSpreadsheetId === mapping?.spreadsheetId,
+      ok: typeof mapping?.spreadsheetId === "string" &&
+        mapping.spreadsheetId.length > 0 &&
+        mapping.spreadsheetId.trim() === mapping.spreadsheetId &&
+        mapping.monthCreation?.verifiedSpreadsheetId === mapping.spreadsheetId,
     },
     {
       key: "month_feature",

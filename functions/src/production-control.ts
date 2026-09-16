@@ -111,7 +111,8 @@ export const getProductionControlStatus = onCall(async (request) => {
     rollout ? db.collection("productionRehearsalCertifications").doc(rollout.id).get() : Promise.resolve(null),
     db.collection("productionControls").doc(companyId).get(),
   ]);
-  const reviewData = review?.exists ? review.data() as ProductionReviewRecord : null;
+  const reviewData = review?.exists && review.data()?.companyId === companyId
+    ? review.data() as ProductionReviewRecord : null;
   const controlData = control.data() ?? {};
   const currentEmail = normalizeEmail(String(session.token.email ?? ""));
   const isExecutive = executiveEmails().includes(currentEmail);
@@ -126,7 +127,8 @@ export const getProductionControlStatus = onCall(async (request) => {
     environment: process.env.APP_ENVIRONMENT ?? "development",
     stagedRollout: rollout ? safeStagedRollout(rollout.id, rollout.data() as StagedRolloutRecord) : null,
     rehearsalCertified: Boolean(certification?.exists && certification.data()?.companyId === companyId && certification.data()?.status === "completed"),
-    rehearsalFingerprint: certification?.exists ? String(certification.data()?.fingerprint ?? "") : "",
+    rehearsalFingerprint: certification?.exists && certification.data()?.companyId === companyId
+      ? String(certification.data()?.fingerprint ?? "") : "",
     review: reviewData ? safeReview(reviewData, session.uid, isExecutive) : null,
     importedApproval: pendingApproval ? safeImportedApproval(pendingApprovalPackageId, pendingApproval, currentEmail) : null,
     control: {

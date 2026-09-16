@@ -114,6 +114,7 @@ jobs:
           node scripts/test-login-link-identity.mjs
           node scripts/test-month-sheet-lifecycle.mjs
           node scripts/test-sheet-write-review.mjs
+          node scripts/test-readiness-company-boundaries.mjs
           node scripts/test-automation-registry.mjs
           node scripts/test-automation-intake.mjs
           node scripts/test-automation-held-receipts.mjs

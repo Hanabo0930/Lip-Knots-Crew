@@ -46,7 +46,17 @@
     "getMyTasks",
     "listMyMailApplications",
     "setSalesFloorClientSubmitted",
-    "submitPreContact"
+    "submitPreContact",
+    "getSheetWriteIssues",
+    "getOperationsDashboard",
+    "getStaffPerformance",
+    "createAdminJobGroup",
+    "updateJobPublication",
+    "adminEditJobInputs",
+    "generateJobExport",
+    "updateNetPrintNumbers",
+    "adminSetJobCancellation",
+    "adminRestoreCancelledJob"
   ],
   "allowedHostingTargets": [
     "staff",

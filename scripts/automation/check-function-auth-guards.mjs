@@ -20,6 +20,16 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "getSheetWriteIssues",
+  "getOperationsDashboard",
+  "getStaffPerformance",
+  "createAdminJobGroup",
+  "updateJobPublication",
+  "adminEditJobInputs",
+  "generateJobExport",
+  "updateNetPrintNumbers",
+  "adminSetJobCancellation",
+  "adminRestoreCancelledJob",
   "applyToJob",
   "getMyTasks",
   "listMyMailApplications",
@@ -97,6 +107,113 @@ function functionBlock(source, exportName) {
 }
 
 
+
+function checkAdminCore(name) {
+  const modules = { getSheetWriteIssues: "admin-operations", getOperationsDashboard: "analytics", getStaffPerformance: "analytics", createAdminJobGroup: "job-management", updateJobPublication: "job-management", adminEditJobInputs: "job-management", generateJobExport: "job-management", updateNetPrintNumbers: "netprint", adminSetJobCancellation: "analytics", adminRestoreCancelledJob: "analytics" };
+  const source = sourceFile("functions/src/" + modules[name] + ".ts");
+  const start = source.indexOf("export const " + name + " =");
+  const marker = name === "generateJobExport" ? "\n);" : "\n});";
+  const end = source.indexOf(marker, start);
+  if (start < 0 || end < start) return false;
+  const compact = text => text.replace(/\s+/g, "");
+  const block = compact(source.slice(start, end + marker.length));
+  const has = values => values.every(value => block.includes(value));
+  if (!/import \{[^}]*\bcompanyFromClaims\b[^}]*\brequireAdmin\b[^}]*\} from "\.\/utils";/.test(source)
+      || !has(["constsession=requireAdmin(request);", "constcompanyId=companyFromClaims(session.token);"])
+      || /(?:input|request\.data)\.(?:companyId|actorUid|uid)/.test(block)) return false;
+  const readOnly = ["getSheetWriteIssues", "getOperationsDashboard", "getStaffPerformance"].includes(name);
+  if (readOnly && /\.(?:add|create|update|delete|set|commit)\(/.test(block)) return false;
+  if (!readOnly && (!has(["awaitassertProductionOperational(companyId);"]) || !source.includes('from "./system-safety";'))) return false;
+  const requirements = {
+    getSheetWriteIssues: [
+      'IssueQuerySchema.parse(request.data??{})', 'db.collection("sheetSyncQueue").where("companyId","==",companyId)',
+      '.where("status","in",["blocked","dead_letter","retry_wait","acknowledged","error","paused_global"])',
+      '.orderBy("updatedAt","desc").limit(input.limit)', 'job?.companyId===companyId?',
+      'canRetry:canManuallyRetrySheetWrite({', 'sourceWriteVerified:false',
+    ],
+    getOperationsDashboard: [
+      'MonthSchema.parse(request.data??{})', 'db.collection("jobs").where("companyId","==",companyId)',
+      '.where("dateKey",">=",from).where("dateKey","<",through).limit(15001)',
+      'if(snapshot.size>15000)thrownewHttpsError("resource-exhausted",', 'returnbuildMonthlyDashboard(jobs,input.month,tokyoToday());',
+    ],
+    getStaffPerformance: [
+      'StaffPerformanceSchema.parse(request.data??{})', 'if(input.from>input.through)',
+      'if(!profile.exists||profile.data()?.companyId!==companyId)',
+      'db.collection("jobs").where("companyId","==",companyId).where("assignedStaffId","==",input.staffId)',
+      '.where("dateKey",">=",input.from).where("dateKey","<=",input.through).limit(10001)',
+      'if(snapshot.size>10000)thrownewHttpsError("resource-exhausted",',
+    ],
+    createAdminJobGroup: [
+      'CreateSchema.parse(request.data??{})', 'normalizeJobInput(parsed)', 'if(normalized.errors.length)',
+      'constrowCreationConfigured=awaitnativeJobSourceEnabled(companyId);', 'constsourceReady=false;',
+      'constpublication=resolvePublication({', 'constbatch=db.batch();',
+      'batch.set(jobRef,{companyId,', 'source:{type:"admin_created",createdBy:session.uid}',
+      'batch.set(db.collection("jobGroups").doc(groupId),{companyId,jobIds,',
+      'if(rowQueueRef){batch.set(rowQueueRef,{companyId,groupId,jobIds,', 'awaitbatch.commit();',
+      'awaitwriteAudit(companyId,session.uid,"job.group.create",',
+    ],
+    updateJobPublication: [
+      'PublicationSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{', 'constsnapshots=awaittx.getAll(...refs);',
+      'if(!snap.exists||snap.data()?.companyId!==companyId)continue;', 'if(job.cancelled===true||job.status==="cancelled")',
+      'if(job.assignedStaffId){blocked.push(snap.id);continue;}', 'status:job.assignedStaffId?"assigned":"stopped",',
+      'constpublication=resolvePublication({', 'tx.set(snap.ref,', 'revision:FieldValue.increment(1)',
+      'return{updated,blocked};', 'awaitwriteAudit(companyId,session.uid,"job.publication.update",',
+    ],
+    adminEditJobInputs: [
+      'EditSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
+      'if(!jobSnap.exists||jobSnap.data()?.companyId!==companyId)',
+      'previousQueue.companyId!==companyId||previousQueue.jobId!==input.jobId||previousQueue.errorType==="verification_required"',
+      'if(input.revision!==undefined&&input.revision!==currentRevision)',
+      '!staffSnap.exists||staffSnap.data()?.companyId!==companyId||staffSnap.data()?.active!==true',
+      '!targetLock||targetLock.companyId!==companyId||targetLock.staffId!==staffRef.id||targetLock.dateKey!==lockDateKey',
+      'if(targetLock.active&&targetLock.jobId!==input.jobId)',
+      'constownsOldLock=oldLock?.active===true&&oldLock.jobId===input.jobId&&oldLock.companyId===companyId&&oldLock.staffId===oldStaffId&&oldLock.dateKey===lockDateKey;',
+      'if(oldLockRef&&ownsOldLock)', 'assignmentPreparationPatch(job,nextJob)',
+      'prepareAdminEditIntent({jobId:input.jobId,previous:job,next:nextJob,requested:sheetUpdates,',
+      'if(writeEnabled)tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.admin_edit",',
+      'updates:intent.updates,expected:intent.expected,', 'tx.set(jobRef,update,{merge:true});',
+    ],
+    generateJobExport: [
+      'ExportSchema.parse(request.data??{})', 'if(input.through<input.from)',
+      'db.collection("jobs").where("companyId","==",companyId)',
+      '.where("dateKey",">=",input.from).where("dateKey","<=",input.through).orderBy("dateKey","asc").limit(5001)',
+      'if(snap.size>5000)thrownewHttpsError("resource-exhausted",', 'constcsv=buildJobCsv(rows);',
+      'awaitdb.collection("exportLogs").add({companyId,actorUid:session.uid,',
+    ],
+    updateNetPrintNumbers: [
+      'UpdateSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{', 'if(job.companyId!==companyId)',
+      'constidentity=netPrintWriteIdentity(job);', 'if(previous?.syncPending===true)', 'if(previous.writeIdentity!==identity)throw',
+      'expected=baselineastypeofexpected;', 'old.printedContext===identity&&old.printedByStaffId===job.assignedStaffId&&old.printedForDate===job.dateKey',
+      'tx.update(jobRef,{netPrint:{items,updatedAt:now,changedCount,writeOperationId:queueRef.id,writeIdentity:identity,syncPending:true,writeStyles:styles,writeExpected:expected}',
+      'tx.create(queueRef,{companyId,jobId:input.jobId,operation:"netprint.update",',
+      'if(notifyStaffId&&changedCount>0&&job.cancelled!==true&&job.status!=="cancelled")',
+    ],
+    adminSetJobCancellation: [
+      'CancellationSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
+      'if(!jobSnap.exists||jobSnap.data()?.companyId!==companyId)',
+      'constownsActiveLock=lock?.active===true&&lock.jobId===input.jobId&&lock.companyId===companyId&&lock.staffId===job.assignedStaffId&&lock.dateKey===job.dateKey;',
+      'job.cancellationFinancialTreatment===treatment&&!ownsActiveLock)return;', 'if(lockRef&&ownsActiveLock)',
+      'cancellationSheetWrite:{queueId:queueRef.id,operation:"job.cancel.v2",identity:cancellationSheetWriteIdentity(job)}',
+      'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.cancel.v2",', 'actorUid:session.uid,',
+    ],
+    adminRestoreCancelledJob: [
+      'RestoreSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
+      'if(!jobSnap.exists||jobSnap.data()?.companyId!==companyId)', 'if(job.cancelled!==true&&job.status!=="cancelled")',
+      'if(!staffSnap.exists||staffSnap.data()?.companyId!==companyId)throw',
+      'currentLock?.companyId!==companyId||currentLock.staffId!==assignedStaffId||currentLock.dateKey!==dateKey',
+      'lockSnap.data()?.active===true&&lockSnap.data()?.jobId!==input.jobId',
+      'tx.set(lockRef,{companyId,staffId:assignedStaffId,dateKey,jobId:input.jobId,active:true,',
+      'cancellationSheetWrite:{queueId:queueRef.id,operation:"job.restore",identity:cancellationSheetWriteIdentity(job)}',
+      'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.restore",', 'actorUid:session.uid,',
+    ],
+  };
+  if (!has(requirements[name])) return false;
+  if (name === "updateJobPublication" && ((block.match(/if\(job\.assignedStaffId\)\{/g) ?? []).length !== 2 || (block.match(/tx\.set\(/g) ?? []).length !== 3 || /(?:batch|snap\.ref)\.(?:set|update|delete)\(/.test(block))) return false;
+  const whole = compact(source);
+  if (name === "generateJobExport" && !whole.includes('constExportSchema=z.object({from:z.iso.date(),through:z.iso.date(),')) return false;
+  if (name === "createAdminJobGroup" && !['feature.data()?.adminJobCreationSourceReady===true', 'mapping.data()?.enabled===true', 'mapping.data()?.rowCreation?.enabled===true'].every(part => whole.includes(part))) return false;
+  return true;
+}
 
 function checkStaffJourney(name) {
   const modules = {applyToJob:"jobs",getMyTasks:"staff-tasks",listMyMailApplications:"automation-intake",setSalesFloorClientSubmitted:"submission-status",submitPreContact:"precontact"};
@@ -748,6 +865,16 @@ function checkProcessNotificationQueue() {
 }
 
 const checkers = {
+  getSheetWriteIssues: () => checkAdminCore("getSheetWriteIssues"),
+  getOperationsDashboard: () => checkAdminCore("getOperationsDashboard"),
+  getStaffPerformance: () => checkAdminCore("getStaffPerformance"),
+  createAdminJobGroup: () => checkAdminCore("createAdminJobGroup"),
+  updateJobPublication: () => checkAdminCore("updateJobPublication"),
+  adminEditJobInputs: () => checkAdminCore("adminEditJobInputs"),
+  generateJobExport: () => checkAdminCore("generateJobExport"),
+  updateNetPrintNumbers: () => checkAdminCore("updateNetPrintNumbers"),
+  adminSetJobCancellation: () => checkAdminCore("adminSetJobCancellation"),
+  adminRestoreCancelledJob: () => checkAdminCore("adminRestoreCancelledJob"),
   applyToJob: () => checkStaffJourney("applyToJob"),
   getMyTasks: () => checkStaffJourney("getMyTasks"),
   listMyMailApplications: () => checkStaffJourney("listMyMailApplications"),

@@ -4,12 +4,12 @@ import {CAMPAIGN_FILE_LIMIT,parseCampaignText,campaignPreview,campaignRequest,ca
   type MailCampaign,type CampaignRequest,type CampaignPreview,type CampaignResult,type CampaignAttempt} from "./campaign-registration";
 export type CampaignApi={preview:(campaign:MailCampaign)=>Promise<unknown>;register:(request:CampaignRequest)=>Promise<unknown>;cancel:(request:CampaignRequest)=>Promise<unknown>};
 const messageOf=(error:unknown)=>error instanceof Error?error.message:"募集を確認できませんでした。もう一度お試しください。";
-export default function CampaignRegistrationPanel({companyId,uid,api,demo=false,demoSample,onClose}:{companyId:string;uid:string;api:CampaignApi;
-  demo?:boolean;demoSample?:()=>Promise<MailCampaign>;onClose:()=>void}){
+export default function CampaignRegistrationPanel({companyId,uid,api,demo=false,demoSample,initialCampaign,onClose}:{companyId:string;uid:string;api:CampaignApi;
+  demo?:boolean;demoSample?:()=>Promise<MailCampaign>;initialCampaign?:MailCampaign;onClose:()=>void}){
   const owner=campaignOwner(companyId,uid),ownerRef=useRef(owner);ownerRef.current=owner;
   const apiRef=useRef(api);apiRef.current=api;
   const mounted=useRef(false),version=useRef(0),busyRef=useRef(false),heading=useRef<HTMLHeadingElement>(null),previewHeading=useRef<HTMLHeadingElement>(null);
-  const [text,setText]=useState(""),[sourceName,setSourceName]=useState(""),[campaign,setCampaign]=useState<MailCampaign|null>(null),[preview,setPreview]=useState<CampaignPreview|null>(null);
+  const [text,setText]=useState(initialCampaign?JSON.stringify(initialCampaign,null,2):""),[sourceName,setSourceName]=useState(initialCampaign?"取得した募集対象":""),[campaign,setCampaign]=useState<MailCampaign|null>(null),[preview,setPreview]=useState<CampaignPreview|null>(null);
   const [loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[initialized,setInitialized]=useState(false),[attempt,setAttempt]=useState<CampaignAttempt|null>(null);
   const [evidence,setEvidence]=useState(""),[confirmed,setConfirmed]=useState(false),[error,setError]=useState(""),[message,setMessage]=useState(""),[result,setResult]=useState<CampaignResult|null>(null);
   const isCurrent=()=>mounted.current&&ownerRef.current===owner;

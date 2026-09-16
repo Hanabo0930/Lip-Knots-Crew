@@ -40,6 +40,7 @@ These rules apply to every automated coding agent working in this repository.
 The only Functions allowed in the first unattended staging deployment phase are:
 
 - `bootstrapSession`
+- `loginGateway`
 - `requestStaffLoginLink`
 - `getSubmissionTimeline`
 - `getSubmissionProcessingStatus`
@@ -136,6 +137,7 @@ guards cannot be changed by the deployment source branch.
 The only Cloud Run services whose Invoker IAM check may be changed are:
 
 - `bootstrapsession`
+- `logingateway`
 - `createuploadsession`
 - `inspectsetupwizard`
 - `savesetupwizarddraft`

@@ -40,6 +40,7 @@ npx --yes --package=firebase-tools@15.24.0 -- node "$lkc_trusted_runner"
 for function_name in "${function_names[@]}"; do
   service_name=""
   case "$function_name" in
+    loginGateway) service_name="logingateway" ;;
     bootstrapSession) service_name="bootstrapsession" ;;
     requestStaffLoginLink) service_name="requeststaffloginlink" ;;
     getSubmissionTimeline) service_name="getsubmissiontimeline" ;;

@@ -252,3 +252,6 @@ assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",
 
 const pilotExpansionFunctions=["submitPilotOutcome","decidePilotExpansion"];
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:pilotExpansionFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,pilotExpansionFunctions);
+
+const loginJourneyFunctions=["bootstrapSession","requestStaffLoginLink","loginGateway"];
+assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:loginJourneyFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,loginJourneyFunctions);

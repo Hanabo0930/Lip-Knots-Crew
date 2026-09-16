@@ -46,6 +46,11 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `getResubmissionComparison`
 - `driveFilePreview`
 - `createUploadSession`
+- `applyToJob`
+- `getMyTasks`
+- `listMyMailApplications`
+- `setSalesFloorClientSubmitted`
+- `submitPreContact`
 - `finalizeStagedUpload`
 - `registerDeviceSession`
 - `heartbeatDeviceSession`
@@ -82,6 +87,11 @@ guards cannot be changed by the deployment source branch.
 The only Cloud Run services whose Invoker IAM check may be changed are:
 
 - `createuploadsession`
+- `applytojob`
+- `getmytasks`
+- `listmymailapplications`
+- `setsalesfloorclientsubmitted`
+- `submitprecontact`
 - `requeststaffloginlink`
 - `getsubmissionprocessingstatus`
 - `drivefilepreview`
@@ -202,3 +212,8 @@ The user authorizes work needed to finish the app and asks not to fragment it in
 The next approved recovery adds the seven HTTP Functions for expense review (read, draft, complete), source sheet link, printing completion, job cancellation, and job duplication. Restore them through the same protected staging workflow, with source authorization checks. Deployment verification must not invoke authenticated business operations or change the paused transfer mode.
 
 The upload entrypoint createUploadSession is included in the approved staging rollout. Preserve the verified finalizeStagedUpload transfer mode when deploying either entrypoint or transfer handler. Explicit mode changes may include only finalizeStagedUpload, optionally with createUploadSession. Prefer the two-function scope when changing both acceptance and transfer state; this does not authorize replaying existing business records.
+
+
+## Staff journey staging recovery (2026-09-16)
+
+Standing completion authorization includes the five staff journey callables listed above through normal CI, merge, and protected staging deployment. Preserve upload/transfer pause state. The only additional Firestore metadata operation is creation, if absent, of the existing main definition for automationApplications: COLLECTION scope, companyId ASC / staffId ASC / status ASC / __name__ ASC. Verify the exact definition and READY state. This permits no index deletion, Rules changes, business document writes, real messages, or production operations.

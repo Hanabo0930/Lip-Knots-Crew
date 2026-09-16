@@ -1,3 +1,4 @@
+import './test-staff-journey-auth-guard.mjs';
 import './test-business-recovery-auth-guard.mjs';
 import './test-resubmission-auth-guard.mjs';
 import './test-confirm-application-auth-guard.mjs';
@@ -46,6 +47,11 @@ const expectedFunctions = [
   "adminCancelJob",
   "duplicateAdminJob",
   "createUploadSession",
+  "applyToJob",
+  "getMyTasks",
+  "listMyMailApplications",
+  "setSalesFloorClientSubmitted",
+  "submitPreContact",
 ];
 
 assert.deepEqual(
@@ -103,6 +109,11 @@ assert.match(
   "listMyDevices must map to its exact Cloud Run service",
 );
 for (const [functionName, serviceName] of [
+  ["applyToJob", "applytojob"],
+  ["getMyTasks", "getmytasks"],
+  ["listMyMailApplications", "listmymailapplications"],
+  ["setSalesFloorClientSubmitted", "setsalesfloorclientsubmitted"],
+  ["submitPreContact", "submitprecontact"],
   ["createUploadSession", "createuploadsession"],
   ["getExpenseReview", "getexpensereview"],
   ["saveExpenseReviewDraft", "saveexpensereviewdraft"],

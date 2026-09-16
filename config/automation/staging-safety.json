@@ -41,7 +41,12 @@
     "markNetPrintPrinted",
     "adminCancelJob",
     "duplicateAdminJob",
-    "createUploadSession"
+    "createUploadSession",
+    "applyToJob",
+    "getMyTasks",
+    "listMyMailApplications",
+    "setSalesFloorClientSubmitted",
+    "submitPreContact"
   ],
   "allowedHostingTargets": [
     "staff",

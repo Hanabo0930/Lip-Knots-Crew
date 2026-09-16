@@ -231,3 +231,6 @@ const businessRecoveryFunctions=["getExpenseReview","saveExpenseReviewDraft","co
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:businessRecoveryFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,businessRecoveryFunctions);
 
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:"createUploadSession,finalizeStagedUpload",confirmation:safetyConfig.confirmations.functionsDeploy}).functions,["createUploadSession","finalizeStagedUpload"]);
+
+const staffJourneyFunctions=["applyToJob","getMyTasks","listMyMailApplications","setSalesFloorClientSubmitted","submitPreContact"];
+assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:staffJourneyFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,staffJourneyFunctions);

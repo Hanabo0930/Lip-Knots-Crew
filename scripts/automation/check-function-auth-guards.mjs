@@ -20,6 +20,11 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "applyToJob",
+  "getMyTasks",
+  "listMyMailApplications",
+  "setSalesFloorClientSubmitted",
+  "submitPreContact",
   "createUploadSession",
   "getExpenseReview",
   "saveExpenseReviewDraft",
@@ -91,6 +96,107 @@ function functionBlock(source, exportName) {
   return source.slice(start, end);
 }
 
+
+
+function checkStaffJourney(name) {
+  const modules = {applyToJob:"jobs",getMyTasks:"staff-tasks",listMyMailApplications:"automation-intake",setSalesFloorClientSubmitted:"submission-status",submitPreContact:"precontact"};
+  const source = sourceFile("functions/src/" + modules[name] + ".ts");
+  const start = source.indexOf("export const " + name + " =");
+  const end = source.indexOf("\n});", start);
+  if (start < 0 || end < start) return false;
+  const compact = text => text.replace(/\s+/g, "");
+  const block = compact(source.slice(start, end + 4));
+  const has = values => values.every(value => block.includes(value));
+  if (!/import \{[^}]*\bcompanyFromClaims\b[^}]*\brequireAuth\b[^}]*\bstaffFromClaims\b[^}]*\} from "\.\/utils";/.test(source)
+      || !has(["requireAuth(request)", "companyFromClaims(session.token)", "staffFromClaims(session.token)"])
+      || /(?:input|request\.data)\.(?:companyId|uid|staffId|actorUid)/.test(block)) return false;
+  const readOnly = ["getMyTasks", "listMyMailApplications"].includes(name);
+  if (readOnly && (/\.(?:add|create|update|delete|commit)\(/.test(block)
+      || (block.match(/\.set\(/g)??[]).length !== (block.match(/(?:jobMap|cache)\.set\(/g)??[]).length)) return false;
+  if (!readOnly && (!has(["awaitassertProductionOperational(companyId);", "awaitdb.runTransaction(async(tx)=>{"])
+      || !source.includes('import { assertProductionOperational } from "./system-safety";'))) return false;
+  if (name === "getMyTasks") return has([
+    'db.collection("jobs").where("companyId","==",companyId).where("assignedStaffId","==",staffId)',
+    '.where("dateKey",">=",from).where("dateKey","<=",through).limit(2000).get()',
+    'db.collection("resubmissionRequests").where("companyId","==",companyId).where("staffId","==",staffId).where("status","==","open").limit(100).get()',
+    'snapshot.exists&&data?.companyId===companyId&&data?.assignedStaffId===staffId',
+    'returnjob?.status==="assigned"&&job.cancelled!==true;',
+    'deriveStaffTasks({jobs,resubmissions,nowMs:Date.now()})',
+  ]);
+  if (name === "applyToJob" || name === "listMyMailApplications") {
+    const intake = compact(sourceFile("functions/src/automation-intake.ts"));
+    const helper = intake.slice(intake.indexOf("exportasyncfunctionreadMailApplicationForAssignment("), intake.indexOf("constListApplicationsSchema="));
+    if (![
+      'parsed.data.companyId!==input.companyId||parsed.data.staffId!==input.staffId||parsed.data.jobId!==input.jobId',
+      'if(candidate.revision!==input.revision)',
+      'requireRecord((awaittx.get(db.collection("automationApplicationReceipts").doc(candidate.receiptKey))).data(),input.companyId)',
+      'receiptKey(incoming)!==candidate.receiptKey||savedReceipt.applicationId!==input.applicationId',
+      'currentSender.data.companyId!==input.companyId||currentSender.data.uid!==savedReceipt.receivedBy',
+      'currentSender.data.producerId!==savedReceipt.producerId||currentSender.data.revision!==savedReceipt.principalRevision',
+      'context.policy.phase!=="app"||context.result.route!=="review"',
+      'context.result.applicationKey!==input.applicationId||context.person?.staffId!==input.staffId',
+      'context.person.revision!==candidate.personRevision||context.selected.workDate!==candidate.workDate',
+    ].every(x=>helper.includes(x))) return false;
+  }
+  if (name === "listMyMailApplications") return has([
+    'if(session.token.role!=="staff")throw',
+    'ListApplicationsSchema.parse(request.data??{})',
+    'db.collection("automationApplications").where("companyId","==",companyId).where("staffId","==",staffId).where("status","==","review").orderBy(FieldPath.documentId()).limit(26)',
+    'if(input.cursor)query=query.startAfter(input.cursor);',
+    'returndb.runTransaction(asynctx=>{',
+    'if(staff?.companyId!==companyId||staff.active!==true)throw',
+    'if(!policySnap.exists)return{ok:true,mode:"not_configured",items:[],nextCursor:null};',
+    'RecruitmentRoutingSchema.parse(requireRecord(policySnap.data(),companyId))',
+    'if(policy.phase!=="app")return{ok:true,mode:"legacy_mail",items:[],nextCursor:null};',
+    'if(candidate.companyId!==companyId||candidate.staffId!==staffId)throw',
+    'if(jobData&&jobData.companyId!==companyId)throw',
+    'awaitreadMailApplicationForAssignment(reader,{companyId,staffId,jobId:candidate.jobId,applicationId:doc.id,revision:candidate.revision})',
+    'constrecords=page.docs.slice(0,25);',
+  ]);
+  if (name === "applyToJob") return source.includes('import { readMailApplicationForAssignment } from "./automation-intake";') && has([
+    'if(session.token.role!=="staff")', 'ApplySchema.parse(request.data)',
+    'constidempotencySnap=awaittx.get(idempotencyRef);',
+    'previous?.uid!==session.uid||previous?.companyId!==companyId',
+    'if(previous.staffId!==staffId)',
+    '(previous.mailApplicationId??null)!==(input.mailApplicationId??null)',
+    'response?.ok!==true||response.jobId!==input.jobId',
+    'if(job.companyId!==companyId||staff.companyId!==companyId)',
+    'if(staff.active!==true)', 'if(job.status!=="open"||job.assignedStaffId)',
+    'if(job.recruitmentStopped===true||job.cancelled===true)',
+    'job.sourceMissing===true||job.assignmentUnresolved===true||job.applicationUnconfirmed===true||job.publishable!==true',
+    'constlockSnap=awaittx.get(lockRef);', 'if(lockSnap.exists&&lockSnap.data()?.active===true)',
+    'awaitreadMailApplicationForAssignment(tx,{companyId,staffId,jobId:input.jobId,applicationId:input.mailApplicationId,revision:input.mailApplicationRevision!,})',
+    'tx.update(jobRef,{status:"assigned",assignedStaffId:staffId,assignedStaffName:displayName,assignedUid:session.uid,',
+    'tx.set(lockRef,{companyId,staffId,dateKey:workDate,jobId:input.jobId,active:true,',
+    'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.assign",',
+    'actorUid:session.uid,actorStaffId:staffId,',
+    'tx.set(idempotencyRef,{mailApplicationId:input.mailApplicationId??null,uid:session.uid,companyId,staffId,result:response,',
+  ]);
+  if (!has([
+    'if(job.companyId!==companyId||job.assignedStaffId!==staffId)',
+    'job.cancelled===true||job.status==="cancelled"', 'if(job.status!=="assigned")throw',
+    'tx.update(jobRef,',
+  ])) return false;
+  if (name === "setSalesFloorClientSubmitted") return has([
+    'ClientSubmittedSchema.parse(request.data??{})', 'constsnap=awaittx.get(jobRef);',
+    'constlipKnotsSubmitted=current?.lipKnotsSubmitted===true;',
+    'if(current?.clientSubmitted===input.submitted&&current.completed===(input.submitted||lipKnotsSubmitted))return;',
+    '"submissionStatus.salesFloor.completed":input.submitted||lipKnotsSubmitted,',
+    'tx.set(db.collection("sheetSyncQueue").doc(),{companyId,jobId:input.jobId,operation:"submission.sales_floor",',
+    'actorUid:session.uid,actorStaffId:staffId,',
+  ]);
+  return has([
+    'Schema.parse(request.data)', 'constjobSnap=awaittx.get(jobRef);',
+    'if(!workDate.success||(input.dateKey!==undefined&&input.dateKey!==workDate.data))throw',
+    'if(job.sourceMissing===true)throw', 'if(job.applicationUnconfirmed===true)throw', 'if(job.assignmentUnresolved===true)throw',
+    'awaitreadAutomationJobContext(tx,companyId,input.jobId,job)',
+    'previous?.source==="app"&&previous.staffId===staffId&&previous.dateKey===job.dateKey',
+    'if(!context?.binding.assignment||matchesAutomationPreContactProof(context,previous,previous?.automationProof))return;',
+    'preContact:{...nextContact,automationProof:makeAutomationPreContactProof(context,nextContact,now)}',
+    'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"precontact.submit",',
+    'actorUid:session.uid,actorStaffId:staffId,',
+  ]) && source.includes('from "./automation-precontact-proof";');
+}
 
 function checkBusinessRecovery(name) {
   const file = name === "markNetPrintPrinted" ? "netprint" : name === "adminCancelJob" ? "jobs" : name === "duplicateAdminJob" ? "job-management" : "admin-operations";
@@ -642,6 +748,11 @@ function checkProcessNotificationQueue() {
 }
 
 const checkers = {
+  applyToJob: () => checkStaffJourney("applyToJob"),
+  getMyTasks: () => checkStaffJourney("getMyTasks"),
+  listMyMailApplications: () => checkStaffJourney("listMyMailApplications"),
+  setSalesFloorClientSubmitted: () => checkStaffJourney("setSalesFloorClientSubmitted"),
+  submitPreContact: () => checkStaffJourney("submitPreContact"),
   createUploadSession: checkCreateUploadSession,
   getExpenseReview: () => checkBusinessRecovery("getExpenseReview"),
   saveExpenseReviewDraft: () => checkBusinessRecovery("saveExpenseReviewDraft"),

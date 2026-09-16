@@ -80,6 +80,11 @@ for function_name in "${function_names[@]}"; do
     markNetPrintPrinted) service_name="marknetprintprinted" ;;
     adminCancelJob) service_name="admincanceljob" ;;
     duplicateAdminJob) service_name="duplicateadminjob" ;;
+    applyToJob) service_name="applytojob" ;;
+    getMyTasks) service_name="getmytasks" ;;
+    listMyMailApplications) service_name="listmymailapplications" ;;
+    setSalesFloorClientSubmitted) service_name="setsalesfloorclientsubmitted" ;;
+    submitPreContact) service_name="submitprecontact" ;;
     *)
       echo "DEPLOY_RESULT=FAIL"
       echo "DEPLOY_ERROR=UNMAPPED_FUNCTION_AFTER_GUARD"

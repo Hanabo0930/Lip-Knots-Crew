@@ -234,3 +234,6 @@ assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",
 
 const staffJourneyFunctions=["applyToJob","getMyTasks","listMyMailApplications","setSalesFloorClientSubmitted","submitPreContact"];
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:staffJourneyFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,staffJourneyFunctions);
+
+const adminCoreFunctions=["getSheetWriteIssues","getOperationsDashboard","getStaffPerformance","createAdminJobGroup","updateJobPublication","adminEditJobInputs","generateJobExport","updateNetPrintNumbers","adminSetJobCancellation","adminRestoreCancelledJob"];
+assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:adminCoreFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,adminCoreFunctions);

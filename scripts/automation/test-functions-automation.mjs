@@ -1,3 +1,4 @@
+import "./test-admin-core-auth-guard.mjs";
 import './test-staff-journey-auth-guard.mjs';
 import './test-business-recovery-auth-guard.mjs';
 import './test-resubmission-auth-guard.mjs';
@@ -52,6 +53,16 @@ const expectedFunctions = [
   "listMyMailApplications",
   "setSalesFloorClientSubmitted",
   "submitPreContact",
+  "getSheetWriteIssues",
+  "getOperationsDashboard",
+  "getStaffPerformance",
+  "createAdminJobGroup",
+  "updateJobPublication",
+  "adminEditJobInputs",
+  "generateJobExport",
+  "updateNetPrintNumbers",
+  "adminSetJobCancellation",
+  "adminRestoreCancelledJob",
 ];
 
 assert.deepEqual(
@@ -114,6 +125,16 @@ for (const [functionName, serviceName] of [
   ["listMyMailApplications", "listmymailapplications"],
   ["setSalesFloorClientSubmitted", "setsalesfloorclientsubmitted"],
   ["submitPreContact", "submitprecontact"],
+  ["getSheetWriteIssues", "getsheetwriteissues"],
+  ["getOperationsDashboard", "getoperationsdashboard"],
+  ["getStaffPerformance", "getstaffperformance"],
+  ["createAdminJobGroup", "createadminjobgroup"],
+  ["updateJobPublication", "updatejobpublication"],
+  ["adminEditJobInputs", "admineditjobinputs"],
+  ["generateJobExport", "generatejobexport"],
+  ["updateNetPrintNumbers", "updatenetprintnumbers"],
+  ["adminSetJobCancellation", "adminsetjobcancellation"],
+  ["adminRestoreCancelledJob", "adminrestorecancelledjob"],
   ["createUploadSession", "createuploadsession"],
   ["getExpenseReview", "getexpensereview"],
   ["saveExpenseReviewDraft", "saveexpensereviewdraft"],

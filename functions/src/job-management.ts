@@ -73,8 +73,8 @@ const EditSchema = z.object({
 });
 
 const ExportSchema = z.object({
-  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  through: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  from: z.iso.date(),
+  through: z.iso.date(),
   groupBy: z.enum(["client", "maker"]),
   name: z.string().max(200).optional(),
   includeCancelled: z.boolean().default(false),
@@ -336,84 +336,84 @@ export const updateJobPublication = onCall(async (request) => {
   await assertProductionOperational(companyId);
   const input = PublicationSchema.parse(request.data ?? {});
   const refs = input.jobIds.map((id) => db.collection("jobs").doc(id));
-  const snapshots = await db.getAll(...refs);
-  const now = Timestamp.now();
-  const batch = db.batch();
-  const updated: string[] = [];
-  const blocked: string[] = [];
+  const { updated, blocked } = await db.runTransaction(async (tx) => {
+    const snapshots = await tx.getAll(...refs);
+    const now = Timestamp.now();
+    const updated: string[] = [];
+    const blocked: string[] = [];
 
-  for (const snap of snapshots) {
-    if (!snap.exists || snap.data()?.companyId !== companyId) continue;
-    const job = snap.data()!;
-    if (job.cancelled === true || job.status === "cancelled") {
-      blocked.push(snap.id);
-      continue;
-    }
+    for (const snap of snapshots) {
+      if (!snap.exists || snap.data()?.companyId !== companyId) continue;
+      const job = snap.data()!;
+      if (job.cancelled === true || job.status === "cancelled") {
+        blocked.push(snap.id);
+        continue;
+      }
 
-    if (input.action === "stop") {
-      batch.set(snap.ref, {
-        status: job.assignedStaffId ? "assigned" : "stopped",
-        publishable: false,
-        recruitmentStopped: true,
-        scheduledPublishAt: FieldValue.delete(),
-        updatedAt: now,
-        revision: FieldValue.increment(1),
-      }, { merge: true });
-      updated.push(snap.id);
-      continue;
-    }
+      if (input.action === "stop") {
+        tx.set(snap.ref, {
+          status: job.assignedStaffId ? "assigned" : "stopped",
+          publishable: false,
+          recruitmentStopped: true,
+          scheduledPublishAt: FieldValue.delete(),
+          updatedAt: now,
+          revision: FieldValue.increment(1),
+        }, { merge: true });
+        updated.push(snap.id);
+        continue;
+      }
 
-    if (input.action === "draft") {
+      if (input.action === "draft") {
+        if (job.assignedStaffId) {
+          blocked.push(snap.id);
+          continue;
+        }
+        tx.set(snap.ref, {
+          status: "draft",
+          publishable: false,
+          recruitmentStopped: true,
+          scheduledPublishAt: FieldValue.delete(),
+          updatedAt: now,
+          revision: FieldValue.increment(1),
+        }, { merge: true });
+        updated.push(snap.id);
+        continue;
+      }
+
       if (job.assignedStaffId) {
         blocked.push(snap.id);
         continue;
       }
-      batch.set(snap.ref, {
-        status: "draft",
-        publishable: false,
-        recruitmentStopped: true,
-        scheduledPublishAt: FieldValue.delete(),
+
+      const sourceReady = job.sourceReady === true ||
+        job.source?.type === "google_sheets_readonly" ||
+        Boolean(job.sheetRef?.spreadsheetId);
+
+      const mode = input.action === "schedule" ? "scheduled" : "immediate";
+      const publication = resolvePublication({
+        requestedMode: mode,
+        publishAt: input.publishAt ?? null,
+        sourceReady,
+        nowIso: now.toDate().toISOString(),
+      });
+
+      tx.set(snap.ref, {
+        status: publication.status,
+        publishable: publication.publishable,
+        recruitmentStopped: publication.recruitmentStopped,
+        scheduledPublishAt: publication.scheduledPublishAt
+          ? Timestamp.fromDate(new Date(publication.scheduledPublishAt))
+          : FieldValue.delete(),
+        publicationBlockedReason: publication.blockedReason ?? FieldValue.delete(),
         updatedAt: now,
         revision: FieldValue.increment(1),
       }, { merge: true });
-      updated.push(snap.id);
-      continue;
+
+      if (publication.blockedReason) blocked.push(snap.id);
+      else updated.push(snap.id);
     }
-
-    if (job.assignedStaffId) {
-      blocked.push(snap.id);
-      continue;
-    }
-
-    const sourceReady = job.sourceReady === true ||
-      job.source?.type === "google_sheets_readonly" ||
-      Boolean(job.sheetRef?.spreadsheetId);
-
-    const mode = input.action === "schedule" ? "scheduled" : "immediate";
-    const publication = resolvePublication({
-      requestedMode: mode,
-      publishAt: input.publishAt ?? null,
-      sourceReady,
-      nowIso: now.toDate().toISOString(),
-    });
-
-    batch.set(snap.ref, {
-      status: publication.status,
-      publishable: publication.publishable,
-      recruitmentStopped: publication.recruitmentStopped,
-      scheduledPublishAt: publication.scheduledPublishAt
-        ? Timestamp.fromDate(new Date(publication.scheduledPublishAt))
-        : FieldValue.delete(),
-      publicationBlockedReason: publication.blockedReason ?? FieldValue.delete(),
-      updatedAt: now,
-      revision: FieldValue.increment(1),
-    }, { merge: true });
-
-    if (publication.blockedReason) blocked.push(snap.id);
-    else updated.push(snap.id);
-  }
-
-  await batch.commit();
+    return { updated, blocked };
+  });
   await writeAudit(companyId, session.uid, "job.publication.update", {
     action: input.action,
     updated,
@@ -729,8 +729,10 @@ export const generateJobExport = onCall(
       .where("dateKey", ">=", input.from)
       .where("dateKey", "<=", input.through)
       .orderBy("dateKey", "asc")
-      .limit(5000)
+      .limit(5001)
       .get();
+
+    if (snap.size > 5000) throw new HttpsError("resource-exhausted", "出力対象が5,000件を超えています。不完全なCSVを防ぐため、期間を短くして再度お試しください。");
 
     const filtered = snap.docs
       .map((doc): FirebaseFirestore.DocumentData & { id: string } => ({ id: doc.id, ...doc.data() }))

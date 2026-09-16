@@ -46,6 +46,16 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `getResubmissionComparison`
 - `driveFilePreview`
 - `createUploadSession`
+- `getSheetWriteIssues`
+- `getOperationsDashboard`
+- `getStaffPerformance`
+- `createAdminJobGroup`
+- `updateJobPublication`
+- `adminEditJobInputs`
+- `generateJobExport`
+- `updateNetPrintNumbers`
+- `adminSetJobCancellation`
+- `adminRestoreCancelledJob`
 - `applyToJob`
 - `getMyTasks`
 - `listMyMailApplications`
@@ -87,6 +97,16 @@ guards cannot be changed by the deployment source branch.
 The only Cloud Run services whose Invoker IAM check may be changed are:
 
 - `createuploadsession`
+- `getsheetwriteissues`
+- `getoperationsdashboard`
+- `getstaffperformance`
+- `createadminjobgroup`
+- `updatejobpublication`
+- `admineditjobinputs`
+- `generatejobexport`
+- `updatenetprintnumbers`
+- `adminsetjobcancellation`
+- `adminrestorecancelledjob`
 - `applytojob`
 - `getmytasks`
 - `listmymailapplications`
@@ -217,3 +237,8 @@ The upload entrypoint createUploadSession is included in the approved staging ro
 ## Staff journey staging recovery (2026-09-16)
 
 Standing completion authorization includes the five staff journey callables listed above through normal CI, merge, and protected staging deployment. Preserve upload/transfer pause state. The only additional Firestore metadata operation is creation, if absent, of the existing main definition for automationApplications: COLLECTION scope, companyId ASC / staffId ASC / status ASC / __name__ ASC. Verify the exact definition and READY state. This permits no index deletion, Rules changes, business document writes, real messages, or production operations.
+
+
+## Admin core staging recovery (2026-09-16)
+
+Standing completion authorization includes the ten admin core callables listed above through normal CI, merge, and protected staging deployment. Preserve authentication, company boundaries, shift-lock ownership, source comparisons, and upload/transfer pause state. Back up the existing deployments and verify the required indexes. This permits no business document operations, original-sheet writes, real messages, or production access.

@@ -85,6 +85,16 @@ for function_name in "${function_names[@]}"; do
     listMyMailApplications) service_name="listmymailapplications" ;;
     setSalesFloorClientSubmitted) service_name="setsalesfloorclientsubmitted" ;;
     submitPreContact) service_name="submitprecontact" ;;
+    getSheetWriteIssues) service_name="getsheetwriteissues" ;;
+    getOperationsDashboard) service_name="getoperationsdashboard" ;;
+    getStaffPerformance) service_name="getstaffperformance" ;;
+    createAdminJobGroup) service_name="createadminjobgroup" ;;
+    updateJobPublication) service_name="updatejobpublication" ;;
+    adminEditJobInputs) service_name="admineditjobinputs" ;;
+    generateJobExport) service_name="generatejobexport" ;;
+    updateNetPrintNumbers) service_name="updatenetprintnumbers" ;;
+    adminSetJobCancellation) service_name="adminsetjobcancellation" ;;
+    adminRestoreCancelledJob) service_name="adminrestorecancelledjob" ;;
     *)
       echo "DEPLOY_RESULT=FAIL"
       echo "DEPLOY_ERROR=UNMAPPED_FUNCTION_AFTER_GUARD"

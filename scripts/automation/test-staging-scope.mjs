@@ -246,3 +246,6 @@ assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",
 
 const setupAuditFunctions=["inspectSetupWizard","saveSetupWizardDraft","getLoginInviteCandidates","sendLoginInvites","previewMonthSheetCreation","createMonthSheetSafe","getMonthCreationHistory","previewSheetRowCreation","listSheetWriteReviewRecords","runGasAudit","scanGasUploadSafety","exportGasAuditMarkdown"];
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:setupAuditFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,setupAuditFunctions);
+
+const readinessFunctions=["getPilotReadiness","getPilotExpansionReview","getProductionControlStatus","getProductionSloDashboard"];
+assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:readinessFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,readinessFunctions);

@@ -20,6 +20,10 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "getPilotReadiness",
+  "getPilotExpansionReview",
+  "getProductionControlStatus",
+  "getProductionSloDashboard",
   "inspectSetupWizard",
   "saveSetupWizardDraft",
   "getLoginInviteCandidates",
@@ -142,6 +146,26 @@ function functionBlock(source, exportName) {
 
 
 
+
+function checkReadiness(name) {
+  const modules={getPilotReadiness:'sheet-row-creation',getPilotExpansionReview:'pilot-expansion',getProductionControlStatus:'production-control',getProductionSloDashboard:'production-slo'};
+  const source=sourceFile('functions/src/'+modules[name]+'.ts'),start=source.indexOf('export const '+name),end=source.indexOf('\n});',start);
+  if(start<0||end<start)return false;
+  const compact=s=>s.replace(/\s+/g,''),block=compact(source.slice(start,end+4)),whole=compact(source);
+  const prefix=new RegExp('^exportconst'+name+'=onCall\\(async\\(?request\\)?=>\\{constsession=requireAdmin\\(request\\);constcompanyId=companyFromClaims\\(session.token\\);');
+  const imported=source.match(/import\s*\{([^}]+)\}\s*from\s*"\.\/utils";/)?.[1]??'';
+  if(!prefix.test(block)||!/\brequireAdmin\b/.test(imported)||!/\bcompanyFromClaims\b/.test(imported)||/\.(?:add|create|delete|set|update)\(/.test(block))return false;
+  const required={
+    getPilotReadiness:['typeofmapping?.spreadsheetId==="string"','mapping.spreadsheetId.length>0','mapping.spreadsheetId.trim()===mapping.spreadsheetId','mapping.monthCreation?.verifiedSpreadsheetId===mapping.spreadsheetId','blockedRows.empty&&deadRows.empty','monthInterventions.empty'],
+    getPilotExpansionReview:['findRollout(companyId,input.rolloutId)','collectAutomatedMetrics(rollout.id,data,companyId)','reviewSnap.exists&&reviewSnap.data()?.companyId===companyId?reviewSnap.data()asExpansionReviewRecord:null'],
+    getProductionControlStatus:['findLatestCompletedStagedRollout(companyId)','review?.exists&&review.data()?.companyId===companyId?review.data()asProductionReviewRecord:null','rehearsalFingerprint:certification?.exists&&certification.data()?.companyId===companyId?','pendingApprovalSnap?.exists&&pendingApprovalSnap.data()?.companyId===companyId'],
+    getProductionSloDashboard:['db.collection("productionSloControls").doc(companyId)','db.collection("productionIncidents").where("companyId","==",companyId)','openIncident?.exists&&openIncident.data()?.companyId===companyId?safeIncident('],
+  };
+  if(!required[name].every(x=>block.includes(x)))return false;
+  if(name==='getPilotExpansionReview'&&!['snap.exists&&snap.data()?.companyId===companyId?snap:null','db.collection("pilotHealthRuns").where("companyId","==",companyId).where("rolloutId","==",rolloutId)','db.collection("pilotAlerts").where("companyId","==",companyId).where("rolloutId","==",rolloutId)'].every(x=>whole.includes(x)))return false;
+  if(name==='getProductionControlStatus'&&!whole.includes('db.collection("stagedRollouts").where("companyId","==",companyId).where("status","==","completed")'))return false;
+  return true;
+}
 
 function checkSetupAudit(name) {
   const modules = {inspectSetupWizard:'setup-wizard',saveSetupWizardDraft:'setup-wizard',getLoginInviteCandidates:'login-links',sendLoginInvites:'login-links',previewMonthSheetCreation:'month-sheet',createMonthSheetSafe:'month-sheet',getMonthCreationHistory:'month-sheet',previewSheetRowCreation:'sheet-row-creation',listSheetWriteReviewRecords:'sheet-write-review',runGasAudit:'gas-audit',scanGasUploadSafety:'gas-remediation',exportGasAuditMarkdown:'gas-remediation'};
@@ -1056,6 +1080,10 @@ function checkProcessNotificationQueue() {
 }
 
 const checkers = {
+  getPilotReadiness: () => checkReadiness("getPilotReadiness"),
+  getPilotExpansionReview: () => checkReadiness("getPilotExpansionReview"),
+  getProductionControlStatus: () => checkReadiness("getProductionControlStatus"),
+  getProductionSloDashboard: () => checkReadiness("getProductionSloDashboard"),
   inspectSetupWizard: () => checkSetupAudit("inspectSetupWizard"),
   saveSetupWizardDraft: () => checkSetupAudit("saveSetupWizardDraft"),
   getLoginInviteCandidates: () => checkSetupAudit("getLoginInviteCandidates"),

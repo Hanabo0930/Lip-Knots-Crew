@@ -57,6 +57,10 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `listSheetWriteReviewRecords`
 - `runGasAudit`
 - `scanGasUploadSafety`
+- `getPilotReadiness`
+- `getPilotExpansionReview`
+- `getProductionControlStatus`
+- `getProductionSloDashboard`
 - `exportGasAuditMarkdown`
 - `getAutomationRegistry`
 - `saveAutomationRegistry`
@@ -141,6 +145,10 @@ The only Cloud Run services whose Invoker IAM check may be changed are:
 - `listsheetwritereviewrecords`
 - `rungasaudit`
 - `scangasuploadsafety`
+- `getpilotreadiness`
+- `getpilotexpansionreview`
+- `getproductioncontrolstatus`
+- `getproductionslodashboard`
 - `exportgasauditmarkdown`
 - `getautomationregistry`
 - `saveautomationregistry`

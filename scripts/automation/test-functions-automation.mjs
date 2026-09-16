@@ -1,3 +1,4 @@
+import "./test-readiness-auth-guard.mjs";
 import "./test-setup-audit-auth-guard.mjs";
 import "./test-staging-firebase-deploy.mjs";
 import "./test-external-handoff-auth-guard.mjs";
@@ -100,6 +101,10 @@ const expectedFunctions = [
   "runGasAudit",
   "scanGasUploadSafety",
   "exportGasAuditMarkdown",
+  "getPilotReadiness",
+  "getPilotExpansionReview",
+  "getProductionControlStatus",
+  "getProductionSloDashboard",
 ];
 
 assert.deepEqual(
@@ -184,6 +189,10 @@ for (const [functionName, serviceName] of [
   ["runGasAudit", "rungasaudit"],
   ["scanGasUploadSafety", "scangasuploadsafety"],
   ["exportGasAuditMarkdown", "exportgasauditmarkdown"],
+  ["getPilotReadiness", "getpilotreadiness"],
+  ["getPilotExpansionReview", "getpilotexpansionreview"],
+  ["getProductionControlStatus", "getproductioncontrolstatus"],
+  ["getProductionSloDashboard", "getproductionslodashboard"],
   ["previewStaffImport", "previewstaffimport"],
   ["syncStaffDirectoryReadOnly", "syncstaffdirectoryreadonly"],
   ["previewShiftImport", "previewshiftimport"],

@@ -40,7 +40,7 @@ export const getProductionSloDashboard=onCall(async request=>{
   const session=requireAdmin(request);const companyId=companyFromClaims(session.token);const controlRef=db.collection("productionSloControls").doc(companyId);
   const[policySnap,snapshotSnap,controlSnap,recent]=await Promise.all([db.collection("productionSloPolicies").doc(companyId).get(),db.collection("productionSloSnapshots").doc(companyId).get(),controlRef.get(),db.collection("productionIncidents").where("companyId","==",companyId).orderBy("createdAt","desc").limit(10).get()]);
   const openIncidentId=String(controlSnap.data()?.openIncidentId??"");const openIncident=openIncidentId?await db.collection("productionIncidents").doc(openIncidentId).get():null;
-  return{policy:policySnap.exists?policySnap.data()?.policy:defaultProductionSloPolicy(),snapshot:safeSnapshot(snapshotSnap.data()),openIncident:openIncident?.exists?safeIncident(openIncident.id,openIncident.data()):null,recentIncidents:recent.docs.map(doc=>safeIncident(doc.id,doc.data()))};
+  return{policy:policySnap.exists?policySnap.data()?.policy:defaultProductionSloPolicy(),snapshot:safeSnapshot(snapshotSnap.data()),openIncident:openIncident?.exists&&openIncident.data()?.companyId===companyId?safeIncident(openIncident.id,openIncident.data()):null,recentIncidents:recent.docs.map(doc=>safeIncident(doc.id,doc.data()))};
 });
 
 export const saveProductionSloPolicy=onCall(async request=>{

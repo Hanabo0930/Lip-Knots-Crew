@@ -1,3 +1,4 @@
+import { assertProductionOperational } from "./system-safety";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
@@ -161,6 +162,7 @@ async function executeStaffImport(
   mode: ImportMode,
   requestedSheets?: string[]
 ): Promise<ImportResult> {
+  if (mode === "commit") await assertProductionOperational(companyId);
   const config = await loadConfig(companyId);
   if (!config.enabled && mode === "commit") {
     throw new HttpsError(
@@ -279,11 +281,13 @@ async function executeStaffImport(
           "一部タブの読取に失敗したため、誤停止防止のため同期を中止しました。"
         );
       }
+      if (!lock) throw new HttpsError("aborted", "スタッフ名簿同期の実行権限がありません。");
       commitStats = await writeStaffDirectory(
         companyId,
         merged.profiles,
         config,
-        runRef?.id ?? ""
+        runRef?.id ?? "",
+        lock
       );
     }
 
@@ -357,7 +361,8 @@ async function writeStaffDirectory(
   companyId: string,
   profiles: MergedStaffProfile[],
   config: StaffImportConfig,
-  runId: string
+  runId: string,
+  lock: StaffImportLock
 ): Promise<{
   emailConflicts: number;
   activated: number;
@@ -384,7 +389,7 @@ async function writeStaffDirectory(
     indexes.push(index);
     activeIndexesByStaff.set(data.staffId, indexes);
   }
-  const writer = new BatchWriter();
+  const writer = new BatchWriter(companyId, lock);
   const now = Timestamp.now();
   const revocations: Array<{ uid: string; staffId: string; emailHash: string; reason: string }> = [];
   let emailConflicts = 0;
@@ -530,8 +535,10 @@ async function writeStaffDirectory(
       const [identity, profile] = await Promise.all([identityRef.get(), profileRef.get()]);
       if (!matches(identity.data(), profile.data())) throw new Error("Staff revocation identity changed");
       if (!required(profile.data()!)) continue;
+      assertStaffImportLease((await lock.ref.get()).data(), companyId, lock.token);
       await auth.revokeRefreshTokens(item.uid);
       await db.runTransaction(async tx => {
+        assertStaffImportLease((await tx.get(lock.ref)).data(), companyId, lock.token);
         const [latestIdentity, latestProfile] = await Promise.all([tx.get(identityRef), tx.get(profileRef)]);
         if (!matches(latestIdentity.data(), latestProfile.data()) || !required(latestProfile.data()!)) {
           throw new Error("Staff revocation identity changed");
@@ -600,7 +607,26 @@ async function fetchDocuments(
   return result;
 }
 
+type StaffImportLock = {
+  ref: FirebaseFirestore.DocumentReference;
+  token: string;
+};
+
+// 各書込トランザクションで再確認し、失効・交代した同期による上書きを防ぐ。
+function assertStaffImportLease(
+  lease: FirebaseFirestore.DocumentData | undefined,
+  companyId: string,
+  token: string
+): void {
+  if (!lease || lease.companyId !== companyId || lease.token !== token
+    || !(lease.leaseUntil instanceof Timestamp) || lease.leaseUntil.toMillis() <= Timestamp.now().toMillis()) {
+    throw new HttpsError("aborted", "スタッフ名簿同期の実行権限が失効しました。再実行してください。");
+  }
+}
+
 class BatchWriter {
+  constructor(private readonly companyId: string, private readonly lock: StaffImportLock) {}
+
   private pending: Array<{
     ref: FirebaseFirestore.DocumentReference;
     data: FirebaseFirestore.DocumentData;
@@ -623,6 +649,7 @@ class BatchWriter {
     if (!this.pending.length) return;
     const pending = this.pending;
     const committed = await db.runTransaction(async tx => {
+      assertStaffImportLease((await tx.get(this.lock.ref)).data(), this.companyId, this.lock.token);
       const refs = new Map(pending.filter(item => item.emailAction).map(item => [item.ref.path, item.ref]));
       const snapshots = await Promise.all([...refs.values()].map(ref => tx.get(ref)));
       const owners = new Map(snapshots.map(snap => [snap.ref.path, snap.data()]));
@@ -692,10 +719,9 @@ async function acquireLock(companyId: string): Promise<{
 }> {
   const ref = db.collection("syncLocks").doc(`${companyId}_staff_import`);
   const token = db.collection("_ids").doc().id;
-  const now = Timestamp.now();
-  const leaseUntil = Timestamp.fromMillis(now.toMillis() + 8 * 60 * 1000);
-
   await db.runTransaction(async (tx) => {
+    const now = Timestamp.now();
+    const leaseUntil = Timestamp.fromMillis(now.toMillis() + 10 * 60 * 1000);
     const snap = await tx.get(ref);
     const currentLease = snap.data()?.leaseUntil as Timestamp | undefined;
     if (currentLease && currentLease.toMillis() > now.toMillis()) {

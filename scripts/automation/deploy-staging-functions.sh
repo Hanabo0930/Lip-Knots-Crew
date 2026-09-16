@@ -85,6 +85,12 @@ for function_name in "${function_names[@]}"; do
     listMyMailApplications) service_name="listmymailapplications" ;;
     setSalesFloorClientSubmitted) service_name="setsalesfloorclientsubmitted" ;;
     submitPreContact) service_name="submitprecontact" ;;
+    previewStaffImport) service_name="previewstaffimport" ;;
+    syncStaffDirectoryReadOnly) service_name="syncstaffdirectoryreadonly" ;;
+    previewShiftImport) service_name="previewshiftimport" ;;
+    syncShiftSheetsReadOnly) service_name="syncshiftsheetsreadonly" ;;
+    retrySheetWriteIssue) service_name="retrysheetwriteissue" ;;
+    acknowledgeSheetWriteIssue) service_name="acknowledgesheetwriteissue" ;;
     getSheetWriteIssues) service_name="getsheetwriteissues" ;;
     getOperationsDashboard) service_name="getoperationsdashboard" ;;
     getStaffPerformance) service_name="getstaffperformance" ;;

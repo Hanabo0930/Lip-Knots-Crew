@@ -1,3 +1,4 @@
+import "./test-import-issues-auth-guard.mjs";
 import "./test-admin-core-auth-guard.mjs";
 import './test-staff-journey-auth-guard.mjs';
 import './test-business-recovery-auth-guard.mjs';
@@ -63,6 +64,12 @@ const expectedFunctions = [
   "updateNetPrintNumbers",
   "adminSetJobCancellation",
   "adminRestoreCancelledJob",
+  "previewStaffImport",
+  "syncStaffDirectoryReadOnly",
+  "previewShiftImport",
+  "syncShiftSheetsReadOnly",
+  "retrySheetWriteIssue",
+  "acknowledgeSheetWriteIssue",
 ];
 
 assert.deepEqual(
@@ -120,6 +127,12 @@ assert.match(
   "listMyDevices must map to its exact Cloud Run service",
 );
 for (const [functionName, serviceName] of [
+  ["previewStaffImport", "previewstaffimport"],
+  ["syncStaffDirectoryReadOnly", "syncstaffdirectoryreadonly"],
+  ["previewShiftImport", "previewshiftimport"],
+  ["syncShiftSheetsReadOnly", "syncshiftsheetsreadonly"],
+  ["retrySheetWriteIssue", "retrysheetwriteissue"],
+  ["acknowledgeSheetWriteIssue", "acknowledgesheetwriteissue"],
   ["applyToJob", "applytojob"],
   ["getMyTasks", "getmytasks"],
   ["listMyMailApplications", "listmymailapplications"],

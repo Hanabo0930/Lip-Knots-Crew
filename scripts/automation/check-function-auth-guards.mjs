@@ -20,6 +20,12 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "previewStaffImport",
+  "syncStaffDirectoryReadOnly",
+  "previewShiftImport",
+  "syncShiftSheetsReadOnly",
+  "retrySheetWriteIssue",
+  "acknowledgeSheetWriteIssue",
   "getSheetWriteIssues",
   "getOperationsDashboard",
   "getStaffPerformance",
@@ -107,6 +113,70 @@ function functionBlock(source, exportName) {
 }
 
 
+
+
+function checkImportIssues(name) {
+  const staff = ["previewStaffImport", "syncStaffDirectoryReadOnly"].includes(name);
+  const shift = ["previewShiftImport", "syncShiftSheetsReadOnly"].includes(name);
+  const source = sourceFile("functions/src/" + (staff ? "staff-import" : shift ? "shift-import" : "admin-operations") + ".ts");
+  const start = source.indexOf("export const " + name + " =");
+  const marker = staff || shift ? "\n);" : "\n});";
+  const end = source.indexOf(marker, start);
+  if (start < 0 || end < start) return false;
+  const compact = text => text.replace(/\s+/g, "");
+  const block = compact(source.slice(start, end + marker.length)), whole = compact(source);
+  const has = values => values.every(value => block.includes(value));
+  const utils = source.match(/import \{([^}]+)\} from "\.\/utils";/)?.[1] ?? "";
+  if (!/\brequireAdmin\b/.test(utils) || !/\bcompanyFromClaims\b/.test(utils)
+    || !has(["constsession=requireAdmin(request);", "constcompanyId=companyFromClaims(session.token);"])
+    || /(?:input|request\.data)\.(?:companyId|actorUid|uid)/.test(block)) return false;
+  const body = block.slice(block.indexOf("async(request)=>{") + "async(request)=>{".length);
+  if (!body.startsWith("constsession=requireAdmin(request);constcompanyId=companyFromClaims(session.token);")) return false;
+  if (staff || shift) {
+    const mode = name.startsWith("preview") ? "preview" : "commit";
+    const execute = staff ? "executeStaffImport" : "executeShiftImport";
+    if (!has(["RequestSchema.parse(request.data??{})", execute+'(companyId,"'+mode+'",input.sheetNames)'])
+      || !source.includes('from "./system-safety";')
+      || !whole.includes('if(mode==="commit")awaitassertProductionOperational(companyId);constconfig=awaitloadConfig(companyId);')
+      || !whole.includes(staff ? "stored.companyId!==undefined&&stored.companyId!==companyId" : "saved?.companyId!==undefined&&saved.companyId!==companyId")
+      || !whole.includes(staff ? "ConfigSchema.safeParse({...stored,companyId})" : "ConfigSchema.safeParse({...saved,companyId,})")) return false;
+    const reader = compact(sourceFile("functions/src/sheet-reader.ts"));
+    if (!reader.includes('scopes:["https://www.googleapis.com/auth/spreadsheets.readonly"]')
+      || /sheets\.spreadsheets\.(?:batchUpdate|values\.(?:update|append|clear|batchUpdate|batchClear))\(/.test(whole + reader)) return false;
+    const requirements = staff ? [
+      'if(mode==="commit"&&(!completeSelection||!completeRows))', 'if(failedSheets>0)',
+      'newBatchWriter(companyId,lock)', 'if(!lock)thrownewHttpsError("aborted",',
+      'lease.companyId!==companyId', 'lease.token!==token', '!(lease.leaseUntilinstanceofTimestamp)',
+      'lease.leaseUntil.toMillis()<=Timestamp.now().toMillis()',
+      'assertStaffImportLease((awaittx.get(this.lock.ref)).data(),this.companyId,this.lock.token);',
+      'assertStaffImportLease((awaitlock.ref.get()).data(),companyId,lock.token);awaitauth.revokeRefreshTokens(item.uid);',
+      'assertStaffImportLease((awaittx.get(lock.ref)).data(),companyId,lock.token);',
+      'constcommitted=awaitdb.runTransaction(asynctx=>{',
+      'current?.companyId===item.data.companyId&&current?.staffId===item.data.staffId',
+      'awaitdb.runTransaction(async(tx)=>{constnow=Timestamp.now();constleaseUntil=Timestamp.fromMillis(now.toMillis()+10*60*1000);',
+    ] : [
+      'awaitwriteJobsAndLocks(allJobs,staffIndex.byName,runRef?.id??"",lock)',
+      'const[leaseSnap]=awaittx.getAll(lock.ref);', 'lease.token!==lock.token',
+      'lease.companyId!==chunk[0]?.companyId', '!(lease.leaseUntilinstanceofTimestamp)',
+      'lease.leaseUntil.toMillis()<=Timestamp.now().toMillis()',
+    ];
+    return requirements.every(value => whole.includes(value));
+  }
+  if (!has(['QueueActionSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
+    'constsnap=awaittx.get(ref);', '!snap.exists||snap.data()?.companyId!==companyId', 'tx.update(ref,{',
+    'tx.set(auditRef,{companyId,actorUid:session.uid,'])) return false;
+  if (name === "retrySheetWriteIssue") return has([
+    'awaitassertProductionOperational(companyId);', 'if(!canManuallyRetrySheetWrite({',
+    'writeVerificationRequired:data.writeVerificationRequired', 'status:"pending",attempts:0,',
+    'manualRetryBy:session.uid', 'action:"sheet.issue.retry"',
+  ]);
+  return has([
+    'if(data.status==="acknowledged")', 'data.acknowledgedBy===session.uid&&data.acknowledgedNote===input.note',
+    'if(!["blocked","dead_letter","retry_wait","error","paused_global"].includes(String(data.status??"")))',
+    'status:"acknowledged",acknowledgedFromStatus:data.status,acknowledgedBy:session.uid',
+    'action:"sheet.issue.acknowledge"', 'return{acknowledged:true,sourceWriteVerified:false};',
+  ]);
+}
 
 function checkAdminCore(name) {
   const modules = { getSheetWriteIssues: "admin-operations", getOperationsDashboard: "analytics", getStaffPerformance: "analytics", createAdminJobGroup: "job-management", updateJobPublication: "job-management", adminEditJobInputs: "job-management", generateJobExport: "job-management", updateNetPrintNumbers: "netprint", adminSetJobCancellation: "analytics", adminRestoreCancelledJob: "analytics" };
@@ -865,6 +935,12 @@ function checkProcessNotificationQueue() {
 }
 
 const checkers = {
+  previewStaffImport: () => checkImportIssues("previewStaffImport"),
+  syncStaffDirectoryReadOnly: () => checkImportIssues("syncStaffDirectoryReadOnly"),
+  previewShiftImport: () => checkImportIssues("previewShiftImport"),
+  syncShiftSheetsReadOnly: () => checkImportIssues("syncShiftSheetsReadOnly"),
+  retrySheetWriteIssue: () => checkImportIssues("retrySheetWriteIssue"),
+  acknowledgeSheetWriteIssue: () => checkImportIssues("acknowledgeSheetWriteIssue"),
   getSheetWriteIssues: () => checkAdminCore("getSheetWriteIssues"),
   getOperationsDashboard: () => checkAdminCore("getOperationsDashboard"),
   getStaffPerformance: () => checkAdminCore("getStaffPerformance"),

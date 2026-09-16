@@ -46,6 +46,12 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `getResubmissionComparison`
 - `driveFilePreview`
 - `createUploadSession`
+- `previewStaffImport`
+- `syncStaffDirectoryReadOnly`
+- `previewShiftImport`
+- `syncShiftSheetsReadOnly`
+- `retrySheetWriteIssue`
+- `acknowledgeSheetWriteIssue`
 - `getSheetWriteIssues`
 - `getOperationsDashboard`
 - `getStaffPerformance`
@@ -97,6 +103,12 @@ guards cannot be changed by the deployment source branch.
 The only Cloud Run services whose Invoker IAM check may be changed are:
 
 - `createuploadsession`
+- `previewstaffimport`
+- `syncstaffdirectoryreadonly`
+- `previewshiftimport`
+- `syncshiftsheetsreadonly`
+- `retrysheetwriteissue`
+- `acknowledgesheetwriteissue`
 - `getsheetwriteissues`
 - `getoperationsdashboard`
 - `getstaffperformance`
@@ -242,3 +254,5 @@ Standing completion authorization includes the five staff journey callables list
 ## Admin core staging recovery (2026-09-16)
 
 Standing completion authorization includes the ten admin core callables listed above through normal CI, merge, and protected staging deployment. Preserve authentication, company boundaries, shift-lock ownership, source comparisons, and upload/transfer pause state. Back up the existing deployments and verify the required indexes. This permits no business document operations, original-sheet writes, real messages, or production access.
+
+- 取込・同期・書込問題管理6 API（previewStaffImport/syncStaffDirectoryReadOnly/previewShiftImport/syncShiftSheetsReadOnly/retrySheetWriteIssue/acknowledgeSheetWriteIssue）も完成までの包括承認によるSTAGING限定反映へ含める。既存6配備物の固定世代退避、正式CI/通常マージ/保護環境を必須とする。定期実行関数は配備対象外。原本は読取専用、実業務を使う同期commit/再試行/確認記録は行わず、転送pausedを維持する。

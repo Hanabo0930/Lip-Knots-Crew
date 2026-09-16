@@ -56,7 +56,13 @@
     "generateJobExport",
     "updateNetPrintNumbers",
     "adminSetJobCancellation",
-    "adminRestoreCancelledJob"
+    "adminRestoreCancelledJob",
+    "previewStaffImport",
+    "syncStaffDirectoryReadOnly",
+    "previewShiftImport",
+    "syncShiftSheetsReadOnly",
+    "retrySheetWriteIssue",
+    "acknowledgeSheetWriteIssue"
   ],
   "allowedHostingTargets": [
     "staff",

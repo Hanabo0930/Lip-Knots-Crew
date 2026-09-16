@@ -1,8 +1,8 @@
-import { Timestamp } from "firebase-admin/firestore";
+import { Timestamp, Transaction } from "firebase-admin/firestore";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { z } from "zod";
 import { db } from "./firebase";
-import { enqueueNotification } from "./notification-core";
+import { notificationQueueId, queueDocumentData } from "./notification-core";
 import {
   evaluatePilotExpansion,
   PilotExpansionAutomated,
@@ -135,21 +135,42 @@ export const submitPilotOutcome = onCall(async (request) => {
   if (!outcome.evidenceRefs.length) {
     throw new HttpsError("invalid-argument", "証拠参照を1件以上入力してください。");
   }
-  const automated = await collectAutomatedMetrics(input.rolloutId, rollout, companyId);
-  const gate = evaluatePilotExpansion(automated, outcome);
   const now = Timestamp.now();
-  const reviewStatus = gate.eligible ? "pending_approval" : "blocked";
-  const rolloutStatus = gate.eligible ? "expansion_review_pending" : "expansion_blocked";
   const reviewRef = db.collection("pilotExpansionReviews").doc(input.rolloutId);
 
-  await db.runTransaction(async (tx) => {
-    const current = await tx.get(rolloutRef);
+  const eventId = requestId("pilot_expansion");
+
+  const result = await db.runTransaction(async (tx) => {
+    const [current, currentReview] = await Promise.all([
+      tx.get(rolloutRef),
+      tx.get(reviewRef),
+    ]);
     if (!current.exists || current.data()?.companyId !== companyId) {
       throw new HttpsError("not-found", "パイロットが見つかりません。");
     }
     if (!REVIEWABLE_STATUSES.has(String(current.data()?.status ?? ""))) {
       throw new HttpsError("already-exists", "このパイロットには提出済みの結果があります。");
     }
+    if (currentReview.exists && currentReview.data()?.companyId !== companyId) {
+      throw new HttpsError("not-found", "移行審査が見つかりません。");
+    }
+    if (!rolloutSnap.updateTime || !current.updateTime?.isEqual(rolloutSnap.updateTime)) {
+      throw new HttpsError("aborted", "パイロットが更新されました。再読込してください。");
+    }
+    const automated = await collectAutomatedMetrics(input.rolloutId, rollout, companyId, tx);
+    const gate = evaluatePilotExpansion(automated, outcome);
+    const reviewStatus = gate.eligible ? "pending_approval" : "blocked";
+    const rolloutStatus = gate.eligible ? "expansion_review_pending" : "expansion_blocked";
+    const notification = prepareAdminNotification({
+      companyId,
+      title: gate.eligible ? "パイロット結果の別管理者承認が必要です" : "パイロット拡大ゲートを停止しました",
+      body: gate.eligible
+        ? "30〜50名への移行は、結果提出者とは別の管理者が承認するまでロックされています。"
+        : `未達項目：${gate.blockers.map((item) => item.label).join(" / ")}`,
+      category: gate.eligible ? "pilot_expansion_review" : "pilot_expansion_blocked",
+      dedupeKey: eventId,
+      urgent: !gate.eligible,
+    });
     tx.set(reviewRef, {
       companyId,
       rolloutId: input.rolloutId,
@@ -174,7 +195,8 @@ export const submitPilotOutcome = onCall(async (request) => {
       expansionGateFingerprint: gate.fingerprint,
       updatedAt: now,
     }, { merge: true });
-    tx.set(db.collection("auditLogs").doc(), {
+    tx.create(notification.ref, notification.data);
+    tx.set(db.collection("auditLogs").doc(eventId), {
       companyId,
       actorUid: session.uid,
       action: "pilot.expansion.outcome_submitted",
@@ -183,22 +205,13 @@ export const submitPilotOutcome = onCall(async (request) => {
       blockerKeys: gate.blockers.map((item) => item.key),
       warningKeys: gate.warnings.map((item) => item.key),
       fingerprint: gate.fingerprint,
-      requestId: requestId("pilot_expansion"),
+      requestId: eventId,
       createdAt: now,
     });
+    return { reviewStatus, rolloutStatus, gate };
   });
 
-  await notifyAdmins({
-    companyId,
-    title: gate.eligible ? "パイロット結果の別管理者承認が必要です" : "パイロット拡大ゲートを停止しました",
-    body: gate.eligible
-      ? "30〜50名への移行は、結果提出者とは別の管理者が承認するまでロックされています。"
-      : `未達項目：${gate.blockers.map((item) => item.label).join(" / ")}`,
-    category: gate.eligible ? "pilot_expansion_review" : "pilot_expansion_blocked",
-    dedupeKey: `${input.rolloutId}_${gate.fingerprint}`,
-    urgent: !gate.eligible,
-  });
-  return { reviewStatus, rolloutStatus, gate };
+  return result;
 });
 
 export const decidePilotExpansion = onCall(async (request) => {
@@ -217,33 +230,54 @@ export const decidePilotExpansion = onCall(async (request) => {
   if (review.status !== "pending_approval" || rollout.status !== "expansion_review_pending") {
     throw new HttpsError("failed-precondition", "承認待ちの移行審査ではありません。");
   }
-  if (review.submittedBy === session.uid) {
+  if (typeof review.submittedBy !== "string" || !review.submittedBy.trim() ||
+      review.submittedBy === session.uid) {
     throw new HttpsError("permission-denied", "結果提出者とは別の管理者による承認が必要です。");
   }
   if (!review.outcome || !review.fingerprint) {
     throw new HttpsError("failed-precondition", "審査データが不足しています。結果を再提出してください。");
   }
-  const automated = await collectAutomatedMetrics(input.rolloutId, rollout, companyId);
-  const gate = evaluatePilotExpansion(automated, review.outcome);
-  if (input.decision === "approve" && (!gate.eligible || gate.fingerprint !== review.fingerprint)) {
-    throw new HttpsError(
-      "failed-precondition",
-      "自動集計値が提出時から変化したか、移行条件を満たしていません。結果を再提出してください。"
-    );
-  }
+  const outcome = review.outcome;
   const now = Timestamp.now();
   const approvalRef = db.collection("pilotExpansionApprovals").doc(input.rolloutId);
+
+  const eventId = requestId("pilot_expansion");
 
   await db.runTransaction(async (tx) => {
     const [currentRollout, currentReview] = await Promise.all([
       tx.get(rolloutRef),
       tx.get(reviewRef),
     ]);
-    if (currentRollout.data()?.status !== "expansion_review_pending" ||
+    if (!currentRollout.exists || !currentReview.exists ||
+        currentRollout.data()?.companyId !== companyId ||
+        currentReview.data()?.companyId !== companyId ||
+        currentReview.data()?.submittedBy !== review.submittedBy ||
+        currentReview.data()?.submittedBy === session.uid ||
+        !rolloutSnap.updateTime || !currentRollout.updateTime?.isEqual(rolloutSnap.updateTime) ||
+        !reviewSnap.updateTime || !currentReview.updateTime?.isEqual(reviewSnap.updateTime) ||
+        currentRollout.data()?.status !== "expansion_review_pending" ||
         currentReview.data()?.status !== "pending_approval" ||
         currentReview.data()?.fingerprint !== review.fingerprint) {
       throw new HttpsError("aborted", "審査状態が更新されました。再読込してください。");
     }
+    const automated = await collectAutomatedMetrics(input.rolloutId, rollout, companyId, tx);
+    const gate = evaluatePilotExpansion(automated, outcome);
+    if (input.decision === "approve" && (!gate.eligible || gate.fingerprint !== review.fingerprint)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "自動集計値が提出時から変化したか、移行条件を満たしていません。結果を再提出してください。"
+      );
+    }
+    const notification = prepareAdminNotification({
+      companyId,
+      title: input.decision === "approve" ? "30〜50名移行ゲートを承認しました" : "30〜50名移行ゲートを否認しました",
+      body: input.decision === "approve"
+        ? "承認証跡を保存しました。配布は自動実行されません。"
+        : input.note.trim(),
+      category: input.decision === "approve" ? "pilot_expansion_approved" : "pilot_expansion_rejected",
+      dedupeKey: eventId,
+      urgent: input.decision === "reject",
+    });
     if (input.decision === "approve") {
       tx.create(approvalRef, {
         companyId,
@@ -285,7 +319,8 @@ export const decidePilotExpansion = onCall(async (request) => {
         updatedAt: now,
       }, { merge: true });
     }
-    tx.set(db.collection("auditLogs").doc(), {
+    tx.create(notification.ref, notification.data);
+    tx.set(db.collection("auditLogs").doc(eventId), {
       companyId,
       actorUid: session.uid,
       action: input.decision === "approve"
@@ -295,21 +330,11 @@ export const decidePilotExpansion = onCall(async (request) => {
       submitterUid: review.submittedBy,
       fingerprint: review.fingerprint,
       note: input.note.trim(),
-      requestId: requestId("pilot_expansion"),
+      requestId: eventId,
       createdAt: now,
     });
   });
 
-  await notifyAdmins({
-    companyId,
-    title: input.decision === "approve" ? "30〜50名移行ゲートを承認しました" : "30〜50名移行ゲートを否認しました",
-    body: input.decision === "approve"
-      ? "承認証跡を保存しました。配布は自動実行されません。"
-      : input.note.trim(),
-    category: input.decision === "approve" ? "pilot_expansion_approved" : "pilot_expansion_rejected",
-    dedupeKey: `${input.rolloutId}_${input.decision}`,
-    urgent: input.decision === "reject",
-  });
   return { decision: input.decision, rolloutStatus: input.decision === "approve" ? "expansion_approved" : "expansion_rejected" };
 });
 
@@ -329,11 +354,14 @@ async function findRollout(companyId: string, rolloutId?: string) {
 async function collectAutomatedMetrics(
   rolloutId: string,
   rollout: PilotRolloutRecord,
-  companyId: string
+  companyId: string,
+  transaction?: Transaction
 ): Promise<PilotExpansionAutomated> {
+  const healthQuery = db.collection("pilotHealthRuns").where("companyId", "==", companyId).where("rolloutId", "==", rolloutId).limit(5000);
+  const alertQuery = db.collection("pilotAlerts").where("companyId", "==", companyId).where("rolloutId", "==", rolloutId).limit(2000);
   const [healthRuns, alerts] = await Promise.all([
-    db.collection("pilotHealthRuns").where("companyId", "==", companyId).where("rolloutId", "==", rolloutId).limit(5000).get(),
-    db.collection("pilotAlerts").where("companyId", "==", companyId).where("rolloutId", "==", rolloutId).limit(2000).get(),
+    transaction ? transaction.get(healthQuery) : healthQuery.get(),
+    transaction ? transaction.get(alertQuery) : alertQuery.get(),
   ]);
   const startedMs = millis(rollout.startedAt);
   const endMs = millis(rollout.completedAt) || millis(rollout.endsAt) || Date.now();
@@ -379,31 +407,28 @@ function safeReview(review: ExpansionReviewRecord, currentUid: string) {
   };
 }
 
-async function notifyAdmins(input: {
+function prepareAdminNotification(input: {
   companyId: string;
   title: string;
   body: string;
   category: string;
   dedupeKey: string;
   urgent?: boolean;
-}): Promise<void> {
-  try {
-    await enqueueNotification({
-      companyId: input.companyId,
-      targetRole: "admin",
-      title: input.title,
-      body: input.body.slice(0, 500),
-      route: "/",
-      category: input.category,
-      dedupeKey: input.dedupeKey,
-      bypassQuietHours: input.urgent === true,
-    });
-  } catch (error) {
-    console.error("pilot_expansion_notification_failed", {
-      category: input.category,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+}) {
+  const notification = {
+    companyId: input.companyId,
+    targetRole: "admin" as const,
+    title: input.title,
+    body: input.body.slice(0, 500),
+    route: "/",
+    category: input.category,
+    dedupeKey: input.dedupeKey,
+    bypassQuietHours: input.urgent === true,
+  };
+  return {
+    ref: db.collection("notificationQueue").doc(notificationQueueId(notification)),
+    data: queueDocumentData(notification),
+  };
 }
 
 function millis(value?: Timestamp): number {

@@ -20,6 +20,8 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "submitPilotOutcome",
+  "decidePilotExpansion",
   "getPilotReadiness",
   "getPilotExpansionReview",
   "getProductionControlStatus",
@@ -146,6 +148,21 @@ function functionBlock(source, exportName) {
 
 
 
+
+function checkPilotExpansionMutation(name) {
+  const source=sourceFile('functions/src/pilot-expansion.ts'),start=source.indexOf('export const '+name),end=source.indexOf('\n});',start);
+  if(start<0||end<start)return false;
+  const compact=s=>s.replace(/\s+/g,''),block=compact(source.slice(start,end+4)),whole=compact(source),tx=block.slice(block.indexOf('db.runTransaction('));
+  const prefix=new RegExp('^exportconst'+name+'=onCall\\(async\\(request\\)=>\\{constsession=requireAdmin\\(request\\);constcompanyId=companyFromClaims\\(session.token\\);');
+  const imported=source.match(/import\s*\{([^}]+)\}\s*from\s*"\.\/utils";/)?.[1]??'';
+  if(!prefix.test(block)||!/\brequireAdmin\b/.test(imported)||!/\bcompanyFromClaims\b/.test(imported))return false;
+  if(!['rolloutSnap.data()?.companyId!==companyId','consteventId=requestId("pilot_expansion");','dedupeKey:eventId','requestId:eventId'].every(x=>block.includes(x)))return false;
+  if(block.indexOf('consteventId=')>block.indexOf('db.runTransaction('))return false;
+  if(!['collectAutomatedMetrics(input.rolloutId,rollout,companyId,tx)','tx.create(notification.ref,notification.data)','tx.set(db.collection("auditLogs").doc(eventId),','tx.set(reviewRef,','tx.set(rolloutRef,'].every(x=>tx.includes(x)))return false;
+  if(!['db.collection("pilotHealthRuns").where("companyId","==",companyId).where("rolloutId","==",rolloutId)','db.collection("pilotAlerts").where("companyId","==",companyId).where("rolloutId","==",rolloutId)','transaction?transaction.get(healthQuery):healthQuery.get()','transaction?transaction.get(alertQuery):alertQuery.get()','targetRole:"admin"asconst','db.collection("notificationQueue").doc(notificationQueueId(notification))','data:queueDocumentData(notification)'].every(x=>whole.includes(x))||whole.includes('enqueueNotification('))return false;
+  if(name==='submitPilotOutcome')return ['current.data()?.companyId!==companyId','currentReview.exists&&currentReview.data()?.companyId!==companyId','!rolloutSnap.updateTime||!current.updateTime?.isEqual(rolloutSnap.updateTime)','REVIEWABLE_STATUSES.has(String(current.data()?.status??""))','constgate=evaluatePilotExpansion(automated,outcome)'].every(x=>tx.includes(x));
+  return ['typeofreview.submittedBy!=="string"||!review.submittedBy.trim()||review.submittedBy===session.uid','reviewSnap.data()?.companyId!==companyId'].every(x=>block.includes(x))&&['currentRollout.data()?.companyId!==companyId','currentReview.data()?.companyId!==companyId','currentReview.data()?.submittedBy!==review.submittedBy','currentReview.data()?.submittedBy===session.uid','!rolloutSnap.updateTime||!currentRollout.updateTime?.isEqual(rolloutSnap.updateTime)','!reviewSnap.updateTime||!currentReview.updateTime?.isEqual(reviewSnap.updateTime)','currentReview.data()?.fingerprint!==review.fingerprint','input.decision==="approve"&&(!gate.eligible||gate.fingerprint!==review.fingerprint)','tx.create(approvalRef,'].every(x=>tx.includes(x));
+}
 
 function checkReadiness(name) {
   const modules={getPilotReadiness:'sheet-row-creation',getPilotExpansionReview:'pilot-expansion',getProductionControlStatus:'production-control',getProductionSloDashboard:'production-slo'};
@@ -1080,6 +1097,8 @@ function checkProcessNotificationQueue() {
 }
 
 const checkers = {
+  submitPilotOutcome: () => checkPilotExpansionMutation("submitPilotOutcome"),
+  decidePilotExpansion: () => checkPilotExpansionMutation("decidePilotExpansion"),
   getPilotReadiness: () => checkReadiness("getPilotReadiness"),
   getPilotExpansionReview: () => checkReadiness("getPilotExpansionReview"),
   getProductionControlStatus: () => checkReadiness("getProductionControlStatus"),

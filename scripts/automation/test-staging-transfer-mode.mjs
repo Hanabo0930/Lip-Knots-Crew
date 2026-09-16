@@ -32,7 +32,8 @@ for(const values of [
 check('other functions unchanged',()=>assert.equal(resolveTransferMode({requested:'preserve',functions:['bootstrapSession']}),null));
 const temp=fs.mkdtempSync(path.join(os.tmpdir(),'lkc-transfer-mode-test-'));
 fs.mkdirSync(path.join(temp,'functions/src'),{recursive:true});
-fs.writeFileSync(path.join(temp,'functions/src/uploads.ts'),'submissionTransferPaused(companyId); pausedTransferSource;');
+const validUploads=fs.readFileSync(new URL('../../functions/src/uploads.ts',import.meta.url),'utf8');
+fs.writeFileSync(path.join(temp,'functions/src/uploads.ts'),validUploads);
 fs.writeFileSync(path.join(temp,'functions/src/submission-transfer-control.ts'),'process.env.LKC_SUBMISSION_TRANSFER_MODE');
 const dotenv=path.join(temp,'functions/.env.'+project),base='APP_ENVIRONMENT=staging\nEXPECTED_FIREBASE_PROJECT_ID='+project+'\nDUMMY_SECRET=synthetic-do-not-print\n';
 const options={project,region,requested:'preserve',functions:target,sourceDirectory:temp,describe:()=>current('paused')};
@@ -80,4 +81,36 @@ check('trusted helper runs before deploy',()=>{
  assert.ok(workflow.indexOf('run: node scripts/automation/materialize-staging-transfer-mode.mjs')<workflow.indexOf('run: bash scripts/automation/deploy-staging-functions.sh'));
  assert.match(workflow,/Preserve or explicitly set submission transfer mode\s+working-directory: guardrails/);
 });
+
+const entry='createUploadSession';
+for(const saved of ['active','paused','acceptance'])check('entry inherits '+saved,()=>assert.equal(resolveTransferMode({requested:'preserve',functions:[entry],current:current(saved),supportsControl:true,supportsAcceptance:true}).mode,saved));
+for(const requested of ['active','paused','acceptance'])for(const functions of [[target,entry],[entry,target]])check('paired switch '+requested+'/'+functions,()=>assert.equal(resolveTransferMode({requested,functions,current:current('paused'),supportsControl:true,supportsAcceptance:true}).mode,requested));
+for(const values of [
+ {functions:[entry],requested:'active'},
+ {functions:[entry],requested:'paused'},
+ {functions:[entry],requested:'acceptance'},
+ {functions:[target,entry,'bootstrapSession'],requested:'paused'},
+ {functions:[entry,entry]},
+ {functions:[entry],current:current('invalid')},
+ {functions:[entry],current:{...current('paused'),state:'DEPLOYING'}},
+ {functions:[entry],supportsControl:false},
+ {functions:[entry],current:current('acceptance'),supportsAcceptance:false},
+])check('entry/pair rejection '+JSON.stringify(values),()=>assert.throws(()=>resolveTransferMode({requested:'preserve',functions:[target,entry],current:current('paused'),supportsControl:true,supportsAcceptance:true,...values})));
+check('entry-only deployment writes the actual existing pause',()=>{
+ fs.writeFileSync(dotenv,base);fs.writeFileSync(controlPath,validControl);fs.writeFileSync(path.join(temp,'functions/src/uploads.ts'),validUploads);
+ assert.equal(materializeTransferMode({...options,functions:entry}).mode,'paused');
+ assert.equal(fs.readFileSync(dotenv,'utf8'),base+'LKC_SUBMISSION_TRANSFER_MODE=paused\n');
+});
+check('entry control is checked in its own handler',()=>{
+ fs.writeFileSync(dotenv,base);
+ fs.writeFileSync(path.join(temp,'functions/src/uploads.ts'),validUploads.replace('if (await submissionTransferPaused(companyId)) throw','if (false) throw'));
+ assert.throws(()=>materializeTransferMode({...options,functions:entry}),/SOURCE_TRANSFER_CONTROL_MISSING/);
+ assert.equal(fs.readFileSync(dotenv,'utf8'),base);
+});
+check('paired acceptance applies exactly one shared setting',()=>{
+ fs.writeFileSync(dotenv,base);fs.writeFileSync(path.join(temp,'functions/src/uploads.ts'),validUploads);
+ assert.equal(materializeTransferMode({...options,functions:entry+','+target,requested:'acceptance'}).mode,'acceptance');
+ assert.equal(fs.readFileSync(dotenv,'utf8'),base+'LKC_SUBMISSION_TRANSFER_MODE=acceptance\n');
+});
+
 console.log(JSON.stringify({stagingTransferModeTests:passed,cloudWritten:false}));

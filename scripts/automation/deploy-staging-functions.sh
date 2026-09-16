@@ -54,6 +54,7 @@ for function_name in "${function_names[@]}"; do
     getSubmissionProcessingStatus) service_name="getsubmissionprocessingstatus" ;;
     getResubmissionComparison) service_name="getresubmissioncomparison" ;;
     driveFilePreview) service_name="drivefilepreview" ;;
+    createUploadSession) service_name="createuploadsession" ;;
     finalizeStagedUpload) service_name="" ;;
     registerDeviceSession) service_name="registerdevicesession" ;;
     heartbeatDeviceSession) service_name="heartbeatdevicesession" ;;

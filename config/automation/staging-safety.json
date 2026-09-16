@@ -62,7 +62,22 @@
     "previewShiftImport",
     "syncShiftSheetsReadOnly",
     "retrySheetWriteIssue",
-    "acknowledgeSheetWriteIssue"
+    "acknowledgeSheetWriteIssue",
+    "getAutomationRegistry",
+    "saveAutomationRegistry",
+    "cancelAutomationRegistryAttempt",
+    "listHeldMailApplications",
+    "getHeldMailApplication",
+    "recheckHeldMailApplication",
+    "cancelHeldMailApplicationReview",
+    "previewCaseMailCampaignRegistration",
+    "registerCaseMailCampaign",
+    "cancelCaseMailCampaignRegistration",
+    "getCaseMailImportSnapshot",
+    "listAutomationNoticeReceipts",
+    "getAutomationNoticeHandoff",
+    "receiveCaseMailApplication",
+    "receiveAutomationNoticeReceipt"
   ],
   "allowedHostingTargets": [
     "staff",

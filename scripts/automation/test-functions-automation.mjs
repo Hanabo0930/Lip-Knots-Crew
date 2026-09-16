@@ -1,3 +1,5 @@
+import "./test-staging-firebase-deploy.mjs";
+import "./test-external-handoff-auth-guard.mjs";
 import "./test-import-issues-auth-guard.mjs";
 import "./test-admin-core-auth-guard.mjs";
 import './test-staff-journey-auth-guard.mjs';
@@ -70,6 +72,21 @@ const expectedFunctions = [
   "syncShiftSheetsReadOnly",
   "retrySheetWriteIssue",
   "acknowledgeSheetWriteIssue",
+  "getAutomationRegistry",
+  "saveAutomationRegistry",
+  "cancelAutomationRegistryAttempt",
+  "listHeldMailApplications",
+  "getHeldMailApplication",
+  "recheckHeldMailApplication",
+  "cancelHeldMailApplicationReview",
+  "previewCaseMailCampaignRegistration",
+  "registerCaseMailCampaign",
+  "cancelCaseMailCampaignRegistration",
+  "getCaseMailImportSnapshot",
+  "listAutomationNoticeReceipts",
+  "getAutomationNoticeHandoff",
+  "receiveCaseMailApplication",
+  "receiveAutomationNoticeReceipt",
 ];
 
 assert.deepEqual(
@@ -127,6 +144,21 @@ assert.match(
   "listMyDevices must map to its exact Cloud Run service",
 );
 for (const [functionName, serviceName] of [
+  ["getAutomationRegistry", "getautomationregistry"],
+  ["saveAutomationRegistry", "saveautomationregistry"],
+  ["cancelAutomationRegistryAttempt", "cancelautomationregistryattempt"],
+  ["listHeldMailApplications", "listheldmailapplications"],
+  ["getHeldMailApplication", "getheldmailapplication"],
+  ["recheckHeldMailApplication", "recheckheldmailapplication"],
+  ["cancelHeldMailApplicationReview", "cancelheldmailapplicationreview"],
+  ["previewCaseMailCampaignRegistration", "previewcasemailcampaignregistration"],
+  ["registerCaseMailCampaign", "registercasemailcampaign"],
+  ["cancelCaseMailCampaignRegistration", "cancelcasemailcampaignregistration"],
+  ["getCaseMailImportSnapshot", "getcasemailimportsnapshot"],
+  ["listAutomationNoticeReceipts", "listautomationnoticereceipts"],
+  ["getAutomationNoticeHandoff", "getautomationnoticehandoff"],
+  ["receiveCaseMailApplication", "receivecasemailapplication"],
+  ["receiveAutomationNoticeReceipt", "receiveautomationnoticereceipt"],
   ["previewStaffImport", "previewstaffimport"],
   ["syncStaffDirectoryReadOnly", "syncstaffdirectoryreadonly"],
   ["previewShiftImport", "previewshiftimport"],

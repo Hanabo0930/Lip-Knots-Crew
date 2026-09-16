@@ -46,6 +46,21 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `getResubmissionComparison`
 - `driveFilePreview`
 - `createUploadSession`
+- `getAutomationRegistry`
+- `saveAutomationRegistry`
+- `cancelAutomationRegistryAttempt`
+- `listHeldMailApplications`
+- `getHeldMailApplication`
+- `recheckHeldMailApplication`
+- `cancelHeldMailApplicationReview`
+- `previewCaseMailCampaignRegistration`
+- `registerCaseMailCampaign`
+- `cancelCaseMailCampaignRegistration`
+- `getCaseMailImportSnapshot`
+- `listAutomationNoticeReceipts`
+- `getAutomationNoticeHandoff`
+- `receiveCaseMailApplication`
+- `receiveAutomationNoticeReceipt`
 - `previewStaffImport`
 - `syncStaffDirectoryReadOnly`
 - `previewShiftImport`
@@ -103,6 +118,21 @@ guards cannot be changed by the deployment source branch.
 The only Cloud Run services whose Invoker IAM check may be changed are:
 
 - `createuploadsession`
+- `getautomationregistry`
+- `saveautomationregistry`
+- `cancelautomationregistryattempt`
+- `listheldmailapplications`
+- `getheldmailapplication`
+- `recheckheldmailapplication`
+- `cancelheldmailapplicationreview`
+- `previewcasemailcampaignregistration`
+- `registercasemailcampaign`
+- `cancelcasemailcampaignregistration`
+- `getcasemailimportsnapshot`
+- `listautomationnoticereceipts`
+- `getautomationnoticehandoff`
+- `receivecasemailapplication`
+- `receiveautomationnoticereceipt`
 - `previewstaffimport`
 - `syncstaffdirectoryreadonly`
 - `previewshiftimport`
@@ -256,3 +286,5 @@ Standing completion authorization includes the five staff journey callables list
 Standing completion authorization includes the ten admin core callables listed above through normal CI, merge, and protected staging deployment. Preserve authentication, company boundaries, shift-lock ownership, source comparisons, and upload/transfer pause state. Back up the existing deployments and verify the required indexes. This permits no business document operations, original-sheet writes, real messages, or production access.
 
 - 取込・同期・書込問題管理6 API（previewStaffImport/syncStaffDirectoryReadOnly/previewShiftImport/syncShiftSheetsReadOnly/retrySheetWriteIssue/acknowledgeSheetWriteIssue）も完成までの包括承認によるSTAGING限定反映へ含める。既存6配備物の固定世代退避、正式CI/通常マージ/保護環境を必須とする。定期実行関数は配備対象外。原本は読取専用、実業務を使う同期commit/再試行/確認記録は行わず、転送pausedを維持する。
+
+- 外部連携15 API（getAutomationRegistry/saveAutomationRegistry/cancelAutomationRegistryAttempt/listHeldMailApplications/getHeldMailApplication/recheckHeldMailApplication/cancelHeldMailApplicationReview/previewCaseMailCampaignRegistration/registerCaseMailCampaign/cancelCaseMailCampaignRegistration/getCaseMailImportSnapshot/listAutomationNoticeReceipts/getAutomationNoticeHandoff/receiveCaseMailApplication/receiveAutomationNoticeReceipt）を、正式CI/通常マージ/保護環境経由のSTAGING限定配備へ含める。初回callableの公開IAM作成要求は固定版CLIアダプターで対象プロジェクト/リージョン/指定関数/public単独を照合し、IAMを書かず既存のCloud Run設定・公開binding不存在検証へ委ねる。アプリ内認証は必須。mainのfirestore.indexes.jsonと完全一致するautomationApplicationReceipts（companyId/route/__name__ ASC）とautomationNoticeReceipts（companyId/current.jobId/__name__ ASC）のCOLLECTION索引2定義のみ不足時に作成可能。索引変更/削除、Rules、実業務文書更新、実受信/実送信、原本書込、Productionは対象外。受付/転送pausedを維持する。

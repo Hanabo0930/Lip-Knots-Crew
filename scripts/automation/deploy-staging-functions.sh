@@ -23,11 +23,6 @@ if [[ -z "$lkc_source_directory" || ! -f "$lkc_source_directory/firebase.json" ]
 fi
 
 IFS=',' read -r -a function_names <<< "$lkc_functions"
-only_targets=()
-for function_name in "${function_names[@]}"; do
-  only_targets+=("functions:${function_name}")
-done
-only_csv="$(IFS=,; echo "${only_targets[*]}")"
 
 echo "DEPLOY_PROJECT=$lkc_project"
 echo "DEPLOY_REGION=$lkc_region"
@@ -37,13 +32,10 @@ echo "DEPLOY_RULES=false"
 echo "DEPLOY_FIRESTORE=false"
 echo "DEPLOY_STORAGE=false"
 
-(
-  cd "$lkc_source_directory"
-  npx --yes firebase-tools@15.24.0 deploy \
-    --only "$only_csv" \
-    --project "$lkc_project" \
-    --non-interactive
-)
+lkc_trusted_runner="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run-staging-firebase-deploy.cjs"
+export LKC_PROJECT_ID="$lkc_project" LKC_REGION="$lkc_region" LKC_SOURCE_REF="$lkc_source_ref"
+export LKC_FUNCTIONS="$lkc_functions" LKC_CONFIRMATION="$lkc_confirmation" LKC_SOURCE_DIRECTORY="$lkc_source_directory"
+npx --yes --package=firebase-tools@15.24.0 -- node "$lkc_trusted_runner"
 
 for function_name in "${function_names[@]}"; do
   service_name=""
@@ -85,6 +77,21 @@ for function_name in "${function_names[@]}"; do
     listMyMailApplications) service_name="listmymailapplications" ;;
     setSalesFloorClientSubmitted) service_name="setsalesfloorclientsubmitted" ;;
     submitPreContact) service_name="submitprecontact" ;;
+    getAutomationRegistry) service_name="getautomationregistry" ;;
+    saveAutomationRegistry) service_name="saveautomationregistry" ;;
+    cancelAutomationRegistryAttempt) service_name="cancelautomationregistryattempt" ;;
+    listHeldMailApplications) service_name="listheldmailapplications" ;;
+    getHeldMailApplication) service_name="getheldmailapplication" ;;
+    recheckHeldMailApplication) service_name="recheckheldmailapplication" ;;
+    cancelHeldMailApplicationReview) service_name="cancelheldmailapplicationreview" ;;
+    previewCaseMailCampaignRegistration) service_name="previewcasemailcampaignregistration" ;;
+    registerCaseMailCampaign) service_name="registercasemailcampaign" ;;
+    cancelCaseMailCampaignRegistration) service_name="cancelcasemailcampaignregistration" ;;
+    getCaseMailImportSnapshot) service_name="getcasemailimportsnapshot" ;;
+    listAutomationNoticeReceipts) service_name="listautomationnoticereceipts" ;;
+    getAutomationNoticeHandoff) service_name="getautomationnoticehandoff" ;;
+    receiveCaseMailApplication) service_name="receivecasemailapplication" ;;
+    receiveAutomationNoticeReceipt) service_name="receiveautomationnoticereceipt" ;;
     previewStaffImport) service_name="previewstaffimport" ;;
     syncStaffDirectoryReadOnly) service_name="syncstaffdirectoryreadonly" ;;
     previewShiftImport) service_name="previewshiftimport" ;;

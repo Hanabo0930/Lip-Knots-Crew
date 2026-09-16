@@ -111,6 +111,13 @@ jobs:
           node scripts/test-emulator-seed-safety.mjs
           node scripts/test-shift-import-lease.mjs
           node scripts/test-staff-import-revocation.mjs
+          node scripts/test-automation-registry.mjs
+          node scripts/test-automation-intake.mjs
+          node scripts/test-automation-held-receipts.mjs
+          node scripts/test-automation-campaigns.mjs
+          node scripts/test-automation-import-snapshot.mjs
+          node scripts/test-automation-notice-receipts.mjs
+          node scripts/test-automation-notice-handoff.mjs
           node scripts/test-shift-integrity-diagnostics.mjs
           node scripts/test-staging-shift-integrity-reader.mjs
           node scripts/test-admin-reassignment-locks.mjs

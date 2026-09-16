@@ -20,6 +20,21 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "getAutomationRegistry",
+  "saveAutomationRegistry",
+  "cancelAutomationRegistryAttempt",
+  "listHeldMailApplications",
+  "getHeldMailApplication",
+  "recheckHeldMailApplication",
+  "cancelHeldMailApplicationReview",
+  "previewCaseMailCampaignRegistration",
+  "registerCaseMailCampaign",
+  "cancelCaseMailCampaignRegistration",
+  "getCaseMailImportSnapshot",
+  "listAutomationNoticeReceipts",
+  "getAutomationNoticeHandoff",
+  "receiveCaseMailApplication",
+  "receiveAutomationNoticeReceipt",
   "previewStaffImport",
   "syncStaffDirectoryReadOnly",
   "previewShiftImport",
@@ -114,6 +129,57 @@ function functionBlock(source, exportName) {
 
 
 
+
+
+function checkExternalHandoff(name) {
+  const modules = {
+    getAutomationRegistry:"automation-registry",saveAutomationRegistry:"automation-registry",cancelAutomationRegistryAttempt:"automation-registry",
+    listHeldMailApplications:"automation-intake",getHeldMailApplication:"automation-intake",recheckHeldMailApplication:"automation-intake",cancelHeldMailApplicationReview:"automation-intake",receiveCaseMailApplication:"automation-intake",
+    previewCaseMailCampaignRegistration:"automation-campaigns",registerCaseMailCampaign:"automation-campaigns",cancelCaseMailCampaignRegistration:"automation-campaigns",
+    getCaseMailImportSnapshot:"automation-import-snapshot",listAutomationNoticeReceipts:"automation-notice-receipts",receiveAutomationNoticeReceipt:"automation-notice-receipts",getAutomationNoticeHandoff:"automation-notice-handoff",
+  };
+  const source=sourceFile("functions/src/"+modules[name]+".ts"),start=source.indexOf("export const "+name);
+  const end=source.indexOf("\n});",start);
+  if(start<0||end<start)return false;
+  const compact=text=>text.replace(/\s+/g,""),block=compact(source.slice(start,end+4)),whole=compact(source);
+  const has=parts=>parts.every(part=>block.includes(part)),all=parts=>parts.every(part=>whole.includes(part));
+  const utils=source.match(/import\s*\{([^}]+)\}\s*from\s*"\.\/utils";/)?.[1]??"";
+  if(!/\brequireAdmin\b/.test(utils)||!/\bcompanyFromClaims\b/.test(utils)
+    ||!block.startsWith("exportconst"+name+"=onCall(asyncrequest=>{constsession=requireAdmin(request)")
+    ||!has(["companyId=id.parse(companyFromClaims(session.token))","return db.runTransaction".replace(/ /g,"")]))return false;
+  const readOnly=["getAutomationRegistry","listHeldMailApplications","getHeldMailApplication","previewCaseMailCampaignRegistration","getCaseMailImportSnapshot","listAutomationNoticeReceipts","getAutomationNoticeHandoff"].includes(name);
+  if(readOnly&&/tx\.(?:set|update|delete|create)\(/.test(block))return false;
+  if(!["getAutomationRegistry","getHeldMailApplication","listHeldMailApplications"].includes(name)
+    &&(!has(["awaitassertProductionOperational(companyId);"])||!whole.includes('from"./system-safety";')))return false;
+  const requirements={
+    getAutomationRegistry:["assertRegistryContext(input,companyId,session.uid)","ReadSchema.parse(request.data)","own(bindingSnap.data(),companyId)","own(staffSnap.data(),companyId)"],
+    saveAutomationRegistry:["assertRegistryContext(input,companyId,session.uid)","event.actorUid!==session.uid||event.inputHash!==inputHash||event.kind!==input.kind",'event.status==="cancelled"',"unchanged(old,input.expectedRevision)","for(constwriteofwrites)tx.set(write.ref,write.value)","tx.set(eventRef,{companyId,actorUid:session.uid"],
+    cancelAutomationRegistryAttempt:["assertRegistryContext(input,companyId,session.uid)","event.actorUid!==session.uid||event.inputHash!==inputHash||event.kind!==input.kind",'event.status==="cancelled"','tx.set(eventRef,{companyId,actorUid:session.uid,kind:input.kind,inputHash,status:"cancelled"'],
+    listHeldMailApplications:["requireReviewScope(input,companyId,session.uid)",'.where("companyId","==",companyId).where("route","==","hold").orderBy(FieldPath.documentId()).limit(26)',"receiptKey(incoming)!==doc.id"],
+    getHeldMailApplication:["requireReviewScope(input,companyId,session.uid)","awaitreadHeldReceiptContext(tx,companyId,input.receiptKey)",'assignmentPerformed:false,dispatch:"disabled"'],
+    recheckHeldMailApplication:["requireReviewScope(input,companyId,session.uid)","previous.companyId!==companyId||previous.actorUid!==session.uid||previous.inputHash!==inputHash","held.revision!==input.expectedReceiptRevision||held.reviewRevision!==input.expectedReviewRevision",'existing?.status!=="assigned"',"tx.set(held.ref,saved)",'assignmentPerformed:false,dispatch:"disabled"'],
+    cancelHeldMailApplicationReview:["requireReviewScope(input,companyId,session.uid)","previous.companyId!==companyId||previous.actorUid!==session.uid||previous.inputHash!==inputHash||previous.receiptKey!==input.receiptKey",'previous.status==="cancelled"','tx.set(eventRef,{companyId,actorUid:session.uid,inputHash,receiptKey:input.receiptKey,status:"cancelled"'],
+    previewCaseMailCampaignRegistration:["checkContext(input,companyId,session.uid)","checkedCampaign(input.campaign,companyId)","awaitreadRegistrationContext(tx,companyId,session.uid,campaign)",'dispatch:"disabled"'],
+    registerCaseMailCampaign:["checkContext(input,companyId,session.uid)","checkedCampaign(input.campaign,companyId)","checkEvent(event,input,session.uid,inputHash)",'event.status==="cancelled"',"awaitreadRegistrationContext(tx,companyId,session.uid,campaign,input.expectedPrincipalRevision)","tx.set(current.campaignRef,saved)","tx.set(current.ownerRef,{companyId"],
+    cancelCaseMailCampaignRegistration:["checkContext(input,companyId,session.uid)","checkedCampaign(input.campaign,companyId)","checkEvent(event,input,session.uid,inputHash)",'tx.set(eventRef,{companyId,actorUid:session.uid,inputHash,status:"cancelled"'],
+    getCaseMailImportSnapshot:["input.expectedCompanyId!==companyId||input.expectedActorUid!==session.uid||input.targets.companyId!==companyId","sender.uid!==session.uid||sender.active!==true",'parsedPolicy.data.phase!=="mail_bridge"','.where("companyId","==",companyId).where("fixedCaseId","==",target.fixedCaseId).limit(2)',"ownerSnap.id!==automationRecordKey(companyId,owner.spreadsheetId,target.fixedCaseId)","binding.revision!==owner.revision",'dispatch:"disabled"'],
+    getAutomationNoticeHandoff:["input.expectedCompanyId!==companyId||input.expectedActorUid!==session.uid","sender.data.companyId!==companyId||sender.data.uid!==session.uid","job.companyId!==companyId","job.applicationUnconfirmed===true","awaitreadAutomationJobContext(tx,companyId,input.jobId,job)","matchesAutomationPreContactProof(context,rawContact,rawContact?.automationProof)",'deliveryVerified:false,automaticRetryAllowed:false,dispatch:"disabled"'],
+    listAutomationNoticeReceipts:["checkedScope(input,companyId,session.uid)",'.where("companyId","==",companyId).where("current.jobId","==",input.jobId).orderBy(FieldPath.documentId()).limit(26)',"event.inputHash!==row.currentHash",'event.disposition!=="accepted"',"event.currentSequenceAtReceipt!==row.current.sequence",'dispatch:"disabled"'],
+    receiveCaseMailApplication:["incoming.companyId!==companyId","senderResult.data.companyId!==companyId||senderResult.data.uid!==session.uid","previous.producerId!==sender.producerId","context.record.producerId!==sender.producerId",'existing?.status!=="assigned"',"tx.set(receiptRef,saved)","returnpublicReceipt(saved,false)"],
+    receiveAutomationNoticeReceipt:["checkedScope(input,companyId,session.uid)","incoming.companyId!==companyId","previous.producerId!==sender.producerId||previous.receivedBy!==session.uid","oldEvent.inputHash!==inputHash",'context.reason!=="aligned"','deliveryVerified:false',"tx.set(eventRef,event)",'assignmentPerformed:false,dispatch:"disabled"'],
+  };
+  if(!has(requirements[name]))return false;
+  if(name==="saveAutomationRegistry" && ((block.match(/unchanged\(old,input\.expectedRevision\)/g)??[]).length!==3 || !has(["unchanged(owner,input.expectedRevision)"])))return false;
+  const shared={
+    "automation-registry":["input.expectedCompanyId!==companyId||input.expectedActorUid!==uid","value.companyId!==companyId","value?.revision??null)!==expected","owner.revision!==old.revision"],
+    "automation-intake":["value.companyId!==companyId","active:z.literal(true)","bindingOwner.revision!==binding.revision","personOwner.revision===matchedPerson.revision","input.expectedCompanyId!==companyId||input.expectedActorUid!==uid",'assignmentPerformed:false,dispatch:"disabled"'],
+    "automation-campaigns":["input.expectedCompanyId!==companyId||input.expectedActorUid!==uid","value.companyId!==companyId","campaign.companyId!==companyId","sender.revision!==expectedPrincipalRevision","owner.registrationRevision!==previous.registrationRevision","confirmedAgainstSource:z.literal(true)"],
+    "automation-import-snapshot":["value.companyId!==companyId"],
+    "automation-notice-receipts":["input.expectedCompanyId!==companyId||input.expectedActorUid!==uid","value.companyId!==companyId","active:z.literal(true)","returnreconcileAutomationReceipt({companyId:binding.companyId,binding,incoming,current})"],
+    "automation-notice-handoff":["active:z.literal(true)"],
+  };
+  return all(shared[modules[name]]);
+}
 
 function checkImportIssues(name) {
   const staff = ["previewStaffImport", "syncStaffDirectoryReadOnly"].includes(name);
@@ -935,6 +1001,21 @@ function checkProcessNotificationQueue() {
 }
 
 const checkers = {
+  getAutomationRegistry: () => checkExternalHandoff("getAutomationRegistry"),
+  saveAutomationRegistry: () => checkExternalHandoff("saveAutomationRegistry"),
+  cancelAutomationRegistryAttempt: () => checkExternalHandoff("cancelAutomationRegistryAttempt"),
+  listHeldMailApplications: () => checkExternalHandoff("listHeldMailApplications"),
+  getHeldMailApplication: () => checkExternalHandoff("getHeldMailApplication"),
+  recheckHeldMailApplication: () => checkExternalHandoff("recheckHeldMailApplication"),
+  cancelHeldMailApplicationReview: () => checkExternalHandoff("cancelHeldMailApplicationReview"),
+  previewCaseMailCampaignRegistration: () => checkExternalHandoff("previewCaseMailCampaignRegistration"),
+  registerCaseMailCampaign: () => checkExternalHandoff("registerCaseMailCampaign"),
+  cancelCaseMailCampaignRegistration: () => checkExternalHandoff("cancelCaseMailCampaignRegistration"),
+  getCaseMailImportSnapshot: () => checkExternalHandoff("getCaseMailImportSnapshot"),
+  listAutomationNoticeReceipts: () => checkExternalHandoff("listAutomationNoticeReceipts"),
+  getAutomationNoticeHandoff: () => checkExternalHandoff("getAutomationNoticeHandoff"),
+  receiveCaseMailApplication: () => checkExternalHandoff("receiveCaseMailApplication"),
+  receiveAutomationNoticeReceipt: () => checkExternalHandoff("receiveAutomationNoticeReceipt"),
   previewStaffImport: () => checkImportIssues("previewStaffImport"),
   syncStaffDirectoryReadOnly: () => checkImportIssues("syncStaffDirectoryReadOnly"),
   previewShiftImport: () => checkImportIssues("previewShiftImport"),

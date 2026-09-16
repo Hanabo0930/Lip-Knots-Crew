@@ -72,6 +72,13 @@ for function_name in "${function_names[@]}"; do
     getMyResubmissionRequests) service_name="getmyresubmissionrequests" ;;
     getAdminResubmissionRequests) service_name="getadminresubmissionrequests" ;;
     completeResubmissionRequest) service_name="completeresubmissionrequest" ;;
+    getExpenseReview) service_name="getexpensereview" ;;
+    saveExpenseReviewDraft) service_name="saveexpensereviewdraft" ;;
+    completeExpenseReview) service_name="completeexpensereview" ;;
+    getJobSheetLink) service_name="getjobsheetlink" ;;
+    markNetPrintPrinted) service_name="marknetprintprinted" ;;
+    adminCancelJob) service_name="admincanceljob" ;;
+    duplicateAdminJob) service_name="duplicateadminjob" ;;
     *)
       echo "DEPLOY_RESULT=FAIL"
       echo "DEPLOY_ERROR=UNMAPPED_FUNCTION_AFTER_GUARD"

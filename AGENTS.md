@@ -63,6 +63,13 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `getMyResubmissionRequests`
 - `getAdminResubmissionRequests`
 - `completeResubmissionRequest`
+- `getExpenseReview`
+- `saveExpenseReviewDraft`
+- `completeExpenseReview`
+- `getJobSheetLink`
+- `markNetPrintPrinted`
+- `adminCancelJob`
+- `duplicateAdminJob`
 
 Never use `firebase deploy --only functions`. Every Functions deployment must list
 each function explicitly and pass `scripts/automation/validate-staging-scope.mjs`.
@@ -92,6 +99,13 @@ The only Cloud Run services whose Invoker IAM check may be changed are:
 - `getmyresubmissionrequests`
 - `getadminresubmissionrequests`
 - `completeresubmissionrequest`
+- `getexpensereview`
+- `saveexpensereviewdraft`
+- `completeexpensereview`
+- `getjobsheetlink`
+- `marknetprintprinted`
+- `admincanceljob`
+- `duplicateadminjob`
 
 Do not add or remove `allUsers` or `allAuthenticatedUsers` IAM bindings. Do not
 change organization policy, project-wide IAM, Firestore data, Storage data,
@@ -182,3 +196,5 @@ Every agent result must state:
 ## Completion authorization (2026-09-16)
 
 The user authorizes work needed to finish the app and asks not to fragment it into repeated approvals. The recovery scope above adds exactly the five application-confirmation/resubmission Functions and their matching Cloud Run services. Use normal PR checks, merge, and protected staging deployment approval; do not bypass protection. Production and the real business shift sheet remain outside this recovery. Preserve the paused submission-transfer mode, and do not trigger real messages or mutate business records during deployment verification.
+
+The next approved recovery adds the seven HTTP Functions for expense review (read, draft, complete), source sheet link, printing completion, job cancellation, and job duplication. Restore them through the same protected staging workflow, with source authorization checks. Deployment verification must not invoke authenticated business operations or change the paused transfer mode.

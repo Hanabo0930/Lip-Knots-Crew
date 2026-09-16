@@ -33,7 +33,14 @@
     "createResubmissionRequest",
     "getMyResubmissionRequests",
     "getAdminResubmissionRequests",
-    "completeResubmissionRequest"
+    "completeResubmissionRequest",
+    "getExpenseReview",
+    "saveExpenseReviewDraft",
+    "completeExpenseReview",
+    "getJobSheetLink",
+    "markNetPrintPrinted",
+    "adminCancelJob",
+    "duplicateAdminJob"
   ],
   "allowedHostingTargets": [
     "staff",

@@ -1,3 +1,4 @@
+import './test-business-recovery-auth-guard.mjs';
 import './test-resubmission-auth-guard.mjs';
 import './test-confirm-application-auth-guard.mjs';
 import "./test-transfer-auth-guard.mjs";
@@ -37,6 +38,13 @@ const expectedFunctions = [
   "getMyResubmissionRequests",
   "getAdminResubmissionRequests",
   "completeResubmissionRequest",
+  "getExpenseReview",
+  "saveExpenseReviewDraft",
+  "completeExpenseReview",
+  "getJobSheetLink",
+  "markNetPrintPrinted",
+  "adminCancelJob",
+  "duplicateAdminJob",
 ];
 
 assert.deepEqual(
@@ -94,6 +102,13 @@ assert.match(
   "listMyDevices must map to its exact Cloud Run service",
 );
 for (const [functionName, serviceName] of [
+  ["getExpenseReview", "getexpensereview"],
+  ["saveExpenseReviewDraft", "saveexpensereviewdraft"],
+  ["completeExpenseReview", "completeexpensereview"],
+  ["getJobSheetLink", "getjobsheetlink"],
+  ["markNetPrintPrinted", "marknetprintprinted"],
+  ["adminCancelJob", "admincanceljob"],
+  ["duplicateAdminJob", "duplicateadminjob"],
   ["confirmApplication", "confirmapplication"],
   ["createResubmissionRequest", "createresubmissionrequest"],
   ["getMyResubmissionRequests", "getmyresubmissionrequests"],

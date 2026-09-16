@@ -20,6 +20,13 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "getExpenseReview",
+  "saveExpenseReviewDraft",
+  "completeExpenseReview",
+  "getJobSheetLink",
+  "markNetPrintPrinted",
+  "adminCancelJob",
+  "duplicateAdminJob",
   "bootstrapSession",
   "confirmApplication",
   "completeResubmissionRequest",
@@ -81,6 +88,80 @@ function functionBlock(source, exportName) {
   const nextOffset = remaining.search(/\nexport const [A-Za-z0-9_]+/);
   const end = nextOffset < 0 ? source.length : start + 1 + nextOffset;
   return source.slice(start, end);
+}
+
+
+function checkBusinessRecovery(name) {
+  const file = name === "markNetPrintPrinted" ? "netprint" : name === "adminCancelJob" ? "jobs" : name === "duplicateAdminJob" ? "job-management" : "admin-operations";
+  const source = sourceFile('functions/src/' + file + '.ts');
+  const compact = text => text.replace(/\s+/g, '');
+  const block = compact(functionBlock(source, name));
+  const has = conditions => conditions.every(condition => block.includes(condition));
+  const staff = name === "markNetPrintPrinted";
+  const readOnly = ["getExpenseReview", "getJobSheetLink"].includes(name);
+  const requiredAuth = staff ? 'requireAuth' : 'requireAdmin';
+  if (!new RegExp('import \\{[^}]*\\b' + requiredAuth + '\\b[^}]*\\} from "\\./utils";').test(source)
+      || !has([requiredAuth + '(request)', 'companyFromClaims(session.token)'])
+      || /(?:input|request\.data)\.(?:companyId|uid|actorUid|staffId)/.test(block)) return false;
+  if (readOnly && /\.(?:add|create|delete|set|update|commit)\(/.test(block)) return false;
+  if (!readOnly && (!has(['awaitassertProductionOperational(companyId);'])
+      || !/import \{[^}]*\bassertProductionOperational\b[^}]*\} from "\.\/system-safety";/.test(source))) return false;
+  if (["saveExpenseReviewDraft", "completeExpenseReview", "getJobSheetLink", "duplicateAdminJob"].includes(name)) {
+    const helper = compact(source.slice(source.indexOf('async function requireCompanyJob('), source.indexOf('\nfunction ', source.indexOf('async function requireCompanyJob('))));
+    if (!helper.includes('if(!snap.exists||snap.data()?.companyId!==companyId)')
+        || !has(['awaitrequireCompanyJob(companyId,input.' + (name === 'duplicateAdminJob' ? 'sourceJobId' : 'jobId') + ')'])) return false;
+  }
+  if (name === 'getJobSheetLink') return has(['JobSchema.parse(request.data??{})', 'return{url:buildSheetUrl(job)}']);
+  if (name === 'getExpenseReview') return has([
+    'JobSchema.parse(request.data??{})', 'if(!job.exists||job.data()?.companyId!==companyId)',
+    'if(draft.exists&&(draft.data()?.companyId!==companyId||draft.data()?.jobId!==input.jobId))',
+    'reviewVersion:expenseReviewVersion(companyId,input.jobId,job,draft)',
+  ]);
+  if (name === 'saveExpenseReviewDraft' || name === 'completeExpenseReview') {
+    const helper = compact(source.slice(source.indexOf('function assertExpenseWriteContext('), source.indexOf('async function requireCompanyJob(')));
+    if (!['if(!currentJob.exists||job?.companyId!==companyId)',
+      'if(expenseWriteContext(job)!==expenseWriteContext(expectedJob))',
+      'if(review.exists&&(review.data()?.companyId!==companyId||review.data()?.jobId!==jobId))'].every(x=>helper.includes(x))) return false;
+    const review = name === 'saveExpenseReviewDraft' ? 'currentReview' : 'existingReview';
+    if (!has(['awaitdb.runTransaction(async(tx)=>{', 'tx.get(db.collection("jobs").doc(input.jobId))',
+      'assertExpenseWriteContext(companyId,input.jobId,job,currentJob,' + review + ');',
+      'assertExpenseReviewVersion(input.expectedVersion,companyId,input.jobId,currentJob,' + review + ');',
+      'normalizeExpenseInput(input.values)', 'if(parsed.errors.length)'])) return false;
+    if (name === 'saveExpenseReviewDraft') return has(['DraftSchema.parse(request.data??{})', 'tx.get(ref)', 'tx.set(ref,{companyId,jobId:input.jobId,', 'updatedBy:session.uid']);
+    return has(['CompleteSchema.parse(request.data??{})', 'tx.get(reviewRef)',
+      'if(!Number.isSafeInteger(previousRevision)||previousRevision<0||previousRevision>=Number.MAX_SAFE_INTEGER)',
+      'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"expense.review",',
+      'actorUid:session.uid', 'tx.set(reviewRef,{companyId,jobId:input.jobId,', 'completedBy:session.uid',
+      'constrevision=previousRevision+1;', 'idempotencyKey:' + String.fromCharCode(96) + 'expense.review:']);
+  }
+  if (name === 'markNetPrintPrinted') return has([
+    'staffFromClaims(session.token)', 'PrintSchema.parse(request.data??{})',
+    'awaitdb.runTransaction(async(tx)=>{', 'constsnap=awaittx.get(jobRef);',
+    'if(job.companyId!==companyId||job.assignedStaffId!==staffId)throw',
+    'if(job.cancelled===true||job.status==="cancelled")throw', 'if(job.status!=="assigned")throw',
+    'if(job.sourceMissing===true||job.assignmentUnresolved===true||job.applicationUnconfirmed===true)throw',
+    'if(!day.success||(input.dateKey!==undefined&&input.dateKey!==day.data))throw',
+    'if(targets.length>1)throw', 'if(!target)throw',
+    'target.printedContext===identity&&target.printedByStaffId===staffId&&target.printedForDate===day.data',
+    'tx.update(jobRef,', 'tx.create(queueRef,{companyId,jobId:input.jobId,operation:"netprint.printed",',
+    'actorUid:session.uid,actorStaffId:staffId',
+  ]);
+  if (name === 'adminCancelJob') return has([
+    'CancelSchema.parse(request.data)', 'awaitdb.runTransaction(async(tx)=>{', 'constjobSnap=awaittx.get(jobRef);',
+    'if(job.companyId!==companyId)', 'lockRef?awaittx.get(lockRef):null',
+    'lock.jobId===input.jobId&&lock.companyId===companyId&&lock.staffId===job.assignedStaffId&&lock.dateKey===job.dateKey',
+    'if(job.cancelled===true&&job.status==="cancelled"&&job.cancellationReason===input.reason&&!ownsActiveLock)return;',
+    'if(lockRef&&ownsActiveLock){tx.set(lockRef,', 'tx.update(jobRef,',
+    'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.cancel",', 'actorUid:session.uid',
+    'tx.set(db.collection("notificationQueue").doc(),queueDocumentData({companyId,targetStaffId:job.assignedStaffId,',
+  ]);
+  const native = compact(source.slice(source.indexOf('async function nativeJobSourceEnabled('), source.indexOf('async function requireCompanyJob(')));
+  return ['feature.data()?.adminJobCreationSourceReady===true', 'mapping.data()?.enabled===true', 'mapping.data()?.rowCreation?.enabled===true'].every(x=>native.includes(x))
+    && has(['DuplicateSchema.parse(request.data??{})', 'normalizeJobInput(createData)', 'if(normalized.errors.length)',
+      'awaitnativeJobSourceEnabled(companyId)', 'constsourceReady=false;', 'constbatch=db.batch();',
+      'batch.set(ref,{...copyableJobFields(source),companyId,', 'createdBy:session.uid',
+      'if(rowQueueRef){batch.set(rowQueueRef,{companyId,', 'awaitbatch.commit();',
+      'awaitwriteAudit(companyId,session.uid,"job.group.duplicate",']);
 }
 
 function checkResubmission(name) {
@@ -526,6 +607,13 @@ function checkProcessNotificationQueue() {
 }
 
 const checkers = {
+  getExpenseReview: () => checkBusinessRecovery("getExpenseReview"),
+  saveExpenseReviewDraft: () => checkBusinessRecovery("saveExpenseReviewDraft"),
+  completeExpenseReview: () => checkBusinessRecovery("completeExpenseReview"),
+  getJobSheetLink: () => checkBusinessRecovery("getJobSheetLink"),
+  markNetPrintPrinted: () => checkBusinessRecovery("markNetPrintPrinted"),
+  adminCancelJob: () => checkBusinessRecovery("adminCancelJob"),
+  duplicateAdminJob: () => checkBusinessRecovery("duplicateAdminJob"),
   bootstrapSession: checkBootstrapSession,
   confirmApplication: checkConfirmApplication,
   completeResubmissionRequest: () => checkResubmission("completeResubmissionRequest"),

@@ -71,6 +71,7 @@ export const createMonthSheetSafe = onCall(
     const lock = await acquireLock(companyId, targetMonth);
     const runRef = db.collection("monthSheetCreationRuns").doc();
     let createdSheetId: number | null = null;
+    let verificationSucceeded = false;
 
     try {
       await runRef.set({
@@ -92,6 +93,7 @@ export const createMonthSheetSafe = onCall(
         throw new SafeStopError(preview.errors.join(" / "));
       }
 
+      await assertProductionOperational(companyId);
       const sheets = await createWriteClient();
       const duplicate = await sheets.spreadsheets.batchUpdate({
         spreadsheetId: mapping.spreadsheetId,
@@ -117,6 +119,7 @@ export const createMonthSheetSafe = onCall(
         throw new Error("新しい月タブのsheetIdを取得できません。");
       }
 
+      await assertProductionOperational(companyId);
       await sheets.spreadsheets.values.batchClear({
         spreadsheetId: mapping.spreadsheetId,
         requestBody: { ranges: preview.plan.clearRanges },
@@ -143,7 +146,10 @@ export const createMonthSheetSafe = onCall(
         );
       }
 
-      await runRef.set({
+      // 検算後は記録保存の障害で作成済みタブを消さない。
+      verificationSucceeded = true;
+      const completion = db.batch();
+      completion.set(runRef, {
         status: "completed",
         sourceMonth: preview.plan.sourceMonth,
         targetMonth: preview.plan.targetMonth,
@@ -154,7 +160,7 @@ export const createMonthSheetSafe = onCall(
         updatedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
 
-      await db.collection("auditLogs").add({
+      completion.set(db.collection("auditLogs").doc(), {
         companyId,
         actorUid: session.uid,
         action: "sheet.month.create",
@@ -167,6 +173,7 @@ export const createMonthSheetSafe = onCall(
         requestId: requestId("audit"),
         createdAt: FieldValue.serverTimestamp(),
       });
+      await completion.commit();
 
       return {
         created: true,
@@ -177,6 +184,25 @@ export const createMonthSheetSafe = onCall(
         verification,
       };
     } catch (error) {
+      if (verificationSucceeded) {
+        // commit応答が失われた場合も、完了済み記録の上書きやシート削除をしない。
+        await db.collection("monthSheetManualInterventions").add({
+          companyId,
+          runId: runRef.id,
+          spreadsheetId: mapping.spreadsheetId,
+          targetMonth,
+          createdSheetId,
+          reason: "completion_recording_uncertain",
+          verificationCompleted: true,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          status: "open",
+          createdAt: FieldValue.serverTimestamp(),
+        });
+        throw new HttpsError(
+          "internal",
+          "月タブの作成と検算は完了しましたが、完了記録を確認できません。タブは保持しています。再作成せず、作成履歴と手動確認記録を確認してください。"
+        );
+      }
       if (createdSheetId !== null) {
         try {
           const sheets = await createWriteClient();
@@ -659,10 +685,10 @@ async function acquireLock(
     `${companyId}_month_create_${targetMonth.replace(".", "_")}`
   );
   const token = db.collection("_ids").doc().id;
-  const now = Timestamp.now();
-  const leaseUntil = Timestamp.fromMillis(now.toMillis() + 10 * 60 * 1000);
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
+    const now = Timestamp.now();
+    const leaseUntil = Timestamp.fromMillis(now.toMillis() + 10 * 60 * 1000);
     const current = snap.data()?.leaseUntil as Timestamp | undefined;
     if (current && current.toMillis() > now.toMillis()) {
       throw new HttpsError(

@@ -111,6 +111,9 @@ jobs:
           node scripts/test-emulator-seed-safety.mjs
           node scripts/test-shift-import-lease.mjs
           node scripts/test-staff-import-revocation.mjs
+          node scripts/test-login-link-identity.mjs
+          node scripts/test-month-sheet-lifecycle.mjs
+          node scripts/test-sheet-write-review.mjs
           node scripts/test-automation-registry.mjs
           node scripts/test-automation-intake.mjs
           node scripts/test-automation-held-receipts.mjs

@@ -93,7 +93,9 @@
     "getPilotReadiness",
     "getPilotExpansionReview",
     "getProductionControlStatus",
-    "getProductionSloDashboard"
+    "getProductionSloDashboard",
+    "submitPilotOutcome",
+    "decidePilotExpansion"
   ],
   "allowedHostingTargets": [
     "staff",

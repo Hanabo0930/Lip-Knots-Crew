@@ -249,3 +249,6 @@ assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",
 
 const readinessFunctions=["getPilotReadiness","getPilotExpansionReview","getProductionControlStatus","getProductionSloDashboard"];
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:readinessFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,readinessFunctions);
+
+const pilotExpansionFunctions=["submitPilotOutcome","decidePilotExpansion"];
+assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:pilotExpansionFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,pilotExpansionFunctions);

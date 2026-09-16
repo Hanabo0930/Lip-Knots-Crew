@@ -88,6 +88,8 @@ for function_name in "${function_names[@]}"; do
     listSheetWriteReviewRecords) service_name="listsheetwritereviewrecords" ;;
     runGasAudit) service_name="rungasaudit" ;;
     scanGasUploadSafety) service_name="scangasuploadsafety" ;;
+    submitPilotOutcome) service_name="submitpilotoutcome" ;;
+    decidePilotExpansion) service_name="decidepilotexpansion" ;;
     getPilotReadiness) service_name="getpilotreadiness" ;;
     getPilotExpansionReview) service_name="getpilotexpansionreview" ;;
     getProductionControlStatus) service_name="getproductioncontrolstatus" ;;

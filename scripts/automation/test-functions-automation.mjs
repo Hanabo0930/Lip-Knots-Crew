@@ -1,3 +1,4 @@
+import "./test-bootstrap-auth-guard.mjs";
 import "./test-pilot-expansion-auth-guard.mjs";
 import "./test-readiness-auth-guard.mjs";
 import "./test-setup-audit-auth-guard.mjs";

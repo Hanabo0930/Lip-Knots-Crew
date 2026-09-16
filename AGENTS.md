@@ -135,6 +135,7 @@ guards cannot be changed by the deployment source branch.
 
 The only Cloud Run services whose Invoker IAM check may be changed are:
 
+- `bootstrapsession`
 - `createuploadsession`
 - `inspectsetupwizard`
 - `savesetupwizarddraft`

@@ -707,6 +707,7 @@ function checkConfirmApplication() {
 function checkBootstrapSession() {
   const source = sourceFile("functions/src/auth.ts");
   const bootstrap = functionBlock(source, "bootstrapSession");
+  const compact = bootstrap.replace(/\s+/g, "");
   const checks = {
     authenticated: /requireAuth\s*\(\s*request\s*\)/.test(bootstrap),
     verifiedEmail: /user\.emailVerified/.test(bootstrap),
@@ -723,6 +724,14 @@ function checkBootstrapSession() {
       /async function fetchAdminDirectory\s*\(\s*companyId\s*:\s*string\s*\)/.test(source)
       && (source.match(/\.where\s*\(\s*"companyId"\s*,\s*"=="\s*,\s*companyId\s*\)/g) ?? []).length === 2,
     noClientCompanyScope: !/input\.companyId/.test(bootstrap),
+    indexIdentity: compact.includes('db.collection("emailIndex").doc(emailHash(email)).get()')
+      && compact.includes('index.active!==true')
+      && compact.includes('[index.companyId,index.staffId].some(value=>typeofvalue!=="string"||!value.trim()||')
+      && compact.includes(String.raw`/[\/\\\u0000-\u001f\u007f]/.test(value)`),
+    staffProfileIdentity: compact.includes('db.collection("staffProfiles").doc(index.staffId).get()')
+      && compact.includes('!profileSnap.exists||profileSnap.data()?.active!==true||profileSnap.data()?.companyId!==index.companyId'),
+    staffClaimsFromIndex: /constclaims=\{role:"staff",companyId:index\.companyId,staffId:index\.staffId,?\};/.test(compact),
+    claimUpdatesForAuthenticatedUser: (compact.match(/auth\.setCustomUserClaims\(session\.uid,claims\)/g) ?? []).length === 2,
   };
   return Object.values(checks).every(Boolean);
 }

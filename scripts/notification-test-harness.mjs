@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const { Timestamp: RealTimestamp } = require('firebase-admin/firestore');
 
-export function setup(at = '2026-09-11T21:59:00+09:00') {
+export function setup(at = '2026-09-11T21:59:00+09:00', environment = {}) {
   const state = { now: Date.parse(at), records: new Map(), sent: [], metrics: [], revokedUids: [], transactionRetries: 0, operational: true, failSend: false, errors: [], suppressExpectedErrors: false };
   class Clock extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
@@ -82,7 +82,7 @@ export function setup(at = '2026-09-11T21:59:00+09:00') {
     assert.ok(['./notification-core', './notifications', './notification-time', './push-delivery', './devices', './push-tokens', './utils', './case-id', './device-authentication', './reminder-scheduler', './staff-tasks', './task-core'].includes(name), name);
     if (modules[name]) return modules[name];
     const exports = {}; modules[name] = exports;
-    runInNewContext(ts.transpileModule(fs.readFileSync('functions/src/' + name.slice(2) + '.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, require: load, Date: Clock, console: moduleConsole });
+    runInNewContext(ts.transpileModule(fs.readFileSync('functions/src/' + name.slice(2) + '.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, require: load, Date: Clock, console: moduleConsole, process: { env: { ...environment } } });
     return exports;
   }
   const core = load('./notification-core'), worker = load('./notifications');

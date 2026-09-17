@@ -1102,6 +1102,13 @@ function checkProcessNotificationQueue() {
     ? ""
     : source.slice(dispatcherStart, dispatcherEnd < 0 ? source.length : dispatcherEnd);
   const checks = {
+    deliveryPause: [
+      'const mode = process.env.LKC_NOTIFICATION_DELIVERY_MODE;',
+      'if (mode !== undefined && mode !== "active") return true;',
+      'return process.env.APP_ENVIRONMENT === "staging" && mode !== "active";',
+    ].every(text => source.includes(text))
+      && /async \(event\) => \{\s*if \(notificationDeliveryPaused\(\)\) return;/.test(block)
+      && /\): Promise<void> \{\s*if \(notificationDeliveryPaused\(\)\) return;/.test(dispatcher),
     exactEventTrigger: /onDocumentCreated\s*\(\s*"notificationQueue\/\{queueId\}"/.test(block),
     queuedOnly: /data\.status\s*!==\s*"queued"/.test(block),
     dueOnly: /deliverAt\s*>\s*Date\.now\(\)\s*\+\s*5_000/.test(block),

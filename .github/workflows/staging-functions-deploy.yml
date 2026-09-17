@@ -200,6 +200,7 @@ jobs:
           umask 077
           {
             printf 'APP_ENVIRONMENT=staging\n'
+            printf 'LKC_NOTIFICATION_DELIVERY_MODE=paused\n'
             printf 'EXPECTED_FIREBASE_PROJECT_ID=%s\n' "$LKC_PROJECT_ID"
             printf 'ADMIN_EMAILS=%s\n' "$LKC_FUNCTIONS_ADMIN_EMAILS"
             printf 'EXECUTIVE_APPROVER_EMAILS=%s\n' "$LKC_FUNCTIONS_EXECUTIVE_APPROVER_EMAILS"
@@ -215,7 +216,7 @@ jobs:
           } > "$dotenv_path"
           chmod 600 "$dotenv_path"
           echo "STAGING_DOTENV=READY"
-          echo "STAGING_DOTENV_KEY_COUNT=13"
+          echo "STAGING_DOTENV_KEY_COUNT=14"
       - name: Preserve or explicitly set submission transfer mode
         working-directory: guardrails
         env:

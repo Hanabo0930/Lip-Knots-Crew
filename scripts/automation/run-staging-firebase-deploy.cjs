@@ -47,6 +47,8 @@ async function main() {
   });
   const source = fs.realpathSync(process.env.LKC_SOURCE_DIRECTORY ?? "");
   if (!fs.statSync(path.join(source, "firebase.json")).isFile()) throw Error("INVALID_SOURCE_DIRECTORY");
+  const {assertNotificationDeliveryPaused} = await import(pathToFileURL(path.join(__dirname, "validate-staging-notification-pause.mjs")).href);
+  assertNotificationDeliveryPaused(plan, source);
   const cli = resolveCli();
   const run = require(path.join(cli.root, "lib/gcp/run.js"));
   installInvokerAdapter(run, plan);

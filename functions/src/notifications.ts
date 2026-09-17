@@ -38,6 +38,13 @@ type TokenRecord = {
   token: string;
 };
 
+// STAGINGの通常配備は送信を保留し、設定誤りでも既存キューを消費しない。
+function notificationDeliveryPaused(): boolean {
+  const mode = process.env.LKC_NOTIFICATION_DELIVERY_MODE;
+  if (mode !== undefined && mode !== "active") return true;
+  return process.env.APP_ENVIRONMENT === "staging" && mode !== "active";
+}
+
 /**
  * 即時通知は作成トリガーで処理します。未来時刻・静穏時間明けの通知は
  * 1分ごとのスケジューラーが処理します。
@@ -45,6 +52,7 @@ type TokenRecord = {
 export const processNotificationQueue = onDocumentCreated(
   "notificationQueue/{queueId}",
   async (event) => {
+    if (notificationDeliveryPaused()) return;
     const snap = event.data;
     if (!snap) return;
     const data = snap.data() as QueueData;
@@ -64,6 +72,7 @@ export const dispatchDueNotifications = onSchedule(
     maxInstances: 1,
   },
   async () => {
+    if (notificationDeliveryPaused()) return;
     const now = Timestamp.now();
     const parts = tokyoParts(now.toDate());
 
@@ -88,6 +97,7 @@ export const dispatchDueNotifications = onSchedule(
 async function dispatchQueueDocument(
   ref: FirebaseFirestore.DocumentReference
 ): Promise<void> {
+  if (notificationDeliveryPaused()) return;
   const pending = await ref.get();
   if (!pending.exists) return;
   const pendingData = pending.data() as QueueData;

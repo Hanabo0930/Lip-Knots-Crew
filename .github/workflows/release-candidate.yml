@@ -113,6 +113,10 @@ jobs:
           node scripts/test-staff-import-revocation.mjs
           node scripts/test-login-link-identity.mjs
           node scripts/test-bootstrap-session-identity.mjs
+          node scripts/test-notification-delivery.mjs
+          node scripts/test-notification-delivery-pause.mjs
+          node scripts/automation/test-notification-auth-guard.mjs
+          node scripts/automation/test-staging-notification-pause.mjs
           node scripts/test-month-sheet-lifecycle.mjs
           node scripts/test-sheet-write-review.mjs
           node scripts/test-readiness-company-boundaries.mjs

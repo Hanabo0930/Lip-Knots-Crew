@@ -243,6 +243,16 @@ jobs:
             --admin-url "${{ steps.channel.outputs.admin_url }}" \
             --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
             --evidence-dir "$LKC_EVIDENCE_DIR/preview"
+      - name: Set up Google Cloud CLI for read-only API verification
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Verify deployed upload APIs before any live Hosting change
+        working-directory: source
+        run: |
+          npm run build -w @lkc/functions
+          python3 scripts/automation/check-hosting-api-readiness.py \
+            --root . \
+            --source-sha "$LKC_SOURCE_SHA" \
+            --evidence "$LKC_EVIDENCE_DIR/api-readiness.json"
       - name: Back up both current live channels
         id: backup
         working-directory: source

@@ -55,6 +55,7 @@ jobs:
           node scripts/test-staff-submission-flow.mjs --browser
           node scripts/test-staff-shift-rendering.mjs
           node scripts/test-admin-workspace.mjs --browser
+          node scripts/test-case-mail-entry-readiness.mjs
           node scripts/test-admin-import-snapshot.mjs
           node scripts/test-submission-attempt-browser.mjs
           node scripts/test-admin-comparison-pages.mjs
@@ -178,6 +179,7 @@ jobs:
       - name: Validate automation scope and production dependencies
         run: |
           npm run test:automation-safety
+          python3 scripts/automation/test-hosting-api-readiness.py
           npm audit --omit=dev --audit-level=high
       - name: Publish security summary
         if: always()

@@ -128,6 +128,15 @@ class ReadinessTests(unittest.TestCase):
         (self.root / "functions/lib/uploads.js").unlink()
         with self.assertRaises(g.ReadinessError): self.run_check()
 
+    def test_gcloud_resolution_supports_windows_and_missing_cli(self):
+        for executable in ("C:/SDK path/gcloud.cmd", "/usr/bin/gcloud"):
+            with patch.object(g.shutil, "which", return_value=executable):
+                self.assertEqual(g.gcloud_command("functions", "describe", "createUploadSession"),
+                                 [executable, "functions", "describe", "createUploadSession"])
+        with patch.object(g.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(g.ReadinessError, "GCLOUD_NOT_FOUND"):
+                g.gcloud_command("version")
+
     def test_workflow_gate_precedes_live_mutations(self):
         workflow = (ROOT / ".github/workflows/staging-hosting-promote.yml").read_text("utf-8")
         check = workflow.index("      - name: Verify deployed upload APIs")

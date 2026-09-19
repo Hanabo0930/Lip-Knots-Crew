@@ -5,6 +5,7 @@ import io
 import json
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -82,6 +83,11 @@ def verify_archive(blob, expected):
     except (zipfile.BadZipFile, KeyError, RuntimeError):
         raise ReadinessError("ARCHIVE_UNREADABLE") from None
 
+def gcloud_command(*arguments):
+    executable = shutil.which("gcloud")
+    require(executable is not None, "GCLOUD_NOT_FOUND")
+    return [executable, *arguments]
+
 def read_json(command):
     try:
         result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
@@ -92,13 +98,13 @@ def read_json(command):
 def describe(function):
     # 環境変数・Secret・IAMを取得/保存しない。
     fields = "name,environment,state,buildConfig.entryPoint,buildConfig.runtime,buildConfig.sourceProvenance,serviceConfig.service,serviceConfig.revision,serviceConfig.allTrafficOnLatestRevision"
-    return read_json(["gcloud", "functions", "describe", function, "--gen2", f"--project={PROJECT}", f"--region={REGION}", f"--format=json({fields})"])
+    return read_json(gcloud_command("functions", "describe", function, "--gen2", f"--project={PROJECT}", f"--region={REGION}", f"--format=json({fields})"))
 
 def read_archive(uri):
     # ZIPは一時ファイルだけに保持し、展開しない。環境ファイルは読み出さない。
     try:
         with tempfile.TemporaryFile() as stream:
-            subprocess.run(["gcloud", "storage", "cat", uri], check=True, stdout=stream, stderr=subprocess.DEVNULL, timeout=120)
+            subprocess.run(gcloud_command("storage", "cat", uri), check=True, stdout=stream, stderr=subprocess.DEVNULL, timeout=120)
             require(stream.tell() <= MAX_ARCHIVE, "ARCHIVE_TOO_LARGE")
             stream.seek(0)
             return stream.read(MAX_ARCHIVE + 1)

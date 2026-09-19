@@ -20,6 +20,13 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "listCaseMailReceipts",
+  "getCaseMailReceipt",
+  "getCaseMailTargetPreview",
+  "confirmCaseMailTarget",
+  "holdCaseMailTarget",
+  "resolveCaseMailTargetHold",
+  "confirmCaseMailReview",
   "loginGateway",
   "submitPilotOutcome",
   "decidePilotExpansion",
@@ -376,7 +383,17 @@ function checkAdminCore(name) {
       '.where("dateKey",">=",input.from).where("dateKey","<=",input.through).limit(10001)',
       'if(snapshot.size>10000)thrownewHttpsError("resource-exhausted",',
     ],
-    createAdminJobGroup: [
+    createAdminJobGroup: block.includes('stageAdminJobGroup(') ? [
+      'CreateSchema.parse(request.data??{})', 'normalizeJobInput(parsed)', 'if(normalized.errors.length)',
+      'constallocation=allocateAdminJobGroup(companyId,normalized.value.workDate,normalized.value.slots);',
+      'constrowCreationConfigured=awaitnativeJobSourceEnabled(companyId);', 'constbatch=db.batch();',
+      'stageAdminJobGroup(batch,{companyId,actorUid:session.uid,input:normalized.value,...allocation,',
+      'rowQueueId:rowCreationConfigured?db.collection("sheetRowCreateQueue").doc().id:null,',
+      'awaitbatch.commit();', 'awaitwriteAudit(companyId,session.uid,"job.group.create",',
+      'if(request.data&&Object.hasOwn(request.data,"mailIntake")){',
+      'returncreateCaseMailJobGroup(request.data,companyId,session.uid,raw=>{',
+      'normalizeJobInput(CreateSchema.parse(raw))',
+    ] : [
       'CreateSchema.parse(request.data??{})', 'normalizeJobInput(parsed)', 'if(normalized.errors.length)',
       'constrowCreationConfigured=awaitnativeJobSourceEnabled(companyId);', 'constsourceReady=false;',
       'constpublication=resolvePublication({', 'constbatch=db.batch();',
@@ -389,6 +406,8 @@ function checkAdminCore(name) {
       'PublicationSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{', 'constsnapshots=awaittx.getAll(...refs);',
       'if(!snap.exists||snap.data()?.companyId!==companyId)continue;', 'if(job.cancelled===true||job.status==="cancelled")',
       'if(job.assignedStaffId){blocked.push(snap.id);continue;}', 'status:job.assignedStaffId?"assigned":"stopped",',
+      'readMailPublication(tx,snap.id,snap.data()!,input.expectedRevisions?.[snap.id],now.toDate())',
+      'if(job.mailIntake&&(!mailCheck||mailCheck.issue)){blocked.push(snap.id);continue;}',
       'constpublication=resolvePublication({', 'tx.set(snap.ref,', 'revision:FieldValue.increment(1)',
       'return{updated,blocked};', 'awaitwriteAudit(companyId,session.uid,"job.publication.update",',
     ],
@@ -415,11 +434,11 @@ function checkAdminCore(name) {
     ],
     updateNetPrintNumbers: [
       'UpdateSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{', 'if(job.companyId!==companyId)',
-      'constidentity=netPrintWriteIdentity(job);', 'if(previous?.syncPending===true)', 'if(previous.writeIdentity!==identity)throw',
+      'assertCaseMailSubmissionRevision(job,input.expectedRevision);', 'constidentity=netPrintWriteIdentity(job);', 'if(previous?.syncPending===true)', 'if(previous.writeIdentity!==identity)throw',
       'expected=baselineastypeofexpected;', 'old.printedContext===identity&&old.printedByStaffId===job.assignedStaffId&&old.printedForDate===job.dateKey',
-      'tx.update(jobRef,{netPrint:{items,updatedAt:now,changedCount,writeOperationId:queueRef.id,writeIdentity:identity,syncPending:true,writeStyles:styles,writeExpected:expected}',
+      'tx.update(jobRef,{netPrint:{...(job.mailIntake?{caseMailContext:caseMailSubmissionContext(job)}:{}),items,updatedAt:now,changedCount,writeOperationId:queueRef.id,writeIdentity:identity,syncPending:true,writeStyles:styles,writeExpected:expected}',
       'tx.create(queueRef,{companyId,jobId:input.jobId,operation:"netprint.update",',
-      'if(notifyStaffId&&changedCount>0&&job.cancelled!==true&&job.status!=="cancelled")',
+      'if(notifyStaffId&&changedCount>0&&!caseMailPreparationHeld(job)&&job.cancelled!==true&&job.status==="assigned"&&job.sourceMissing!==true&&job.applicationUnconfirmed!==true&&job.assignmentUnresolved!==true)',
     ],
     adminSetJobCancellation: [
       'CancellationSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
@@ -441,6 +460,34 @@ function checkAdminCore(name) {
     ],
   };
   if (!has(requirements[name])) return false;
+  if (name === "createAdminJobGroup" && block.includes("stageAdminJobGroup(")) {
+    const shared = compact(sourceFile("functions/src/job-group-creation.ts"));
+    const intake = compact(sourceFile("functions/src/case-mail-job-creation.ts"));
+    if (!['from"./job-group-creation";', 'from"./case-mail-job-creation";'].every(part => compact(source).includes(part))) return false;
+    if (![
+      'constsourceReady=false;', 'constpublication=resolvePublication({requestedMode:input.publicationMode,publishAt:input.publishAt,sourceReady,',
+      'constbatch=writer;', 'batch.set(jobRef,{companyId,caseId:job.caseId,', 'source:{type:"admin_created",createdBy:actorUid}',
+      'batch.set(db.collection("jobGroups").doc(groupId),{companyId,jobIds,',
+      'if(rowQueueRef){batch.set(rowQueueRef,{companyId,groupId,jobIds,',
+      'persistedIdentity?createJobIdFromPersistedCaseId(companyId,caseId):ref.id',
+    ].every(part => shared.includes(part)) || /(?:jobRef|rowQueueRef)\.(?:set|update|create)\(/.test(shared)) return false;
+    if (![
+      'RequestSchema=z.object({mailIntake:CommandSchema,expectedCompanyId:id.optional(),expectedActorUid:id.optional()}).strict()',
+      'expectedCompanyId!==companyId||expectedActorUid!==actorUid',
+      'expectedCompanyId!==undefined||expectedActorUid!==undefined', 'returndb.runTransaction(asynctx=>{',
+      'constprevious=(awaittx.get(operationRef)).data();', 'returncommittedResult(tx,previous,companyId);',
+      'ReceiptSchema.safeParse(receiptSnap.data())', 'CandidateSchema.safeParse(candidateSnap.data())',
+      'receipt.companyId!==companyId||candidate.companyId!==companyId', 'receipt.status!=="ready"',
+      'receipt.revision!==command.expectedReceiptRevision', 'principal.companyId!==companyId',
+      'principal.active!==true', 'principal.revision!==receipt.principalRevision',
+      'input.slots!==1||input.basePay!==null||input.publicationMode!=="draft"||input.publishAt!==null',
+      'owner.payloadHash!==payloadHash', 'candidate.revision!==command.expectedRevision',
+      'featureSnap.data()?.caseMailJobCreationEnabled!==true', 'collisions.some(snap=>snap.exists)',
+      'stageAdminJobGroup(tx,{...allocation,companyId,actorUid,input,rowQueueId,now,mailIntake:origin})',
+      'tx.set(candidateRef,', 'tx.set(ownerRef,', 'tx.set(operationRef,', 'tx.set(auditRef,',
+      'structuralComplete:z.literal(true)', 'verification:z.literal("verified")', 'kind:z.literal("new")',
+    ].every(part => intake.includes(part)) || /(?:db\.batch\(|(?:operationRef|ownerRef|candidateRef|auditRef)\.(?:set|create|update)\()/.test(intake)) return false;
+  }
   if (name === "updateJobPublication" && ((block.match(/if\(job\.assignedStaffId\)\{/g) ?? []).length !== 2 || (block.match(/tx\.set\(/g) ?? []).length !== 3 || /(?:batch|snap\.ref)\.(?:set|update|delete)\(/.test(block))) return false;
   const whole = compact(source);
   if (name === "generateJobExport" && !whole.includes('constExportSchema=z.object({from:z.iso.date(),through:z.iso.date(),')) return false;
@@ -470,7 +517,7 @@ function checkStaffJourney(name) {
     '.where("dateKey",">=",from).where("dateKey","<=",through).limit(2000).get()',
     'db.collection("resubmissionRequests").where("companyId","==",companyId).where("staffId","==",staffId).where("status","==","open").limit(100).get()',
     'snapshot.exists&&data?.companyId===companyId&&data?.assignedStaffId===staffId',
-    'returnjob?.status==="assigned"&&job.cancelled!==true;',
+    'returnjob?.status==="assigned"&&job.cancelled!==true&&job.sourceMissing!==true&&job.applicationUnconfirmed!==true&&job.assignmentUnresolved!==true&&!caseMailPreparationHeld(job);',
     'deriveStaffTasks({jobs,resubmissions,nowMs:Date.now()})',
   ]);
   if (name === "applyToJob" || name === "listMyMailApplications") {
@@ -512,33 +559,39 @@ function checkStaffJourney(name) {
     'response?.ok!==true||response.jobId!==input.jobId',
     'if(job.companyId!==companyId||staff.companyId!==companyId)',
     'if(staff.active!==true)', 'if(job.status!=="open"||job.assignedStaffId)',
-    'if(job.recruitmentStopped===true||job.cancelled===true)',
+    'if(job.recruitmentStopped===true||job.cancelled===true||job.mailIntakeReviewRequired===true||job.mailTargetHold!=null)',
     'job.sourceMissing===true||job.assignmentUnresolved===true||job.applicationUnconfirmed===true||job.publishable!==true',
+    'awaitreadMailPublication(tx,input.jobId,job,input.expectedJobRevision,newDate(),"apply")',
+    'confirmed.context!==checked.confirmation.context',
+    '(previous.expectedJobRevision??null)!==(input.expectedJobRevision??null)',
     'constlockSnap=awaittx.get(lockRef);', 'if(lockSnap.exists&&lockSnap.data()?.active===true)',
     'awaitreadMailApplicationForAssignment(tx,{companyId,staffId,jobId:input.jobId,applicationId:input.mailApplicationId,revision:input.mailApplicationRevision!,})',
-    'tx.update(jobRef,{status:"assigned",assignedStaffId:staffId,assignedStaffName:displayName,assignedUid:session.uid,',
+    'tx.update(jobRef,{revision:nextAssignmentRevision(job),status:"assigned",assignedStaffId:staffId,assignedStaffName:displayName,assignedUid:session.uid,',
     'tx.set(lockRef,{companyId,staffId,dateKey:workDate,jobId:input.jobId,active:true,',
     'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.assign",',
     'actorUid:session.uid,actorStaffId:staffId,',
-    'tx.set(idempotencyRef,{mailApplicationId:input.mailApplicationId??null,uid:session.uid,companyId,staffId,result:response,',
+    'tx.set(idempotencyRef,{expectedJobRevision:input.expectedJobRevision??null,mailApplicationRevision:input.mailApplicationRevision??null,mailApplicationId:input.mailApplicationId??null,uid:session.uid,companyId,staffId,result:response,',
   ]);
   if (!has([
     'if(job.companyId!==companyId||job.assignedStaffId!==staffId)',
     'job.cancelled===true||job.status==="cancelled"', 'if(job.status!=="assigned")throw',
     'tx.update(jobRef,',
   ])) return false;
-  if (name === "setSalesFloorClientSubmitted") return has([
-    'ClientSubmittedSchema.parse(request.data??{})', 'constsnap=awaittx.get(jobRef);',
+  if (name === "setSalesFloorClientSubmitted") return source.includes('import { submissionSheetWriteIdentity } from "./sheet-write-core";') && has([
+    'ClientSubmittedSchema.parse(request.data??{})', 'constsnap=awaittx.get(jobRef);', 'assertSubmissionReadiness(job);', 'assertCaseMailSubmissionRevision(job,input.expectedRevision);',
     'constlipKnotsSubmitted=current?.lipKnotsSubmitted===true;',
     'if(current?.clientSubmitted===input.submitted&&current.completed===(input.submitted||lipKnotsSubmitted))return;',
     '"submissionStatus.salesFloor.completed":input.submitted||lipKnotsSubmitted,',
-    'tx.set(db.collection("sheetSyncQueue").doc(),{companyId,jobId:input.jobId,operation:"submission.sales_floor",',
+    '"submissionStatus.salesFloor.sheetWrite":{operationId:queueRef.id,identity:submissionSheetWriteIdentity(job),...(job.mailIntake?{caseMailContext:caseMailSubmissionContext(job)}:{}),pending:true},',
+    'tx.set(queueRef,{companyId,jobId:input.jobId,dateKey:job.dateKey,operation:"submission.sales_floor",',
     'actorUid:session.uid,actorStaffId:staffId,',
   ]);
   return has([
     'Schema.parse(request.data)', 'constjobSnap=awaittx.get(jobRef);',
     'if(!workDate.success||(input.dateKey!==undefined&&input.dateKey!==workDate.data))throw',
     'if(job.sourceMissing===true)throw', 'if(job.applicationUnconfirmed===true)throw', 'if(job.assignmentUnresolved===true)throw',
+    'if(caseMailPreparationHeld(job))throw',
+    'input.expectedRevision!==job.revision',
     'awaitreadAutomationJobContext(tx,companyId,input.jobId,job)',
     'previous?.source==="app"&&previous.staffId===staffId&&previous.dateKey===job.dateKey',
     'if(!context?.binding.assignment||matchesAutomationPreContactProof(context,previous,previous?.automationProof))return;',
@@ -651,9 +704,11 @@ function checkResubmission(name) {
       'if(!source||source.companyId!==companyId||source.jobId!==input.jobId||source.type!==input.type)throw',
       "assertSubmissionFileIdentity(source,file.data(),input.sourceSubmissionId);",
       'if(file.data()?.status!=="completed")throw',
-      "tx.create(ref,{companyId,staffId,jobId:input.jobId,",
+      "tx.create(ref,{...(current.data()!.mailIntake?{acceptedMailContext:caseMailSubmissionContext(current.data()!)}:{}),companyId,staffId,jobId:input.jobId,",
+      "assertCaseMailSubmissionRevision(current.data()!,input.expectedRevision);",
+      "if(current.data()!.mailIntake)assertSubmissionOwner(source,current.data());",
       "createdBy:session.uid,",
-      "tx.create(notificationRef,{...queueDocumentData(notification),",
+      'tx.create(notificationRef,{...queueDocumentData({...notification,reminderContext:{version:1,kind:"resubmission",jobId:input.jobId,staffId,dateKey:String(current.data()?.dateKey??""),revision:current.data()?.revision??0,requestId:ref.id,requestType:input.type}}),',
     ]);
   }
   const helperStart = source.indexOf("function assertCompletedReplacement(");
@@ -668,6 +723,8 @@ function checkResubmission(name) {
     "if(submission.data()?.resubmissionRequestId!==input.requestId)throw",
     "assertCompletedReplacement(data,submission.data(),String(data.replacementSubmissionId));",
     'if(data.status==="completed")return;',
+    'assertSubmissionOwner(submission.data()!,job.data());',
+    'assertCaseMailSubmissionCurrent(data,job.data()!);',
     'tx.update(ref,{status:"completed",completedBy:session.uid,',
   ]) && [
     "assertReplacementRequest(request,submission,submissionId);",
@@ -690,13 +747,19 @@ function checkConfirmApplication() {
     claimsCompany: /const companyId = companyFromClaims\(session\.token\);/.test(block),
     operational: /await assertProductionOperational\(companyId\);/.test(block)
       && /import \{ assertProductionOperational \} from "\.\/system-safety";/.test(source),
-    validatedInput: /const input = JobSchema\.parse\(request\.data \?\? \{\}\);/.test(block),
+    validatedInput: block.includes('const input = ApplicationConfirmationSchema.parse(request.data ?? {});')
+      && source.includes('const ApplicationConfirmationSchema = JobSchema.extend({')
+      && source.includes('expectedRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)'),
+    displayedVersion: block.includes('(data.revision ?? 0) !== input.expectedRevision'),
+    reviewConditionsStable: block.includes('applicationConfirmationIdentity(data) !== applicationConfirmationIdentity(job.data()!)')
+      && source.includes('import { applicationConfirmationIdentity } from "./assignment-preparation-core";'),
     jobReference: /const ref = db\.collection\("jobs"\)\.doc\(input\.jobId\);/.test(block),
     initialCompany: /if \(!job\.exists \|\| job\.data\(\)\?\.companyId !== companyId\)/.test(block),
     transaction: /await db\.runTransaction\(async \(tx\) =>/.test(block),
     transactionRead: /const current = await tx\.get\(ref\);/.test(block),
     transactionCompany: /if \(!current\.exists \|\| current\.data\(\)\?\.companyId !== companyId\)/.test(block),
     assignmentStable: /data\.status !== "assigned" \|\| \(data\.assignedStaffId \?\? null\) !== \(job\.data\(\)\?\.assignedStaffId \?\? null\)/.test(block),
+    receivedChangeHeld: block.includes("data.mailIntakeReviewRequired === true || data.pendingSourceWrite === true || data.adminEditSheetWrite?.pending === true"),
     idempotent: /if \(data\.applicationAdminConfirmed === true\) return;/.test(block),
     confirmedByActor: /tx\.update\(ref, \{\s*applicationAdminConfirmed: true,\s*applicationAdminConfirmedBy: session\.uid,/.test(block),
     audit: /const auditRef = db\.collection\("auditLogs"\)\.doc\(\);/.test(block)
@@ -857,13 +920,21 @@ function checkCreateUploadSession() {
       'awaittx.get(db.collection("resubmissionRequests").doc(input.resubmissionRequestId))',
       'if(resubmission?.companyId!==companyId||resubmission?.staffId!==staffId||resubmission?.jobId!==input.jobId||resubmission?.type!==input.type||resubmission?.status!=="open")',
       'if(resubmission.sourceFileId&&input.files.length!==1)',
+      'assertSubmissionReadiness(job);',
+      'parent.companyId!==companyId||parent.uid!==session.uid||parent.staffId!==staffId',
+      'parent.requestFingerprint!==fingerprint', 'parent.acceptedDateKey!==job.dateKey',
+      'parent.acceptedAssignmentRevision!==(job.revision??0)',
+      'assertSubmissionFile(parent,saved,submissionRef.id);',
+      'assertReplacementRequest(replacement.data(),parent,submissionRef.id);',
+      'object.metadata?.lkcContentSha256!==saved.contentSha256',
+      'if(saved.status!=="waiting_upload")throw',
       'tx.create(submissionRef,{', 'completedFiles:0,',
       'tx.create(submissionRef.collection("files").doc(record.fileId),{',
       'submissionId:submissionRef.id,type:input.type,', 'storagePath:record.storagePath,',
     ])
     && block.indexOf('if(awaitsubmissionTransferPaused(companyId))') < block.indexOf('db.collection("submissions")')
     && (block.match(/companyId,jobId:input\.jobId,staffId,uid:session\.uid,/g) ?? []).length === 2
-    && !/(?:input|request\.data)\.(?:companyId|staffId|uid)/.test(block)
+    && !/(?:input|request\.data)\.(?:companyId|staffId|uid|submissionId|storagePath)/.test(block)
     && schema.includes('size:z.number().int().positive().max(50*1024*1024)')
     && schema.includes('})).min(1).max(20)')
     && schema.includes('value==="application/pdf"||/^image\\/[^\\s/;]+$/.test(value)');
@@ -1129,7 +1200,136 @@ function checkProcessNotificationQueue() {
   return Object.values(checks).every(Boolean);
 }
 
+
+// 受信callableの既知の安全条件を固定する。動作試験と組み合わせ、配備許可とは分離する。
+function checkCaseMail(name) {
+  const original = name === "confirmCaseMailReview";
+  const source = sourceFile("functions/src/case-mail-" + (original ? "resolution" : "review") + ".ts");
+  const clean = text => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "");
+  const compact = text => clean(text).replace(/\s+/g, "");
+  const code = clean(source);
+  const start = code.search(new RegExp("export const " + name + "\\s*="));
+  const end = code.indexOf("\n});", start);
+  if (start < 0 || end < start) return false;
+  const block = compact(code.slice(start, end + 4));
+  const whole = compact(source);
+  const has = (text, parts) => parts.every(part => text.includes(part));
+  const section = (text, from, to) => {
+    const begin = text.indexOf(from), finish = text.indexOf(to, begin + from.length);
+    return begin < 0 || finish < 0 ? "" : compact(text.slice(begin, finish));
+  };
+  const readOnly = ["listCaseMailReceipts", "getCaseMailReceipt", "getCaseMailTargetPreview"].includes(name);
+  if (!has(whole, [
+    'import{requireAdmin,companyFromClaims}from"./utils";',
+    'import{onCall,HttpsError}from"firebase-functions/v2/https";',
+    'import{db}from"./firebase";',
+  ]) || /(?:input|request\.data)\.(?:companyId|actorUid|uid)/.test(block)) return false;
+  const schemas = {
+    listCaseMailReceipts: "ListSchema", getCaseMailReceipt: "DetailSchema",
+    getCaseMailTargetPreview: "TargetPreviewSchema", confirmCaseMailTarget: "TargetConfirmSchema",
+    holdCaseMailTarget: "TargetHoldSchema", resolveCaseMailTargetHold: "TargetConfirmSchema",
+  };
+  let prefix = "exportconst" + name + "=onCall(asyncrequest=>{constsession=requireAdmin(request),companyId=";
+  if (original) prefix += "companyFromClaims(session.token),input=Command.parse(request.data);if(input.expectedCompanyId!==companyId||input.expectedActorUid!==session.uid)fail();";
+  else {
+    prefix += "id.parse(companyFromClaims(session.token))";
+    prefix += ["listCaseMailReceipts", "getCaseMailReceipt"].includes(name) ? ";constinput=" : ",input=";
+    prefix += schemas[name] + ".parse(request.data);scope(input,companyId,session.uid);";
+    const scope = section(code, "function scope(", "function receipt(");
+    if (!has(scope, ['if(input.expectedCompanyId!==companyId||input.expectedActorUid!==uid){thrownewHttpsError("failed-precondition",'])) return false;
+  }
+  if (!readOnly) prefix += "awaitassertProductionOperational(companyId);";
+  if (name !== "listCaseMailReceipts") prefix += "returndb.runTransaction(asynctx=>{";
+  else prefix += 'letquery=db.collection("caseMailIntakeReceipts").where("companyId","==",companyId)';
+  if (!block.startsWith(prefix)) return false;
+  if (!readOnly && !whole.includes('import{assertProductionOperational}from"./system-safety";')) return false;
+  if (readOnly && /\.(?:set|create|update|delete|add|commit)\(/.test(block)) return false;
+  if (!original && !has(section(code, "function receipt(", "function summary("), [
+    "ReceiptSchema.safeParse(raw)", "!parsed.success||parsed.data.companyId!==companyId",
+  ])) return false;
+  const requirements = {
+    listCaseMailReceipts: ['.orderBy(FieldPath.documentId()).limit(26)', 'returndb.runTransaction(asynctx=>{constpage=awaittx.get(query);',
+      'page.docs.slice(0,25).map(doc=>summary(doc.id,receipt(doc.data(),companyId)))'],
+    getCaseMailReceipt: ['!snap.exists||snap.data()?.companyId!==companyId', 'candidate.companyId!==companyId',
+      'candidate.receiptId!==input.receiptId', 'candidate.messageId!==record.messageId', 'candidate.sourceFingerprint!==record.sourceFingerprint',
+      'job.companyId!==companyId', 'job.mailIntake?.receiptId!==input.receiptId', 'job.mailIntake?.candidateId!==candidateSnap.id',
+      'savedTarget.companyId!==companyId', 'savedTarget.receiptId!==input.receiptId', 'savedTarget.candidateId!==candidateSnap.id',
+      'caseMailTargetReader(tx,companyId,input.receiptId)', 'readCaseMailResolution(tx,companyId,input.receiptId,candidateSnap.id)'],
+    getCaseMailTargetPreview: ['readTargetContext(tx,companyId,input)', 'readTargetResolution(tx,companyId,input,current)'],
+    confirmCaseMailTarget: ['readTargetContext(tx,companyId,input)', 'current.saved.reviewVersion!==input.reviewVersion',
+      'current.saved.actorUid!==session.uid', 'current.view.state!=="available"||current.reviewVersion!==input.reviewVersion',
+      'tx.set(current.candidateRef,{targetBinding:binding},{merge:true})',
+      'tx.set(current.auditRef,{companyId,actorUid:session.uid,action:"caseMail.target.confirm"'],
+    holdCaseMailTarget: ['readTargetContext(tx,companyId,input)', 'audit.companyId!==companyId', 'audit.jobId!==input.jobId',
+      'audit.reviewVersion!==input.reviewVersion', 'current.view.state!=="confirmed"||current.reviewVersion!==input.reviewVersion||!current.saved||current.job.mailTargetHold!=null',
+      'tx.set(current.jobRef,caseMailTargetHoldPatch(current.job,hold,now),{merge:true})',
+      'tx.set(auditRef,{companyId,actorUid:session.uid,action:"caseMail.target.hold"'],
+    resolveCaseMailTargetHold: ['readTargetContext(tx,companyId,input)', 'readTargetResolution(tx,companyId,input,current)',
+      'if(!resolution)fail();', 'resolution.saved.actorUid!==session.uid', 'resolution.saved.reviewVersion!==input.reviewVersion',
+      '!resolution.view.canResolve||resolution.view.reviewVersion!==input.reviewVersion',
+      'tx.set(current.jobRef,', 'tx.set(current.candidateRef,{targetResolution:saved},{merge:true})',
+      'tx.set(resolution.auditRef,{companyId,actorUid:session.uid,action:"caseMail.target.resolve"',
+      'publishable:false,recruitmentStopped:true'],
+    confirmCaseMailReview: ['readCaseMailResolution(tx,companyId,input.receiptId,input.candidateId)',
+      'if(view.jobId!==input.jobId)fail();', '!view.canConfirm||view.reviewVersion!==input.reviewVersion',
+      'if((awaittx.get(auditRef)).exists)fail();', 'tx.set(jobRef,', 'publishable:false,recruitmentStopped:true',
+      'tx.set(auditRef,{companyId,actorUid:session.uid,action:"caseMail.review.confirm"'],
+  };
+  if (!has(block, requirements[name])) return false;
+  if (!readOnly) {
+    const expectedWrites = name === "resolveCaseMailTargetHold" ? 3 : 2;
+    const writes = [...block.matchAll(/\b([A-Za-z0-9_.]+)\.(set|create|update|delete|add|commit)\(/g)];
+    if (writes.filter(m => m[1] === "tx" && m[2] === "set").length !== expectedWrites
+        || writes.some(m => !(m[1] === "tx" && m[2] === "set") && !(m[1] === "FieldValue" && m[2] === "delete"))) return false;
+  }
+  if (!original && !["listCaseMailReceipts", "getCaseMailReceipt"].includes(name)) {
+    const context = section(code, "async function readTargetContext(", "export const getCaseMailTargetPreview");
+    if (!has(context, [
+      'awaittx.getAll(', 'rawReceipt.companyId!==companyId', 'rawCandidate.companyId!==companyId', 'job.companyId!==companyId',
+      'candidate.receiptId!==input.receiptId', 'candidate.messageId!==record.messageId',
+      'saved.companyId!==companyId', 'audit.companyId!==companyId', 'parsed.data.companyId!==companyId',
+      'binding.companyId!==companyId', 'owner.companyId!==companyId', 'originReceipt.companyId!==companyId', 'originCandidate.companyId!==companyId',
+      'feature?.caseMailIntakeEnabled!==true', 'principal.companyId!==companyId', 'principal.uid!==record.ingestedBy',
+      'principal.active!==true', 'principal.revision!==record.principalRevision',
+      'caseMailTargetReader(tx,companyId,input.receiptId)',
+    ]) || /\btx\.(?:set|create|update|delete)\(/.test(context)) return false;
+  }
+  if (["getCaseMailReceipt", "getCaseMailTargetPreview", "confirmCaseMailTarget", "holdCaseMailTarget", "resolveCaseMailTargetHold"].includes(name)) {
+    const reader = compact(sourceFile("functions/src/case-mail-collision.ts").split("export function caseMailTargetReader(")[1] ?? "");
+    if (!has(reader, ['db.collection("jobs").where("companyId","==",companyId)', 'job.companyId!==companyId',
+      'days.size>=5', '.limit(201)', 'page.docs.slice(0,200)', 'items.length>=10'])) return false;
+  }
+  if (["getCaseMailTargetPreview", "resolveCaseMailTargetHold"].includes(name)) {
+    const resolution = section(code, "async function readTargetResolution(", "export const resolveCaseMailTargetHold");
+    if (!has(resolution, ['resolved.companyId!==companyId', 'audit.companyId!==companyId',
+      'principal.companyId!==companyId', 'principal.active!==true', 'feature?.caseMailIntakeEnabled!==true',
+      'caseMailResolutionIssue(input.jobId,job,source', 'lock.companyId!==companyId', 'lock.jobId!==input.jobId',
+      'caseMailReviewAccepted(', 'caseMailRecordKey("case-mail-target-resolution-v1"'])) return false;
+  }
+  if (["getCaseMailReceipt", "confirmCaseMailReview"].includes(name)) {
+    const resolutionSource = sourceFile("functions/src/case-mail-resolution.ts");
+    const resolution = section(resolutionSource, "export async function readCaseMailResolution(", "export const confirmCaseMailReview");
+    if (!has(resolution, ['receipt.companyId!==companyId', 'candidate.companyId!==companyId', 'candidate.receiptId!==receiptId',
+      'job.companyId!==companyId', 'job.mailIntake?.receiptId!==receiptId', 'job.mailIntake?.candidateId!==candidateId',
+      'owner.companyId!==companyId', 'principal.companyId!==companyId', 'principal.active!==true',
+      'principal.revision!==receipt.principalRevision', 'feature?.caseMailIntakeEnabled!==true',
+      'candidate.heldChange?.revision!==receipt.revision', 'lock.companyId!==companyId', 'lock.jobId!==jobId',
+      'caseMailResolutionIssue(jobId,job,source', 'caseMailRecordKey(receipt,candidate,job,source??null,lock??null,principal,feature?.caseMailIntakeEnabled)'])) return false;
+  }
+  if (name === "holdCaseMailTarget" && !has(compact(sourceFile("functions/src/case-mail-target-hold.ts")),
+    ['publishable:false,recruitmentStopped:true', 'mailTargetHold:hold,mailIntakeReviewRequired:true'])) return false;
+  return true;
+}
+
 const checkers = {
+  listCaseMailReceipts: () => checkCaseMail("listCaseMailReceipts"),
+  getCaseMailReceipt: () => checkCaseMail("getCaseMailReceipt"),
+  getCaseMailTargetPreview: () => checkCaseMail("getCaseMailTargetPreview"),
+  confirmCaseMailTarget: () => checkCaseMail("confirmCaseMailTarget"),
+  holdCaseMailTarget: () => checkCaseMail("holdCaseMailTarget"),
+  resolveCaseMailTargetHold: () => checkCaseMail("resolveCaseMailTargetHold"),
+  confirmCaseMailReview: () => checkCaseMail("confirmCaseMailReview"),
+
   submitPilotOutcome: () => checkPilotExpansionMutation("submitPilotOutcome"),
   decidePilotExpansion: () => checkPilotExpansionMutation("decidePilotExpansion"),
   getPilotReadiness: () => checkReadiness("getPilotReadiness"),

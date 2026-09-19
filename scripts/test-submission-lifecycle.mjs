@@ -33,32 +33,34 @@ function harness(sourceFiles=null,compiledFiles=null){
       if(h.failWrite?.(w))throw new Error('synthetic DB write failure');
       if(w.mode==='create')assert.ok(!next.has(w.ref.path),'create exists');
       if(w.mode==='update')assert.ok(next.has(w.ref.path),'update missing');
+      if(w.mode==='delete'){next.delete(w.ref.path);continue;}
       let data=w.data;
       if(w.mode==='update'){
         data={};for(const [key,v] of Object.entries(w.data)){const parts=key.split('.');let node=data;for(const part of parts.slice(0,-1))node=node[part]??={};node[parts.at(-1)]=v;}
       }
       next.set(w.ref.path,merge(w.merge||w.mode==='update'?next.get(w.ref.path):{},data));
     }
-    records.clear();for(const [k,v]of next)records.set(k,v);for(const w of writes)versions.set(w.ref.path,(versions.get(w.ref.path)??0)+1);
+    records.clear();for(const [k,v]of next)records.set(k,v);for(const w of writes){versions.set(w.ref.path,(versions.get(w.ref.path)??0)+1);const key="@collection:"+w.ref.path.split("/").slice(0,-1).join("/");versions.set(key,(versions.get(key)??0)+1);}
   }
   const ref=p=>({path:p,id:p.split('/').at(-1),collection:n=>collection(`${p}/${n}`),get:async()=>{h.documentReads++;return snap(ref(p));},set:async(data,opts)=>{if(p.startsWith("resubmissionRequests/"))await h.beforeRequestWrite?.();commit([{ref:ref(p),data,merge:opts?.merge}]);},update:async data=>commit([{ref:ref(p),data,mode:"update"}])});
   const field=(v,k)=>k.split('.').reduce((x,p)=>x?.[p],v);
   const collection=(name,filters=[],ordering=null,max=Infinity)=>({
+    queryPath:name,
     doc:(id=`synthetic-${++serial}`)=>ref(`${name}/${id}`),
     add:async data=>{const r=ref(`${name}/synthetic-${++serial}`);await r.set(data);return r;},
-    where:(f,op,v)=>{assert.ok(['==','in','>=','<='].includes(op));return collection(name,[...filters,[f,op,v]],ordering,max);},
+    where:(f,op,v)=>{assert.ok(['==','in','>=','<=','<'].includes(op));return collection(name,[...filters,[f,op,v]],ordering,max);},
     orderBy:(f,d)=>collection(name,filters,[f,d],max),limit:n=>collection(name,filters,ordering,n),
     get:async()=>{
-      h.queryReads++;let entries=[...records].filter(([k,v])=>k.startsWith(name+'/')&&!k.slice(name.length+1).includes('/')&&filters.every(([f,op,x])=>op==='=='?field(v,f)===x:op==='>='?field(v,f)>=x:op==='<='?field(v,f)<=x:x.includes(field(v,f))));
+      h.queryReads++;let entries=[...records].filter(([k,v])=>k.startsWith(name+'/')&&!k.slice(name.length+1).includes('/')&&filters.every(([f,op,x])=>op==='=='?field(v,f)===x:op==='>='?field(v,f)>=x:op==='<='?field(v,f)<=x:op==='<'?field(v,f)<x:x.includes(field(v,f))));
       if(ordering)entries.sort((a,b)=>{const val=x=>{const v=field(x[1],ordering[0]);return v instanceof Timestamp?v.toMillis():v;};return (val(a)>val(b)?1:val(a)<val(b)?-1:0)*(ordering[1]==='desc'?-1:1);});
-      h.returnedDocuments+=Math.min(entries.length,max);return {docs:entries.slice(0,max).map(([k])=>snap(ref(k)))};
+      h.returnedDocuments+=Math.min(entries.length,max);return {docs:entries.slice(0,max).map(([k])=>snap(ref(k))),size:Math.min(entries.length,max)};
     },
   });
-  const writer=w=>({set:(ref,data,opts)=>w.push({ref,data,merge:opts?.merge}),update:(ref,data)=>w.push({ref,data,mode:'update'}),create:(ref,data)=>w.push({ref,data,mode:'create'})});
+  const writer=w=>({delete:ref=>w.push({ref,mode:'delete'}),set:(ref,data,opts)=>w.push({ref,data,merge:opts?.merge}),update:(ref,data)=>w.push({ref,data,mode:'update'}),create:(ref,data)=>w.push({ref,data,mode:'create'})});
   const db={collection,doc:ref,getAll:(...refs)=>Promise.all(refs.map(r=>r.get())),batch:()=>{const w=[];return {...writer(w),commit:async()=>{await h.beforeCommit?.();commit(w);}};},runTransaction:async callback=>{
     await h.beforeRequestWrite?.();
     for(let attempt=0;attempt<10;attempt++){
-      const w=[],reads=new Map();const get=async r=>{assert.equal(w.length,0,'read after write');reads.set(r.path,versions.get(r.path)??0);return snap(r);};
+      const w=[],reads=new Map();const get=async r=>{assert.equal(w.length,0,'read after write');if(r.queryPath){const key='@collection:'+r.queryPath;reads.set(key,versions.get(key)??0);const result=await r.get();for(const doc of result.docs)reads.set(doc.ref.path,versions.get(doc.ref.path)??0);return result;}reads.set(r.path,versions.get(r.path)??0);return snap(r);};
       const result=await callback({...writer(w),get,getAll:(...refs)=>Promise.all(refs.map(get))});
       await h.beforeCommit?.();
       if([...reads].some(([k,v])=>(versions.get(k)??0)!==v))continue;
@@ -75,12 +77,12 @@ function harness(sourceFiles=null,compiledFiles=null){
       const id=input.requestBody.id??`synthetic-drive-${h.copies+1}`;
       if(h.conflictMismatch){h.driveFiles.set(id,{id,name:'unrelated',size:'100'});throw {code:409};}
       if(h.driveFiles.has(id))throw {code:409};
-      h.copies++;const data={...input.requestBody,id,size:'100',mimeType:'image/png',md5Checksum:'00000000000000000000000000000000',createdTime:h.driveCreatedAt??'2099-09-20T02:00:00.000Z'};
+      h.copies++;const data={...input.requestBody,id,size:'100',mimeType:'image/png',md5Checksum:'00000000000000000000000000000000',createdTime:h.driveCreatedAt??'2026-09-20T02:00:00.000Z'};
       if(h.drivePayload)Object.assign(data,h.drivePayload(input));h.driveFiles.set(id,data);await h.afterCopy?.();if(h.loseCopyResponse)throw new Error('synthetic lost response');return {data:copy(data)};
     },
   }};
-  const storage={bucket:name=>{assert.equal(name,h.storageBucket??'synthetic-bucket');return {file:(p,options)=>({createReadStream:()=>{if(h.allowLegacyUnversionedRead&&options?.generation===undefined)h.unversionedReads=(h.unversionedReads??0)+1;else assert.equal(options?.generation,'1');return {syntheticPath:p};},delete:async()=>{h.deletedPaths??=[];h.deletedPaths.push(p);h.deletes++;if(h.failDelete)throw new Error('synthetic cleanup failure');}})};}};
-  const boundaries={'firebase-functions/v2/firestore':{onDocumentWritten:(_path,fn)=>fn},'firebase-functions/v2/scheduler':{onSchedule:(_options,fn)=>fn},googleapis:{google:{auth:{GoogleAuth:class{}},monitoring:()=>({}),sheets:()=>{throw Error('External Sheets access refused');}}},'./firebase':{db,storage},'./google-drive-client':{getWritableDriveClient:()=>drive,getReadonlyDriveClient:()=>({files:{get:async()=>{h.previewReads=(h.previewReads??0)+1;const stream={on:()=>stream,pipe:response=>response.end()};return {data:stream};}}})},'firebase-admin/firestore':{Timestamp,FieldValue:{serverTimestamp:()=>Timestamp.now(),delete:()=>deleted,increment:value=>({__increment:value}),arrayUnion:(...v)=>({__union:v})}},'firebase-functions/v2/https':{HttpsError,onCall:fn=>fn,onRequest:fn=>fn},'firebase-functions/v2/storage':{onObjectFinalized:fn=>fn},'firebase-functions/params':{defineString:(name,options)=>({value:()=>name==='FILE_PREVIEW_GATEWAY_URL'?(h.previewBase??options.default):options.default})},zod:dependency('zod'),'node:path':path,'node:crypto':crypto,'node:buffer':{Buffer}};
+  const storage={bucket:name=>{assert.equal(name??'synthetic-bucket',h.storageBucket??'synthetic-bucket');return {file:(p,options)=>({getMetadata:async()=>{h.metadataReads=(h.metadataReads??0)+1;if(h.metadataError)throw {code:h.metadataError};const object=h.storageObjects?.get(p);if(!object)throw {code:404};return [copy(object)];},createReadStream:()=>{if(h.allowLegacyUnversionedRead&&options?.generation===undefined)h.unversionedReads=(h.unversionedReads??0)+1;else assert.equal(options?.generation,'1');return {syntheticPath:p};},delete:async()=>{h.deletedPaths??=[];h.deletedPaths.push(p);h.storageObjects?.delete(p);h.deletes++;if(h.failDelete)throw new Error('synthetic cleanup failure');}})};}};
+  const boundaries={'firebase-functions/v2/firestore':{onDocumentWritten:(_path,fn)=>fn},'firebase-functions/v2/scheduler':{onSchedule:(_options,fn)=>fn},googleapis:{google:{auth:{GoogleAuth:class{}},monitoring:()=>({}),sheets:()=>{if(h.sheets)return h.sheets;throw Error('External Sheets access refused');}}},'./firebase':{db,storage},'./google-drive-client':{getWritableDriveClient:()=>drive,getReadonlyDriveClient:()=>({files:{get:async()=>{h.previewReads=(h.previewReads??0)+1;const stream={on:()=>stream,pipe:response=>response.end()};return {data:stream};}}})},'firebase-admin/firestore':{Timestamp,FieldValue:{serverTimestamp:()=>Timestamp.now(),delete:()=>deleted,increment:value=>({__increment:value}),arrayUnion:(...v)=>({__union:v})}},'firebase-functions/v2/https':{HttpsError,onCall:(...args)=>args.at(-1),onRequest:fn=>fn},'firebase-functions/v2/storage':{onObjectFinalized:fn=>fn},'firebase-functions/params':{defineString:(name,options)=>({value:()=>name==='FILE_PREVIEW_GATEWAY_URL'?(h.previewBase??options.default):options.default})},zod:dependency('zod'),'node:path':path,'node:crypto':crypto,'node:buffer':{Buffer}};
   function load(name){
     if(Object.hasOwn(boundaries,name))return boundaries[name];assert.match(name,/^\.\/[a-z0-9-]+$/,'External import refused');if(modules.has(name))return modules.get(name);
     const filename=name.slice(2),source=compiledFiles?compiledFiles[filename+'.js']:sourceFiles?sourceFiles[filename+'.ts']:fs.readFileSync(new URL('../functions/src/'+filename+'.ts',import.meta.url),'utf8');if(typeof source!=='string')throw Error('Historical module missing: '+name);const code=compiledFiles?source:ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
@@ -89,7 +91,7 @@ function harness(sourceFiles=null,compiledFiles=null){
   h.loadModule=load;h.snapshot=p=>snap(ref(p));h.updateRecord=(p,data)=>ref(p).update(data);
   h.status=load('./submission-status');h.uploads=load('./uploads');h.requests=load('./resubmissions');h.views=load('./submission-files');h.tasks=load('./staff-tasks');h.netprint=load('./netprint');h.precontact=load('./precontact');
   h.staff={uid:'synthetic-user',token:{companyId:'synthetic-company',staffId:'synthetic-staff',role:'staff'}};h.admin={uid:'synthetic-admin',token:{companyId:'synthetic-company',role:'admin'}};
-  records.set('jobs/synthetic-job',{companyId:'synthetic-company',assignedStaffId:'synthetic-staff',status:'assigned',dateKey:'2099-09-20',storeName:'Synthetic Store',clientName:'Synthetic Client'});
+  records.set('jobs/synthetic-job',{companyId:'synthetic-company',assignedStaffId:'synthetic-staff',status:'assigned',dateKey:'2026-09-20',storeName:'Synthetic Store',clientName:'Synthetic Client'});
   records.set('staffProfiles/synthetic-staff',{companyId:'synthetic-company',displayName:'Synthetic Staff'});
   records.set('companies/synthetic-company/settings/drive',{rootFolderId:'synthetic-root'});
   h.start=(count=1,patch={})=>h.uploads.createUploadSession({auth:h.staff,data:{jobId:'synthetic-job',type:'report',files:Array.from({length:count},(_,i)=>({originalName:`synthetic-${i}.png`,contentType:'image/png',size:100})),...patch}});
@@ -101,7 +103,8 @@ function harness(sourceFiles=null,compiledFiles=null){
 const deployedOnly=process.argv.includes('--deployed-rollback-only');
 if(deployedOnly&&!process.env.LKC_DEPLOYED_TRANSFER_BUNDLE)throw Error('Deployed rollback bundle is required.');
 const results=[],deployedObservations=[];
-async function test(name,run){if(deployedOnly&&!name.startsWith('deployed rollback '))return;try{await run();results.push({name,ok:true});}catch(e){results.push({name,ok:false,error:e.message});}}
+const testPrefix=process.argv.find(arg=>arg.startsWith('--test-name-prefix='))?.slice('--test-name-prefix='.length);
+async function test(name,run){if(testPrefix&&!name.startsWith(testPrefix))return;if(deployedOnly&&!name.startsWith('deployed rollback '))return;try{await run();results.push({name,ok:true});}catch(e){results.push({name,ok:false,error:e.message});}}
 function pauseTransfers(h){h.env.APP_ENVIRONMENT='production';h.records.set('productionControls/synthetic-company',{productionEnabled:true,emergencyLock:true});}
 await test('transfer pause updates canonical records and resumes the same submission',async()=>{
  const h=harness(),s=await h.start(),file=s.files[0],parent='submissions/'+s.submissionId,key=parent+'/files/'+file.fileId;
@@ -313,11 +316,44 @@ await test('replacement deleted during copy is not recreated and retains source'
 await test('admin completion validates replacement and repeated completion is harmless',async()=>{
  const h=harness(),r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}}),s=await h.start(1,{purpose:'replacement',resubmissionRequestId:r.requestId});await h.finish(s.files[0]);const parent=h.records.get('submissions/'+s.submissionId);parent.jobStatusApplied=false;await assert.rejects(h.requests.completeResubmissionRequest({auth:h.admin,data:r}));parent.jobStatusApplied=true;await h.requests.completeResubmissionRequest({auth:h.admin,data:r});const before=JSON.stringify(h.records.get('resubmissionRequests/'+r.requestId));await h.requests.completeResubmissionRequest({auth:h.admin,data:r});assert.equal(JSON.stringify(h.records.get('resubmissionRequests/'+r.requestId)),before);
 });
+await test('upload captures the accepted holiday deadline and rule version',async()=>{
+ const h=harness(),s=await h.start();const policy=h.records.get('submissions/'+s.submissionId).deadlinePolicy;
+ assert.equal(policy.status,'known');assert.equal(policy.workDate,'2026-09-20');
+ assert.equal(policy.ruleVersion,'jp-business-day-11-v1');assert.equal(policy.dueAtMs,Date.parse('2026-09-24T02:00:00Z'));
+ h.driveCreatedAt='2026-09-24T02:00:00Z';await h.finish(s.files[0]);
+ const report=h.records.get('jobs/synthetic-job').submissionStatus.report;assert.equal(report.lateFirstSubmission,false);assert.equal(report.deadlineReviewRequired,false);assert.equal(report.deadlinePolicy.dueAtMs,policy.dueAtMs);
+});
+await test('additional submission retains the original deadline policy',async()=>{
+ const h=harness(),a=await h.start();h.driveCreatedAt='2026-09-25T02:00:00Z';await h.finish(a.files[0]);
+ const original=h.records.get('jobs/synthetic-job').submissionStatus.report.deadlinePolicy;
+ const b=await h.start(1,{purpose:'additional'});h.records.get('submissions/'+b.submissionId).deadlinePolicy.dueAtMs=Date.parse('2026-09-28T02:00:00Z');
+ h.driveCreatedAt='2026-09-26T02:00:00Z';await h.finish(b.files[0]);
+ const report=h.records.get('jobs/synthetic-job').submissionStatus.report;assert.equal(report.deadlinePolicy.dueAtMs,original.dueAtMs);assert.equal(report.lateFirstSubmission,true);
+});
+await test('legacy first submission retains its lateness without inventing a policy',async()=>{
+ const h=harness(),a=await h.start();h.driveCreatedAt='2026-09-20T02:00:00Z';await h.finish(a.files[0]);
+ const original=h.records.get('jobs/synthetic-job').submissionStatus.report;delete original.deadlinePolicy;original.lateFirstSubmission=true;
+ const b=await h.start(1,{purpose:'additional'});h.driveCreatedAt='2026-09-25T02:00:00Z';await h.finish(b.files[0]);
+ const report=h.records.get('jobs/synthetic-job').submissionStatus.report;assert.equal(report.lateFirstSubmission,true);assert.equal(report.deadlinePolicy.status,'unrecorded');assert.equal(report.deadlineReviewRequired,true);
+});
+await test('unpublished calendar does not prevent storage or invent timely submission',async()=>{
+ const h=harness();h.records.get('jobs/synthetic-job').dateKey='2099-09-20';h.driveCreatedAt='2099-09-20T02:00:00Z';const s=await h.start();await h.finish(s.files[0]);
+ const report=h.records.get('jobs/synthetic-job').submissionStatus.report;assert.equal(report.completed,true);assert.equal(report.lateFirstSubmission,undefined);assert.equal(report.deadlinePolicy.status,'unavailable');assert.equal(report.deadlineReviewRequired,true);
+});
+await test('legacy pending transfer completes without guessing its original deadline',async()=>{
+ const h=harness(),s=await h.start();delete h.records.get('submissions/'+s.submissionId).deadlinePolicy;await h.finish(s.files[0]);
+ const report=h.records.get('jobs/synthetic-job').submissionStatus.report;assert.equal(report.completed,true);assert.equal(report.lateFirstSubmission,undefined);assert.equal(report.deadlinePolicy.status,'unrecorded');assert.equal(report.deadlineReviewRequired,true);
+});
+await test('changed work date preserves the recorded deadline and requests review',async()=>{
+ const h=harness(),s=await h.start();h.records.get('jobs/synthetic-job').dateKey='2026-09-25';await h.finish(s.files[0]);
+ const report=h.records.get('jobs/synthetic-job').submissionStatus.report;assert.equal(report.deadlinePolicy.workDate,'2026-09-20');assert.equal(report.deadlineReviewRequired,true);
+});
+
 await test('additional late report preserves late first submission in queued sheet status',async()=>{
- const h=harness();h.driveCreatedAt='2099-09-25T02:00:00.000Z';const a=await h.start();await h.finish(a.files[0]);h.driveCreatedAt='2099-09-26T02:00:00.000Z';const b=await h.start(1,{purpose:'additional'});await h.finish(b.files[0]);assert.equal(h.records.get('jobs/synthetic-job').submissionStatus.report.lateFirstSubmission,true);assert.equal(h.list('sheetSyncQueue').at(-1).updates.reportSubmitted,'遅延');
+ const h=harness();h.driveCreatedAt='2026-09-25T02:00:00.000Z';const a=await h.start();await h.finish(a.files[0]);h.driveCreatedAt='2026-09-26T02:00:00.000Z';const b=await h.start(1,{purpose:'additional'});await h.finish(b.files[0]);assert.equal(h.records.get('jobs/synthetic-job').submissionStatus.report.lateFirstSubmission,true);assert.equal(h.list('sheetSyncQueue').at(-1).updates.reportSubmitted,'遅延');
 });
 await test('recovery of older transfer keeps earliest and latest submission chronology',async()=>{
- const h=harness(),a=await h.start();h.failWrite=w=>w.ref.path.startsWith('sheetSyncQueue/');await assert.rejects(h.finish(a.files[0]));h.failWrite=null;h.driveCreatedAt='2099-09-25T02:00:00.000Z';const b=await h.start(1,{purpose:'additional'});await h.finish(b.files[0]);await h.finish(a.files[0]);const report=h.records.get('jobs/synthetic-job').submissionStatus.report;assert.equal(report.firstCompletedAt.toDate().toISOString(),'2099-09-20T02:00:00.000Z');assert.equal(report.latestCompletedAt.toDate().toISOString(),'2099-09-25T02:00:00.000Z');assert.equal(h.copies,2);
+ const h=harness(),a=await h.start();h.failWrite=w=>w.ref.path.startsWith('sheetSyncQueue/');await assert.rejects(h.finish(a.files[0]));h.failWrite=null;h.driveCreatedAt='2026-09-25T02:00:00.000Z';const b=await h.start(1,{purpose:'additional'});await h.finish(b.files[0]);await h.finish(a.files[0]);const report=h.records.get('jobs/synthetic-job').submissionStatus.report;assert.equal(report.firstCompletedAt.toDate().toISOString(),'2026-09-20T02:00:00.000Z');assert.equal(report.latestCompletedAt.toDate().toISOString(),'2026-09-25T02:00:00.000Z');assert.equal(h.copies,2);
 });
 
 
@@ -671,5 +707,244 @@ await test('targeted preview operation count with 100 submissions and 2000 files
  console.log(JSON.stringify({syntheticPreviewOperationCounts:measurements,realBillingOrLatencyMeasurement:false}));
  assert.deepEqual(measurements[0],{targeted:false,documentReads:1,queryReads:101,returnedDocuments:2100,tokenWrites:2000,groups:100,files:2000});
  assert.deepEqual(measurements[1],{targeted:true,documentReads:3,queryReads:0,returnedDocuments:0,tokenWrites:1,groups:1,files:1});
+});
+await test('malformed stored deadline never invents a valid historical rule',async()=>{const h=harness(),s=await h.start();h.records.get('submissions/'+s.submissionId).deadlinePolicy={ruleVersion:'jp-business-day-11-v1',calendarVersion:'cao-2026-2027-20260917',workDate:'2026-02-30',dueAtMs:Date.parse('2026-03-03T02:00:00Z'),status:'known'};await h.finish(s.files[0]);const report=h.records.get('jobs/synthetic-job').submissionStatus.report;assert.equal(report.deadlinePolicy.status,'unrecorded');assert.equal(report.lateFirstSubmission,undefined);assert.equal(report.deadlineReviewRequired,true);});
+for(const [flag,reason]of [['sourceMissing','source_unavailable'],['applicationUnconfirmed','assignment_sheet_confirmation_pending'],['assignmentUnresolved','assignment_identity_unresolved']])for(const action of ['upload','client-record'])await test('pending '+flag+' prevents '+action+' without writes',async()=>{const h=harness();const job=h.records.get('jobs/synthetic-job');job[flag]=true;const before=JSON.stringify([...h.records]);const call=()=>action==='upload'?h.start():h.loadModule('./submission-status').setSalesFloorClientSubmitted({auth:h.staff,data:{jobId:'synthetic-job',submitted:true}});await assert.rejects(call(),e=>e.code==='failed-precondition'&&e.details?.reason===reason);assert.equal(JSON.stringify([...h.records]),before);job[flag]=false;await call();});
+for(const flag of ['sourceMissing','applicationUnconfirmed','assignmentUnresolved'])await test('accepted file is retained when '+flag+' changes later',async()=>{const h=harness(),s=await h.start();h.records.get('jobs/synthetic-job')[flag]=true;await h.finish(s.files[0]);assert.equal((await h.state(s.submissionId)).status,'completed');assert.equal(h.driveFiles.size,1);assert.equal(h.records.get('submissions/'+s.submissionId).totalFiles,1);});
+const retryRequest='11111111-1111-4111-8111-111111111111';
+const retryFiles=(count=1,size=100)=>Array.from({length:count},(_,i)=>({originalName:'retry-'+i+'.png',contentType:'image/png',size,contentSha256:'a'.repeat(64)}));
+const retryStart=(h,count=1,patch={})=>h.start(count,{clientRequestId:retryRequest,files:retryFiles(count),...patch});
+function presentObject(h,file,patch={}){h.storageObjects??=new Map();h.storageObjects.set(file.storagePath,{name:file.storagePath,contentType:'image/png',size:'100',generation:'1',metadata:{lkcContentSha256:'a'.repeat(64)},...patch});}
+await test('upload retry reuses receipt after response loss without creating new files',async()=>{const h=harness(),first=await retryStart(h,2),again=await retryStart(h,2);assert.equal(first.submissionId,again.submissionId);assert.equal(again.replayed,true);assert.equal(again.clientRequestId,retryRequest);assert.deepEqual(again.files,first.files);assert.equal(h.list('submissions').length,1);assert.equal(h.records.size,6);assert.equal(h.metadataReads,2);});
+await test('concurrent same operation converges on one receipt',async()=>{const h=harness(),responses=await Promise.all([retryStart(h),retryStart(h)]);assert.equal(responses[0].submissionId,responses[1].submissionId);assert.equal(h.list('submissions').length,1);assert.equal(h.list('submissions/'+responses[0].submissionId+'/files').length,1);});
+await test('partial uploaded and finalized files are skipped while missing files resume',async()=>{const h=harness(),first=await retryStart(h,3);presentObject(h,first.files[0]);presentObject(h,first.files[1]);await h.finish(first.files[0]);const again=await retryStart(h,3);assert.deepEqual(Array.from(again.files,f=>f.uploadRequired),[false,false,true]);assert.equal(h.copies,1);assert.equal(h.metadataReads,2);assert.equal(h.list('submissions').length,1);});
+await test('completed receipt survives staging cleanup without reupload',async()=>{const h=harness(),first=await retryStart(h);await h.finish(first.files[0]);const before=JSON.stringify([...h.records]);const again=await retryStart(h);assert.equal(again.files[0].uploadRequired,false);assert.equal(h.metadataReads??0,0);assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.copies,1);});
+for(const field of ['name','size','contentType','hash'])await test('retry refuses mismatched existing Storage '+field,async()=>{const h=harness(),first=await retryStart(h);const changes={name:{name:'other'},size:{size:'101'},contentType:{contentType:'application/pdf'},hash:{metadata:{lkcContentSha256:'b'.repeat(64)}}};presentObject(h,first.files[0],changes[field]);await assert.rejects(retryStart(h),e=>e.code==='failed-precondition');assert.equal(h.list('submissions').length,1);assert.equal(h.copies,0);});
+for(const code of [403,500,503])await test('metadata '+code+' cannot fall back to overwriting',async()=>{const h=harness();await retryStart(h);h.metadataError=code;await assert.rejects(retryStart(h),e=>e.code===code);assert.equal(h.list('submissions').length,1);});
+for(const state of ['processing','paused_global','error','security_error'])await test('missing source in '+state+' requires recovery instead of recreation',async()=>{const h=harness(),first=await retryStart(h);h.records.get('submissions/'+first.submissionId+'/files/'+first.files[0].fileId).status=state;await assert.rejects(retryStart(h),e=>e.code==='failed-precondition');assert.equal(h.list('submissions').length,1);});
+for(const patch of [{files:retryFiles(2)},{type:'sales_floor'},{files:[{...retryFiles()[0],originalName:'changed.png'}]},{files:[{...retryFiles()[0],contentSha256:'b'.repeat(64)}]}])await test('same request with changed content is rejected '+JSON.stringify(patch),async()=>{const h=harness();await retryStart(h);await assert.rejects(retryStart(h,1,patch),e=>e.code==='failed-precondition');assert.equal(h.list('submissions').length,1);});
+for(const [name,change]of [['revision',j=>j.revision=1],['date',j=>j.dateKey='2026-09-21'],['pending',j=>j.applicationUnconfirmed=true],['cancelled',j=>j.cancelled=true],['staff',j=>j.assignedStaffId='other'],['company',j=>j.companyId='other']])await test('retry refuses changed assignment '+name,async()=>{const h=harness();await retryStart(h);change(h.records.get('jobs/synthetic-job'));await assert.rejects(retryStart(h));assert.equal(h.list('submissions').length,1);assert.equal(h.metadataReads??0,0);});
+await test('retry keeps twenty 50MiB files valid without physically allocating them',async()=>{const h=harness(),a=await retryStart(h,20,{files:retryFiles(20,50*1024*1024)}),b=await retryStart(h,20,{files:retryFiles(20,50*1024*1024)});assert.equal(a.files.length,20);assert.equal(b.files.length,20);assert.equal(h.list('submissions').length,1);});
+await test('request ID is scoped to authenticated UID and legacy calls remain compatible',async()=>{const h=harness(),a=await retryStart(h);h.staff={...h.staff,uid:'other-session-user'};const b=await retryStart(h);assert.notEqual(a.submissionId,b.submissionId);const legacy=await h.start();assert.equal(legacy.clientRequestId,undefined);assert.equal(legacy.files[0].uploadRequired,undefined);});
+await test('idempotent request requires valid operation ID and each content hash',async()=>{for(const patch of [{clientRequestId:'bad'},{files:[{originalName:'a.png',contentType:'image/png',size:100}]}]){const h=harness();await assert.rejects(retryStart(h,1,patch));assert.equal(h.list('submissions').length,0);}});
+
+for(const field of ['uid','staffId','jobId','type','purpose'])await test('tampered receipt identity refuses replay '+field,async()=>{const h=harness(),first=await retryStart(h);h.records.get('submissions/'+first.submissionId)[field]='other';await assert.rejects(retryStart(h),e=>e.code==='failed-precondition');assert.equal(h.metadataReads??0,0);});
+await test('missing or changed child never recreates a partially corrupt receipt',async()=>{for(const missing of [true,false]){const h=harness(),first=await retryStart(h),key='submissions/'+first.submissionId+'/files/'+first.files[0].fileId;if(missing)h.records.delete(key);else h.records.get(key).contentSha256='b'.repeat(64);const before=JSON.stringify([...h.records]);await assert.rejects(retryStart(h),e=>e.code==='failed-precondition');assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.metadataReads??0,0);}});
+for(const status of ['submitted','completed'])await test('same replacement receipt can be checked after request becomes '+status,async()=>{const h=harness(),req={companyId:'synthetic-company',jobId:'synthetic-job',staffId:'synthetic-staff',type:'report',status:'open'};h.records.set('resubmissionRequests/request-a',req);const first=await retryStart(h,1,{purpose:'replacement',resubmissionRequestId:'request-a'});presentObject(h,first.files[0]);Object.assign(h.records.get('resubmissionRequests/request-a'),{status,replacementSubmissionId:first.submissionId});const again=await retryStart(h,1,{purpose:'replacement',resubmissionRequestId:'request-a'});assert.equal(again.files[0].uploadRequired,false);assert.equal(h.records.get('resubmissionRequests/request-a').status,status);h.records.get('resubmissionRequests/request-a').replacementSubmissionId='another-receipt';await assert.rejects(retryStart(h,1,{purpose:'replacement',resubmissionRequestId:'request-a'}),e=>e.code==='failed-precondition');});
+await test('paused transfer rejects replay without changing retained receipt or Storage',async()=>{const h=harness();await retryStart(h);pauseTransfers(h);const before=JSON.stringify([...h.records]);await assert.rejects(retryStart(h),e=>e.code==='failed-precondition');assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.metadataReads??0,0);});
+for(const flag of ['sourceMissing','applicationUnconfirmed','assignmentUnresolved'])for(const period of ['current','outside-window'])await test('resubmission readiness '+period+' '+flag,async()=>{const h=harness(),job=h.records.get('jobs/synthetic-job');job.dateKey=period==='outside-window'?'2000-01-01':new Date(Date.now()+9*3600000).toISOString().slice(0,10);job[flag]=true;h.records.set('resubmissionRequests/pending',{companyId:'synthetic-company',staffId:'synthetic-staff',jobId:'synthetic-job',type:'report',status:'open',createdAt:Timestamp.now()});const before=JSON.stringify([...h.records]);const waiting=await h.tasks.getMyTasks({auth:h.staff,data:{}});assert.equal(waiting.tasks.filter(t=>t.kind==='resubmission').length,0);assert.equal(JSON.stringify([...h.records]),before);job[flag]=false;const ready=await h.tasks.getMyTasks({auth:h.staff,data:{}});assert.equal(ready.tasks.filter(t=>t.kind==='resubmission').length,1);});
+for(const flag of ['sourceMissing','applicationUnconfirmed','assignmentUnresolved'])await test('netprint registration retains numbers without notifying an unconfirmed assignment '+flag,async()=>{const h=harness();h.records.get('jobs/synthetic-job')[flag]=true;await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:'synthetic-job',numbers:['12345678']}});assert.equal(h.list('notificationQueue').length,0);assert.equal(h.records.get('jobs/synthetic-job').netPrint.items[0].number,'12345678');h.records.get('jobs/synthetic-job')[flag]=false;await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:'synthetic-job',numbers:['87654321']}});const notice=h.list('notificationQueue')[0];assert.equal(notice.reminderContext.kind,'netprint-update');assert.equal(notice.reminderContext.jobId,'synthetic-job');});
+await test('idempotent receipt -> interrupted replacement -> admin comparison -> completed retains original files',async()=>{
+const h=harness(),initial=await retryStart(h);await h.finish(initial.files[0]);const originalDrive=h.records.get('submissions/'+initial.submissionId+'/files/'+initial.files[0].fileId).driveFileId;
+const request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:initial.submissionId,sourceFileId:initial.files[0].fileId,reasons:['その他']}});
+const options={clientRequestId:'22222222-2222-4222-8222-222222222222',purpose:'replacement',resubmissionRequestId:request.requestId};const accepted=await retryStart(h,1,options),recovered=await retryStart(h,1,options);assert.equal(accepted.submissionId,recovered.submissionId);assert.notEqual(initial.files[0].fileId,accepted.files[0].fileId);assert.equal(h.list('submissions').length,2);assert.equal(h.records.get('resubmissionRequests/'+request.requestId).status,'open');
+await h.finish(recovered.files[0]);assert.equal(h.records.get('resubmissionRequests/'+request.requestId).status,'submitted');const again=await retryStart(h,1,options);assert.equal(again.files[0].uploadRequired,false);const comparison=await h.views.getResubmissionComparison({auth:h.admin,data:request});assert.equal(comparison.source.id,initial.files[0].fileId);assert.equal(comparison.replacements.length,1);assert.equal(comparison.replacements[0].submissionId,accepted.submissionId);
+await h.requests.completeResubmissionRequest({auth:h.admin,data:request});await h.requests.completeResubmissionRequest({auth:h.admin,data:request});assert.equal(h.records.get('resubmissionRequests/'+request.requestId).status,'completed');assert.equal(h.driveFiles.size,2);assert.ok(h.driveFiles.has(originalDrive));assert.equal(h.list('submissions').length,2);assert.equal((await h.state(initial.submissionId)).completedFiles,1);assert.equal((await h.state(accepted.submissionId)).completedFiles,1);
+});
+
+await test('resubmission queue records the transaction current assignment and request identity',async()=>{const h=harness();h.records.get('jobs/synthetic-job').revision=4;h.beforeCommit=async()=>{h.beforeCommit=null;await h.updateRecord('jobs/synthetic-job',{revision:5,dateKey:'2026-09-21'});};const r=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});const notices=h.list('notificationQueue');assert.equal(notices.length,1);const c=notices[0].reminderContext;assert.equal(c.version,1);assert.equal(c.kind,'resubmission');assert.equal(c.jobId,'synthetic-job');assert.equal(c.staffId,'synthetic-staff');assert.equal(c.dateKey,'2026-09-21');assert.equal(c.revision,5);assert.equal(c.requestId,r.requestId);assert.equal(c.requestType,'report');assert.equal(h.list('resubmissionRequests').length,1);});
+
+
+for(const mode of ['normal','recovery','replacement'])await test('multi-file completion uses the latest transferred file time '+mode,async()=>{
+ const h=harness();const patch={};let request;
+ if(mode==='replacement'){request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',reasons:['その他']}});Object.assign(patch,{purpose:'replacement',resubmissionRequestId:request.requestId});}
+ const s=await h.start(2,patch);h.driveCreatedAt='2026-09-24T02:05:00.000Z';await h.finish(s.files[0]);h.driveCreatedAt='2026-09-24T01:55:00.000Z';
+ if(mode==='recovery'){h.failWrite=w=>w.ref.path.startsWith('sheetSyncQueue/');await assert.rejects(h.finish(s.files[1]));h.failWrite=null;}
+ await h.finish(s.files[1]);const parent=h.records.get('submissions/'+s.submissionId),report=h.records.get('jobs/synthetic-job').submissionStatus.report;
+ assert.equal(parent.completedAt.toDate().toISOString(),'2026-09-24T02:05:00.000Z');assert.equal(report.firstCompletedAt.toDate().toISOString(),'2026-09-24T02:05:00.000Z');assert.equal(report.latestCompletedAt.toDate().toISOString(),'2026-09-24T02:05:00.000Z');assert.equal(report.lateFirstSubmission,true);assert.equal(h.list('sheetSyncQueue').at(-1).updates.reportSubmitted,'遅延');
+ const before=JSON.stringify(report);await h.finish(s.files[0]);assert.equal(JSON.stringify(h.records.get('jobs/synthetic-job').submissionStatus.report),before);assert.equal(h.copies,2);
+ if(request){assert.equal(h.records.get('resubmissionRequests/'+request.requestId).submittedAt.toDate().toISOString(),'2026-09-24T02:05:00.000Z');await h.requests.completeResubmissionRequest({auth:h.admin,data:request});}
+});
+
+
+for(const mode of ['missing','extra','foreign','missing-time','uncounted','incomplete'])await test('all-file completion refuses inconsistent sibling '+mode,async()=>{
+ const h=harness(),s=await h.start(2);await h.finish(s.files[0]);const p='submissions/'+s.submissionId+'/files/'+s.files[0].fileId,original={...h.records.get(p)};
+ if(mode==='missing')h.records.delete(p);if(mode==='extra')h.records.set(p+'-extra',{...original});if(mode==='foreign')h.records.get(p).companyId='other';if(mode==='missing-time'){delete h.records.get(p).transferCompletedAt;delete h.records.get(p).completedAt;}if(mode==='uncounted')h.records.get(p).completionCounted=false;if(mode==='incomplete')h.records.get(p).status='processing';
+ await assert.rejects(h.finish(s.files[1]),e=>e.code==='failed-precondition');assert.equal(h.records.get('jobs/synthetic-job').submissionStatus,undefined);assert.equal(h.list('sheetSyncQueue').length,0);assert.equal(h.copies,2);assert.equal(h.driveFiles.size,2);
+ h.records.set(p,original);h.records.delete(p+'-extra');await h.finish(s.files[1]);assert.equal(h.records.get('jobs/synthetic-job').submissionStatus.report.completed,true);assert.equal(h.copies,2);
+});
+await test('known completed sibling timestamp supports a legacy transfer checkpoint',async()=>{const h=harness(),s=await h.start(2);h.driveCreatedAt='2026-09-24T02:05:00.000Z';await h.finish(s.files[0]);delete h.records.get('submissions/'+s.submissionId+'/files/'+s.files[0].fileId).transferCompletedAt;h.driveCreatedAt='2026-09-24T01:55:00.000Z';await h.finish(s.files[1]);assert.equal(h.records.get('submissions/'+s.submissionId).completedAt.toDate().toISOString(),'2026-09-24T02:05:00.000Z');});
+await test('replay preserves already applied historical completion timestamp',async()=>{const h=harness(),s=await h.start(2);await h.finish(s.files[0]);await h.finish(s.files[1]);const parent=h.records.get('submissions/'+s.submissionId),old=Timestamp.fromMillis(Date.parse('2026-09-20T01:00:00Z'));parent.completedAt=old;const before=JSON.stringify(h.records.get('jobs/synthetic-job').submissionStatus),queues=h.list('sheetSyncQueue').length;await h.finish(s.files[0]);assert.equal(h.records.get('submissions/'+s.submissionId).completedAt.toMillis(),old.toMillis());assert.equal(JSON.stringify(h.records.get('jobs/synthetic-job').submissionStatus),before);assert.equal(h.list('sheetSyncQueue').length,queues);assert.equal(h.copies,2);});
+await test('job completion refuses caller time different from persisted receipt',async()=>{const h=harness(),s=await h.start();await h.finish(s.files[0]);h.records.get('submissions/'+s.submissionId).jobStatusApplied=false;const before=JSON.stringify([...h.records]);await assert.rejects(h.status.markSubmissionCompleted({submissionId:s.submissionId,jobId:'synthetic-job',type:'report',submittedAt:Timestamp.fromMillis(0)}),e=>e.code==='failed-precondition');assert.equal(JSON.stringify([...h.records]),before);});
+
+
+for(const scope of ['file','submission'])await test('comparison returns explicit replacement scope '+scope,async()=>{const h=harness(),s=await h.start();await h.finish(s.files[0]);const req=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type:'report',sourceSubmissionId:s.submissionId,...(scope==='file'?{sourceFileId:s.files[0].fileId}:{}),reasons:['その他']}});const detail=await h.views.getResubmissionComparison({auth:h.staff,data:req});assert.equal(detail.request.scope,scope);assert.equal(detail.source!==null,scope==='file');if(scope==='submission'){const upload=await h.start(20,{purpose:'replacement',resubmissionRequestId:req.requestId});assert.equal(upload.files.length,20);}else await assert.rejects(h.start(2,{purpose:'replacement',resubmissionRequestId:req.requestId}),e=>e.code==='invalid-argument');});
+
+
+// 同じメモリDBに実API・原本照合・転送処理を接続し、スタッフと管理者の往復を検証する。
+async function staffAdminJourneyHarness() {
+ const h=harness(),companyId='synthetic-company',jobId=h.loadModule('./case-id').createJobIdFromPersistedCaseId(companyId,'synthetic-case'),dateKey='2026-09-20',sheetId='synthetic-sheet',sheetName='2026.9';
+ h.jobId=jobId;h.records.set('jobs/'+jobId,h.records.get('jobs/synthetic-job'));h.records.delete('jobs/synthetic-job');const start=h.start;h.start=(count,patch={})=>start(count,{jobId,...patch});
+ h.current=()=>h.records.get('jobs/'+jobId);
+ Object.assign(h.current(),{status:'open',assignedStaffId:null,assignedStaffName:null,revision:0,publishable:true,caseId:'synthetic-case',workDate:dateKey,makerName:'Synthetic maker',menuName:'Synthetic menu',workTime:'10:00-18:00',sheetRef:{spreadsheetId:sheetId,sheetId:1,sheetName,currentRow:2}});
+ h.records.get('staffProfiles/synthetic-staff').active=true;
+ const row=Array(55).fill('');Object.assign(row,{0:dateKey,1:'',9:'Synthetic Client',10:'Synthetic Store',11:'Synthetic maker',12:'Synthetic menu',14:'10:00-18:00',16:'synthetic-case'});h.row=row;h.sheetWrites=[];
+ h.records.set('sheetImportConfigs/'+companyId,{companyId,enabled:true,spreadsheetId:sheetId,headerRow:1,dataStartRow:2,readRangeEndColumn:'BC',columns:{workDate:'A',staffName:'B',clientName:'J',storeName:'K',makerName:'L',menuName:'M',workTime:'O',caseId:'Q'}});
+ h.records.set('companies/'+companyId+'/sheetMappings/shift',{enabled:true,spreadsheetId:sheetId,idColumn:'Q',columns:{staffName:'B',workDate:'A',reportSubmitted:'I'},operations:{'job.assign':{values:['staffName']},'submission.report':{values:['reportSubmitted']}}});
+ const column=range=>{assert.ok(range.startsWith("'"+sheetName+"'!"));const letters=range.split('!')[1].match(/^[A-Z]+/)[0];return [...letters].reduce((n,c)=>n*26+c.charCodeAt(0)-64,0)-1;};
+ h.sheets={spreadsheets:{get:async input=>{assert.equal(input.spreadsheetId,sheetId);return {data:{sheets:[{properties:{sheetId:1,title:sheetName,gridProperties:{rowCount:100,columnCount:55}}}]}};},values:{
+  get:async input=>{assert.equal(input.spreadsheetId,sheetId);return {data:{values:input.range.includes('Q:Q')?[['case'],[row[16]]]:[Array(55).fill('header'),[...row]]}};},
+  batchGet:async input=>{assert.equal(input.spreadsheetId,sheetId);return {data:{valueRanges:input.ranges.map(range=>({values:[[row[column(range)]]]}))}};},
+  batchUpdate:async input=>{assert.equal(input.spreadsheetId,sheetId);h.sheetWrites.push(copy(input));for(const entry of input.requestBody.data)row[column(entry.range)]=entry.values[0][0];return {data:{}};}
+ }}};
+ h.adminCall=(name,data)=>h.loadModule('./admin-operations')[name]({auth:h.admin,data:{jobId,...data}});
+ h.runSheet=async id=>h.loadModule('./safe-sheet-writes').processSafeSheetWrite({data:{after:h.snapshot('sheetSyncQueue/'+id)}});
+ h.sync=()=>h.loadModule('./shift-import').syncShiftSheetsReadOnly({auth:h.admin,data:{}});
+ h.apply=()=>h.loadModule('./jobs').applyToJob({auth:h.staff,data:{jobId,requestId:'journey-application-0001'}});
+ await h.sync();return h;
+}
+for(const scope of ['file','submission'])await test('staff-admin journey '+scope,async()=>{
+ const h=await staffAdminJourneyHarness();await h.apply();const assignedRevision=h.current().revision;
+ assert.equal(h.current().applicationUnconfirmed,true);
+ await assert.rejects(h.adminCall('confirmApplication',{expectedRevision:assignedRevision-1}),e=>e.code==='failed-precondition');
+ await h.adminCall('confirmApplication',{expectedRevision:assignedRevision});assert.equal(h.current().applicationAdminConfirmed,true);
+ await assert.rejects(h.start(),e=>e.code==='failed-precondition'&&e.details.reason==='assignment_sheet_confirmation_pending');
+ const assignment=h.list('sheetSyncQueue').find(q=>q.operation==='job.assign');await h.runSheet(assignment.id);
+ assert.equal(h.records.get('sheetSyncQueue/'+assignment.id).status,'completed');assert.equal(h.row[1],'Synthetic Staff');
+ assert.equal(h.current().applicationUnconfirmed,true);await h.sync();assert.equal(h.current().applicationUnconfirmed,false);assert.equal(h.current().applicationAdminConfirmed,true);
+ const first=await h.start(2);await h.finish(first.files[0]);await h.finish(first.files[1]);
+ const originalIds=first.files.map(f=>h.records.get('submissions/'+first.submissionId+'/files/'+f.fileId).driveFileId);
+ const timeline=await h.views.getSubmissionTimeline({auth:h.admin,data:{jobId:h.jobId,type:'report'}});assert.equal(timeline.submissions.length,1);assert.equal(timeline.submissions[0].files.length,2);
+ const report=h.list('sheetSyncQueue').find(q=>q.operation==='submission.report');await h.runSheet(report.id);assert.equal(h.records.get('sheetSyncQueue/'+report.id).status,'completed');assert.equal(h.current().submissionStatus.report.sheetWrite.pending,false);
+ const request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:h.jobId,type:'report',sourceSubmissionId:first.submissionId,...(scope==='file'?{sourceFileId:first.files[0].fileId}:{}),reasons:['その他']}});
+ const before=await h.views.getResubmissionComparison({auth:h.staff,data:request});assert.equal(before.request.scope,scope);
+ const count=scope==='file'?1:2,replacement=await h.start(count,{purpose:'replacement',resubmissionRequestId:request.requestId});
+ await assert.rejects(h.requests.completeResubmissionRequest({auth:h.admin,data:request}),e=>e.code==='failed-precondition');
+ if(count===2){await h.finish(replacement.files[0]);await assert.rejects(h.requests.completeResubmissionRequest({auth:h.admin,data:request}),e=>e.code==='failed-precondition');}
+ await h.finish(replacement.files.at(-1));
+ assert.equal((await h.requests.getAdminResubmissionRequests({auth:h.admin,data:{}})).requests[0].status,'submitted');
+ const comparison=await h.views.getResubmissionComparison({auth:h.admin,data:request});assert.equal(comparison.request.scope,scope);assert.equal(comparison.replacements.length,count);
+ await h.requests.completeResubmissionRequest({auth:h.admin,data:request});
+ assert.equal((await h.requests.getAdminResubmissionRequests({auth:h.admin,data:{}})).requests.length,0);assert.equal((await h.requests.getMyResubmissionRequests({auth:h.staff,data:{}})).requests.length,0);
+ assert.equal((await h.tasks.getMyTasks({auth:h.staff,data:{}})).tasks.filter(t=>t.kind==='resubmission').length,0);
+ for(const id of originalIds)assert.ok(h.driveFiles.has(id));assert.equal(h.driveFiles.size,2+count);
+ assert.equal(h.list('auditLogs').filter(a=>a.action==='application.confirm').length,1);
+});
+await test('staff-admin journey source conflict keeps submission blocked',async()=>{
+ const h=await staffAdminJourneyHarness();await h.apply();await h.adminCall('confirmApplication',{expectedRevision:h.current().revision});h.row[1]='Other Staff';
+ const assignment=h.list('sheetSyncQueue').find(q=>q.operation==='job.assign');await h.runSheet(assignment.id);
+ assert.notEqual(h.records.get('sheetSyncQueue/'+assignment.id).status,'completed');assert.equal(h.sheetWrites.length,0);
+ await assert.rejects(h.start(),e=>e.code==='failed-precondition');assert.equal(h.list('submissions').length,0);assert.equal(h.row[1],'Other Staff');
+});
+
+
+// 実保存→初回遅延判定→再提出→管理者の必要集計を同じ合成DBで接続する。
+for(const type of ['report','sales_floor'])for(const timing of ['late-first','on-time-first'])await test('submission analytics journey '+type+' '+timing,async()=>{
+ const h=harness(),job=h.records.get('jobs/synthetic-job'),field=type==='report'?'report':'salesFloor',lateKey=type==='report'?'reportLate':'salesFloorLate';
+ Object.assign(job,{financials:{clientChargeTotal:10000,clientChargeAdditionsTotal:500,staffPaymentTotal:8000},expenses:{transportation:900}});
+ const analytics=h.loadModule('./analytics'),read=()=>analytics.getStaffPerformance({auth:h.admin,data:{staffId:'synthetic-staff',from:'2026-09-01',through:'2026-09-30'}});
+ h.records.set('jobs/foreign',{...copy(job),companyId:'other-company',submissionStatus:{report:{lateFirstSubmission:true},salesFloor:{lateFirstSubmission:true}}});
+ h.records.set('jobs/outside-month',{...copy(job),dateKey:'2026-10-01',submissionStatus:{report:{lateFirstSubmission:true},salesFloor:{lateFirstSubmission:true}}});
+ h.records.set('jobs/other-staff',{...copy(job),assignedStaffId:'other-staff',financials:{clientChargeTotal:2000,staffPaymentTotal:1000},submissionStatus:{report:{lateFirstSubmission:true},salesFloor:{lateFirstSubmission:true}}});
+ const first=await h.start(2,{type});h.driveCreatedAt='2026-09-24T01:55:00.000Z';await h.finish(first.files[0]);assert.equal((await read()).performance.totals[lateKey],0);
+ h.driveCreatedAt=timing==='late-first'?'2026-09-24T02:05:00.000Z':'2026-09-24T01:59:00.000Z';await h.finish(first.files[1]);
+ const expectedLate=timing==='late-first'?1:0,firstStatus=copy(h.records.get('jobs/synthetic-job').submissionStatus[field]);assert.equal(firstStatus.lateFirstSubmission,expectedLate===1);
+ const request=await h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:'synthetic-job',type,sourceSubmissionId:first.submissionId,reasons:['その他']}});
+ const replacement=await h.start(2,{type,purpose:'replacement',resubmissionRequestId:request.requestId});h.driveCreatedAt='2026-09-25T02:05:00.000Z';await h.finish(replacement.files[0]);await h.finish(replacement.files[1]);await h.requests.completeResubmissionRequest({auth:h.admin,data:request});
+ const after=h.records.get('jobs/synthetic-job').submissionStatus[field];assert.equal(after.firstCompletedAt.toMillis(),firstStatus.firstCompletedAt.toMillis());assert.equal(after.lateFirstSubmission,expectedLate===1);
+ const stats=(await read()).performance;assert.equal(stats.totals.assignedJobs,1);assert.equal(stats.totals[lateKey],expectedLate);assert.equal(stats.totals[type==='report'?'salesFloorLate':'reportLate'],0);assert.equal(stats.totals.invoice,10500);assert.equal(stats.totals.payment,8000);assert.equal(stats.recentJobs.length,1);assert.equal(stats.recentJobs[0].id,'synthetic-job');
+ const monthly=await analytics.getOperationsDashboard({auth:h.admin,data:{month:'2026-09'}});assert.equal(monthly.counts.totalRequests,2);assert.equal(monthly.finance.bookedInvoice,12500);assert.equal(monthly.finance.bookedPayment,9000);assert.equal(monthly.finance.bookedGrossProfit,3500);
+ assert.equal(h.records.get('resubmissionRequests/'+request.requestId).status,'completed');assert.equal(h.driveFiles.size,4);
+});
+
+
+// 受信→Crew作成→募集→応募→原本再取込の合成結果を、既存の提出ハーネスへ渡す。
+async function mailSubmissionHarness(){
+ const {fixture}=await import('./case-mail-assignment-harness.mjs');
+ const m=await fixture();await m.apply();await m.run();await m.importRow();
+ const h=harness();h.records.clear();for(const [key,value] of m.records)h.records.set(key,copy(value));
+ h.staff=m.staffAuth;h.admin=m.auth;h.jobId=m.jobId;h.job=()=>h.records.get('jobs/'+h.jobId);h.mail=m;
+ h.records.set('companies/'+h.job().companyId+'/settings/drive',{rootFolderId:'synthetic-root'});
+ h.start=(count=1,patch={})=>h.uploads.createUploadSession({auth:h.staff,data:{jobId:h.jobId,type:'report',expectedRevision:h.job().revision,files:Array.from({length:count},(_,i)=>({originalName:'synthetic-'+i+'.png',contentType:'image/png',size:100})),...patch}});
+ h.state=id=>h.views.getSubmissionProcessingStatus({auth:h.staff,data:{jobId:h.jobId,submissionId:id}});
+ h.createRequest=(patch={})=>h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:h.jobId,type:'report',expectedRevision:h.job().revision,reasons:['その他'],...patch}});
+ h.patch=data=>h.updateRecord('jobs/'+h.jobId,data);
+ h.sheets=m.sheets;
+ const mapping=h.records.get(m.paths.mapping);Object.assign(mapping.columns,{reportSubmitted:'P',salesFloorSubmitted:'Q',netPrint1:'R',netPrint2:'S',netPrint3:'T'});
+ Object.assign(mapping.operations,{'submission.report':{values:['reportSubmitted']},'submission.sales_floor':{values:['salesFloorSubmitted']},'netprint.printed':{values:[],styles:['netPrint1','netPrint2','netPrint3']}});
+ h.runSheet=async q=>h.loadModule('./safe-sheet-writes').processSafeSheetWrite({data:{after:h.snapshot('sheetSyncQueue/'+q.id)}});
+ return h;
+}
+const mailHolds=[{mailIntakeReviewRequired:true},{pendingSourceWrite:true},{adminEditSheetWrite:{pending:true}},{applicationUnconfirmed:true}];
+for(const type of ['report','sales_floor'])await test('case-mail submission complete '+type+' photo/PDF replacement and replay',async()=>{
+ const h=await mailSubmissionHarness();const s=await h.start(2,{type,files:[{originalName:'photo.png',contentType:'image/png',size:100},{originalName:'document.pdf',contentType:'application/pdf',size:100}]});
+ await h.finish(s.files[0]);h.drivePayload=()=>({mimeType:'application/pdf'});await h.finish(s.files[1],{contentType:'application/pdf'});
+ assert.equal((await h.state(s.submissionId)).status,'completed');assert.equal(h.copies,2);
+ const q=h.list('sheetSyncQueue').find(q=>q.operation===(type==='report'?'submission.report':'submission.sales_floor'));const before=h.mail.row.slice();await h.runSheet(q);
+ assert.equal(h.records.get('sheetSyncQueue/'+q.id).status,'completed');assert.equal(h.mail.row[15+(type==='sales_floor'?1:0)],type==='report'?'提出済':'リップ');
+ for(let n=0;n<before.length;n++)if(n!==15+(type==='sales_floor'?1:0))assert.equal(h.mail.row[n],before[n]);
+ const r=await h.createRequest({type,sourceSubmissionId:s.submissionId,sourceFileId:s.files[1].fileId});
+ const replacement=await h.start(1,{type,purpose:'replacement',resubmissionRequestId:r.requestId,files:[{originalName:'replacement.pdf',contentType:'application/pdf',size:100}]});
+ await h.finish(replacement.files[0],{contentType:'application/pdf'});await h.requests.completeResubmissionRequest({auth:h.admin,data:r});
+ const comparison=await h.views.getResubmissionComparison({auth:h.admin,data:r});assert.equal(comparison.request.status,'completed');assert.equal(comparison.replacements.length,1);
+ await h.finish(replacement.files[0],{contentType:'application/pdf'});assert.equal(h.copies,3);assert.equal(h.records.get('submissions/'+replacement.submissionId).completedFiles,1);
+});
+for(const patch of mailHolds)await test('case-mail submission held admissions '+JSON.stringify(patch),async()=>{
+ const h=await mailSubmissionHarness();await h.patch(patch);const before=JSON.stringify([...h.records]);
+ await assert.rejects(h.start(),{code:'failed-precondition'});await assert.rejects(h.createRequest(),{code:'failed-precondition'});
+ await assert.rejects(h.status.setSalesFloorClientSubmitted({auth:h.staff,data:{jobId:h.jobId,submitted:true,expectedRevision:h.job().revision}}),{code:'failed-precondition'});
+ await assert.rejects(h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:h.jobId,itemId:'item',expectedRevision:h.job().revision}}),{code:'failed-precondition'});
+ assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.copies,0);
+});
+for(const revision of [undefined,-1,0,99])await test('case-mail submission stale displayed revision '+revision,async()=>{
+ const h=await mailSubmissionHarness();await assert.rejects(h.start(1,{expectedRevision:revision}));assert.equal(h.list('submissions').length,0);
+});
+await test('case-mail submission not accepted response permits only matching local attempt reset',async()=>{
+ const h=await mailSubmissionHarness(),clientRequestId=crypto.randomUUID();await assert.rejects(h.start(1,{clientRequestId,expectedRevision:0,files:[{originalName:'a.png',contentType:'image/png',size:100,contentSha256:'a'.repeat(64)}]}),e=>e.details?.accepted===false&&e.details.clientRequestId===clientRequestId&&e.details.expectedRevision===0);
+ assert.equal(h.list('submissions').length,0);
+});
+await test('case-mail submission replay keeps one receipt and never adopts changed conditions',async()=>{
+ const h=await mailSubmissionHarness(),input={clientRequestId:crypto.randomUUID(),files:[{originalName:'a.png',contentType:'image/png',size:100,contentSha256:'a'.repeat(64)}]};const s=await h.start(1,input);assert.equal((await h.start(1,input)).submissionId,s.submissionId);
+ await h.patch({menuConditions:['changed']});await assert.rejects(h.start(1,input),e=>e.details?.reason==='case_mail_submission_changed'&&e.details.accepted!==false);assert.equal(h.list('submissions').length,1);assert.equal(h.copies,0);
+});
+const mailChanges=[...mailHolds,{menuConditions:['changed']},{revision:99},{assignedStaffId:'staff-2'},{cancelled:true},{companyId:'foreign'},{dateKey:'2099-10-11'}];
+for(const patch of mailChanges)for(const phase of ['before','during'])await test('case-mail submission '+phase+' transfer rejects '+JSON.stringify(patch),async()=>{
+ const h=await mailSubmissionHarness(),s=await h.start();if(phase==='before')await h.patch(patch);else h.afterCopy=()=>h.patch(patch);
+ await assert.rejects(h.finish(s.files[0]),{code:'failed-precondition'});const parent=h.records.get('submissions/'+s.submissionId),file=h.records.get('submissions/'+s.submissionId+'/files/'+s.files[0].fileId);
+ assert.equal(parent.completedFiles,0);assert.notEqual(parent.jobStatusApplied,true);assert.equal(parent.status,'error');assert.equal(h.copies,phase==='during'?1:0);assert.equal(h.deletes,0);if(phase==='during')assert.ok(file.driveFileId);assert.equal(h.job().submissionStatus,undefined);
+});
+await test('case-mail submission transfer condition conflict retains fixed Drive ID for safe retry',async()=>{
+ const h=await mailSubmissionHarness(),s=await h.start(),before=copy(h.job());h.afterCopy=()=>h.patch({pendingSourceWrite:true});await assert.rejects(h.finish(s.files[0]));h.afterCopy=null;
+ // 合成状態だけを戻す。実受信保留の解除機能・実ファイル再送ではない。
+ await h.patch({pendingSourceWrite:before.pendingSourceWrite??false});await h.finish(s.files[0]);assert.equal(h.copies,1);assert.equal((await h.state(s.submissionId)).status,'completed');
+});
+await test('case-mail submission already completed history is preserved during later hold',async()=>{
+ const h=await mailSubmissionHarness(),s=await h.start();await h.finish(s.files[0]);const before=copy(h.records.get('submissions/'+s.submissionId));await h.patch({mailIntakeReviewRequired:true,revision:h.job().revision+1});await assert.rejects(h.finish(s.files[0]));assert.deepEqual(h.records.get('submissions/'+s.submissionId),before);assert.equal((await h.state(s.submissionId)).status,'completed');
+});
+for(const phase of ['create','replacement','confirm'])await test('case-mail submission resubmission hold at '+phase,async()=>{
+ const h=await mailSubmissionHarness(),s=await h.start();await h.finish(s.files[0]);if(phase==='create'){await h.patch({mailIntakeReviewRequired:true});await assert.rejects(h.createRequest({sourceSubmissionId:s.submissionId}));return;}
+ const request=await h.createRequest({sourceSubmissionId:s.submissionId});if(phase==='replacement'){await h.patch({menuConditions:['changed']});await assert.rejects(h.start(1,{purpose:'replacement',resubmissionRequestId:request.requestId}));assert.equal(h.list('submissions').length,1);return;}
+ const r=await h.start(1,{purpose:'replacement',resubmissionRequestId:request.requestId});await h.finish(r.files[0]);await h.patch({mailIntakeReviewRequired:true});await assert.rejects(h.requests.completeResubmissionRequest({auth:h.admin,data:request}));assert.equal(h.records.get('resubmissionRequests/'+request.requestId).status,'submitted');
+});
+for(const change of ['held','conditions','source-only'])await test('case-mail submission queued sheet result stops '+change,async()=>{
+ const h=await mailSubmissionHarness(),s=await h.start();await h.finish(s.files[0]);const q=h.list('sheetSyncQueue').find(q=>q.operation==='submission.report'),writes=h.mail.writes.length;
+ if(change==='held')await h.patch({mailIntakeReviewRequired:true});if(change==='conditions')await h.patch({menuConditions:['changed']});if(change==='source-only')h.mail.row[14]='changed time';
+ await h.runSheet(q);assert.equal(h.records.get('sheetSyncQueue/'+q.id).status,'blocked');assert.equal(h.mail.writes.length,writes);assert.equal(h.job().submissionStatus.report.sheetWrite.pending,true);
+});
+await test('case-mail submission completion rechecks conditions after file bookkeeping',async()=>{
+ const h=await mailSubmissionHarness(),s=await h.start();h.beforeCommit=async()=>{const parent=h.list('submissions')[0];if(parent?.status==='completed'&&!parent.jobStatusApplied){h.beforeCommit=null;await h.patch({menuConditions:['changed']});}};
+ await assert.rejects(h.finish(s.files[0]));assert.notEqual(h.records.get('submissions/'+s.submissionId).jobStatusApplied,true);assert.equal(h.job().submissionStatus,undefined);assert.equal(h.copies,1);assert.equal(h.deletes,0);
+});
+await test('case-mail submission print revision and held write protection',async()=>{
+ const h=await mailSubmissionHarness();await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:h.jobId,numbers:['12345678'],expectedRevision:h.job().revision}});const item=h.job().netPrint.items[0];
+ await assert.rejects(h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:h.jobId,itemId:item.id,expectedRevision:0}}));
+ await h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:h.jobId,itemId:item.id,expectedRevision:h.job().revision}});assert.equal(h.job().netPrint.items[0].printed,true);
+ const q=h.list('sheetSyncQueue').find(q=>q.operation==='netprint.printed');await h.patch({mailIntakeReviewRequired:true});await h.runSheet(q);assert.equal(h.records.get('sheetSyncQueue/'+q.id).status,'blocked');
+});
+
+for(const changed of [false,true])await test('case-mail material print original-row confirmation changed='+changed,async()=>{
+ const h=await mailSubmissionHarness();await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:h.jobId,numbers:['12345678'],expectedRevision:h.job().revision}});const item=h.job().netPrint.items[0];h.mail.row[17]=item.number;
+ await h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:h.jobId,itemId:item.id,expectedRevision:h.job().revision}});const q=h.list('sheetSyncQueue').find(q=>q.operation==='netprint.printed'),styles=[];
+ h.sheets.spreadsheets.batchUpdate=async data=>{styles.push(data);return {data:{}};};if(changed)h.mail.row[14]='changed time';const before=h.mail.row.slice();await h.runSheet(q);assert.equal(h.records.get('sheetSyncQueue/'+q.id).status,changed?'blocked':'completed');assert.equal(styles.length,changed?0:1);assert.deepEqual(h.mail.row,before);if(!changed){const request=styles[0].requestBody.requests[0].repeatCell;assert.equal(request.range.startColumnIndex,17);assert.equal(request.fields,'userEnteredFormat.backgroundColor');}
+});
+await test('case-mail material received change resets earlier print confirmation and retains number',async()=>{
+ const h=await mailSubmissionHarness(),m=h.mail;
+ await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:m.jobId,numbers:['12345678'],expectedRevision:m.job().revision}});const item=h.job().netPrint.items[0];await h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:m.jobId,itemId:item.id,expectedRevision:m.job().revision}});m.records.set('jobs/'+m.jobId,copy(h.job()));
+ assert.equal(m.job().netPrint.items[0].printed,true);await m.changeMail();assert.equal(m.job().netPrint.items[0].printed,false);assert.equal(m.job().netPrint.items[0].number,'12345678');assert.equal(m.job().netPrint.needsPrintReview,true);
+});
+await test('case-mail material unchanged import retains print; changed revision resets it',async()=>{
+ const h=await mailSubmissionHarness(),m=h.mail;
+ await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:m.jobId,numbers:['12345678'],expectedRevision:m.job().revision}});const item=h.job().netPrint.items[0];await h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:m.jobId,itemId:item.id,expectedRevision:m.job().revision}});m.records.set('jobs/'+m.jobId,copy(h.job()));await m.importRow();assert.equal(m.job().netPrint.items[0].printed,true);
+ m.row[14]='10:00-18:00';await m.importRow();assert.equal(m.job().netPrint.items[0].printed,false);assert.equal(m.job().netPrint.needsPrintReview,true);
 });
 console.log(JSON.stringify({passed:results.filter(r=>r.ok).length,results,boundary:'Complete actual modules, synthetic callable/Storage/Drive and in-memory DB. No external network, real login, emulator, concurrent SDK transactions or delivery.'},null,2));if(results.some(r=>!r.ok))process.exitCode=1;

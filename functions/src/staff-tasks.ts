@@ -1,3 +1,4 @@
+import { caseMailPreparationHeld } from "./case-mail-preparation-core";
 import { Timestamp } from "firebase-admin/firestore";
 import { onCall } from "firebase-functions/v2/https";
 import { db } from "./firebase";
@@ -53,7 +54,8 @@ export const getMyTasks = onCall(async (request) => {
   const resubmissions: OpenResubmission[] = openRequests
     .filter(doc => {
       const job = jobMap.get(String(doc.data().jobId));
-      return job?.status === "assigned" && job.cancelled !== true;
+      return job?.status === "assigned" && job.cancelled !== true &&
+        job.sourceMissing !== true && job.applicationUnconfirmed !== true && job.assignmentUnresolved !== true && !caseMailPreparationHeld(job);
     })
     .map((doc) => {
       const data = doc.data();

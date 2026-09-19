@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db } from "./firebase";
 import { queueDocumentData } from "./notification-core";
 import { cancellationSheetWriteIdentity } from "./sheet-write-core";
+import { nextAssignmentRevision, resetApplicationConfirmation } from "./assignment-preparation-core";
 import {
   buildMonthlyDashboard,
   buildStaffPerformance,
@@ -32,6 +33,7 @@ const StaffPerformanceSchema = z.object({
 
 const CancellationSchema = z.object({
   jobId: z.string().min(1),
+  expectedRevision: z.number().int().min(0).optional(),
   reasonCategory: z.enum([
     "maker",
     "client",
@@ -51,6 +53,7 @@ const CancellationSchema = z.object({
 
 const RestoreSchema = z.object({
   jobId: z.string().min(1),
+  expectedRevision: z.number().int().min(0).optional(),
   note: z.string().max(1000).default(""),
 });
 
@@ -131,6 +134,9 @@ export const adminSetJobCancellation = onCall(async (request) => {
     }
 
     const job = jobSnap.data() as Record<string, unknown>;
+    if (job.mailIntake && (!Number.isSafeInteger(job.revision) || input.expectedRevision !== job.revision)) {
+      throw new HttpsError("failed-precondition", "受信案件の確認後に内容が変更されています。再読込してから取消・復帰してください。");
+    }
     // 取消対象の枠だけを解除する。別案件への再応募後の再取消でも、その勤務枠を保持する。
     const lockRef = typeof job.assignedStaffId === "string" && job.assignedStaffId
       ? db.collection("staffDayLocks").doc(`${companyId}_${job.assignedStaffId}_${job.dateKey}`)
@@ -153,6 +159,8 @@ export const adminSetJobCancellation = onCall(async (request) => {
 
     if (job.cancelled === true && job.status === "cancelled" && job.cancellationReasonCategory === reasonCategory && job.cancellationReasonNote === input.reasonNote.trim() && job.cancellationFinancialTreatment === treatment && !ownsActiveLock) return;
     tx.set(jobRef, {
+      ...resetApplicationConfirmation(),
+      revision: nextAssignmentRevision(job),
       status: "cancelled",
       cancelled: true,
       cancellationReasonCategory: reasonCategory,
@@ -238,6 +246,9 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
       throw new HttpsError("not-found", "案件が見つかりません。");
     }
     const job = jobSnap.data() as Record<string, unknown>;
+    if (job.mailIntake && (!Number.isSafeInteger(job.revision) || input.expectedRevision !== job.revision)) {
+      throw new HttpsError("failed-precondition", "受信案件の確認後に内容が変更されています。再読込してから取消・復帰してください。");
+    }
     if (job.cancelled !== true && job.status !== "cancelled") {
       throw new HttpsError("failed-precondition", "この案件はキャンセル状態ではありません。");
     }
@@ -283,9 +294,12 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
     }
 
     tx.set(jobRef, {
+      ...resetApplicationConfirmation(),
+      revision: nextAssignmentRevision(job),
       status: restoredStatus,
       cancelled: false,
-      recruitmentStopped: false,
+      recruitmentStopped: Boolean(job.mailIntake),
+      ...(job.mailIntake ? { mailPublication: FieldValue.delete() } : {}),
       cancellationReasonCategory: FieldValue.delete(),
       cancellationReason: FieldValue.delete(),
       cancellationReasonNote: FieldValue.delete(),
@@ -298,7 +312,7 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
       restoredAt: now,
       restoredBy: session.uid,
       restoreNote: input.note.trim() || FieldValue.delete(),
-      publishable: restoredStatus === "open",
+      publishable: !job.mailIntake && restoredStatus === "open",
       appOverride: { type: "restore", active: true, createdAt: now },
       updatedAt: now,
     }, { merge: true });

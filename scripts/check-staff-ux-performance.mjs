@@ -427,12 +427,12 @@ assert.match(
 );
 assert.match(
   app,
-  /file-picker-button library[\s\S]*multiple=\{!requestId\}[\s\S]*accept="image\/\*,\.pdf"/u,
+  /file-picker-button library[\s\S]*multiple=\{!singleFileResubmission\}[\s\S]*accept="image\/\*,\.pdf"/u,
   "Photo-library and PDF selection must stay separate from direct camera capture.",
 );
 assert.match(
   app,
-  /const base=requestId\?\[\]:files;[\s\S]*const next=\[\.\.\.base,\.\.\.additions\]/u,
+  /const single=Boolean\(requestId&&resubmissionDetail\?\.request\.scope!=="submission"\);[\s\S]*const base=single\?\[\]:files;[\s\S]*const next=\[\.\.\.base,\.\.\.additions\]/u,
   "Normal submission picks must append without discarding files already selected.",
 );
 assert.match(
@@ -630,7 +630,7 @@ assert.match(
 
 assert.match(
   app,
-  /const submissionEditPending=isSubmissionActionPending\(\);[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*setClientSubmitted[\s\S]*aria-disabled=\{submissionEditPending\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\|\|resubmissionSendBlocked\}/u,
+  /const submissionEditPending=isSubmissionActionPending\(\);[\s\S]*submission-panel \$\{submissionType\}`\} aria-busy=\{submissionEditPending\}[\s\S]*setClientSubmitted[\s\S]*aria-disabled=\{submissionEditPending\|\|Boolean\(submissionReadiness\)\}[\s\S]*type="file"[\s\S]*disabled=\{submissionEditPending\|\|resubmissionSendBlocked\}[\s\S]*すべて解除[\s\S]*disabled=\{submissionEditPending\}[\s\S]*type="checkbox" checked=\{submissionConfirmed\} disabled=\{submissionEditPending\|\|resubmissionSendBlocked\}/u,
   "Client-submission updates, context, file pickers, removal, confirmation, and send controls must share one visible edit lock.",
 );
 

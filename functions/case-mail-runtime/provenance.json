@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "source": "case-management",
+  "capturedOn": "2026-09-18",
+  "closureSha256": "a179bf0be07f8cf21c9b6916fde74692c8d856b5dd3a0f200b55a5c2df433e8f",
+  "files": [
+    {
+      "name": "core.js",
+      "sha256": "868f561ca3e21ad43e81a75a64c6c5f42e10da58dcf996911cb4c7c6151a720f"
+    },
+    {
+      "name": "business-rules.js",
+      "sha256": "b9f6510d0cd89eef4a209815111bb651774e135bf443432458f95ab1c4f4046a"
+    },
+    {
+      "name": "intake.js",
+      "sha256": "5137e3c8992b953b974c019ad1a2e5a66eec112d790551c24c1c653c4ac9aa94"
+    },
+    {
+      "name": "mail-source.cjs",
+      "sha256": "77235a9b661408d4aa1437b2100af2b6a99616aeed7229881b6aec77fddc49cf"
+    },
+    {
+      "name": "shift-adapter.js",
+      "sha256": "252f4babd51a0e59d179ea0302798ef21c9475670339ed4d59dffc701dcbc1e0"
+    },
+    {
+      "name": "generic-request.cjs",
+      "sha256": "5fc61cef855ecb52d3f2c537d2527fb976c5077290532ea7af121efa01e619ad"
+    },
+    {
+      "name": "progress-request.cjs",
+      "sha256": "79e7689ad61b4ae846bdf5b07ca0cf94c90d4cf6b45441a3aa69742013aef135"
+    }
+  ],
+  "usage": "Crew読取専用解析。外部側の保存・募集・送信処理は起動しない。"
+}

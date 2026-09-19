@@ -15,6 +15,12 @@ export default defineConfig({
           // circular ESM chunks and crash the app before React mounts.
           groups: [
             {
+              // アプリ本体から安定したReact共通依存を分け、更新時のキャッシュを再利用する。
+              name: "react-vendor",
+              test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/,
+              priority: 8,
+            },
+            {
               name: "firebase-client",
               test: /src[\\/]firebase-config\.ts$/,
               priority: 7,

@@ -8,11 +8,15 @@ import { hashText } from "./case-id";
 import { cancellationSheetWriteIdentity as netPrintWriteIdentity } from "./sheet-write-core";
 import { assertProductionOperational } from "./system-safety";
 
+import { caseMailPreparationHeld } from "./case-mail-preparation-core";
+import { caseMailSubmissionContext, assertCaseMailSubmissionRevision } from "./submission-integrity";
+
 const UpdateSchema = z.object({
   jobId: z.string().min(1),
+  expectedRevision: z.number().int().nonnegative().optional(),
   numbers: z.array(z.string().max(40)).max(3),
 });
-const PrintSchema = z.object({ jobId: z.string().min(1), itemId: z.string().min(1), dateKey: z.iso.date().optional() });
+const PrintSchema = z.object({ expectedRevision: z.number().int().nonnegative().optional(), jobId: z.string().min(1), itemId: z.string().min(1), dateKey: z.iso.date().optional() });
 
 export const updateNetPrintNumbers = onCall(async (request) => {
   const session = requireAdmin(request);
@@ -28,6 +32,7 @@ export const updateNetPrintNumbers = onCall(async (request) => {
     if (!snap.exists) throw new HttpsError("not-found", "案件が見つかりません。");
     const job = snap.data() as Record<string, unknown>;
     if (job.companyId !== companyId) throw new HttpsError("permission-denied", "権限がありません。");
+    assertCaseMailSubmissionRevision(job, input.expectedRevision);
     const oldItems = ((job.netPrint as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? []);
     const oldNumbers = [0,1,2].map((index) => String(oldItems[index]?.number ?? ""));
     const clean = input.numbers.map((value) => value.trim()).filter(Boolean).slice(0, 3);
@@ -49,7 +54,8 @@ export const updateNetPrintNumbers = onCall(async (request) => {
         number,
         position: index + 1,
         version,
-        printed: sameItem && old?.printed === true && old.printedAt instanceof Timestamp && old.printedContext === identity &&
+        ...(job.mailIntake ? { caseMailContext: caseMailSubmissionContext(job) } : {}),
+        printed: (!job.mailIntake || old?.caseMailContext === caseMailSubmissionContext(job)) && sameItem && old?.printed === true && old.printedAt instanceof Timestamp && old.printedContext === identity &&
           old.printedByStaffId === job.assignedStaffId && old.printedForDate === job.dateKey && typeof old.printOperationId === "string",
         updatedAt: now,
       };
@@ -76,17 +82,18 @@ export const updateNetPrintNumbers = onCall(async (request) => {
     }
     const notifyStaffId = String(job.assignedStaffId ?? "");
     tx.update(jobRef, {
-      netPrint: { items, updatedAt: now, changedCount, writeOperationId: queueRef.id, writeIdentity: identity, syncPending: true, writeStyles: styles, writeExpected: expected },
+      netPrint: { ...(job.mailIntake ? { caseMailContext: caseMailSubmissionContext(job) } : {}), items, updatedAt: now, changedCount, writeOperationId: queueRef.id, writeIdentity: identity, syncPending: true, writeStyles: styles, writeExpected: expected },
       updatedAt: now,
     });
     tx.create(queueRef, {
-      companyId, jobId: input.jobId, operation: "netprint.update",
+      companyId, jobId: input.jobId, operation: "netprint.update", ...(job.mailIntake ? { dateKey: job.dateKey } : {}),
       updates,
       styles,
       expected,
       status:"pending", attempts:0, idempotencyKey:`netprint.update:${input.jobId}:${queueRef.id}`, actorUid:session.uid, createdAt:FieldValue.serverTimestamp(),
     });
-    if (notifyStaffId && changedCount > 0 && job.cancelled !== true && job.status !== "cancelled") {
+    if (notifyStaffId && changedCount > 0 && !caseMailPreparationHeld(job) && job.cancelled !== true && job.status === "assigned" &&
+        job.sourceMissing !== true && job.applicationUnconfirmed !== true && job.assignmentUnresolved !== true) {
       const notification = {
         companyId,
         targetStaffId: notifyStaffId,
@@ -94,6 +101,8 @@ export const updateNetPrintNumbers = onCall(async (request) => {
         body: cleanNumbers.length ? "できるだけ早く、遅くとも通知から1週間以内に印刷してください。" : "シフトの資料情報を確認してください。",
         route: `/shifts/${input.jobId}/netprint`,
         category: "netprint_updated",
+        reminderContext: { version: 1 as const, jobId: input.jobId, staffId: notifyStaffId, dateKey: String(job.dateKey ?? ""),
+          revision: Number(job.revision ?? 0), kind: "netprint-update" as const, printUpdatedAtMs: now.toMillis(), printWriteOperationId: queueRef.id },
         dedupeKey: `${input.jobId}_${queueRef.id}_netprint`,
       };
       tx.create(db.collection("notificationQueue").doc(notificationQueueId(notification)), { ...queueDocumentData(notification), createdAt: now, updatedAt: now });
@@ -119,6 +128,7 @@ export const markNetPrintPrinted = onCall(async (request) => {
     if (job.cancelled === true || job.status === "cancelled") throw new HttpsError("failed-precondition", "キャンセル済みの案件です。");
     if (job.status !== "assigned") throw new HttpsError("failed-precondition", "確定したシフトだけを変更できます。シフトを更新して確認してください。");
     if (job.sourceMissing === true || job.assignmentUnresolved === true || job.applicationUnconfirmed === true) throw new HttpsError("failed-precondition", "現在の担当・元シフト表を確認してから印刷済みにしてください。");
+    assertCaseMailSubmissionRevision(job, input.expectedRevision);
     const day = z.iso.date().safeParse(job.dateKey);
     if (!day.success || (input.dateKey !== undefined && input.dateKey !== day.data)) throw new HttpsError("failed-precondition", "勤務日が変更されたか確認できません。最新のシフトを確認してください。");
     const identity = netPrintWriteIdentity(job);
@@ -130,9 +140,9 @@ export const markNetPrintPrinted = onCall(async (request) => {
     const position = Number(target.position ?? 0);
     const number = String(target.number ?? "").trim();
     if (!Number.isInteger(position) || position < 1 || position > 3 || !number) throw new HttpsError("failed-precondition", "印刷対象の番号を確認できません。");
-    if (target.printed === true && (!target.printOperationId || (target.printedContext === identity && target.printedByStaffId === staffId && target.printedForDate === day.data))) return;
+    if ((!job.mailIntake || target.caseMailContext === caseMailSubmissionContext(job)) && target.printed === true && (!target.printOperationId || (target.printedContext === identity && target.printedByStaffId === staffId && target.printedForDate === day.data))) return;
     const now = Timestamp.now();
-    const items = current.map(item => item === target ? { ...item, printed: true, printedAt: now, updatedAt: now, printOperationId: queueRef.id, printedContext: identity, printedByStaffId: staffId, printedForDate: day.data } : item);
+    const items = current.map(item => item === target ? { ...item, ...(job.mailIntake ? { caseMailContext: caseMailSubmissionContext(job) } : {}), printed: true, printedAt: now, updatedAt: now, printOperationId: queueRef.id, printedContext: identity, printedByStaffId: staffId, printedForDate: day.data } : item);
     tx.update(jobRef, {
       "netPrint.items": items, updatedAt: now,
       ...((job.netPrint as { needsPrintReview?: unknown } | undefined)?.needsPrintReview === true

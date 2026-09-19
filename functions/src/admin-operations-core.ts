@@ -1,3 +1,6 @@
+import { caseMailPreparationHeld } from "./case-mail-preparation-core";
+import { mailPreparationContext } from "./assignment-preparation-core";
+
 export type ExpenseValues = {
   transportation: number | null;
   purchase8: number | null;
@@ -51,7 +54,26 @@ export function expenseSheetWriteContext(job: Record<string, unknown>): string {
     job.dateKey ?? null, job.workDate ?? null, job.caseId ?? null,
     job.clientName ?? null, job.storeName ?? null, job.workTime ?? null,
     sheet.spreadsheetId ?? null, sheet.sheetId ?? null, sheet.sheetName ?? null,
+    ...(job.mailIntake ? [job.companyId ?? null, job.revision ?? null, mailPreparationContext(job), job.mailIntake,
+      job.rawStaffName ?? null, job.rawClientName ?? null, job.cancellationReasonCategory ?? null,
+      job.cancellationFinancialTreatment ?? null, (job.appOverride as Record<string, unknown> | undefined)?.active === true] : []),
   ]);
+}
+
+/** 取消後の実費は維持し、未確認の受信・担当・原本だけを保留する。 */
+export function expenseMailHoldReason(job: Record<string, unknown>): string | null {
+  if (caseMailPreparationHeld(job)) return "受信内容・勤務条件の変更を確認中です。経費の保存・確認完了は保留します。";
+  if (!job.mailIntake) return null;
+  if (job.sourceMissing === true || job.assignmentUnresolved === true || job.applicationUnconfirmed === true ||
+      (job.appOverride as Record<string, unknown> | undefined)?.active === true) {
+    return "受信案件の担当・原本照合が完了していません。原本確認後に経費を読み直してください。";
+  }
+  const cancelled = job.status === "cancelled" && job.cancelled === true;
+  if ((!cancelled && (job.status !== "assigned" || job.cancelled === true || !job.assignedStaffId)) ||
+      !Number.isSafeInteger(job.revision) || Number(job.revision) < 0) {
+    return "受信案件の担当・確認版を確認できません。最新の案件を確認してください。";
+  }
+  return null;
 }
 
 export function buildExpenseExpected(

@@ -1,4 +1,5 @@
-import { assertSubmissionFile, assertSubmissionOwner, assertReplacementRequest } from "./submission-integrity";
+import { assertSubmissionFile, assertSubmissionFileIdentity, assertSubmissionOwner, assertReplacementRequest, assertSubmissionReadiness, caseMailSubmissionContext, assertCaseMailSubmissionRevision, assertCaseMailSubmissionCurrent } from "./submission-integrity";
+import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onObjectFinalized } from "firebase-functions/v2/storage";
@@ -17,13 +18,17 @@ import {
   staffFromClaims,
 } from "./utils";
 import { submissionTransferPaused, assertPausedTransferSource } from "./submission-transfer-control";
+import { createSubmissionDeadlinePolicy } from "./submission-deadline-policy";
 
 const CreateSchema = z.object({
+  clientRequestId: z.string().uuid().optional(),
+  expectedRevision: z.number().int().nonnegative().optional(),
   jobId: z.string().min(1),
   type: z.enum(["report", "sales_floor"]),
   purpose: z.enum(["initial", "additional", "replacement"]).default("initial"),
   resubmissionRequestId: z.string().trim().min(1).optional(),
   files: z.array(z.object({
+    contentSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     originalName: z.string().min(1).max(250),
     contentType: z.string().min(1).max(120).refine(value => value === "application/pdf" || /^image\/[^\s/;]+$/.test(value), { message: "画像またはPDFを選択してください。" }),
     size: z.number().int().positive().max(50 * 1024 * 1024),
@@ -39,17 +44,20 @@ export const createUploadSession = onCall(async (request) => {
   const companyId = companyFromClaims(session.token);
   if (await submissionTransferPaused(companyId)) throw new HttpsError("failed-precondition", "提出転送を一時停止しています。再開後に同じ提出を確認してください。");
   const staffId = staffFromClaims(session.token);
-  const submissionRef = db.collection("submissions").doc();
+  if (input.clientRequestId && input.files.some(file => !file.contentSha256)) throw new HttpsError("invalid-argument", "再試行用のファイル確認情報が不足しています。");
+  const fingerprint = createHash("sha256").update(JSON.stringify([input.jobId, input.type, input.purpose, input.resubmissionRequestId ?? null, input.files])).digest("hex");
+  const stableId = input.clientRequestId ? "submission_" + createHash("sha256").update(JSON.stringify([companyId, staffId, session.uid, input.clientRequestId])).digest("hex") : undefined;
+  const submissionRef = stableId ? db.collection("submissions").doc(stableId) : db.collection("submissions").doc();
   const now = Timestamp.now();
-  const fileRecords = input.files.map((file) => {
-    const fileId = requestId("file");
+  const fileRecords = input.files.map((file, index) => {
+    const fileId = input.clientRequestId ? "file_" + createHash("sha256").update(submissionRef.id + "|" + index).digest("hex").slice(0, 32) : requestId("file");
     const safeName = basename(file.originalName).replace(/[\\/:*?"<>|]/g, "_");
     const storagePath =
       `staging/${companyId}/${session.uid}/${submissionRef.id}/${fileId}/${safeName}`;
     return { fileId, storagePath, ...file };
   });
 
-  await db.runTransaction(async (tx) => {
+  const receipt = await db.runTransaction(async (tx) => {
     const jobSnap = await tx.get(db.collection("jobs").doc(input.jobId));
 
     if (!jobSnap.exists) {
@@ -63,7 +71,48 @@ export const createUploadSession = onCall(async (request) => {
     if (job.cancelled === true || job.status === "cancelled") throw new HttpsError("failed-precondition", "キャンセル済みの案件です。");
 
     if (job.status !== "assigned") throw new HttpsError("failed-precondition", "確定済みの案件だけ提出できます。");
+    assertSubmissionReadiness(job);
 
+    if (input.clientRequestId) {
+      const existing = await tx.get(submissionRef);
+      if (existing.exists) {
+        const parent = existing.data()!;
+        assertCaseMailSubmissionCurrent(parent, job);
+        assertCaseMailSubmissionRevision(job, input.expectedRevision);
+        if (parent.companyId !== companyId || parent.uid !== session.uid || parent.staffId !== staffId ||
+            parent.jobId !== input.jobId || parent.type !== input.type || parent.purpose !== input.purpose ||
+            (parent.resubmissionRequestId ?? null) !== (input.resubmissionRequestId ?? null) ||
+            parent.requestFingerprint !== fingerprint || parent.totalFiles !== fileRecords.length ||
+            parent.acceptedDateKey !== job.dateKey || parent.acceptedAssignmentRevision !== (job.revision ?? 0)) {
+          throw new HttpsError("failed-precondition", "同じ受付番号の提出内容または担当情報が変わっています。提出履歴を確認してください。");
+        }
+        const stored = [];
+        for (const record of fileRecords) {
+          const saved = (await tx.get(submissionRef.collection("files").doc(record.fileId))).data();
+          assertSubmissionFile(parent, saved, submissionRef.id);
+          if (!saved || ["storagePath", "originalName", "contentType", "size", "contentSha256"].some(key => saved[key] !== record[key as keyof typeof record])) {
+            throw new HttpsError("failed-precondition", "受付済みファイルの記録を確認できません。提出履歴を確認してください。");
+          }
+          stored.push({ ...saved, fileId: record.fileId, storagePath: record.storagePath });
+        }
+        if (input.resubmissionRequestId) {
+          const replacement = await tx.get(db.collection("resubmissionRequests").doc(input.resubmissionRequestId));
+          assertReplacementRequest(replacement.data(), parent, submissionRef.id);
+        }
+        return { replayed: true, files: stored };
+      }
+      if (!Number.isSafeInteger(job.revision ?? 0) || Number(job.revision ?? 0) < 0 || typeof job.dateKey !== "string") {
+        throw new HttpsError("failed-precondition", "提出する案件の日付と版を確認できません。");
+      }
+    }
+    try { assertCaseMailSubmissionRevision(job, input.expectedRevision); }
+    catch (error) {
+      if (error instanceof HttpsError && (error.details as { reason?: unknown } | undefined)?.reason === "case_mail_submission_changed" && input.clientRequestId) {
+        throw new HttpsError(error.code, error.message, { reason: "case_mail_submission_changed", accepted: false,
+          clientRequestId: input.clientRequestId, expectedRevision: input.expectedRevision ?? null });
+      }
+      throw error;
+    }
     let resubmission: FirebaseFirestore.DocumentData | null = null;
     if (input.resubmissionRequestId) {
       const requestSnap = await tx.get(db.collection("resubmissionRequests").doc(input.resubmissionRequestId));
@@ -72,6 +121,7 @@ export const createUploadSession = onCall(async (request) => {
       if (resubmission?.companyId !== companyId || resubmission?.staffId !== staffId || resubmission?.jobId !== input.jobId || resubmission?.type !== input.type || resubmission?.status !== "open") {
         throw new HttpsError("failed-precondition", "この再提出依頼には送信できません。");
       }
+      assertCaseMailSubmissionCurrent(resubmission, job);
       if (resubmission.sourceFileId && input.files.length !== 1) {
         throw new HttpsError("invalid-argument", "画像単位の再送は1ファイルだけ選んでください。");
       }
@@ -85,7 +135,10 @@ export const createUploadSession = onCall(async (request) => {
       type: input.type,
       purpose: input.purpose,
       resubmissionRequestId: input.resubmissionRequestId ?? null,
+      ...(input.clientRequestId ? { requestFingerprint: fingerprint, acceptedDateKey: job.dateKey, acceptedAssignmentRevision: job.revision ?? 0 } : {}),
+      ...(job.mailIntake ? { acceptedMailContext: caseMailSubmissionContext(job) } : {}),
       status: "uploading",
+      deadlinePolicy: createSubmissionDeadlinePolicy(job.dateKey),
       totalFiles: fileRecords.length,
       completedFiles: 0,
       createdAt: now,
@@ -106,18 +159,40 @@ export const createUploadSession = onCall(async (request) => {
         replacesSubmissionId: resubmission?.sourceSubmissionId ?? null,
         status: "waiting_upload",
         storagePath: record.storagePath,
+        ...(record.contentSha256 ? { contentSha256: record.contentSha256 } : {}),
         originalName: record.originalName,
         contentType: record.contentType,
         size: record.size,
         createdAt: now,
       });
     }
+    return { replayed: false, files: fileRecords };
   });
 
-  return {
-    submissionId: submissionRef.id,
-    files: fileRecords.map(({ fileId, storagePath }) => ({ fileId, storagePath })),
-  };
+  const files = [];
+  for (const record of receipt.files) {
+    let uploadRequired = true;
+    if (receipt.replayed) {
+      const saved = record as FirebaseFirestore.DocumentData;
+      if (saved.driveFileId && (saved.transferCompletedAt instanceof Timestamp || saved.completionCounted === true)) {
+        uploadRequired = false;
+      } else {
+        try {
+          const [object] = await storage.bucket().file(record.storagePath).getMetadata();
+          if (object.name !== record.storagePath || String(object.size) !== String(saved.size) || object.contentType !== saved.contentType ||
+              !object.generation || object.metadata?.lkcContentSha256 !== saved.contentSha256) {
+            throw new HttpsError("failed-precondition", "受付済みの元ファイル情報が一致しません。再送せず管理者へ連絡してください。");
+          }
+          uploadRequired = false;
+        } catch (error) {
+          if (Number((error as { code?: unknown }).code) !== 404) throw error;
+          if (saved.status !== "waiting_upload") throw new HttpsError("failed-precondition", "処理中の元ファイルを確認できません。提出履歴を確認して管理者へ連絡してください。");
+        }
+      }
+    }
+    files.push({ fileId: record.fileId, storagePath: record.storagePath, ...(input.clientRequestId ? { uploadRequired } : {}) });
+  }
+  return { submissionId: submissionRef.id, files, ...(input.clientRequestId ? { clientRequestId: input.clientRequestId, replayed: receipt.replayed } : {}) };
 });
 
 export const finalizeStagedUpload = onObjectFinalized(async (event) => {
@@ -202,6 +277,7 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
   const staffRef = db.collection("staffProfiles").doc(String(meta.staffId));
   const requestId = String(meta.resubmissionRequestId ?? "");
   const requestRef = requestId ? db.collection("resubmissionRequests").doc(requestId) : null;
+  try {
   const { job, staff, driveConfig } = await db.runTransaction(async tx => {
     const [latest, parent, jobSnap, staffSnap, driveSnap, replacement] = await Promise.all([
       tx.get(fileRef), tx.get(db.collection("submissions").doc(submissionId)),
@@ -220,6 +296,7 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
     if (!config.rootFolderId) throw new HttpsError("failed-precondition", "Driveルートフォルダが未設定です。");
     if (requestRef) {
       assertReplacementRequest(replacement?.data(), parent.data()!, submissionId);
+      assertCaseMailSubmissionCurrent(replacement!.data()!, jobSnap.data()!);
       // 最初に処理を開始した提出だけが、この依頼へ差替ファイルを追加できる。
       if (!replacement?.data()?.replacementSubmissionId) tx.update(requestRef, { replacementSubmissionId: submissionId });
     }
@@ -227,7 +304,6 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
     return { job: jobSnap.data()!, staff: staffSnap.data()!, driveConfig: { rootFolderId: config.rootFolderId } };
   });
 
-  try {
     let submittedAt = meta.transferCompletedAt instanceof Timestamp
       ? meta.transferCompletedAt : meta.completedAt instanceof Timestamp ? meta.completedAt : Timestamp.now();
     let transferResult = {
@@ -293,17 +369,36 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
       const completedFiles = Number(current.data()?.completedFiles ?? 0) + (countedFile.data()?.completionCounted === true ? 0 : 1);
       const totalFiles = Number(current.data()?.totalFiles ?? 0);
       const completed = totalFiles > 0 && completedFiles >= totalFiles;
+      let completedAt: Timestamp | null = null;
+      if (completed) {
+        if (current.data()?.jobStatusApplied === true) {
+          // 反映済みの履歴は現在のルールや再実行時刻で書き換えない。
+          if (!(current.data()?.completedAt instanceof Timestamp)) throw new HttpsError("failed-precondition", "提出の完了時刻を確認できません。");
+          completedAt = current.data()!.completedAt;
+        } else {
+          const allFiles = await tx.get(submissionRef.collection("files").limit(21));
+          if (allFiles.docs.length !== totalFiles) throw new HttpsError("failed-precondition", "提出のファイル記録数が一致しません。");
+          for (const item of allFiles.docs) {
+            const saved = item.data();
+            assertSubmissionFileIdentity(current.data(), saved, submissionId);
+            const savedAt = saved.transferCompletedAt instanceof Timestamp ? saved.transferCompletedAt : saved.completedAt;
+            if (saved.status !== "completed" || !saved.driveFileId || !(savedAt instanceof Timestamp) ||
+                (item.id !== fileId && saved.completionCounted !== true)) throw new HttpsError("failed-precondition", "全ファイルの保存完了を確認できません。");
+            if (!completedAt || savedAt.toMillis() > completedAt.toMillis()) completedAt = savedAt;
+          }
+        }
+      }
       const otherFailed = current.data()?.status === "error" &&
         current.data()?.failedFileId && current.data()?.failedFileId !== fileId;
       tx.set(fileRef, { completionCounted: true }, { merge: true });
       tx.set(submissionRef, {
         completedFiles,
         status: completed ? "completed" : otherFailed ? "error" : "uploading",
-        ...(completed ? { completedAt: current.data()?.completedAt ?? submittedAt } : {}),
+        ...(completedAt ? { completedAt } : {}),
         ...(!otherFailed || completed ? { errorMessage: FieldValue.delete(), failedFileId: FieldValue.delete() } : {}),
         updatedAt: submittedAt,
       }, { merge: true });
-      return completed;
+      return completedAt;
     });
 
     if (completedAll) {
@@ -311,12 +406,12 @@ export const finalizeStagedUpload = onObjectFinalized(async (event) => {
         submissionId,
         jobId: String(meta.jobId),
         type: meta.type === "sales_floor" ? "sales_floor" : "report",
-        submittedAt,
+        submittedAt: completedAll,
       });
       const requestId = String(meta.resubmissionRequestId ?? "");
       if (requestId) {
         await markResubmissionSubmitted({
-          requestId, submissionId, submittedAt,
+          requestId, submissionId, submittedAt: completedAll,
         });
       }
     }

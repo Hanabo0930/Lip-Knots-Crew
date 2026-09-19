@@ -39,7 +39,7 @@ for(const [name,args,message] of actions){
 for(const data of [{sheetWriteQueued:true},{pendingSourceWrite:true}]){
  const {state,handlers}=setup({data,refreshFailure:true});await handlers.saveJobEdit();assert.match(state.messages.at(-1),data.sheetWriteQueued?/キュー/:/安全確認待ち/);assert.match(state.messages.at(-1),/一覧/);cases++;
 }
-for(const [name,args,data,pattern] of [['createJobGroup',[],{warning:'要確認の警告'},/要確認の警告/],['changePublication',[{id:'j'},'publish'],{blocked:['j']},/下書きのまま/]]){
+for(const [name,args,data,pattern] of [['createJobGroup',[],{warning:'要確認の警告'},/要確認の警告/],['changePublication',[{id:'j'},'publish'],{blocked:['j']},/募集を開始できません。受信記録と原本照合を確認/]]){
  const {state,handlers}=setup({data,refreshFailure:true});await handlers[name](...args);assert.match(state.messages.at(-1),pattern);assert.equal(state.calls.length,1);cases++;
 }
 function deferred(){let resolve;const promise=new Promise(done=>resolve=done);return {promise,resolve};}

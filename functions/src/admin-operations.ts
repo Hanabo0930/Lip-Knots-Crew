@@ -6,9 +6,11 @@ import { z } from "zod";
 import { db } from "./firebase";
 import { companyFromClaims, requireAdmin, requestId } from "./utils";
 import { assertProductionOperational } from "./system-safety";
+import { applicationConfirmationIdentity } from "./assignment-preparation-core";
 import {
   buildExpenseExpected,
   expenseSheetWriteContext,
+  expenseMailHoldReason,
   buildExpenseSheetUpdates,
   canManuallyRetrySheetWrite,
   createSpreadsheetRowUrl,
@@ -26,6 +28,10 @@ const QueueActionSchema = z.object({
 
 const JobSchema = z.object({
   jobId: z.string().min(1),
+});
+
+const ApplicationConfirmationSchema = JobSchema.extend({
+  expectedRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
 });
 
 const DraftSchema = z.object({
@@ -164,17 +170,19 @@ export const confirmApplication = onCall(async (request) => {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
-  const input = JobSchema.parse(request.data ?? {});
+  const input = ApplicationConfirmationSchema.parse(request.data ?? {});
   const ref = db.collection("jobs").doc(input.jobId);
   const job = await ref.get();
 
   if (!job.exists || job.data()?.companyId !== companyId) {
     throw new HttpsError("not-found", "案件が見つかりません。");
   }
-  if (job.data()?.status !== "assigned") {
+  if (job.data()?.status !== "assigned" || job.data()?.cancelled === true || !job.data()?.assignedStaffId ||
+      job.data()?.sourceMissing === true || job.data()?.assignmentUnresolved === true ||
+      (job.data()?.mailIntake && (job.data()?.mailIntakeReviewRequired === true || job.data()?.pendingSourceWrite === true || job.data()?.adminEditSheetWrite?.pending === true))) {
     throw new HttpsError(
       "failed-precondition",
-      "手配済み案件だけ確認済みにできます。"
+      "担当者を確認できる有効な手配済み案件だけ確認済みにできます。"
     );
   }
 
@@ -185,19 +193,26 @@ export const confirmApplication = onCall(async (request) => {
       throw new HttpsError("not-found", "案件が見つかりません。");
     }
     const data = current.data()!;
-    if (data.status !== "assigned" || (data.assignedStaffId ?? null) !== (job.data()?.assignedStaffId ?? null)) {
-      throw new HttpsError("failed-precondition", "案件の状態または担当が変わりました。再読込して確認してください。");
+    if (data.status !== "assigned" || (data.assignedStaffId ?? null) !== (job.data()?.assignedStaffId ?? null) ||
+        (data.revision ?? 0) !== input.expectedRevision ||
+        applicationConfirmationIdentity(data) !== applicationConfirmationIdentity(job.data()!)) {
+      throw new HttpsError("failed-precondition", "案件の状態・担当・勤務条件が変わりました。再読込して確認してください。");
+    }
+    if (data.mailIntake && (data.mailIntakeReviewRequired === true || data.pendingSourceWrite === true || data.adminEditSheetWrite?.pending === true)) {
+      throw new HttpsError("failed-precondition", "受信内容または原本の変更を確認してから担当確認してください。");
     }
     if (data.applicationAdminConfirmed === true) return;
     tx.update(ref, {
       applicationAdminConfirmed: true,
       applicationAdminConfirmedBy: session.uid,
       applicationAdminConfirmedAt: FieldValue.serverTimestamp(),
+      applicationAdminConfirmedRevision: input.expectedRevision,
       updatedAt: FieldValue.serverTimestamp(),
     });
     tx.set(auditRef, {
       companyId, actorUid: session.uid, action: "application.confirm",
-      jobId: input.jobId, createdAt: FieldValue.serverTimestamp(),
+      jobId: input.jobId, assignedStaffId: data.assignedStaffId, dateKey: data.dateKey ?? null,
+      revision: input.expectedRevision, createdAt: FieldValue.serverTimestamp(),
     });
   });
 
@@ -233,6 +248,7 @@ export const getExpenseReview = onCall(async (request) => {
   return {
     job: {
       id: job.id,
+      ...(jobData.mailIntake ? { receivedMail: true } : {}),
       workDate: jobData.workDate ?? jobData.dateKey ?? "",
       clientName: jobData.clientName ?? "",
       storeName: jobData.storeName ?? "",
@@ -241,6 +257,7 @@ export const getExpenseReview = onCall(async (request) => {
       sheetUrl: buildSheetUrl(jobData),
     },
     currentValues,
+    writeBlockedReason: expenseMailHoldReason(jobData),
     reviewVersion: expenseReviewVersion(companyId, input.jobId, job, draft),
     draft: draft.exists ? serializeDocument(draft.data() ?? {}) : null,
   };
@@ -282,6 +299,9 @@ export const completeExpenseReview = onCall(async (request) => {
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
   const input = CompleteSchema.parse(request.data ?? {});
+  if (input.confirmExistingValues) {
+    throw new HttpsError("failed-precondition", "変更前の経費照合は省略できません。最新の経費を再読込して確認してください。");
+  }
   const parsed = normalizeExpenseInput(input.values);
 
   if (parsed.errors.length) {
@@ -314,14 +334,13 @@ export const completeExpenseReview = onCall(async (request) => {
       throw new HttpsError("failed-precondition", "経費確認の版番号が不正です。");
     }
     const revision = previousRevision + 1;
-    const expected = input.confirmExistingValues
-      ? Object.fromEntries(Object.keys(currentValues).map((key) => [key, { mode: "any" }]))
-      : buildExpenseExpected(currentValues);
+    const expected = buildExpenseExpected(currentValues);
 
     tx.set(queueRef, {
       companyId,
       jobId: input.jobId,
       operation: "expense.review",
+      ...(currentJob.data()!.mailIntake ? { dateKey: currentJob.data()!.dateKey } : {}),
       updates: buildExpenseSheetUpdates(parsed.values),
       expected,
       status: "pending",
@@ -406,6 +425,16 @@ export const updateExpenseReviewFromQueue = onDocumentWritten(
         !["queued", "error", "completed"].includes(String(currentReview.status ?? ""))) return;
       const currentStatus = String(latest.status ?? "");
       if (!["completed", "blocked", "dead_letter", "acknowledged"].includes(currentStatus)) return;
+      // 一度反映済みの完了イベントは、後から取込んだ金額や確認時刻へ再適用しない。
+      if (currentReview.status === "completed") return;
+      if (currentStatus === "completed" && !expenseCompletionIsCurrent(latest, currentReview, currentJob)) {
+        tx.update(reviewRef, {
+          status: "error", sheetWriteStatus: "completed",
+          sheetWriteError: "原本への書込みは完了していますが、経費・担当・勤務日・書込先の確認情報が変わっています。原本と最新の案件を確認してください。",
+          finalizedAt: null, updatedAt: FieldValue.serverTimestamp(),
+        });
+        return;
+      }
       tx.update(reviewRef, {
         status: currentStatus === "completed" ? "completed" : "error",
         sheetWriteStatus: currentStatus,
@@ -428,6 +457,27 @@ export const updateExpenseReviewFromQueue = onDocumentWritten(
 
 
 
+/** 原本書込後から完了通知までに変更があれば、現在の案件へ旧金額を戻さない。 */
+function expenseCompletionIsCurrent(queue: FirebaseFirestore.DocumentData, review: FirebaseFirestore.DocumentData, job: FirebaseFirestore.DocumentData): boolean {
+  if (expenseMailHoldReason(job) || job.sourceMissing === true || job.assignmentUnresolved === true ||
+      review.writeContext !== expenseSheetWriteContext(job) ||
+      !Number.isSafeInteger(review.revision) || review.revision < 1 ||
+      queue.idempotencyKey !== "expense.review:" + queue.jobId + ":" + review.revision ||
+      !review.values || typeof review.values !== "object" || Array.isArray(review.values) ||
+      !review.expectedValues || typeof review.expectedValues !== "object" || Array.isArray(review.expectedValues) ||
+      Object.keys(queue.styles ?? {}).length) return false;
+  const before = normalizeExpenseInput(review.expectedValues);
+  const values = normalizeExpenseInput(review.values);
+  const current = normalizeExpenseInput(job.expenses ?? {});
+  const same = (left: unknown, right: unknown) => JSON.stringify(expenseVersionValue(left)) === JSON.stringify(expenseVersionValue(right));
+  return !before.errors.length && !values.errors.length && !current.errors.length &&
+    same(before.values, review.expectedValues) && same(values.values, review.values) &&
+    same(buildExpenseExpected(before.values), queue.expected ?? {}) &&
+    same(buildExpenseSheetUpdates(values.values), queue.updates ?? {}) &&
+    // 完了通知に先行して、原本の反映済み金額を取込済みの場合も許可する。
+    (same(current.values, before.values) || same(current.values, values.values));
+}
+
 function expenseVersionValue(value: unknown): unknown {
   if (value instanceof Timestamp) return ["timestamp", value.seconds, value.nanoseconds];
   if (Array.isArray(value)) return value.map(expenseVersionValue);
@@ -447,7 +497,10 @@ function expenseReviewVersion(companyId: string, jobId: string, job: FirebaseFir
 }
 
 function assertExpenseReviewVersion(expected: string | undefined, companyId: string, jobId: string, job: FirebaseFirestore.DocumentSnapshot, review: FirebaseFirestore.DocumentSnapshot): void {
-  // 旧クライアントのAPI互換性を維持。版を受け取った新画面は必ず送信する。
+  // 旧Crew案件の互換性は維持。受信案件では表示版を省略できない。
+  if (job.data()?.mailIntake && expected === undefined) {
+    throw new HttpsError("failed-precondition", "受信案件の経費確認版がありません。経費を読み直してください。", { reason: "case_mail_expense_version_required" });
+  }
   if (expected !== undefined && expected !== expenseReviewVersion(companyId, jobId, job, review)) {
     throw new HttpsError("failed-precondition", "経費確認が別の操作で更新されました。再読込して確認してください。");
   }
@@ -472,6 +525,8 @@ function assertExpenseWriteContext(
   if (!currentJob.exists || job?.companyId !== companyId) {
     throw new HttpsError("not-found", "案件が見つかりません。");
   }
+  const holdReason = expenseMailHoldReason(job);
+  if (holdReason) throw new HttpsError("failed-precondition", holdReason, { reason: "case_mail_expense_pending" });
   if (expenseWriteContext(job) !== expenseWriteContext(expectedJob)) {
     throw new HttpsError("failed-precondition", "案件の担当・経費・書込先が変更されました。再読込して確認してください。");
   }

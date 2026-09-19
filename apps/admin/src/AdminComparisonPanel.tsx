@@ -22,7 +22,7 @@ export default function AdminComparisonPanel({comparison,closeComparison}:{compa
       <button className="ghost" disabled={index+1>=comparison.replacements.length} onClick={()=>setView({requestId:comparison.request.id,index:index+1})}>次のファイル</button>
     </nav>}
     <div className="comparison-grid">
-      <figure><figcaption>元ファイル</figcaption><ComparisonImage key={JSON.stringify([comparison.source?.submissionId,comparison.source?.id,comparison.source?.previewUrl])} file={comparison.source} label="元ファイル"/><small>{comparison.source?.driveName||comparison.source?.originalName||""}</small></figure>
+      <figure><figcaption>元ファイル</figcaption>{comparison.request.scope==="submission"?<div className="pdf-preview">案件全体の再提出です。過去の提出は提出履歴で確認できます。</div>:<><ComparisonImage key={JSON.stringify([comparison.source?.submissionId,comparison.source?.id,comparison.source?.previewUrl])} file={comparison.source} label="元ファイル"/><small>{comparison.source?.driveName||comparison.source?.originalName||""}</small></>}</figure>
       <figure><figcaption>再送ファイル</figcaption>{replacement?<ComparisonImage key={JSON.stringify([replacement.submissionId,replacement.id,replacement.previewUrl])} file={replacement} label="再送ファイル"/>:<div className="pdf-preview">再送ファイルなし</div>}<small>{replacement?.driveName||replacement?.originalName||""}</small></figure>
     </div>
   </div>;

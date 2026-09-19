@@ -7,6 +7,7 @@ const dependency = createRequire(process.env.LKC_TEST_DEPENDENCY_ROOT ? path.joi
 const ts = dependency('typescript');
 const loaded = new Map();
 function loadState(name) {
+  if(name === "firebase-functions/v2/https") return { HttpsError: dependency(name).HttpsError };
   assert.ok(['./sheet-write-core','./netprint-state-core','./assignment-preparation-core','./admin-edit-state-core','./job-management-core'].includes(name));
   if(loaded.has(name))return loaded.get(name);const exports={};loaded.set(name,exports);
   runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../functions/src/'+name.slice(2)+'.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports,require:loadState});return exports;

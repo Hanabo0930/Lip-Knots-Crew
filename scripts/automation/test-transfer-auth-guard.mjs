@@ -38,6 +38,15 @@ assert.deepEqual(run(undefined,'createUploadSession'),{passed:true,exitCode:0});
 const uploadsPath='functions/src/uploads.ts',start=source[uploadsPath].indexOf('export const createUploadSession ='),end=source[uploadsPath].indexOf('\nexport const finalizeStagedUpload');
 const entryBlock=source[uploadsPath].slice(start,end);
 for(const [before,after] of [
+ ['assertSubmissionReadiness(job);',''],
+ ['parent.companyId !== companyId || parent.uid !== session.uid || parent.staffId !== staffId','false'],
+ ['parent.requestFingerprint !== fingerprint','false'],
+ ['parent.acceptedDateKey !== job.dateKey','false'],
+ ['parent.acceptedAssignmentRevision !== (job.revision ?? 0)','false'],
+ ['assertSubmissionFile(parent, saved, submissionRef.id);',''],
+ ['assertReplacementRequest(replacement.data(), parent, submissionRef.id);',''],
+ ['object.metadata?.lkcContentSha256 !== saved.contentSha256','false'],
+ ['if (saved.status !== "waiting_upload") throw','if (false) throw'],
  ['requireAuth(request)','unverified(request)'],
  ['CreateSchema.parse(request.data)','request.data'],
  ['companyFromClaims(session.token)','request.data.companyId'],

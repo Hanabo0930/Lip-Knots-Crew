@@ -22,6 +22,8 @@ function reject(name,before,after,file=null){
  files[file??modulePath]=text.slice(0,start)+block.replace(before,after)+text.slice(end);
  assert.deepEqual(run(name,files),{passed:false,exitCode:1},name+': '+before);passed++;
 }
+reject('createResubmissionRequest','assertCaseMailSubmissionRevision(current.data()!, input.expectedRevision);','');
+reject('completeResubmissionRequest','assertCaseMailSubmissionCurrent(data, job.data()!);','');
 for(const name of names){
  assert.deepEqual(run(name),{passed:true,exitCode:0});passed++;
  reject(name,name==='getMyResubmissionRequests'?'requireAuth(request)':'requireAdmin(request)','untrustedSession(request)');
@@ -53,6 +55,9 @@ for(const [before,after] of [
  ['file.data()?.status!=="completed"','false'],
  ['tx.create(ref,','ref.set('],
  ['tx.create(notificationRef,','notificationRef.set('],
+ ['kind:"resubmission"','kind:"other"'],
+ ['revision:current.data()?.revision??0','revision:0'],
+ ['requestId:ref.id','requestId:"other"'],
  ['createdBy:session.uid','createdBy:input.uid'],
 ])reject('createResubmissionRequest',before,after);
 for(const [before,after] of [

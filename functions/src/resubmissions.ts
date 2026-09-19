@@ -1,4 +1,4 @@
-import { assertSubmissionFileIdentity, assertSubmissionFile, assertSubmissionCounters, assertReplacementRequest } from "./submission-integrity";
+import { assertSubmissionFileIdentity, assertSubmissionFile, assertSubmissionCounters, assertReplacementRequest, assertSubmissionOwner, assertSubmissionReadiness, caseMailSubmissionContext, assertCaseMailSubmissionRevision, assertCaseMailSubmissionCurrent } from "./submission-integrity";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { z } from "zod";
@@ -7,7 +7,7 @@ import { notificationQueueId, queueDocumentData } from "./notification-core";
 import { companyFromClaims, requireAdmin, requireAuth, staffFromClaims } from "./utils";
 import { assertProductionOperational } from "./system-safety";
 const ReasonEnum=z.enum(["手ブレで文字が読めません","画像が暗い・反射しています","一部が切れています","レシート全体が写っていません","金額・日付が確認できません","その他"]);
-const CreateSchema=z.object({jobId:z.string().min(1),type:z.enum(["report","sales_floor"]),sourceSubmissionId:z.string().optional(),sourceFileId:z.string().optional(),reasons:z.array(ReasonEnum).min(1).max(6),note:z.string().max(1000).default("")}).refine(v=>!v.sourceFileId||!!v.sourceSubmissionId,{message:"元ファイルの提出IDが必要です"});
+const CreateSchema=z.object({expectedRevision:z.number().int().nonnegative().optional(),jobId:z.string().min(1),type:z.enum(["report","sales_floor"]),sourceSubmissionId:z.string().optional(),sourceFileId:z.string().optional(),reasons:z.array(ReasonEnum).min(1).max(6),note:z.string().max(1000).default("")}).refine(v=>!v.sourceFileId||!!v.sourceSubmissionId,{message:"元ファイルの提出IDが必要です"});
 const CompleteSchema=z.object({requestId:z.string().min(1)});
 export const createResubmissionRequest = onCall(async request => {
  const session=requireAdmin(request),companyId=companyFromClaims(session.token);
@@ -26,11 +26,14 @@ export const createResubmissionRequest = onCall(async request => {
   if(String(current.data()?.assignedStaffId??"")!==staffId)throw new HttpsError("failed-precondition","担当が変わりました。案件を再読込してください。");
   if(current.data()?.cancelled===true||current.data()?.status==="cancelled")throw new HttpsError("failed-precondition","キャンセル済みの案件です。");
   if(current.data()?.status!=="assigned")throw new HttpsError("failed-precondition","確定済みの案件だけ再提出を依頼できます。");
+  if(current.data()!.mailIntake) assertSubmissionReadiness(current.data()!);
+  assertCaseMailSubmissionRevision(current.data()!, input.expectedRevision);
   let sourceFile:null|Record<string,unknown>=null;
   if(input.sourceSubmissionId){
    const submission=await tx.get(db.collection("submissions").doc(input.sourceSubmissionId));
    const source=submission.data();
    if(!source||source.companyId!==companyId||source.jobId!==input.jobId||source.type!==input.type)throw new HttpsError("failed-precondition","元の提出と案件の所属情報が一致しません。");
+   if(current.data()!.mailIntake) assertSubmissionOwner(source, current.data());
    if(input.sourceFileId){
     const file=await tx.get(submission.ref.collection("files").doc(input.sourceFileId));
     assertSubmissionFileIdentity(source,file.data(),input.sourceSubmissionId);
@@ -38,8 +41,8 @@ export const createResubmissionRequest = onCall(async request => {
     sourceFile={submissionId:input.sourceSubmissionId,fileId:input.sourceFileId,driveName:file.data()?.driveName??null,sequence:file.data()?.sequence??null,contentType:file.data()?.contentType??null};
    }
   }
-  tx.create(ref,{companyId,staffId,jobId:input.jobId,type:input.type,sourceSubmissionId:input.sourceSubmissionId??null,sourceFileId:input.sourceFileId??null,sourceFile,reasons:input.reasons,note:input.note,status:"open",createdBy:session.uid,createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()});
-  tx.create(notificationRef,{...queueDocumentData(notification),createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()});
+  tx.create(ref,{...(current.data()!.mailIntake ? { acceptedMailContext: caseMailSubmissionContext(current.data()!) } : {}),companyId,staffId,jobId:input.jobId,type:input.type,sourceSubmissionId:input.sourceSubmissionId??null,sourceFileId:input.sourceFileId??null,sourceFile,reasons:input.reasons,note:input.note,status:"open",createdBy:session.uid,createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()});
+  tx.create(notificationRef,{...queueDocumentData({...notification,reminderContext:{version:1,kind:"resubmission",jobId:input.jobId,staffId,dateKey:String(current.data()?.dateKey??""),revision:current.data()?.revision??0,requestId:ref.id,requestType:input.type}}),createdAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()});
  });
 
  return{requestId:ref.id};
@@ -59,6 +62,11 @@ export const completeResubmissionRequest = onCall(async request => {
   if (submission.data()?.resubmissionRequestId !== input.requestId) throw new HttpsError("failed-precondition", "差替提出の依頼先が一致しません。");
   assertCompletedReplacement(data, submission.data(), String(data.replacementSubmissionId));
   if (data.status === "completed") return;
+  const job = await tx.get(db.collection("jobs").doc(String(data.jobId)));
+  if (job.data()?.mailIntake || data.acceptedMailContext != null || submission.data()?.acceptedMailContext != null) {
+    assertSubmissionOwner(submission.data()!, job.data());
+    assertCaseMailSubmissionCurrent(data, job.data()!);
+  }
   tx.update(ref, { status:"completed", completedBy:session.uid, completedAt:FieldValue.serverTimestamp(), updatedAt:FieldValue.serverTimestamp() });
  });
  return { ok:true };
@@ -80,6 +88,11 @@ export async function markResubmissionReplacementFile(input:{requestId:string;su
    if (existing.driveFileId !== input.driveFileId) throw new HttpsError("failed-precondition", "差替ファイルの転送先が変更されています。");
    return;
   }
+  const job = await tx.get(db.collection("jobs").doc(String(parent!.jobId)));
+  if (job.data()?.mailIntake || parent!.acceptedMailContext != null || data?.acceptedMailContext != null) {
+    assertSubmissionOwner(parent!, job.data());
+    assertCaseMailSubmissionCurrent(data!, job.data()!);
+  }
   if (data?.status !== "open") throw new HttpsError("failed-precondition", "確認済みの再提出へファイルを追加できません。");
   tx.update(ref, { replacementSubmissionId:input.submissionId, replacementFiles:[...entries,{fileId:input.fileId,driveFileId:input.driveFileId,driveName:input.driveName,contentType:input.previewContentType,submittedAt:input.submittedAt}], updatedAt:input.submittedAt });
  });
@@ -99,6 +112,11 @@ export async function markResubmissionSubmitted(input:{requestId:string;submissi
   if (submission.data()?.resubmissionRequestId !== input.requestId) throw new HttpsError("failed-precondition", "提出先の再提出依頼が一致しません。");
   assertCompletedReplacement(snap.data(), submission.data(), input.submissionId);
   if (snap.data()?.status !== "open") return;
+  const job = await tx.get(db.collection("jobs").doc(String(submission.data()!.jobId)));
+  if (job.data()?.mailIntake || submission.data()!.acceptedMailContext != null || snap.data()?.acceptedMailContext != null) {
+    assertSubmissionOwner(submission.data()!, job.data());
+    assertCaseMailSubmissionCurrent(snap.data()!, job.data()!);
+  }
   tx.update(ref, {status:"submitted", replacementSubmissionId:input.submissionId, submittedAt:input.submittedAt, updatedAt:input.submittedAt});
  });
 }

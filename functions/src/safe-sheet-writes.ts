@@ -1,14 +1,17 @@
+import { caseMailSubmissionContext } from "./submission-integrity";
+import { caseMailPreparationHeld } from "./case-mail-preparation-core";
 import { createHash, randomUUID } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onDocumentWritten } from "firebase-functions/v2/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { google } from "googleapis";
 import { db } from "./firebase";
-import { cancellationSheetWriteIdentity, columnToNumber, expectedMatches, validateMutation, valuesEquivalent, ExpectedValue } from "./sheet-write-core";
-import { parseDateKey } from "./shift-parser";
+import { cancellationSheetWriteIdentity, submissionSheetWriteIdentity, columnToNumber, expectedMatches, validateMutation, valuesEquivalent, ExpectedValue } from "./sheet-write-core";
+import { applicationConfirmationIdentity, mailPreparationContext } from "./assignment-preparation-core";
+import { parseDateKey, splitMenuConditions } from "./shift-parser";
 import { assertAdminEditCurrent, adminEditValueMatches, editSourceIdentity } from "./admin-edit-state-core";
 import { cancellationReasonLabels, cancellationTreatmentLabels } from "./analytics-core";
-import { buildExpenseSheetUpdates, expenseSheetWriteContext, normalizeExpenseInput } from "./admin-operations-core";
+import { buildExpenseExpected, buildExpenseSheetUpdates, expenseSheetWriteContext, expenseMailHoldReason, normalizeExpenseInput } from "./admin-operations-core";
 import { getProductionOperationalState } from "./system-safety";
 import { incrementProductionMetrics } from "./production-metrics";
 
@@ -125,6 +128,9 @@ async function finishOwned(ref: FirebaseFirestore.DocumentReference, queue: Queu
 function assertPreContact(ref: FirebaseFirestore.DocumentReference, queue: Queue, job: FirebaseFirestore.DocumentData, mapping: Mapping): void {
   if (queue.operation !== "precontact.submit") return;
   const saved = job.preContact, updates = queue.updates ?? {};
+  if (caseMailPreparationHeld(job) || (job.mailIntake && saved?.caseMailContext !== mailPreparationContext(job))) {
+    throw new BlockedError("受信内容・勤務条件が変わっています。事前連絡を再確認してください。");
+  }
   if (job.status !== "assigned" || job.cancelled === true || job.sourceMissing === true ||
       job.assignmentUnresolved === true || job.applicationUnconfirmed === true || job.preContactNeedsReview === true) {
     throw new BlockedError("現在の手配と事前連絡の本人確認が完了していません。");
@@ -151,6 +157,10 @@ function assertAssignment(ref: FirebaseFirestore.DocumentReference, queue: Queue
   mapping: Mapping, staff: FirebaseFirestore.DocumentData | undefined, lock: FirebaseFirestore.DocumentData | undefined): void {
   if (queue.operation !== "job.assign") return;
   const saved = job.assignmentSheetWrite;
+  if (job.mailIntake && (job.mailIntakeReviewRequired === true || job.pendingSourceWrite === true || job.adminEditSheetWrite?.pending === true ||
+      saved?.confirmation !== applicationConfirmationIdentity(job))) {
+    throw new ConflictError("応募後に受信内容・勤務条件が変わっています。担当と原本を再確認してください。");
+  }
   if (job.status !== "assigned" || job.cancelled === true || job.sourceMissing === true || job.assignmentUnresolved === true ||
       !queue.actorStaffId || queue.actorStaffId !== job.assignedStaffId || !queue.dateKey || queue.dateKey !== job.dateKey ||
       parseDateKey(queue.dateKey, "") !== queue.dateKey || !queue.actorUid || queue.actorUid !== job.assignedUid ||
@@ -201,16 +211,17 @@ function assertCancellation(ref: FirebaseFirestore.DocumentReference, queue: Que
 
 function assertNetPrint(ref: FirebaseFirestore.DocumentReference, queue: Queue, job: FirebaseFirestore.DocumentData): void {
   if (!["netprint.update", "netprint.printed"].includes(queue.operation)) return;
+  if (caseMailPreparationHeld(job)) throw new ConflictError("受信内容・勤務条件を確認中のため資料反映を停止しました。");
   const saved = job.netPrint, items = saved?.items, identity = cancellationSheetWriteIdentity(job);
   if (job.sourceMissing === true || job.assignmentUnresolved === true || !Array.isArray(items) || items.length > 3 ||
       items.some((item, index) => !item || typeof item.id !== "string" || !item.id || typeof item.number !== "string" || !item.number.trim() || item.position !== index + 1) ||
       new Set(items.map(item => item.id)).size !== items.length) throw new ConflictError("現在の資料と担当・元シフト表を確認できません。");
-  const printed = (item: FirebaseFirestore.DocumentData) => item.printed === true && item.printedAt instanceof Timestamp && item.printedContext === identity &&
+  const printed = (item: FirebaseFirestore.DocumentData) => (!job.mailIntake || item.caseMailContext === caseMailSubmissionContext(job)) && item.printed === true && item.printedAt instanceof Timestamp && item.printedContext === identity &&
     item.printedByStaffId === job.assignedStaffId && item.printedForDate === job.dateKey && typeof item.printOperationId === "string";
   if (queue.operation === "netprint.update") {
     const updates = Object.fromEntries([1,2,3].map(position => [`netPrint${position}`, items[position - 1]?.number ?? ""]));
     const styles = Object.fromEntries([1,2,3].map(position => [`netPrint${position}`, { background: items[position - 1] && printed(items[position - 1]) ? "#fff2cc" : "#ffffff" }]));
-    if (saved.writeOperationId !== ref.id || saved.writeIdentity !== identity ||
+    if ((job.mailIntake && saved.caseMailContext !== caseMailSubmissionContext(job)) || saved.writeOperationId !== ref.id || saved.writeIdentity !== identity ||
         queue.idempotencyKey !== `netprint.update:${queue.jobId}:${ref.id}` || stableJson(queue.updates) !== stableJson(updates) ||
         stableJson(queue.styles) !== stableJson(saved.writeStyles) || stableJson(queue.styles) !== stableJson(styles) ||
         stableJson(queue.expected) !== stableJson(saved.writeExpected)) throw new ConflictError("資料番号か印刷状態が更新されています。最新の内容で番号登録を確認し直してください。");
@@ -228,8 +239,24 @@ function assertNetPrint(ref: FirebaseFirestore.DocumentReference, queue: Queue, 
   }
 }
 
+function assertSubmissionState(ref: FirebaseFirestore.DocumentReference, queue: Queue, job: FirebaseFirestore.DocumentData, mapping: Mapping): void {
+  if (!["submission.report", "submission.sales_floor"].includes(queue.operation)) return;
+  if (caseMailPreparationHeld(job)) throw new ConflictError("受信内容・勤務条件を確認中のため提出反映を停止しました。");
+  const report = queue.operation === "submission.report", state = job.submissionStatus?.[report ? "report" : "salesFloor"], saved = state?.sheetWrite;
+  const updates = report ? { reportSubmitted: state?.lateFirstSubmission === true ? "遅延" : "提出済" }
+    : { salesFloorSubmitted: state?.clientSubmitted === true && state?.lipKnotsSubmitted === true ? "直＋リップ" : state?.clientSubmitted === true ? "直" : state?.lipKnotsSubmitted === true ? "リップ" : "" };
+  if (job.status !== "assigned" || job.cancelled === true || job.sourceMissing === true || job.applicationUnconfirmed === true || job.assignmentUnresolved === true ||
+      !queue.actorStaffId || queue.actorStaffId !== job.assignedStaffId || !queue.actorUid || !queue.dateKey || queue.dateKey !== job.dateKey || parseDateKey(queue.dateKey, "") !== queue.dateKey ||
+      !Number.isSafeInteger(job.revision ?? 0) || Number(job.revision ?? 0) < 0 || mapping.columns.staffName !== "B" ||
+      saved?.operationId !== ref.id || saved.identity !== submissionSheetWriteIdentity(job) || (job.mailIntake && saved.caseMailContext !== caseMailSubmissionContext(job)) || saved.pending !== true ||
+      queue.idempotencyKey !== queue.operation + ":" + queue.jobId + ":" + ref.id || Object.keys(queue.styles ?? {}).length ||
+      (report && (state?.completed !== true || state?.lipKnotsSubmitted !== true)) ||
+      stableJson(queue.updates) !== stableJson(updates)) throw new ConflictError("提出状態の操作番号・担当・勤務日・元シフト表が現在の記録と一致しません。最新の提出状態を確認してください。");
+}
+
 function assertExpenseReview(ref: FirebaseFirestore.DocumentReference, queue: Queue, job: FirebaseFirestore.DocumentData, review: FirebaseFirestore.DocumentData | undefined): void {
   if (queue.operation !== "expense.review") return;
+  if (expenseMailHoldReason(job)) throw new ConflictError("受信案件の担当・勤務条件・原本を確認中のため、経費反映を停止しました。");
   if (!review || review.companyId !== queue.companyId || review.jobId !== queue.jobId || review.queueId !== ref.id ||
       !["queued", "error"].includes(String(review.status)) ||
       (review.staffId ?? null) !== (job.assignedStaffId ?? null) || job.sourceMissing === true ||
@@ -241,6 +268,18 @@ function assertExpenseReview(ref: FirebaseFirestore.DocumentReference, queue: Qu
   if (!review.values || typeof review.values !== "object" || Array.isArray(review.values)) {
     throw new ConflictError("経費の保存内容を確認できません。");
   }
+  // 受付後の再試行でも、確認時の旧金額と同じ条件だけを許可する。
+  if (!review.expectedValues || typeof review.expectedValues !== "object" || Array.isArray(review.expectedValues)) {
+    throw new ConflictError("変更前の経費の確認記録がありません。最新の案件から確認し直してください。");
+  }
+  const before = normalizeExpenseInput(review.expectedValues);
+  const current = normalizeExpenseInput(job.expenses ?? {});
+  if (before.errors.length || current.errors.length ||
+      stableJson(before.values) !== stableJson(review.expectedValues) ||
+      stableJson(before.values) !== stableJson(current.values) ||
+      stableJson(buildExpenseExpected(before.values)) !== stableJson(queue.expected ?? {})) {
+    throw new ConflictError("変更前の経費または照合条件が変わっています。最新の案件から確認し直してください。");
+  }
   const values = normalizeExpenseInput(review.values);
   if (values.errors.length || Object.keys(queue.styles ?? {}).length ||
       stableJson(buildExpenseSheetUpdates(values.values)) !== stableJson(queue.updates ?? {})) {
@@ -249,6 +288,11 @@ function assertExpenseReview(ref: FirebaseFirestore.DocumentReference, queue: Qu
 }
 
 function matchesValue(queue: Queue, key: string, actual: unknown, expected: unknown): boolean {
+  if (queue.operation === "expense.review") {
+    const left = normalizeExpenseInput({ [key]: actual }), right = normalizeExpenseInput({ [key]: expected });
+    return !left.errors.length && !right.errors.length && Object.hasOwn(left.values, key) &&
+      left.values[key as keyof typeof left.values] === right.values[key as keyof typeof right.values];
+  }
   if (queue.operation === "job.admin_edit") return adminEditValueMatches(key, actual, expected);
   if (queue.operation === "precontact.submit" && key === "temperature") {
     const number = (value: unknown) => {
@@ -318,6 +362,7 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
     assertPreContact(ref, queue, job, mapping);
     assertCancellation(ref, queue, job);
     assertNetPrint(ref, queue, job);
+    assertSubmissionState(ref, queue, job, mapping);
     if (reviewRef) assertExpenseReview(ref, queue, job, (await reviewRef.get()).data());
     const styleOnly = Object.keys(queue.styles ?? {}).filter(key => !Object.hasOwn(queue.updates ?? {}, key));
     for (const key of styleOnly) {
@@ -361,8 +406,9 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
       return `'${sheetName.replace(/'/g, "''")}'!${column}${row}`;
     };
     const ranges = keys.map(key => cell(mapping.columns[key]!));
-    if (["precontact.submit", "job.assign"].includes(queue.operation)) await verifyPreContactRow(sheets, mapping, job, queue, sheetName, row, queue.operation === "job.assign");
+    if ((["precontact.submit", "job.assign", "submission.report", "submission.sales_floor"].includes(queue.operation) || (job.mailIntake && ["netprint.printed", "netprint.update"].includes(queue.operation)))) await verifyPreContactRow(sheets, mapping, job, queue, sheetName, row, queue.operation === "job.assign");
     if (queue.operation === "job.admin_edit") await verifyPreContactRow(sheets, mapping, job, queue, sheetName, row, !job.assignedStaffId, Object.hasOwn(queue.updates ?? {}, "staffName"));
+    await verifyMailExpenseRow(sheets, mapping, job, queue, sheetName, row);
     const currentResp = await sheets.spreadsheets.values.batchGet({ spreadsheetId: mapping.spreadsheetId, ranges, valueRenderOption: "FORMATTED_VALUE" });
     const before: Record<string, unknown> = {};
     keys.forEach((key, i) => before[key] = currentResp.data.valueRanges?.[i]?.values?.[0]?.[0] ?? "");
@@ -383,25 +429,28 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
     assertPreContact(ref, queue, latestJob.data()!, mapping);
     assertCancellation(ref, queue, latestJob.data()!);
     assertNetPrint(ref, queue, latestJob.data()!);
+    assertSubmissionState(ref, queue, latestJob.data()!, mapping);
     if (reviewRef) assertExpenseReview(ref, queue, latestJob.data()!, (await reviewRef.get()).data());
     if (jobReference(latestJob.data()) !== jobReference(job) || stableJson(latestMapping.data()) !== stableJson(mapping)) throw new ConflictError("案件の参照先・担当・書込設定が変更されています。");
     if (!(await getProductionOperationalState(queue.companyId)).operational) throw new BlockedError("書込前に運用が停止されました。");
     };
     await ensureCurrent();
 
-    if (queue.operation === "job.assign") {
-      await verifyPreContactRow(sheets, mapping, job, queue, sheetName, row, true);
+    if (["job.assign", "submission.report", "submission.sales_floor"].includes(queue.operation) || (job.mailIntake && ["netprint.printed", "netprint.update"].includes(queue.operation))) {
+      await verifyPreContactRow(sheets, mapping, job, queue, sheetName, row, queue.operation === "job.assign");
       await ensureCurrent();
     }
     if (queue.operation === "job.admin_edit") {
       await verifyPreContactRow(sheets, mapping, job, queue, sheetName, row, !job.assignedStaffId, Object.hasOwn(queue.updates ?? {}, "staffName"));
       await ensureCurrent();
     }
+    await verifyMailExpenseRow(sheets, mapping, job, queue, sheetName, row);
+    if (queue.operation === "expense.review" && job.mailIntake) await ensureCurrent();
     if (!allAlready) {
       const data = Object.entries(queue.updates ?? {}).map(([key, value]) => ({ range: cell(mapping.columns[key]!), values: [[value ?? ""]] }));
       if (data.length) {
         mutationAttempted = true;
-        await sheets.spreadsheets.values.batchUpdate({ spreadsheetId: mapping.spreadsheetId, requestBody: { valueInputOption: ["job.assign", "job.admin_edit"].includes(queue.operation) ? "RAW" : mapping.valueInputOption ?? "USER_ENTERED", data } });
+        await sheets.spreadsheets.values.batchUpdate({ spreadsheetId: mapping.spreadsheetId, requestBody: { valueInputOption: (["job.assign", "job.admin_edit"].includes(queue.operation) || (queue.operation === "expense.review" && job.mailIntake)) ? "RAW" : mapping.valueInputOption ?? "USER_ENTERED", data } });
       }
     }
     const styleRequests = Object.entries(queue.styles ?? {}).map(([key, style]) => {
@@ -431,8 +480,9 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
       for (const [key, value] of Object.entries(queue.updates ?? {})) if (!matchesValue(queue, key, afterValues[key], value)) throw new Error("書込後の値を確認できません。");
       for (const key of styleOnly) if (!matchesExpected(key, afterValues[key], queue.expected![key]!)) throw new Error("書式変更後の対象セルを確認できません。");
     }
-    if (["precontact.submit", "job.assign"].includes(queue.operation)) await verifyPreContactRow(sheets, mapping, job, queue, sheetName, row);
+    if ((["precontact.submit", "job.assign", "submission.report", "submission.sales_floor"].includes(queue.operation) || (job.mailIntake && ["netprint.printed", "netprint.update"].includes(queue.operation)))) await verifyPreContactRow(sheets, mapping, job, queue, sheetName, row);
     if (queue.operation === "job.admin_edit") await verifyPreContactRow(sheets, mapping, job, queue, sheetName, row, !job.assignedStaffId);
+    await verifyMailExpenseRow(sheets, mapping, job, queue, sheetName, row);
     const now = Timestamp.now(), auditRef = db.collection("auditLogs").doc();
     await db.runTransaction(async tx => {
       const currentQueue = await tx.get(ref), currentJob = await tx.get(jobRef), currentMapping = await tx.get(mapRef);
@@ -443,12 +493,14 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
       assertPreContact(ref, queue, currentJob.data()!, mapping);
       assertCancellation(ref, queue, currentJob.data()!);
       assertNetPrint(ref, queue, currentJob.data()!);
+      assertSubmissionState(ref, queue, currentJob.data()!, mapping);
       if (reviewRef) assertExpenseReview(ref, queue, currentJob.data()!, (await tx.get(reviewRef)).data());
       if (jobReference(currentJob.data()) !== jobReference(job) || stableJson(currentMapping.data()) !== stableJson(mapping)) throw new ConflictError("書込後の案件・設定が変更されています。");
       const editSource = await verifyEditSource(currentJob.data()!, tx);
       if (editSourceRef && (!editSource || editSource.companyId !== queue.companyId || editSource.jobId !== queue.jobId || editSource.identity !== editSourceIdentity(currentJob.data()!))) throw new ConflictError("原本確認値の保存先が変更されています。");
       tx.set(ref, { status: "completed", resolvedRow: row, beforeValues: before, afterValues, completedAt: now, updatedAt: now, retryAt: null }, { merge: true });
       if (queue.operation === "precontact.submit") tx.update(jobRef, { preContactSyncPending: false });
+      if (["submission.report", "submission.sales_floor"].includes(queue.operation)) tx.update(jobRef, { ["submissionStatus." + (queue.operation === "submission.report" ? "report" : "salesFloor") + ".sheetWrite.pending"]: false });
       if (queue.operation === "netprint.update") tx.update(jobRef, { "netPrint.syncPending": false });
       if (editSourceRef && editSource) {
         tx.set(editSourceRef, { ...editSource, values: { ...editSource.values, ...Object.fromEntries(Object.entries(afterValues).map(([key,value]) => [key,String(value ?? "")])) }, observedAt: now });
@@ -495,11 +547,32 @@ function jobReference(job: FirebaseFirestore.DocumentData | undefined): string {
   return stableJson([job?.companyId, job?.caseId, job?.sheetRef, job?.dateKey, job?.workDate, job?.clientName,
     job?.storeName, job?.workTime, job?.assignedStaffId, job?.assignedStaffName, job?.status, job?.cancelled, job?.sourceMissing]);
 }
+async function verifyMailExpenseRow(sheets: ReturnType<typeof google.sheets>, mapping: Mapping, job: FirebaseFirestore.DocumentData, queue: Queue, sheetName: string, row: number): Promise<void> {
+  if (queue.operation !== "expense.review" || !job.mailIntake) return;
+  const columns = { transportation: "AK", purchase8: "AL", purchase10: "AM", netPrintCost: "AO", postageCost: "AP" };
+  if ((mapping.valueInputOption ?? "RAW") !== "RAW" || !mapping.idColumn ||
+      Object.entries(columns).some(([key, column]) => mapping.columns[key] !== column) ||
+      queue.dateKey !== job.dateKey || typeof queue.dateKey !== "string" || queue.dateKey < "2026-10-01") {
+    throw new BlockedError("受信案件の経費列・勤務日・固定IDの設定を確認してください。");
+  }
+  await verifyPreContactRow(sheets, mapping, job, queue, sheetName, row);
+  const response = await sheets.spreadsheets.values.batchGet({ spreadsheetId: mapping.spreadsheetId,
+    ranges: Object.values(columns).map(column => "'" + sheetName.replace(/'/g, "''") + "'!" + column + row), valueRenderOption: "FORMULA" });
+  const cells = response.data.valueRanges;
+  if (!cells || cells.length !== 5 || cells.some(cell => typeof cell.values?.[0]?.[0] === "string" && cell.values[0][0].trim().startsWith("="))) {
+    throw new ConflictError("経費の対象セルに数式があるか、確認結果が不足しています。数式は上書きせず、原本を確認してください。");
+  }
+}
+
 async function verifyPreContactRow(sheets: ReturnType<typeof google.sheets>, mapping: Mapping, job: FirebaseFirestore.DocumentData, queue: Queue, sheetName: string, row: number, allowBlankStaff = false, skipStaff = false) {
   const dateColumn = mapping.columns.workDate || mapping.identityColumns?.workDate;
-  const fields: [string, unknown, "name" | "date" | "id"][] = [
+  const fields: [string, unknown, "name" | "date" | "id" | "value" | "menu"][] = [
     [mapping.columns.staffName!, job.assignedStaffName, "name"], [dateColumn!, queue.dateKey, "date"],
   ];
+  if (queue.operation === "expense.review" && job.mailIntake) {
+    if (typeof job.rawStaffName !== "string" || typeof job.rawClientName !== "string") throw new BlockedError("経費確認に必要な原本の担当・依頼元を確認できません。");
+    fields[0] = [mapping.columns.staffName!, job.rawStaffName, "value"];
+  }
   if (skipStaff) fields.shift();
   if (mapping.idColumn) fields.push([mapping.idColumn, job.caseId, "id"]);
   else {
@@ -507,13 +580,25 @@ async function verifyPreContactRow(sheets: ReturnType<typeof google.sheets>, map
     if (!identity) throw new BlockedError("行本人確認用の列設定がありません。");
     fields.push([identity.clientName, job.clientName, "name"], [identity.storeName, job.storeName, "name"], [identity.workTime, job.workTime, "name"]);
   }
+  if (["job.assign", "precontact.submit", "submission.report", "submission.sales_floor", "netprint.printed", "netprint.update", "expense.review"].includes(queue.operation) && job.mailIntake) {
+    const columns = { clientName: "J", storeName: "K", makerName: "L", menuName: "M", entryTime: "N", workTime: "O" };
+    if (mapping.columns.staffName !== "B" || Object.entries(columns).some(([key, column]) => mapping.columns[key] !== column)) {
+      throw new BlockedError("受信案件の原本照合列が一致しません。");
+    }
+    for (const [key, column] of Object.entries(columns)) fields.push([column, key === "clientName" && queue.operation === "expense.review" ? job.rawClientName : job[key] ?? "", key === "menuName" ? "menu" : "value"]);
+  }
   if (fields.some(([column]) => !/^[A-Z]{1,3}$/i.test(column))) throw new BlockedError("行照合の列が不正です。");
   const response = await sheets.spreadsheets.values.batchGet({ spreadsheetId: mapping.spreadsheetId, ranges: fields.map(([column]) => `'${sheetName.replace(/'/g, "''")}'!${column}${row}`), valueRenderOption: "FORMATTED_VALUE" });
   if (fields.some(([, expected, kind], index) => {
     const actual = response.data.valueRanges?.[index]?.values?.[0]?.[0];
+    if (kind === "value") return !adminEditValueMatches("source", actual ?? "", expected);
+    if (kind === "menu") {
+      const menu = splitMenuConditions(String(actual ?? "").normalize("NFKC").trim());
+      return !adminEditValueMatches("menuName", menu.name, expected) || JSON.stringify(menu.conditions) !== JSON.stringify(job.menuConditions ?? []);
+    }
     if (kind === "date") return parseDateKey(String(actual ?? ""), sheetName) !== expected;
     if (kind === "id") return !expected || String(actual ?? "") !== String(expected);
-    if (allowBlankStaff && fields[index]?.[0] === mapping.columns.staffName && String(actual ?? "").trim() === "") return false;
+    if (allowBlankStaff && fields[index]?.[0] === mapping.columns.staffName && (job.mailIntake && queue.operation === "job.assign" ? actual === "" : String(actual ?? "").trim() === "")) return false;
     return !exactIdentity(actual, expected);
   })) throw new ConflictError("シフト表の案件・担当・勤務日を一致確認できません。");
 }

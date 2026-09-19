@@ -60,11 +60,11 @@ for(const scenario of ['success','failure','auth','refresh','role','token-auth']
  if(scenario==='failure'){assert.equal(state.busy,false);assert.match(state.message,/offline/);assert.equal(ctx.jobDirectoryPendingRef.current,false);ctx.loadPageModule=async()=>({readCurrentAdminJobPage:async()=>({jobs:[{id:'retried'}],cursor:{id:'retried'},hasMore:false})});await ctx.loadMoreAdminJobs();assert.equal(state.jobs.at(-1).id,'retried');}
 }
 
-const createCode=compile(extract('  async function createResubmission()','  async function refreshResubmissionList()'));
+const createCode=compile(extract('function mailSubmissionHeld(','export type StaffProfile')+extract('  async function createResubmission()','  async function refreshResubmissionList()'));
 for(const scenario of ['success','failure','refresh-failure','context','auth','invalid-file']){
  const gate=deferred();let calls=0,refreshes=0;const state={messages:[],busy:false,needsReview:false};
  const user={uid:'one'};
- const ctx={resubmissionPendingRef:{current:false},resubmissionNeedsReviewRef:{current:false},setResubmissionNeedsReview:v=>state.needsReview=v,timelineReady:true,timelinePendingRef:{current:null},selectedAdminJobId:'job',resubmitReasons:['reason'],resubmitNote:'note',resubmitType:'report',selectedSourceFile:scenario==='invalid-file'?{id:'foreign',submissionId:'other'}:null,submissionTimeline:[],firebaseConfigured:true,functions:{},auth:{currentUser:user},timelineKey:'first',timelineKeyRef:{current:'first'},setMessage:v=>state.messages.push(v),setResubmissionBusy:v=>state.busy=v,
+ const ctx={jobs:[{id:'job'}],resubmissionPendingRef:{current:false},resubmissionNeedsReviewRef:{current:false},setResubmissionNeedsReview:v=>state.needsReview=v,timelineReady:true,timelinePendingRef:{current:null},selectedAdminJobId:'job',resubmitReasons:['reason'],resubmitNote:'note',resubmitType:'report',selectedSourceFile:scenario==='invalid-file'?{id:'foreign',submissionId:'other'}:null,submissionTimeline:[],firebaseConfigured:true,functions:{},auth:{currentUser:user},timelineKey:'first',timelineKeyRef:{current:'first'},setMessage:v=>state.messages.push(v),setResubmissionBusy:v=>state.busy=v,
   httpsCallable:()=>()=>{calls++;return gate.promise;},loadResubmissions:async guard=>{assert.equal(guard(),true);refreshes++;if(scenario==='refresh-failure')throw new Error('refresh offline');}};
  runInNewContext(createCode,ctx);
  const task=ctx.createResubmission();await ctx.createResubmission();
@@ -96,6 +96,8 @@ for(const failure of ['error','null','malformed']){
 }
 console.log('Admin directory refresh: Error/null/malformed failures preserve list, search, page and cursor; retry replaces list and resets paging without losing search.');
 
+const confirmCode=compile(extract('  async function confirmJobApplication(job:Job)','  async function runAdminOperation('));
+for(const fields of [{},{cancelled:true},{sourceMissing:true},{assignmentUnresolved:true},{assignedStaffId:null},{status:'open'},{applicationAdminConfirmed:true}]){const calls=[],ctx={runAdminOperation:async(...args)=>calls.push(args)};runInNewContext(confirmCode,ctx);await ctx.confirmJobApplication({id:'synthetic',assignedStaffId:'staff',status:'assigned',revision:7,...fields});assert.equal(calls.length,Object.keys(fields).length?0:1);if(calls.length){assert.equal(calls[0][2].expectedRevision,7);assert.equal(calls[0][2].jobId,'synthetic');assert.match(calls[0][3],/原本/);}}
 await import('./test-admin-push-recovery.mjs');
 await import('./test-admin-push-sdk-guard.mjs');
 

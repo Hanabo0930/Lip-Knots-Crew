@@ -12,7 +12,7 @@ function load(name){
  inventorySourceHashes[name+'.ts']=createHash('sha256').update(source).digest('hex');
  const module={exports:{}};
  const allowed={'node:crypto':{createHash},'node:buffer':{Buffer},'firebase-admin/firestore':{Timestamp},'firebase-functions/v2/https':{HttpsError},zod:dependency('zod'),'./firebase':{db:Object.freeze({})},'./google-drive-client':{getWritableDriveClient(){throw Error('NETWORK_FORBIDDEN');}}};
- runInNewContext(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{module,exports:module.exports,require:key=>{if(!Object.hasOwn(allowed,key))throw Error('MODULE_DENIED');return allowed[key];}},{timeout:3000});
+ runInNewContext(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{module,exports:module.exports,require:key=>{if(['./case-mail-preparation-core','./assignment-preparation-core','./netprint-state-core','./sheet-write-core'].includes(key))return load(key.slice(2));if(!Object.hasOwn(allowed,key))throw Error('MODULE_DENIED');return allowed[key];}},{timeout:3000});
  return module.exports;
 }
 const {assertSubmissionFile,assertSubmissionCounters}=load('submission-integrity');

@@ -1,4 +1,5 @@
 import { Timestamp } from "firebase-admin/firestore";
+import { nextSubmissionBusinessDate } from "./japan-business-day";
 
 export type TokyoParts = {
   dateKey: string;
@@ -97,11 +98,11 @@ export function isWithinMinuteWindow(
   return current >= target && current < target + windowMinutes;
 }
 
-export function submissionDeadline(dateKey: string): Timestamp {
-  const source = new Date(`${dateKey}T00:00:00${TOKYO_OFFSET}`);
-  const weekday = tokyoParts(source).weekday;
-  const daysUntilDeadline = weekday === 6 ? 2 : weekday === 0 ? 1 : 1;
-  return tokyoTimestamp(addTokyoDays(dateKey, daysUntilDeadline), 11, 0);
+export const SUBMISSION_DEADLINE_RULE_VERSION = "jp-business-day-11-v1";
+
+export function submissionDeadline(dateKey: string): Timestamp | null {
+  const next = nextSubmissionBusinessDate(dateKey);
+  return next ? tokyoTimestamp(next, 11, 0) : null;
 }
 
 export function timestampMinusMinutes(

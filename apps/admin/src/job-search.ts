@@ -1,7 +1,7 @@
 export type JobListFilter = "all" | "precontact" | "assigned" | "cancelled" | "report-completed" | "report-unconfirmed";
 type SearchableJob = {
   workDate:string; dateKey?:string; assignedStaffName?:string; storeName:string;
-  makerName:string; clientName:string; status:string; cancelled?:boolean; preContact?:unknown; submissionStatus?:{report?:{completed?:boolean}};
+  makerName:string; clientName:string; status:string; cancelled?:boolean; preContact?:unknown; applicationUnconfirmed?:boolean; sourceMissing?:boolean; assignmentUnresolved?:boolean; submissionStatus?:{report?:{completed?:boolean;deadlineReviewRequired?:boolean}};
 };
 export function reportCompletion(job:SearchableJob):"completed"|"unconfirmed"|"excluded"{
   if(job.status!=="assigned"||job.cancelled===true)return "excluded";
@@ -9,7 +9,15 @@ export function reportCompletion(job:SearchableJob):"completed"|"unconfirmed"|"e
 }
 export function reportCompletionLabel(job:SearchableJob){
   const state=reportCompletion(job);
+  if(state==="completed"&&job.submissionStatus?.report?.deadlineReviewRequired===true)return "完了記録あり・期限要確認";
   return state==="completed"?"完了記録あり":state==="unconfirmed"?"完了未確認":"対象外";
+}
+export function jobReadinessLabel(job:SearchableJob):string{
+  if(job.cancelled===true||job.status==="cancelled")return "キャンセル";
+  if(job.sourceMissing===true)return "取込元の案件を確認中";
+  if(job.assignmentUnresolved===true)return "担当者の照合待ち";
+  if(job.status==="assigned")return job.applicationUnconfirmed===true?"原本の担当確認待ち":job.preContact?"事前連絡あり":"事前連絡待ち";
+  switch(job.status){case "draft":return "下書き";case "scheduled":return "公開予約";case "stopped":return "募集停止";case "open":return "未手配";default:return "状態要確認";}
 }
 export const ADMIN_JOB_PAGE_SIZE=50;
 const normalize=(value:string)=>value.normalize("NFKC").toLocaleLowerCase("ja-JP");

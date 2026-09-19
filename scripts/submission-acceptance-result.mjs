@@ -30,7 +30,15 @@ export function verifySubmissionAcceptanceResult(kit, result, now = Date.now()) 
   const submission = document(`submissions/${kit.submissionId}`);
   check(submission?.status === 'completed' && submission?.completedFiles === 2 && submission?.totalFiles === 2 && submission?.jobStatusApplied === true && !submission?.errorMessage && !submission?.failedFileId, 'submission_completed');
   const job = document(`jobs/${kit.jobId}`), report = job?.submissionStatus?.report;
-  check(job?.sheetRef === undefined && report?.completed === true && report?.lipKnotsSubmitted === true && report?.lateFirstSubmission === true, 'job_completed_without_sheet_reference');
+  // 旧証跡の遅延記録は保持する。期限未記録の新しい復旧結果を「遅延」と推測しない。
+  const policy = report?.deadlinePolicy;
+  const legacyLatenessRecorded = report?.lateFirstSubmission === true && policy === undefined && report?.deadlineReviewRequired === undefined;
+  const deadlineUnrecorded = report?.lateFirstSubmission === undefined && report?.deadlineReviewRequired === true &&
+    policy && typeof policy === 'object' && !Array.isArray(policy) && Object.keys(policy).length === 5 &&
+    policy.ruleVersion === 'legacy-unrecorded' && policy.calendarVersion === null &&
+    policy.workDate === null && policy.dueAtMs === null && policy.status === 'unrecorded';
+  check(job?.sheetRef === undefined && report?.completed === true && report?.lipKnotsSubmitted === true &&
+    (legacyLatenessRecorded || deadlineUnrecorded), 'job_completed_without_sheet_reference');
   check(document(kit.indirectWrites.counterPath)?.value === 2, 'counter_exactly_two');
   const folders = Array.isArray(result?.drive?.folders) ? result.drive.folders : [];
   const root = folders.find(item => item?.id === kit.drive.rootFolderId);
@@ -60,9 +68,15 @@ export function verifySubmissionAcceptanceResult(kit, result, now = Date.now()) 
   check(exact(sequences.sort((a, b) => a - b), [1, 2]), 'unique_sequences');
   const last = Math.max(...completionTimes);
   check(Number.isFinite(last) && timestamp(submission?.completedAt) === last && timestamp(report?.firstCompletedAt) === last && timestamp(report?.latestCompletedAt) === last, 'final_completion_time');
-  const queue = queues[0]?.data;
-  check(queue?.companyId === kit.companyId && queue?.jobId === kit.jobId && queue?.operation === 'submission.report' && queue?.status === 'blocked' && queue?.errorType === 'blocked' && queue?.errorMessage === '安全書込がまだ有効化されていません。' && Number.isInteger(queue?.attempts) && queue.attempts >= 1 && queue?.retryAt === null && exact(queue?.updates, { reportSubmitted: '遅延' }) && queue?.idempotencyKey === `submission:report:${kit.jobId}:${last}` && timestamp(queue?.createdAt) === last, 'sheet_write_blocked');
+  const queue = queues[0]?.data, queueId = queues[0]?.path?.split("/")[1];
+  const sourceIdentity = JSON.stringify([job?.caseId ?? null, job?.assignedStaffId ?? null, job?.assignedStaffName ?? null, job?.dateKey ?? null, job?.workDate ?? null, null, null, null]);
+  const currentOperation = report?.sheetWrite?.operationId === queueId && typeof queueId === "string" && report?.sheetWrite?.pending === true &&
+    report?.sheetWrite?.identity === JSON.stringify([job?.companyId ?? null, sourceIdentity, job?.revision ?? 0]) &&
+    queue?.actorUid === submission?.uid && queue?.actorStaffId === kit.staffId && queue?.dateKey === job?.dateKey &&
+    queue?.idempotencyKey === "submission.report:" + kit.jobId + ":" + queueId;
+  const legacyOperation = report?.sheetWrite === undefined && queue?.idempotencyKey === "submission:report:" + kit.jobId + ":" + last;
+  check(queue?.companyId === kit.companyId && queue?.jobId === kit.jobId && queue?.operation === 'submission.report' && queue?.status === 'blocked' && queue?.errorType === 'blocked' && queue?.errorMessage === '安全書込がまだ有効化されていません。' && Number.isInteger(queue?.attempts) && queue.attempts >= 1 && queue?.retryAt === null && exact(queue?.updates, { reportSubmitted: deadlineUnrecorded ? '提出済' : '遅延' }) && (currentOperation || legacyOperation) && timestamp(queue?.createdAt) === last, 'sheet_write_blocked');
   for (const collection of ['notificationQueue', 'pushTokens']) check(result?.counts?.[collection]?.companyId === kit.companyId && result?.counts?.[collection]?.count === 0, `no_side_effects:${collection}`);
   check(result?.listingsComplete === true, 'complete_resource_listings');
-  return { mode: 'local-evidence-check', passed: issues.length === 0, issues, cloudExecutionAuthorized: false, actualCloudAcceptanceVerified: false };
+  return { mode: 'local-evidence-check', passed: issues.length === 0, issues, deadlineClassification: deadlineUnrecorded ? 'unrecorded' : legacyLatenessRecorded ? 'legacy-recorded' : 'invalid', cloudExecutionAuthorized: false, actualCloudAcceptanceVerified: false };
 }

@@ -341,7 +341,7 @@ function formatIso(year: number, month: number, day: number): string {
   ].join("-");
 }
 
-function splitMenuConditions(raw: string): { name: string; conditions: string[] } {
+export function splitMenuConditions(raw: string): { name: string; conditions: string[] } {
   const conditions: string[] = [];
   const name = raw.replace(/[（(]([^）)]+)[）)]/gu, (_whole, inner: string) => {
     const value = inner.trim();

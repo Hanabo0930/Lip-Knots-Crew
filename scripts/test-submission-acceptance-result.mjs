@@ -41,6 +41,45 @@ const valid = verifySubmissionAcceptanceResult(kit, result, now);
 assert.deepEqual(valid.issues, []); assert.equal(valid.passed, true); assert.equal(valid.actualCloudAcceptanceVerified, false); assert.equal(valid.cloudExecutionAuthorized, false);
 assert.equal(JSON.stringify(result), before);
 const queue = r => doc(r, 'sheetSyncQueue/synthetic-queue');
+const unknownDeadline = structuredClone(result);
+const unknownReport = doc(unknownDeadline, `jobs/${kit.jobId}`).submissionStatus.report;
+delete unknownReport.lateFirstSubmission;
+unknownReport.deadlineReviewRequired = true;
+unknownReport.deadlinePolicy = {ruleVersion:'legacy-unrecorded',calendarVersion:null,workDate:null,dueAtMs:null,status:'unrecorded'};
+queue(unknownDeadline).updates.reportSubmitted = '提出済';
+const unknownVerified = verifySubmissionAcceptanceResult(kit, unknownDeadline, now);
+assert.equal(unknownVerified.passed, true);assert.equal(unknownVerified.deadlineClassification, 'unrecorded');
+assert.equal(valid.deadlineClassification, 'legacy-recorded');
+const deadlineMutations = [
+  ['guessed-on-time',r=>doc(r,`jobs/${kit.jobId}`).submissionStatus.report.lateFirstSubmission=false],
+  ['guessed-late',r=>doc(r,`jobs/${kit.jobId}`).submissionStatus.report.lateFirstSubmission=true],
+  ['missing-review',r=>delete doc(r,`jobs/${kit.jobId}`).submissionStatus.report.deadlineReviewRequired],
+  ['missing-policy',r=>delete doc(r,`jobs/${kit.jobId}`).submissionStatus.report.deadlinePolicy],
+  ['guessed-rule',r=>doc(r,`jobs/${kit.jobId}`).submissionStatus.report.deadlinePolicy.ruleVersion='guessed'],
+  ['guessed-date',r=>doc(r,`jobs/${kit.jobId}`).submissionStatus.report.deadlinePolicy.dueAtMs=now],
+  ['unexpected-policy-field',r=>doc(r,`jobs/${kit.jobId}`).submissionStatus.report.deadlinePolicy.extra=true],
+  ['wrong-sheet-status',r=>queue(r).updates.reportSubmitted='遅延'],
+];
+for(const [name,mutate]of deadlineMutations){const changed=structuredClone(unknownDeadline);mutate(changed);assert.equal(verifySubmissionAcceptanceResult(kit,changed,now).passed,false,name);}
+
+
+const currentOperation=structuredClone(unknownDeadline),currentJob=doc(currentOperation,'jobs/'+kit.jobId),currentQueue=queue(currentOperation);
+const currentQueueId='synthetic-queue';
+const sourceIdentity=JSON.stringify([currentJob.caseId??null,currentJob.assignedStaffId??null,currentJob.assignedStaffName??null,currentJob.dateKey??null,currentJob.workDate??null,null,null,null]);
+currentJob.submissionStatus.report.sheetWrite={operationId:currentQueueId,identity:JSON.stringify([currentJob.companyId??null,sourceIdentity,currentJob.revision??0]),pending:true};
+Object.assign(currentQueue,{actorUid:doc(currentOperation,submissionPath).uid,actorStaffId:kit.staffId,dateKey:currentJob.dateKey,idempotencyKey:'submission.report:'+kit.jobId+':'+currentQueueId});
+assert.equal(verifySubmissionAcceptanceResult(kit,currentOperation,now).passed,true);
+const operationMutations=[
+ ['missing-context',r=>delete doc(r,'jobs/'+kit.jobId).submissionStatus.report.sheetWrite],
+ ['operation-id',r=>doc(r,'jobs/'+kit.jobId).submissionStatus.report.sheetWrite.operationId='other'],
+ ['identity',r=>doc(r,'jobs/'+kit.jobId).submissionStatus.report.sheetWrite.identity='other'],
+ ['pending',r=>doc(r,'jobs/'+kit.jobId).submissionStatus.report.sheetWrite.pending=false],
+ ['actor-uid',r=>queue(r).actorUid='other'],['actor-staff',r=>queue(r).actorStaffId='other'],
+ ['date',r=>queue(r).dateKey='2099-01-01'],['idempotency',r=>queue(r).idempotencyKey='old'],
+ ['mixed-legacy-key',r=>queue(r).idempotencyKey=queue(result).idempotencyKey],
+];
+for(const [name,mutate]of operationMutations){const changed=structuredClone(currentOperation);mutate(changed);assert.equal(verifySubmissionAcceptanceResult(kit,changed,now).passed,false,name);}
+
 const mutations = [
   ['project', r => r.project = 'other'], ['fingerprint', r => r.kitFingerprint = 'old'],
   ['stale', r => r.readAt = at(-600001)], ['future', r => r.readAt = at(1)], ['reversed-time', r => r.startedAt = at(0)], ['invalid-time', r => r.startedAt = 'invalid'],
@@ -74,4 +113,4 @@ assert.equal(invoke().status, 0);
 const invalid = structuredClone(result); invalid.storage[0].exists = true; fs.writeFileSync(resultFile, JSON.stringify(invalid));
 const failure = invoke(); assert.equal(failure.status, 1); assert.equal(JSON.parse(failure.stdout).passed, false);
 assert.notEqual(spawnSync(process.execPath, [command, '--apply'], { encoding: 'utf8' }).status, 0);
-console.log(JSON.stringify({ cases: 1 + mutations.length + 3 + 1 + 1 + 3, passed: true, cloudChanges: false }));
+console.log(JSON.stringify({ cases: 1 + mutations.length + 3 + 1 + 1 + 3 + 1 + deadlineMutations.length, passed: true, cloudChanges: false }));

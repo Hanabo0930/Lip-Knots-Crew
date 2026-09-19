@@ -56,7 +56,8 @@ export function adminEditValueMatches(key: string, actual: unknown, expected: un
 
 export function adminEditContext(job: Record<string, unknown>): string {
   return JSON.stringify([editSourceIdentity(job), job.assignedStaffId ?? null, job.assignedStaffName ?? null,
-    job.status ?? null, job.cancelled === true, job.sourceMissing === true, job.assignmentUnresolved === true]);
+    job.status ?? null, job.cancelled === true, job.sourceMissing === true, job.assignmentUnresolved === true,
+    ...(job.mailIntake ? [job.mailIntakeHold ?? null] : []), ...(job.mailTargetHold != null ? [job.mailTargetHold] : [])]);
 }
 export function currentAdminEditValues(job: Record<string, unknown>, keys: string[]): Record<string, unknown> {
   const values: Record<string, unknown> = {};
@@ -181,6 +182,7 @@ export function importedEditRevision(previous: Record<string, unknown> | undefin
   if (!previous) return 0;
   const revision = previous.revision ?? 0;
   if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0 || revision >= Number.MAX_SAFE_INTEGER) throw new Error("案件の保存版を確認できません。");
-  const changed = adminEditContext(previous) !== adminEditContext(next) || editProjection(previous, [...adminEditKeys]) !== editProjection(next, [...adminEditKeys]);
+  const changed = adminEditContext(previous) !== adminEditContext(next) || editProjection(previous, [...adminEditKeys]) !== editProjection(next, [...adminEditKeys]) ||
+    (previous.basePay ?? null) !== (next.basePay ?? null);
   return revision + (changed ? 1 : 0);
 }

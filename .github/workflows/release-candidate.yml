@@ -39,6 +39,7 @@ jobs:
           npm run test:admin-startup
           node scripts/test-admin-action-confirmation.mjs
           node scripts/test-admin-expense-recovery.mjs
+          node scripts/test-admin-expense-status.mjs
       - name: Validate Staff workflows and company isolation
         run: |
           npm run test:staff-company-scope
@@ -55,6 +56,9 @@ jobs:
           node scripts/test-staff-shift-rendering.mjs
           node scripts/test-admin-workspace.mjs --browser
           node scripts/test-admin-import-snapshot.mjs
+          node scripts/test-submission-attempt-browser.mjs
+          node scripts/test-admin-comparison-pages.mjs
+          node scripts/test-case-mail-review-browser.mjs release-evidence/ci-mail-review --resolve-only
       - name: Run release orchestration regressions
         run: |
           npm run test:preview-demo
@@ -108,6 +112,7 @@ jobs:
           node scripts/test-submission-acceptance-kit.mjs
           node scripts/test-submission-acceptance-result.mjs
           node scripts/test-expense-completion-integrity.mjs
+          node scripts/test-safe-sheet-precontact.mjs
           node scripts/test-emulator-seed-safety.mjs
           node scripts/test-shift-import-lease.mjs
           node scripts/test-staff-import-revocation.mjs
@@ -115,6 +120,7 @@ jobs:
           node scripts/test-bootstrap-session-identity.mjs
           node scripts/test-notification-delivery.mjs
           node scripts/test-notification-delivery-pause.mjs
+          node scripts/test-precontact-reminder-readiness.mjs
           node scripts/automation/test-notification-auth-guard.mjs
           node scripts/automation/test-staging-notification-pause.mjs
           node scripts/test-month-sheet-lifecycle.mjs
@@ -123,6 +129,20 @@ jobs:
           node scripts/test-pilot-expansion-lifecycle.mjs
           node scripts/test-automation-registry.mjs
           node scripts/test-automation-intake.mjs
+          node scripts/test-case-mail-intake-roundtrip.mjs
+          node scripts/test-case-mail-job-creation.mjs
+          node scripts/automation/test-admin-core-auth-guard.mjs
+          node scripts/automation/test-staff-journey-auth-guard.mjs
+          node scripts/automation/test-case-mail-auth-guard.mjs
+          node scripts/test-case-mail-review.mjs
+          node scripts/test-case-mail-targets.mjs
+          node scripts/test-case-mail-publication.mjs
+          node scripts/test-case-mail-assignment.mjs
+          node scripts/test-case-mail-preparation.mjs
+          node scripts/test-case-mail-resolution.mjs
+          node scripts/test-case-mail-target-binding.mjs
+          node scripts/test-case-mail-target-hold.mjs
+          node scripts/test-case-mail-target-resolution.mjs
           node scripts/test-automation-held-receipts.mjs
           node scripts/test-automation-campaigns.mjs
           node scripts/test-automation-import-snapshot.mjs

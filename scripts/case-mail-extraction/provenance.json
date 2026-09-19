@@ -1,0 +1,23 @@
+{
+  "source": "case-management",
+  "capturedOn": "2026-09-18",
+  "files": [
+    {
+      "name": "extract-request-pdf.py",
+      "sha256": "e1e9dfc48ef54336063585761c479b7c89d18a91e31a76cf461940e341ceaf64"
+    },
+    {
+      "name": "extract-request-xlsx.py",
+      "sha256": "cf3263d6f809346fb6ba31d0ad1719819aeac420259cde53ca4968c59ecdec18"
+    },
+    {
+      "name": "requirements-extraction.txt",
+      "sha256": "3e597167e2d87f9c48a75eddb4ae29cfdf3b502cd51ed294282776f381ccc247"
+    },
+    {
+      "name": "read-mail.cjs",
+      "sha256": "8852dcc20793ce99cde0a042d4b4703dcc83d5affffa4087797edde571d3827b"
+    }
+  ],
+  "usage": "既存抽出器の合成実体検証。サービス起動・実接続なし。"
+}

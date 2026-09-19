@@ -79,7 +79,7 @@ export function setup(at = '2026-09-11T21:59:00+09:00', environment = {}) {
   const modules = {};
   function load(name) {
     if (boundaries[name]) return boundaries[name];
-    assert.ok(['./notification-core', './notifications', './notification-time', './push-delivery', './devices', './push-tokens', './utils', './case-id', './device-authentication', './reminder-scheduler', './staff-tasks', './task-core'].includes(name), name);
+    assert.ok(['./case-mail-preparation-core', './assignment-preparation-core', './netprint-state-core', './sheet-write-core', './resubmissions', './submission-integrity', './operational-reminder', './notification-core', './notifications', './notification-time', './japan-business-day', './push-delivery', './devices', './push-tokens', './utils', './case-id', './device-authentication', './reminder-scheduler', './staff-tasks', './task-core'].includes(name), name);
     if (modules[name]) return modules[name];
     const exports = {}; modules[name] = exports;
     runInNewContext(ts.transpileModule(fs.readFileSync('functions/src/' + name.slice(2) + '.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, require: load, Date: Clock, console: moduleConsole, process: { env: { ...environment } } });

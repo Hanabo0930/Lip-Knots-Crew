@@ -20,7 +20,9 @@ for(const [before,after] of [
  ['requireAdmin(request)','requireAuth(request)'],
  ['companyFromClaims(session.token)','request.data.companyId'],
  ['await assertProductionOperational(companyId);',''],
- ['JobSchema.parse(request.data ?? {})','request.data'],
+ ['ApplicationConfirmationSchema.parse(request.data ?? {})','request.data'],
+ ['(data.revision ?? 0) !== input.expectedRevision','false'],
+ ['applicationConfirmationIdentity(data) !== applicationConfirmationIdentity(job.data()!)','false'],
  ['db.collection("jobs").doc(input.jobId)','db.collection("jobs").doc(request.data.target)'],
  ['!job.exists || job.data()?.companyId !== companyId','!job.exists'],
  ['await db.runTransaction(async (tx) =>','await nonAtomic(async (tx) =>'],
@@ -37,9 +39,12 @@ for(const [before,after] of [
  const result=run(original.slice(0,start)+block.replace(before,after)+original.slice(end));
  assert.deepEqual(result,{passed:false,exitCode:1},before);passed++;
 }
-for(const [before,after] of [['from "./utils"','from "./other"'],['from "./system-safety"','from "./other"']]){
+for(const [before,after] of [['from "./utils"','from "./other"'],['from "./system-safety"','from "./other"'],['from "./assignment-preparation-core"','from "./other"'],['expectedRevision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)','expectedRevision: z.any()']]){
  assert.ok(original.includes(before));assert.deepEqual(run(original.replace(before,after)),{passed:false,exitCode:1});passed++;
 }
 const config=JSON.parse(read('config/automation/staging-safety.json'));
 assert.equal(config.allowedFunctions.includes('confirmApplication'),true,'Approved confirmation recovery must be explicitly allowlisted');passed++;
 console.log(JSON.stringify({confirmApplicationAuthGuardTests:passed,deploymentAllowlistExpanded:true,cloudOperations:false}));
+
+assert.equal(run(original.replace("data.mailIntakeReviewRequired === true || data.pendingSourceWrite === true || data.adminEditSheetWrite?.pending === true", "false")).passed,false);
+console.log("受信変更保留の担当確認ガード追加1条件成功");

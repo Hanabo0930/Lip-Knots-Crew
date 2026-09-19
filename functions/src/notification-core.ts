@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { db } from "./firebase";
+import type { OperationalReminderContext } from "./operational-reminder";
 import { applyQuietHours } from "./notification-time";
 
 export type NotificationTarget =
@@ -15,6 +16,7 @@ export type QueueNotificationInput = NotificationTarget & {
   route?: string;
   category: string;
   dedupeKey: string;
+  reminderContext?: OperationalReminderContext;
   preferredAt?: Timestamp;
   bypassQuietHours?: boolean;
   data?: Record<string, string>;
@@ -42,6 +44,7 @@ export async function enqueueNotification(
       category: input.category,
       dedupeKey: input.dedupeKey,
       data: input.data ?? {},
+      ...(input.reminderContext ? { reminderContext: input.reminderContext } : {}),
       status: "queued",
       deliverAt: timing.deliverAt,
       quietDeferred: timing.quietDeferred,
@@ -70,6 +73,7 @@ export function queueDocumentData(input: QueueNotificationInput) {
     category: input.category,
     dedupeKey: input.dedupeKey,
     data: input.data ?? {},
+      ...(input.reminderContext ? { reminderContext: input.reminderContext } : {}),
     status: "queued",
     deliverAt: timing.deliverAt,
     quietDeferred: timing.quietDeferred,

@@ -14,6 +14,7 @@ const lockPath = `staffDayLocks/${companyId}_${staffId}_${dateKey}`;
 const ownLock = { companyId, staffId, dateKey, jobId: 'old-job', active: true };
 const pureModules = new Map();
 function pureModule(name) {
+  if(name === "firebase-functions/v2/https") return { HttpsError };
   assert.ok(['sheet-write-core', 'netprint-state-core', 'assignment-preparation-core'].includes(name), 'Pure module is allowlisted');
   if (pureModules.has(name)) return pureModules.get(name);
   const module = { exports: {} };
@@ -57,6 +58,7 @@ for (const moduleName of ['jobs', 'analytics']) {
       './utils': { requireAdmin: (request) => { if (request.auth?.token.role !== 'admin') throw new HttpsError('permission-denied', 'admin required'); return request.auth; }, companyFromClaims: (token) => token.companyId },
       './analytics-core': { cancellationReasonLabels: { other: 'その他' }, cancellationTreatmentLabels: { neither: 'なし' } },
       './notification-core': { queueDocumentData: (input) => input },
+      './case-mail-publication': { readMailPublication: () => assert.fail('Native cancellation must not read mail publication') },
       './notification-time': { tokyoParts: () => assert.fail('Cancellation must not evaluate application dates') },
       './sheet-write-core': pureModule('sheet-write-core'),
       './assignment-preparation-core': pureModule('assignment-preparation-core'),

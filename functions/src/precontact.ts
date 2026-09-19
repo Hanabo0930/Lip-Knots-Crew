@@ -1,3 +1,5 @@
+import { caseMailPreparationHeld } from "./case-mail-preparation-core";
+import { mailPreparationContext } from "./assignment-preparation-core";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { Timestamp } from "firebase-admin/firestore";
 import { z } from "zod";
@@ -9,6 +11,7 @@ import {readAutomationJobContext,automationPreContactEvidence,makeAutomationPreC
 const Schema = z.object({
   jobId: z.string().min(1),
   dateKey: z.iso.date().optional(),
+  expectedRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   temperature: z.number().min(34).max(42),
   arrivalTime: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/),
 });
@@ -42,11 +45,14 @@ export const submitPreContact = onCall(async (request) => {
     if(job.sourceMissing===true)throw new HttpsError("failed-precondition","取込元の案件を確認できません。事前連絡を保存する前に、元の案件と取込状態を確認してください。",{reason:"source_unavailable"});
     if(job.applicationUnconfirmed===true)throw new HttpsError("failed-precondition","応募内容はアプリに保存されています。シフト表で担当を確認できるまで、事前連絡は保存できません。シフトを更新して確認してください。",{reason:"assignment_sheet_confirmation_pending"});
     if(job.assignmentUnresolved===true)throw new HttpsError("failed-precondition","担当者の照合が完了していません。シフトを更新し、担当者を確認してから送信してください。",{reason:"assignment_identity_unresolved"});
+    if(caseMailPreparationHeld(job))throw new HttpsError("failed-precondition","受信内容・勤務条件の変更を確認中です。管理者の確認後にシフトを更新してください。",{reason:"case_mail_review_pending"});
+    if(job.mailIntake && (!Number.isSafeInteger(job.revision) || input.expectedRevision !== job.revision))throw new HttpsError("failed-precondition","勤務条件が更新されました。シフトを更新し、入力を確認してから送信してください。",{reason:"case_mail_precontact_changed"});
     const now = Timestamp.now();
     const previous = (job.preContact ?? null) as Record<string, unknown> | null;
     const context = await readAutomationJobContext(tx,companyId,input.jobId,job);
     const sameInput = previous?.source === "app" && previous.staffId === staffId && previous.dateKey === job.dateKey &&
       previous.submittedAt instanceof Timestamp && job.preContactNeedsReview !== true &&
+      (!job.mailIntake || previous.caseMailContext === mailPreparationContext(job)) &&
       Number(previous.temperature) === input.temperature && String(previous.arrivalTime ?? "").padStart(5,"0") === input.arrivalTime.padStart(5,"0");
     if(sameInput){
       const proof = makeAutomationPreContactProof(context,previous,now);
@@ -60,7 +66,7 @@ export const submitPreContact = onCall(async (request) => {
         return;
       }
     }
-    const nextContact = {source:"app" as const,staffId,dateKey:workDate.data,operationId:queueRef.id,
+    const nextContact = {...(job.mailIntake ? {caseMailContext:mailPreparationContext(job)} : {}),source:"app" as const,staffId,dateKey:workDate.data,operationId:queueRef.id,
       temperature:input.temperature,arrivalTime:input.arrivalTime,submittedAt:now,revised:previous!==null};
     tx.update(jobRef, {
       preContact: {...nextContact,automationProof:makeAutomationPreContactProof(context,nextContact,now)},

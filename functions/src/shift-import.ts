@@ -13,6 +13,8 @@ import {
 } from "./sheet-reader";
 import { parseShiftSheet } from "./shift-parser";
 import { assignmentPreparationPatch } from "./assignment-preparation-core";
+import { netPrintAssignmentPatch } from "./netprint-state-core";
+import { mailPublicationContext } from "./case-mail-publication-core";
 import { captureEditSource, selectEditSourceColumns, importedEditConfirmation, adminEditContext, editProjection, sourceMoneyInputs, importedEditRevision } from "./admin-edit-state-core";
 import {
   ParsedShiftJob,
@@ -443,7 +445,12 @@ async function writeJobsAndLocks(
           ? job.cancelled === true
           : override?.type === "restore" ? job.cancelled !== true : true;
         const preserveAppOverride = override?.active === true && !sourceMatchesOverride;
-        const effectiveStatus = preserveAppOverride ? String(old?.status ?? job.status) : job.status;
+        if (old?.mailIntake && old.cancelled === true && !job.cancelled && !(override?.active === true && override.type === "restore")) {
+          throw new HttpsError("failed-precondition", "受信案件の取消解除は明示的な復帰操作を確認してください。");
+        }
+        const preserveMailPublication = Boolean(old?.mailIntake || old?.mailTargetReview) && job.status === "open" &&
+          (old?.status === "draft" || old?.status === "stopped");
+        const effectiveStatus = preserveAppOverride || preserveMailPublication ? String(old?.status ?? job.status) : job.status;
         const effectiveCancelled = preserveAppOverride ? old?.cancelled === true : job.cancelled;
         const isActiveAssignment = effectiveStatus === "assigned" && !effectiveCancelled && resolvedStaffId !== null;
         const oldStaffId = typeof old?.assignedStaffId === "string" ? old.assignedStaffId : null;
@@ -484,10 +491,10 @@ async function writeJobsAndLocks(
           assignmentUnresolved:
             effectiveStatus === "assigned" && job.assignedStaffName !== "" && !resolvedStaffId,
           status: effectiveStatus,
-          publishable: preserveAppOverride
+          publishable: preserveMailPublication ? false : preserveAppOverride
             ? old?.publishable === true
             : job.publishable,
-          recruitmentStopped: preserveAppOverride
+          recruitmentStopped: preserveMailPublication ? true : preserveAppOverride
             ? old?.recruitmentStopped === true
             : job.recruitmentStopped,
           cancelled: effectiveCancelled,
@@ -517,6 +524,20 @@ async function writeJobsAndLocks(
           updatedAt: now,
         };
 
+        if (old?.mailIntake && job.status === "open" && !preserveAppOverride) {
+          const keepOpen = old.status === "open" && old.publishable === true && old.recruitmentStopped !== true &&
+            old.mailPublication?.context === mailPublicationContext({ ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null });
+          if (!keepOpen) {
+            data.status = old.status === "draft" ? "draft" : "stopped";
+            data.publishable = false; data.recruitmentStopped = true;
+            data.scheduledPublishAt = FieldValue.delete(); data.mailPublication = FieldValue.delete();
+          }
+        }
+        if (old?.mailTargetHold != null || (old?.mailTargetReview != null && old.recruitmentStopped === true)) {
+          data.publishable=false;data.recruitmentStopped=true;if(old?.mailTargetHold!=null)data.mailIntakeReviewRequired=true;
+          if(data.status==="open"||data.status==="scheduled")data.status="stopped";
+          data.scheduledPublishAt=FieldValue.delete();data.mailPublication=FieldValue.delete();
+        }
         Object.assign(data, assignmentPreparationPatch(old, {
           ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null,
         }));
@@ -529,9 +550,16 @@ async function writeJobsAndLocks(
           data.appOverride = sourceMatchesOverride ? FieldValue.delete() : override;
         }
         try {
-          data.revision = importedEditRevision(old, { ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null });
+          const finalJob = { ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null };
+          data.revision = importedEditRevision(old, finalJob);
+          if (old?.mailIntake && mailPublicationContext(old) !== mailPublicationContext(finalJob)) {
+            data.revision = Math.max(Number(data.revision), Number(old.revision ?? 0) + 1);
+          }
         } catch (error) {
           throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "案件の保存版を確認できません。");
+        }
+        if (old?.mailIntake && old.revision !== data.revision) {
+          Object.assign(data, netPrintAssignmentPatch(old, { ...old, ...data }, true));
         }
         if (!old) data.createdAt = now;
 
@@ -611,6 +639,11 @@ function resolveImportedPreContact(
     stored.staffId !== staffId || stored.dateKey !== job.dateKey
   ));
   const needsReview = old?.preContactNeedsReview === true || ownerChanged || wrongProof;
+  if (old?.mailIntake && needsReview && staffId && !ownerChanged && !wrongProof && status === "assigned" && !cancelled &&
+      stored?.source === "app" && stored.submittedAt instanceof Timestamp) {
+    // 同じ本人の旧入力は履歴と書戻し比較値として保持し、原本再取込だけで再確認を解除しない。
+    return { preContact: stored, preContactNeedsReview: true, preContactSyncPending: old.preContactSyncPending === true };
+  }
   if (!staffId || needsReview) {
     // G/Hの値だけでは新担当の本人入力を証明できない。再取込でも解除しない。
     return { preContact: null, preContactNeedsReview: needsReview, preContactSyncPending: false };

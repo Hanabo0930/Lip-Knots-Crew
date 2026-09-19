@@ -44,7 +44,9 @@ assert.equal(filterJobSearchIndex(index,'存在しない','all').length,0);
 assert.equal(filterJobSearchIndex(index,'  ','cancelled').length,2000);
 assert.equal(filterJobSearchIndex(index,'','assigned').length,8000);
 assert.equal(filterJobSearchIndex(index,'','precontact').length,4000);
-const {reportCompletionLabel}=searchScope.exports;
+const {reportCompletionLabel,jobReadinessLabel}=searchScope.exports;
+for(const [extra,label]of [[{applicationUnconfirmed:true},'原本の担当確認待ち'],[{sourceMissing:true,applicationUnconfirmed:true},'取込元の案件を確認中'],[{assignmentUnresolved:true},'担当者の照合待ち'],[{cancelled:true,applicationUnconfirmed:true},'キャンセル'],[{preContact:{}},'事前連絡あり'],[{},'事前連絡待ち'],[{status:'open'},'未手配'],[{status:'constructor'},'状態要確認']])assert.equal(jobReadinessLabel({status:'assigned',...extra}),label);
+assert.equal(reportCompletionLabel({status:'assigned',submissionStatus:{report:{completed:true,deadlineReviewRequired:true}}}),'完了記録あり・期限要確認');
 const statusScope={exports:{}};
 runInNewContext(ts.transpileModule(readFileSync("apps/admin/src/submission-status.ts","utf8"),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,statusScope);
 const {submissionStatusLabel}=statusScope.exports;
@@ -108,7 +110,7 @@ for(const scenario of ['success','empty','failure','malformed','context','auth',
  if(['context','auth'].includes(scenario)){assert.equal(state.status,'loading');assert.equal(state.files.length,0);assert.equal(state.key,undefined);}
  if(scenario==='newer'){assert.equal(state.files[0].id,'new');assert.equal(state.key,'second');assert.equal(state.busy,false);}
 }
-assert.match(source,/disabled=\{!timelineReady\|\|timelineBusy\|\|resubmissionBusy\|\|resubmissionNeedsReview\}/);
+assert.match(source,/disabled=\{!timelineReady\|\|timelineBusy\|\|resubmissionBusy\|\|resubmissionNeedsReview\|\|mailSubmissionHeld\(jobs\.find\(job=>job\.id===selectedAdminJobId\)\)\}/);
 assert.match(source,/if\(!timelineReady\|\|timelinePendingRef.current\)/);
 console.log('Admin timeline passed: success/empty/error/malformed separation, retry, synchronous double click, stale job/auth response, and reverse response order.');
 await import('./test-admin-review-flow.mjs');

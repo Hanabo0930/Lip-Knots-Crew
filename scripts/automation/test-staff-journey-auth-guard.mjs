@@ -20,6 +20,7 @@ function reject(name,before,after,wholeFile) {
  const block=source.slice(start,end);assert.ok(block.includes(before),name+': '+before);
  assert.deepEqual(run(name,files=>{files[p]=source.slice(0,start)+block.replace(before,after)+source.slice(end);}),{passed:false,exitCode:1},name+': '+before);cases++;
 }
+reject('setSalesFloorClientSubmitted','assertCaseMailSubmissionRevision(job, input.expectedRevision);','');
 for(const name of Object.keys(modules)) {
  assert.deepEqual(run(name),{passed:true,exitCode:0},name);cases++;
  reject(name,'requireAuth(request)','unverified(request)');
@@ -29,6 +30,9 @@ for(const name of Object.keys(modules)) {
 }
 const mutations={
  applyToJob:[
+  ['job.mailIntakeReviewRequired === true', 'false'],
+  ['job.mailTargetHold != null', 'false'],
+  ['revision: nextAssignmentRevision(job)','revision: 0'],
   ['session.token.role !== "staff"','false'],
   ['previous?.uid !== session.uid || previous?.companyId !== companyId','false'],
   ['previous.staffId !== staffId','false'],
@@ -41,6 +45,9 @@ const mutations={
   ['tx.set(idempotencyRef,','await idempotencyRef.set('],
  ],
  getMyTasks:[
+  ['job.sourceMissing !== true','true'],
+  ['job.applicationUnconfirmed !== true','true'],
+  ['job.assignmentUnresolved !== true','true'],
   ['.where("assignedStaffId", "==", staffId)',''],
   ['.where("staffId", "==", staffId)',''],
   ['.limit(2000)','.limit(100000)'],
@@ -58,11 +65,15 @@ const mutations={
   ['await readMailApplicationForAssignment(reader,','await unverifiedApplication(reader,'],
  ],
  setSalesFloorClientSubmitted:[
+  ['assertSubmissionReadiness(job);',''],
   ['job.companyId !== companyId || job.assignedStaffId !== staffId','job.companyId !== companyId'],
   ['job.cancelled === true || job.status === "cancelled"','false'],
   ['current?.clientSubmitted === input.submitted && current.completed === (input.submitted || lipKnotsSubmitted)','false'],
   ['"submissionStatus.salesFloor.completed": input.submitted || lipKnotsSubmitted','"submissionStatus.salesFloor.completed": input.submitted'],
-  ['tx.set(db.collection("sheetSyncQueue").doc(),','await nonAtomicQueueWrite('],
+  ['tx.set(queueRef,','await nonAtomicQueueWrite('],
+  ['identity: submissionSheetWriteIdentity(job)','identity: "unverified"'],
+  ['operationId: queueRef.id','operationId: "old"'],
+  ['pending: true','pending: false'],
  ],
  submitPreContact:[
   ['job.companyId !== companyId || job.assignedStaffId !== staffId','job.companyId !== companyId'],
@@ -86,3 +97,15 @@ const config=JSON.parse(read('config/automation/staging-safety.json'));
 assert.ok(Object.keys(modules).every(name=>config.allowedFunctions.includes(name)));cases++;
 console.log(JSON.stringify({staffJourneyAuthGuardTests:cases,functions:Object.keys(modules),cloudOperations:false}));
 
+
+reject("applyToJob", 'await readMailPublication(tx, input.jobId, job, input.expectedJobRevision, new Date(), "apply")', '({})');
+reject("applyToJob", 'confirmed.context !== checked.confirmation.context', 'false');
+reject("applyToJob", '(previous.expectedJobRevision ?? null) !== (input.expectedJobRevision ?? null)', 'false');
+console.log("受信応募ガード追加3条件成功");
+
+reject("submitPreContact", "if(caseMailPreparationHeld(job))throw", "if(false)throw");
+reject("submitPreContact", "input.expectedRevision !== job.revision", "false");
+console.log("受信案件の事前連絡ガード追加2条件成功");
+
+reject("getMyTasks", "!caseMailPreparationHeld(job)", "true");
+console.log("受信保留中のタスクガード追加1条件成功");

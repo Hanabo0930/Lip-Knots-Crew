@@ -170,7 +170,7 @@ export const getResubmissionComparison = onCall(async (request) => {
   const source = sourceFile ? await fileView(companyId, session.uid, String(data.sourceSubmissionId), sourceFile.id, sourceFile.data()!) : null;
   const replacements = await Promise.all(replacementFiles.map(file => fileView(companyId, session.uid, String(data.replacementSubmissionId), file.id, file.data())));
   return {
-    request: { id: snap.id, jobId: data.jobId, type: data.type, reasons: data.reasons ?? [], note: data.note ?? "", status: data.status, createdAt: iso(data.createdAt), submittedAt: iso(data.submittedAt) },
+    request: { id: snap.id, jobId: data.jobId, type: data.type, scope: data.sourceFileId ? "file" : "submission", reasons: data.reasons ?? [], note: data.note ?? "", status: data.status, createdAt: iso(data.createdAt), submittedAt: iso(data.submittedAt) },
     source,
     replacements,
   };

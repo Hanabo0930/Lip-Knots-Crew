@@ -6,8 +6,10 @@ import { runInNewContext } from 'node:vm';
 const dependency = createRequire(process.env.LKC_TEST_DEPENDENCY_ROOT ? path.join(process.env.LKC_TEST_DEPENDENCY_ROOT, 'package.json') : import.meta.url);
 const ts = dependency('typescript');
 const stateModules=new Map();
-function loadState(name){assert.ok(['./sheet-write-core','./netprint-state-core','./assignment-preparation-core','./admin-edit-state-core','./job-management-core'].includes(name));if(stateModules.has(name))return stateModules.get(name);const exports={};stateModules.set(name,exports);runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../functions/src/'+name.slice(2)+'.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports,require:loadState});return exports;}
+function loadState(name){if(name === "node:crypto") return dependency(name);if(name === "firebase-functions/v2/https") return { HttpsError: dependency(name).HttpsError };assert.ok(['./sheet-write-core','./netprint-state-core','./assignment-preparation-core','./admin-edit-state-core','./job-management-core','./case-mail-publication-core','./shift-parser','./case-id'].includes(name));if(stateModules.has(name))return stateModules.get(name);const exports={};stateModules.set(name,exports);runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../functions/src/'+name.slice(2)+'.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports,require:loadState});return exports;}
 const {assignmentPreparationPatch}=loadState('./assignment-preparation-core');
+const {netPrintAssignmentPatch}=loadState('./netprint-state-core');
+const {mailPublicationContext}=loadState('./case-mail-publication-core');
 const {importedEditConfirmation,adminEditContext,editProjection,sourceMoneyInputs,selectEditSourceColumns,importedEditRevision}=loadState('./admin-edit-state-core');
 const source = fs.readFileSync(process.env.LKC_TEST_IMPORT_SOURCE ?? new URL('../functions/src/shift-import.ts', import.meta.url), 'utf8');
 const start = source.indexOf('async function writeJobsAndLocks(');
@@ -73,7 +75,7 @@ function harness(entries = [], options = {}) {
     },
   };
   const exports = {};
-  runInNewContext(code, { exports, db, HttpsError, assignmentPreparationPatch, importedEditConfirmation, adminEditContext, editProjection, sourceMoneyInputs, importedEditRevision, Timestamp: MockTimestamp, FieldValue: { delete: () => deleted }, normalizeName: name => name.normalize('NFKC').replace(/[\s　]+/g, '').trim() }, { timeout: 3000 });
+  runInNewContext(code, { exports, db, HttpsError, netPrintAssignmentPatch, mailPublicationContext, assignmentPreparationPatch, importedEditConfirmation, adminEditContext, editProjection, sourceMoneyInputs, importedEditRevision, Timestamp: MockTimestamp, FieldValue: { delete: () => deleted }, normalizeName: name => name.normalize('NFKC').replace(/[\s　]+/g, '').trim() }, { timeout: 3000 });
   return { records, commits, attempts, run: (jobs, index = names) => exports.writeJobsAndLocks(jobs, index, 'synthetic-run', { ref: leaseRef, token: 'synthetic-token' }) };
 }
 const baseEntries = () => [['jobs/job-a', oldJob()], [lockPath(), ownLock()]];
@@ -273,4 +275,23 @@ for(const change of ['same','source','missing-source']) {
  if(change==='same')assert.equal(actual.preContact.temperature,36.5);else assert.equal(actual.preContact,null);
  passed++;
 }
+for (const status of ['draft','stopped']) await test('mail intake retains manual publication '+status,async()=>{
+ const saved=oldJob({mailIntake:{sourceKey:'synthetic-source'},assignedStaffId:null,status,publishable:true,recruitmentStopped:false});
+ const h=harness([['jobs/job-a',saved]]);
+ await h.run([incoming({assignedStaffName:'',rawStaffName:'',status:'open',publishable:true,recruitmentStopped:false})]);
+ const actual=h.records.get('jobs/job-a');assert.equal(actual.status,status);assert.equal(actual.publishable,false);assert.equal(actual.recruitmentStopped,true);
+});
+await test('mail intake cancelled source cannot auto restore',async()=>{
+ const saved=oldJob({mailIntake:{sourceKey:'synthetic-source'},assignedStaffId:null,status:'cancelled',cancelled:true,appOverride:{type:'restore',active:false}});
+ const h=harness([['jobs/job-a',saved]]);
+ await assert.rejects(h.run([incoming({assignedStaffName:'',rawStaffName:'',status:'open',publishable:true})]));
+ assert.equal(h.records.get('jobs/job-a').cancelled,true);assert.equal(h.commits.length,0);
+});
+await test('explicitly published mail intake stays open on unchanged import',async()=>{
+ const base=incoming({assignedStaffName:'',rawStaffName:'',status:'open',publishable:true,recruitmentStopped:false});
+ const saved={...base,mailIntake:{sourceKey:'synthetic-source'},assignedStaffId:null};
+ saved.mailPublication={context:mailPublicationContext(saved)};
+ const h=harness([['jobs/job-a',saved]]);await h.run([incoming({assignedStaffName:'',rawStaffName:'',status:'open',publishable:true})]);
+ assert.equal(h.records.get('jobs/job-a').status,'open');assert.equal(h.records.get('jobs/job-a').publishable,true);
+});
 console.log(`Shift import transaction: ${passed} cases passed (SDK boundary mocks; no external writes).`);

@@ -1,3 +1,6 @@
+import "./test-submission-attempt-store.mjs";
+import "./test-staff-upload-resume.mjs";
+import "./test-staff-submission-readiness.mjs";
 import './test-staff-history-feedback.mjs';
 import './test-staff-draft-store-order.mjs';
 import './test-staff-route-target.mjs';
@@ -87,8 +90,8 @@ function section(source, start, end) {
  console.log('Application retry JSX: new/uncertain/pending labels and per-job status distinguish retry from new application.');
 }
 {
- const buttonStart=app.indexOf('<button className="secondary" onClick={()=>{if(!submissionEditPending)void setClientSubmitted('),buttonEnd=app.indexOf('</button>',buttonStart)+9;assert.ok(buttonStart>=0&&buttonEnd>buttonStart);const code=ts.transpileModule('globalThis.node='+app.slice(buttonStart,buttonEnd)+';',{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;
- for(const value of [true,false,'true','false',1,0,null,undefined]){let sent;const ctx={React:{createElement},selectedAssignedJob:{submissionStatus:{salesFloor:{clientSubmitted:value}}},submissionEditPending:false,shiftActionPending:false,pendingShiftAction:'',setClientSubmitted:v=>sent=v};runInNewContext(code,ctx);const html=renderToStaticMarkup(ctx.node);assert.ok(html.includes(value===true?'クライアント提出を解除':'クライアントへ提出済み'));ctx.node.props.onClick();assert.equal(sent,value!==true);}
+ const buttonStart=app.indexOf('<button className="secondary" onClick={()=>{if(!submissionEditPending&&!submissionReadiness)void setClientSubmitted('),buttonEnd=app.indexOf('</button>',buttonStart)+9;assert.ok(buttonStart>=0&&buttonEnd>buttonStart);const code=ts.transpileModule('globalThis.node='+app.slice(buttonStart,buttonEnd)+';',{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText;
+ for(const value of [true,false,'true','false',1,0,null,undefined]){let sent;const ctx={React:{createElement},selectedAssignedJob:{submissionStatus:{salesFloor:{clientSubmitted:value}}},submissionReadiness:null,submissionEditPending:false,shiftActionPending:false,pendingShiftAction:'',setClientSubmitted:v=>sent=v};runInNewContext(code,ctx);const html=renderToStaticMarkup(ctx.node);assert.ok(html.includes(value===true?'クライアント提出を解除':'クライアントへ提出済み'));ctx.node.props.onClick();assert.equal(sent,value!==true);}
  console.log('Client submitted flag: 8 values, true-only release label and matching boolean action; no real request.');
 }
 const handler = section(app, "  async function openTask(", "  async function pollSubmissionProcessing(");
@@ -219,11 +222,11 @@ for(const [driveName,originalName,expected] of [['same.pdf','original.pdf','same
  const end=app.indexOf('\n      {submissionType===',start);
  assert.ok(start>=0&&end>start);
  const jsx=app.slice(start,end).trim().slice(0,-1);
- for(const status of ['open','submitted','completed','unknown'])for(const hasSource of [false,true])for(const reasons of [["確認用の再送理由"],[],["  "],["", "  文字が読めません  ", " "]]){
-  const ctx={exports:{},require:createRequire(import.meta.url),SubmissionPreviewImage:moduleScope.exports.default,refreshFilePreview:async()=>null,resubmissionDetail:{request:{status,reasons,note:'確認用の備考'},source:hasSource?{id:'source',submissionId:'submission',originalName:'source.pdf',driveName:'',contentType:'application/pdf',previewUrl:null}:null}};
+ for(const singleFileResubmission of [true,false])for(const status of ['open','submitted','completed','unknown'])for(const hasSource of [false,true])for(const reasons of [["確認用の再送理由"],[],["  "],["", "  文字が読めません  ", " "]]){
+  const ctx={exports:{},require:createRequire(import.meta.url),singleFileResubmission,submissionType:'report',SubmissionPreviewImage:moduleScope.exports.default,refreshFilePreview:async()=>null,resubmissionDetail:{request:{status,reasons,note:'確認用の備考'},source:hasSource?{id:'source',submissionId:'submission',originalName:'source.pdf',driveName:'',contentType:'application/pdf',previewUrl:null}:null}};
   runInNewContext(ts.transpileModule('export default function Guide(){return ('+jsx+');}',{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,ctx);
   const output=renderToStaticMarkup(createElement(ctx.exports.default));
-  assert.equal(output.includes('元画像を確認できません'),!hasSource);assert.equal(output.includes('管理者に対象ファイルを確認'),!hasSource);assert.equal(output.includes('この画像だけを撮り直し'),hasSource&&status==='open');assert.equal(output.includes('1ファイル選んで再送'),status==='open');assert.equal(output.includes('この依頼への再送は受付済み'),status==='submitted');assert.equal(output.includes('この再提出依頼は完了'),status==='completed');assert.equal(output.includes('受付状態を確認できません'),status==='unknown');assert.equal(output.includes('再送理由を確認できません'),!reasons.some(reason=>reason.trim()));assert.equal(output.includes('文字が読めません'),reasons.length===3);assert.ok(!output.includes(' /  / '));
+  assert.equal(output.includes('元画像を確認できません'),singleFileResubmission&&!hasSource);assert.equal(output.includes('管理者に対象ファイルを確認'),singleFileResubmission&&!hasSource);assert.equal(output.includes('この画像だけを撮り直し'),singleFileResubmission&&hasSource&&status==='open');assert.equal(output.includes('1ファイル選んで再送'),singleFileResubmission&&status==='open');assert.equal(output.includes('この依頼への再送は受付済み'),status==='submitted');assert.equal(output.includes('この再提出依頼は完了'),status==='completed');assert.equal(output.includes('受付状態を確認できません'),status==='unknown');assert.equal(output.includes('再送理由を確認できません'),!reasons.some(reason=>reason.trim()));assert.equal(output.includes('文字が読めません'),reasons.length===3);assert.ok(!output.includes(' /  / '));assert.equal(output.includes('最大20件、各50MB'),!singleFileResubmission&&status==='open');assert.equal(output.includes('この案件の報告書が対象'),!singleFileResubmission&&!hasSource);
  }
 }
 {
@@ -249,10 +252,10 @@ for(const [driveName,originalName,expected] of [['same.pdf','original.pdf','same
 {
  const declaration=app.slice(app.indexOf('  const resubmissionSendBlocked='),app.indexOf(';',app.indexOf('  const resubmissionSendBlocked='))+1);
  const start=app.indexOf('<p id="submission-send-help"'),end=app.indexOf('</button>',start)+9;assert.ok(start>=0&&end>start);const jsx=app.slice(start,end);
- for(const status of [null,'open','submitted','completed','cancelled','unknown']){
-  const ctx={exports:{},require:createRequire(import.meta.url),requestId:'request',resubmissionDetail:status?{request:{id:'request',jobId:'job',type:'report',status}}:null,selectedJob:{id:'job'},submissionType:'report',files:[{}],submissionConfirmed:true,submissionEditPending:false,processingSubmission:false,isPending:()=>false,uploadSubmission:async()=>{}};
+ for(const singleFileResubmission of [true,false])for(const status of [null,'open','submitted','completed','cancelled','unknown']){
+  const ctx={exports:{},require:createRequire(import.meta.url),singleFileResubmission,requestId:'request',resubmissionDetail:status?{request:{id:'request',jobId:'job',type:'report',status}}:null,selectedJob:{id:'job'},submissionType:'report',files:[{}],submissionConfirmed:true,submissionReadiness:null,submissionEditPending:false,processingSubmission:false,isPending:()=>false,uploadSubmission:async()=>{}};
   runInNewContext(ts.transpileModule(declaration+' export default function Send(){return (<>'+jsx+'</>);}',{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,ctx);
-  const html=renderToStaticMarkup(createElement(ctx.exports.default));assert.equal(html.includes('disabled=""'),status!=='open');assert.equal(html.includes('「提出情報を再読み込み」'),status!=='open');assert.ok(html.includes('aria-describedby="submission-send-help"'));
+  const html=renderToStaticMarkup(createElement(ctx.exports.default));assert.equal(html.includes('disabled=""'),status!=='open');assert.equal(html.includes('「提出情報を再読み込み」'),status!=='open');assert.ok(html.includes('aria-describedby="submission-send-help"'));assert.ok(html.includes(singleFileResubmission?'この画像を再送する':'ファイルを再提出する'));
  }
  console.log('Resubmission send UI passed: 6 statuses with disabled send and linked refresh guidance.');
 }
@@ -277,16 +280,16 @@ for(const [driveName,originalName,expected] of [['same.pdf','original.pdf','same
 }
 {
  const start=app.indexOf('<div className="upload-box">'),end=app.indexOf(String.fromCharCode(10)+'      {files.length>0',start);const checkStart=app.indexOf('<label className={`submission-confirmation'),checkEnd=app.indexOf('</label>',checkStart)+8;assert.ok(start>0&&end>start&&checkStart>0&&checkEnd>checkStart);
- for(const resubmissionSendBlocked of [false,true])for(const submissionEditPending of [false,true]){
-  const ctx={exports:{},require:createRequire(import.meta.url),resubmissionSendBlocked,submissionEditPending,requestId:'request',submissionType:'report',submissionConfirmed:false,addSubmissionFiles:()=>{},setSubmissionConfirmed:()=>{}};
-  runInNewContext(ts.transpileModule('export default function Inputs(){return (<>'+app.slice(start,end)+app.slice(checkStart,checkEnd)+'</>);}',{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,ctx);const html=renderToStaticMarkup(createElement(ctx.exports.default));assert.equal((html.match(/disabled=""/g)||[]).length,resubmissionSendBlocked||submissionEditPending?3:0);
+ for(const singleFileResubmission of [true,false])for(const resubmissionSendBlocked of [false,true])for(const submissionEditPending of [false,true]){
+  const ctx={exports:{},require:createRequire(import.meta.url),singleFileResubmission,resubmissionSendBlocked,submissionEditPending,requestId:'request',submissionType:'report',submissionConfirmed:false,addSubmissionFiles:()=>{},setSubmissionConfirmed:()=>{}};
+  runInNewContext(ts.transpileModule('export default function Inputs(){return (<>'+app.slice(start,end)+app.slice(checkStart,checkEnd)+'</>);}',{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,ctx);const html=renderToStaticMarkup(createElement(ctx.exports.default));assert.equal((html.match(/disabled=""/g)||[]).length,resubmissionSendBlocked||submissionEditPending?3:0);assert.equal(html.includes('multiple=""'),!singleFileResubmission);
  }
  console.log('Resubmission input controls: camera/library/confirmation follow request availability and pending state in 4 combinations.');
 }
 {
  const start=app.indexOf('{submissionType==="sales_floor"&&<><p id="client-submission-help"'),end=app.indexOf('</>}',start)+3;assert.ok(start>0&&end>start);const jsx=app.slice(start+1,end);
  for(const submissionType of ['sales_floor','report']){
-  const ctx={exports:{},require:createRequire(import.meta.url),submissionType,selectedAssignedJob:{submissionStatus:{salesFloor:{clientSubmitted:false}}},submissionEditPending:false,shiftActionPending:false,pendingShiftAction:'',setClientSubmitted:async()=>{}};
+  const ctx={exports:{},require:createRequire(import.meta.url),submissionType,selectedAssignedJob:{submissionStatus:{salesFloor:{clientSubmitted:false}}},submissionReadiness:null,submissionEditPending:false,shiftActionPending:false,pendingShiftAction:'',setClientSubmitted:async()=>{}};
   runInNewContext(ts.transpileModule('export default function ClientStatus(){return ('+jsx+');}',{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,ctx);const html=renderToStaticMarkup(createElement(ctx.exports.default));if(submissionType==='report')assert.equal(html,'');else{assert.ok(html.includes('直接提出した場合'));assert.ok(html.includes('提出済みを記録'));assert.ok(html.includes('id="client-submission-help"'));assert.ok(html.includes('aria-describedby="client-submission-help"'));}
  }
  console.log('Client submission explanation: sales-floor action describes recording direct submission; report view excludes the unrelated action.');
@@ -1040,12 +1043,12 @@ try {
     await offer.getByRole('button',{name:'詳細を閉じる',exact:true}).focus();await page.keyboard.press('Enter');
     await offer.getByRole('button',{name:'詳細を見る',exact:true}).waitFor();assert.equal(await offer.locator('dl').count(),0);
     assert.equal(await offer.getByRole('button',{name:'詳細を見る',exact:true}).evaluate(button=>button===document.activeElement),true);
-    assert.equal(await page.locator('.open-job').count(),1);assert.equal(await page.getByText('デモ：応募が確定しました。',{exact:true}).count(),0);
+    assert.equal(await page.locator('.open-job').count(),1);assert.equal(await page.getByText('デモ：応募を受け付けました。シフトで担当の確認状況を確認してください。',{exact:true}).count(),0);
   }
   console.log('Open job detail: named offer, keyboard expand/collapse and focus retained, controlled panel matches, long conditions fit 3 widths, no application from toggling.');
 
   await page.getByRole('button',{name:'この案件に応募する',exact:true}).click();
-  await page.getByText('デモ：応募が確定しました。',{exact:true}).waitFor();
+  await page.getByText('デモ：応募を受け付けました。シフトで担当の確認状況を確認してください。',{exact:true}).waitFor();
   await page.getByRole('button',{name:'応募したシフトを確認',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'応募したシフトを確認',exact:true}).evaluate(node=>document.activeElement===node),true);
 

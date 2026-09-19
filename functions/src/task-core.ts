@@ -1,3 +1,4 @@
+import { caseMailPreparationHeld, type CaseMailPreparation } from "./case-mail-preparation-core";
 import { submissionDeadline } from "./notification-time";
 
 export type TaskPriority = "overdue" | "urgent" | "normal";
@@ -8,7 +9,8 @@ export type TaskKind =
   | "report"
   | "resubmission";
 
-export type TaskJob = {
+export type TaskJob = CaseMailPreparation & {
+  preContactNeedsReview?: boolean;
   id: string;
   dateKey: string;
   storeName: string;
@@ -60,23 +62,25 @@ export function deriveStaffTasks(input: {
     const workStart = tokyoMidnightMs(job.dateKey);
     const preAvailable = workStart - 3 * 24 * 60 * 60 * 1000;
     const preDue = workStart - 9 * 60 * 60 * 1000; // 前日15:00 JST
-    const preComplete = Boolean(
+    const preComplete = job.preContactNeedsReview !== true && Boolean(
       job.preContact?.temperature !== undefined &&
       job.preContact?.temperature !== "" &&
       job.preContact?.arrivalTime
     );
-    const preContactWaitTitle = job.sourceMissing === true ? "シフトの取込状況を確認してください"
+    const preContactWaitTitle = caseMailPreparationHeld(job) ? "受信内容・勤務条件を確認中です" : job.sourceMissing === true ? "シフトの取込状況を確認してください"
       : job.applicationUnconfirmed === true ? "シフト表の担当確認待ちです"
       : job.assignmentUnresolved === true ? "担当者の照合待ちです" : null;
-    if (!preComplete && input.nowMs >= preAvailable) {
+    if ((!preComplete || preContactWaitTitle) && input.nowMs >= preAvailable) {
       tasks.push(makeTask({
         id: `${job.id}_precontact`, jobId: job.id, kind: "precontact",
         title: preContactWaitTitle ?? "事前連絡を送ってください",
-        body: `${job.dateKey} ${job.storeName} / ${preContactWaitTitle ? "確認後に事前連絡を送信できます。シフトで状態を確認してください。" : "体温と到着予定時刻"}`,
+        body: `${job.dateKey} ${job.storeName} / ${preContactWaitTitle ? "確認後に準備・提出できます。シフトで状態を確認してください。" : "体温と到着予定時刻"}`,
         actionRoute: `/shifts/${job.id}/precontact`,
         dueAtMs: preContactWaitTitle ? null : preDue, availableAtMs: preAvailable, nowMs: input.nowMs,
       }));
     }
+
+    if (preContactWaitTitle) continue;
 
     const unprinted = (job.netPrint?.items ?? []).filter(
       (item) => item.number && item.printed !== true
@@ -93,7 +97,8 @@ export function deriveStaffTasks(input: {
       }));
     }
 
-    const deadline = submissionDeadline(job.dateKey).toMillis();
+    const deadline = submissionDeadline(job.dateKey)?.toMillis() ?? null;
+    const deadlineNote = deadline === null ? " / 提出期限は確認中です。管理者に確認してください。" : "";
     const sales = job.submissionStatus?.salesFloor;
     const salesComplete = Boolean(
       sales?.completed || sales?.clientSubmitted || sales?.lipKnotsSubmitted
@@ -102,7 +107,7 @@ export function deriveStaffTasks(input: {
       tasks.push(makeTask({
         id: `${job.id}_sales_floor`, jobId: job.id, kind: "sales_floor",
         title: "売場画像を提出してください",
-        body: `${job.storeName} / クライアント提出済みでも完了にできます`,
+        body: `${job.storeName} / クライアント提出済みでも完了にできます${deadlineNote}`,
         actionRoute: `/submissions/${job.id}/sales-floor`,
         dueAtMs: deadline, availableAtMs: workStart, nowMs: input.nowMs,
       }));
@@ -111,7 +116,7 @@ export function deriveStaffTasks(input: {
       tasks.push(makeTask({
         id: `${job.id}_report`, jobId: job.id, kind: "report",
         title: "報告書を提出してください",
-        body: `${job.storeName} / 写真またはPDF`,
+        body: `${job.storeName} / 写真またはPDF${deadlineNote}`,
         actionRoute: `/submissions/${job.id}/report`,
         dueAtMs: deadline, availableAtMs: workStart, nowMs: input.nowMs,
       }));
@@ -119,6 +124,9 @@ export function deriveStaffTasks(input: {
   }
 
   for (const request of input.resubmissions) {
+    const job = input.jobs.find(item => item.id === request.jobId);
+    if (job && (job.cancelled === true || job.status !== "assigned" || job.sourceMissing === true ||
+        job.applicationUnconfirmed === true || job.assignmentUnresolved === true || caseMailPreparationHeld(job))) continue;
     tasks.push({
       id: `resubmission_${request.id}`,
       jobId: request.jobId,

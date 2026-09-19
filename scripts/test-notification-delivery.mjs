@@ -1,3 +1,4 @@
+import "./test-operational-reminder-delivery.mjs";
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { setup } from './notification-test-harness.mjs';

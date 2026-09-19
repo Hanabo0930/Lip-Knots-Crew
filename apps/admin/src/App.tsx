@@ -1,3 +1,4 @@
+import { expenseReadinessMessage } from "./expense-readiness";
 import type { SheetWriteIssue } from "./AdminSheetIssuePanel";
 import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -12,7 +13,7 @@ import { auth, firebaseApp, firebaseConfigured, functions } from "./firebase";
 import { expectedFirebaseProjectId } from "./firebase-config";
 import type { ProductionEvidenceView } from "./ProductionAcceptanceRollbackConsole";
 
-import { reportCompletionLabel, buildStaffSearchIndex, filterStaffSearchIndex, buildJobSearchIndex, filterJobSearchIndex, jobListPage, type JobListFilter } from "./job-search";
+import { reportCompletionLabel, jobReadinessLabel, buildStaffSearchIndex, filterStaffSearchIndex, buildJobSearchIndex, filterJobSearchIndex, jobListPage, type JobListFilter } from "./job-search";
 
 import type { QueryDocumentSnapshot } from "firebase/firestore";
 
@@ -42,6 +43,7 @@ const AdminStaffDevicePanel=lazy(()=>import("./AdminStaffDevicePanel"));
 const AdminComparisonPanel=lazy(()=>import("./AdminComparisonPanel"));
 const AdminExpensePanel = lazy(() => import("./AdminExpensePanel"));
 const JobSafeEditPanel = lazy(() => import("./JobSafeEditPanel"));
+const CaseMailIntakeEntry = lazy(() => import("./CaseMailIntakeEntry"));
 
 export type Job = {
   id: string;
@@ -53,6 +55,9 @@ export type Job = {
   storeNearestStation?: string;
   makerName: string;
   menuName?: string;
+  menuConditions?: string[];
+  mailIntake?: { receiptId: string; candidateId: string; sourceKey: string };
+  mailIntakeReviewRequired?: boolean;
   entryTime?: string;
   workTime?: string;
   basePay?: number | null;
@@ -64,6 +69,8 @@ export type Job = {
   scheduledPublishAt?: unknown;
   revision?: number;
   pendingSourceWrite?: boolean;
+  adminEditSheetWrite?: { pending?: boolean };
+  appOverride?: { active?: boolean };
   clientChargeInputs?: Record<string,number|null>;
   staffPaymentInputs?: Record<string,number|null>;
   assignedStaffName?: string;
@@ -72,6 +79,9 @@ export type Job = {
   preContact?: unknown;
   netPrint?: { items?: Array<{ id:string; number:string; printed?:boolean }> };
   applicationAdminConfirmed?: boolean;
+  applicationUnconfirmed?: boolean;
+  sourceMissing?: boolean;
+  assignmentUnresolved?: boolean;
   expenses?: {
     transportation?: number | null;
     purchase8?: number | null;
@@ -92,12 +102,17 @@ export type Job = {
   cancelled?: boolean;
   preContactLate?: boolean;
   submissionStatus?: {
-    report?: { completed?:boolean; lateFirstSubmission?: boolean };
+    report?: { completed?:boolean; lateFirstSubmission?: boolean; deadlineReviewRequired?: boolean };
     salesFloor?: { lateFirstSubmission?: boolean };
   };
   sheetRef?: { spreadsheetId?:string; sheetId?:number; currentRow?:number; sheetName?:string };
 };
 
+
+function mailSubmissionHeld(job: Job | undefined): boolean {
+  return job?.mailIntakeReviewRequired === true || Boolean(job?.mailIntake &&
+    (job.pendingSourceWrite === true || job.adminEditSheetWrite?.pending === true || job.applicationUnconfirmed === true || job.assignmentUnresolved === true || job.sourceMissing === true));
+}
 
 export type StaffProfile = {
   id: string;
@@ -133,7 +148,7 @@ export type SubmissionFile = {
 };
 export type SubmissionGroup = { id:string; purpose:string; status:string; createdAt:string|null; completedAt:string|null; files:SubmissionFile[] };
 export type ResubmissionComparison = {
-  request:{id:string;jobId:string;type:"report"|"sales_floor";reasons:string[];note:string;status:string};
+  request:{id:string;jobId:string;type:"report"|"sales_floor";scope?:"file"|"submission";reasons:string[];note:string;status:string};
   source:SubmissionFile|null; replacements:SubmissionFile[];
 };
 
@@ -949,9 +964,15 @@ export default function App() {
   const [expenseBusy, setExpenseBusy] = useState(false);
   const [expenseReady, setExpenseReady] = useState(false);
   const expenseVersionRef = useRef(0);
-  const expenseReadyRef = useRef<{jobId:string;user:unknown;reviewVersion?:string;snapshot?:string;blocked?:boolean}|null>(null);
+  const expenseReadyRef = useRef<{jobId:string;user:unknown;reviewVersion?:string;snapshot?:string;blocked?:boolean;holdReason?:string}|null>(null);
   const expenseLoadRef = useRef<number|null>(null);
   const expenseWriteRef = useRef<symbol|null>(null);
+  const expenseJobHoldReason=expenseReadinessMessage(jobs.find(job=>job.id===expenseJobId));
+  useEffect(()=>{
+    const ready=expenseReadyRef.current;
+    if(!expenseJobHoldReason||!ready||ready.jobId!==expenseJobId||ready.blocked)return;
+    ready.blocked=true;ready.holdReason=expenseJobHoldReason;setExpenseReady(false);
+  },[expenseJobHoldReason,expenseJobId,expenseReady]);
   const [dashboardMonth, setDashboardMonth] = useState(firebaseConfigured?currentTokyoMonth():"2026-07");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [dashboardBusy, setDashboardBusy] = useState(false);
@@ -2592,7 +2613,7 @@ async function previewRowCreation() {
   }
   async function saveNetPrint() {
     if(!selectedAdminJobId)return;
-    await runAdminOperation("netprint:"+selectedAdminJobId,"updateNetPrintNumbers",{jobId:selectedAdminJobId,numbers:[...netPrintNumbers]},"ネットプリントを保存しました。","netprint");
+    await runAdminOperation("netprint:"+selectedAdminJobId,"updateNetPrintNumbers",{jobId:selectedAdminJobId,numbers:[...netPrintNumbers],...(jobs.find(job=>job.id===selectedAdminJobId)?.mailIntake?{expectedRevision:jobs.find(job=>job.id===selectedAdminJobId)?.revision}:{})},"ネットプリントを保存しました。","netprint");
   }
 
   async function loadSubmissionTimeline(previewFile?:{submissionId:string;fileId:string}) {
@@ -2666,6 +2687,7 @@ async function previewRowCreation() {
   async function createResubmission() {
     if(resubmissionNeedsReviewRef.current){setMessage("依頼一覧を再読込して結果を確認してください。");return;}
     if(resubmissionPendingRef.current)return;
+    if(mailSubmissionHeld(jobs.find(job=>job.id===selectedAdminJobId))){setMessage("受信内容・勤務条件を確認中です。確認後に再提出を依頼してください。");return;}
     if(!timelineReady||timelinePendingRef.current){setMessage("提出履歴を確認してから依頼してください。");return;}
     if(!selectedAdminJobId||!resubmitReasons.length){setMessage("再提出理由を1つ以上選んでください。");return;}
     if(selectedSourceFile&&!submissionTimeline.some(group=>group.files.some(file=>file.id===selectedSourceFile.id&&file.submissionId===selectedSourceFile.submissionId&&file.status==="completed"))){setMessage("処理完了した画像を選び直してください。");return;}
@@ -2679,7 +2701,7 @@ async function previewRowCreation() {
         setResubmissions(current=>[{id:crypto.randomUUID(),jobId:selectedAdminJobId,staffId:"s1",type:resubmitType,reasons:resubmitReasons,note:resubmitNote,status:"open",sourceSubmissionId:selectedSourceFile?.submissionId,sourceFileId:selectedSourceFile?.id},...current]);
         setMessage("デモ：再提出依頼を送りました。");return;
       }
-      await httpsCallable(functions!,"createResubmissionRequest")({jobId:selectedAdminJobId,type:resubmitType,reasons:resubmitReasons,note:resubmitNote,sourceSubmissionId:selectedSourceFile?.submissionId,sourceFileId:selectedSourceFile?.id});
+      await httpsCallable(functions!,"createResubmissionRequest")({jobId:selectedAdminJobId,...(jobs.find(job=>job.id===selectedAdminJobId)?.mailIntake?{expectedRevision:jobs.find(job=>job.id===selectedAdminJobId)?.revision}:{}),type:resubmitType,reasons:resubmitReasons,note:resubmitNote,sourceSubmissionId:selectedSourceFile?.submissionId,sourceFileId:selectedSourceFile?.id});
       accepted=true;
       if(!isCurrent())return;
       setMessage("再提出依頼を送りました。");
@@ -2752,8 +2774,8 @@ async function previewRowCreation() {
   }
 
   async function confirmJobApplication(job:Job) {
-    if(job.applicationAdminConfirmed||job.status!=="assigned")return;
-    await runAdminOperation("job:"+job.id,"confirmApplication",{jobId:job.id},"応募を確認済みにしました。",true);
+    if(job.applicationAdminConfirmed||job.status!=="assigned"||job.cancelled||job.sourceMissing||job.assignmentUnresolved||job.mailIntakeReviewRequired||(Boolean(job.mailIntake)&&job.pendingSourceWrite)||!job.assignedStaffId)return;
+    await runAdminOperation("job:"+job.id,"confirmApplication",{jobId:job.id,expectedRevision:job.revision??0},"管理者確認済みです。原本照合は状態欄に表示します。",true);
   }
 
   async function runAdminOperation(key:string,action:string,payload:Record<string,unknown>,success:string,application:boolean|"resubmission"|"netprint"|"cancellation"|"devices") {
@@ -2806,7 +2828,7 @@ async function previewRowCreation() {
     if (firebaseConfigured&&(!functions||!user||!adminSessionReady)) {setExpenseBusy(expenseWriteRef.current!==null);return;}
     expenseLoadRef.current=version;setExpenseBusy(true);setExpenseStatus("読込中");
     try {
-      let values:Record<string,unknown>={};let note="";let status="デモ読込済み";let reviewVersion:string|undefined;
+      let values:Record<string,unknown>={};let note="";let status="デモ読込済み";let reviewVersion:string|undefined;let holdReason:string|undefined;
       if (!firebaseConfigured) {
         const job=jobs.find(item=>item.id===jobId);
         if (!job) throw new Error("案件が見つかりません。");
@@ -2814,10 +2836,13 @@ async function previewRowCreation() {
       } else {
         const response=await httpsCallable(functions!,"getExpenseReview")({jobId});
         if (!isCurrent()) return;
-        const data=response.data as {job?:{id?:string};reviewVersion?:string;currentValues?:Record<string,number|null>;draft?:{values?:Record<string,number|null>;note?:string;status?:string}|null};
+        const data=response.data as {job?:{id?:string;receivedMail?:boolean};writeBlockedReason?:string|null;reviewVersion?:string;currentValues?:Record<string,number|null>;draft?:{values?:Record<string,number|null>;note?:string;status?:string}|null};
         if (data.job?.id!==jobId) throw new Error("経費の読込対象が一致しません。再読込してください。");
         if(data.reviewVersion!==undefined&&(typeof data.reviewVersion!=="string"||!/^[a-f0-9]{64}$/.test(data.reviewVersion)))throw new Error("経費確認の版を取得できません。再読込してください。");
         if(data.draft!=null&&(typeof data.draft!=="object"||Array.isArray(data.draft)))throw new Error("経費の下書き形式が不正です。再読込してください。");
+        if(data.writeBlockedReason!=null&&(typeof data.writeBlockedReason!=="string"||!data.writeBlockedReason.trim()))throw new Error("経費の確認待ち状態を取得できません。再読込してください。");
+        if(data.job?.receivedMail===true&&!data.reviewVersion)throw new Error("受信案件の経費確認版を取得できません。再読込してください。");
+        holdReason=data.writeBlockedReason??undefined;
         reviewVersion=data.reviewVersion;
         values=data.draft?.values??data.currentValues??{};note=data.draft?.note??"";status=data.draft?.status??"未処理";
       }
@@ -2826,7 +2851,7 @@ async function previewRowCreation() {
       const nextValues={transportation:String(values.transportation??""),purchase8:String(values.purchase8??""),purchase10:String(values.purchase10??""),netPrintCost:String(values.netPrintCost??""),postageCost:String(values.postageCost??"")};
       setExpenseValues(nextValues);
       setExpenseNote(note);setExpenseStatus(status);
-      expenseReadyRef.current={jobId,user,reviewVersion,snapshot:JSON.stringify([nextValues,note])};setExpenseReady(true);
+      expenseReadyRef.current={jobId,user,reviewVersion,snapshot:JSON.stringify([nextValues,note]),...(holdReason?{blocked:true,holdReason}:{})};setExpenseReady(!holdReason);
     } catch(error) {
       if(isCurrent()){setExpenseStatus("読込できませんでした");setMessage(error instanceof Error?error.message:String(error));}
     } finally {
@@ -2842,6 +2867,8 @@ async function previewRowCreation() {
     if(!expenseJobId||expenseReadyRef.current?.blocked||expenseWriteRef.current!==null||expenseLoadRef.current!==null||
       expenseReadyRef.current?.jobId!==expenseJobId||expenseReadyRef.current.user!==user||
       (firebaseConfigured&&(!functions||!user||!adminSessionReady)))return;
+    const holdReason=expenseReadinessMessage(jobs.find(job=>job.id===expenseJobId));
+    if(holdReason){if(expenseReadyRef.current){expenseReadyRef.current.blocked=true;expenseReadyRef.current.holdReason=holdReason;}setExpenseReady(false);setMessage(holdReason);return;}
     if(complete&&!window.confirm("スプシの現在値と一致する場合だけ、経費を書込キューへ送ります。続けますか？"))return;
     const version=expenseVersionRef.current,token=Symbol("expense-write");
     const isCurrent=()=>version===expenseVersionRef.current&&(auth?.currentUser??null)===user;
@@ -2931,7 +2958,7 @@ async function previewRowCreation() {
 
       return;
     }
-    await runAdminOperation("cancellation","adminSetJobCancellation",{jobId:cancellationJobId,reasonCategory:cancellationReasonCategory,reasonNote:cancellationNote,financialTreatment:cancellationTreatment},"キャンセルを記録しました。募集・事前連絡・提出タスクを停止します。","cancellation");
+    await runAdminOperation("cancellation","adminSetJobCancellation",{jobId:cancellationJobId,...(job.mailIntake?{expectedRevision:job.revision}:{}),reasonCategory:cancellationReasonCategory,reasonNote:cancellationNote,financialTreatment:cancellationTreatment},"キャンセルを記録しました。募集・事前連絡・提出タスクを停止します。","cancellation");
   }
 
   async function restoreCancellation(job: Job) {
@@ -2951,7 +2978,7 @@ async function previewRowCreation() {
       setMessage("デモ：キャンセルを解除しました。");
       return;
     }
-    await runAdminOperation("cancellation","adminRestoreCancelledJob",{jobId:job.id,note},"キャンセルを解除しました。","cancellation");
+    await runAdminOperation("cancellation","adminRestoreCancelledJob",{jobId:job.id,note,...(job.mailIntake?{expectedRevision:job.revision}:{})},"キャンセルを解除しました。","cancellation");
   }
 
   async function loadStaffPerformance(profile: StaffProfile,range={from:"2025-10-01",through:"2099-12-31"}) {
@@ -3086,6 +3113,16 @@ async function duplicateJobAction(job:Job,isCurrent:()=>boolean) {
 }
 
 async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"schedule",isCurrent:()=>boolean) {
+  const confirmedRevision=job.revision;
+  if(job.mailIntake&&action==="publish"){
+    if(!Number.isSafeInteger(confirmedRevision)||Number(confirmedRevision)<0){setMessage("案件の確認版がありません。一覧を読み直してください。");return;}
+    if(job.mailIntakeReviewRequired){setMessage("受信内容が変更されています。変更・取消の確認を完了してから募集してください。");return;}
+    const details=[["実施日",job.workDate],["クライアント",job.clientName],["店舗",job.storeName],["メーカー",job.makerName],
+      ["メニュー",job.menuName],["条件",(job.menuConditions??[]).join(" / ")],["入店",job.entryTime],["実施時間",job.workTime]]
+      .map(([label,value])=>label+"："+(value||"未記載")).join("\n");
+    if(!window.confirm(details+"\n\nこの内容で1名を募集します。直近のシフト取込・受信記録との照合が未完了の場合は開始できません。"))return;
+    if(!isCurrent())return;
+  }
   let publishAt:string|null=null;
   if(action==="schedule") {
     const entered=window.prompt("公開日時（例 2026-08-01T09:00）","");
@@ -3106,10 +3143,11 @@ async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"
   try {
     const response=await httpsCallable(functions,"updateJobPublication")({
       jobIds:[job.id],action,publishAt,
+      ...(Number.isSafeInteger(confirmedRevision)?{expectedRevisions:{[job.id]:confirmedRevision}}:{}),
     });
     if(!isCurrent())return;
     const data=response.data as {updated?:string[];blocked?:string[]};
-    await refreshJobsAfterAction(data.blocked?.length?"安全条件により下書きのままです。":"公開状態を変更しました。",isCurrent);
+    await refreshJobsAfterAction(data.blocked?.length?"募集を開始できません。受信記録と原本照合を確認し、一覧を読み直してください。":"公開状態を変更しました。",isCurrent);
   } catch(error) {
     if(isCurrent())setMessage(error instanceof Error?error.message:String(error));
   }
@@ -3747,6 +3785,8 @@ function downloadCsv(filename:string,content:string) {
       </section></WorkspacePanel>
 
 
+<WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p>受信候補を準備中…</p>}><CaseMailIntakeEntry onCreated={()=>void refreshAdminJobs()} onReviewJob={(id,action)=>{const job=jobs.find(item=>item.id===id);if(!job){setMessage("案件一覧を更新して対象案件を確認してください。");return;}if(action==="edit")loadJobEdit(job);else {openWorkspace("jobs");prepareCancellation(job);}}}/></Suspense></WorkspacePanel>
+
 <WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel job-create-panel">
   <div className="section-heading">
     <div>
@@ -3807,19 +3847,19 @@ function downloadCsv(filename:string,content:string) {
                   <td>{job.assignedStaffName ?? "募集中"}</td>
                   <td>{job.storeName}</td>
                   <td>{job.makerName}</td>
-                  <td>{job.status === "cancelled" ? "キャンセル" : job.status==="draft"?"下書き":job.status==="scheduled"?"公開予約":job.status==="stopped"?"募集停止":job.preContact ? "正常" : "事前連絡待ち"}</td>
+                  <td>{jobReadinessLabel(job)}</td>
                   <td>{reportCompletionLabel(job)}</td>
-                  <td>{job.publishable ? <span className="mini-tag">募集中</span> : <span className="mini-tag muted-tag">非公開</span>}</td>
+                  <td>{job.status==="assigned" ? <span className="mini-tag muted-tag">応募受付終了</span> : job.publishable&&job.status==="open"&&!job.cancelled ? <span className="mini-tag">募集中</span> : <span className="mini-tag muted-tag">非公開</span>}</td>
                   <td className="row-actions">
                     <button className="ghost compact" onClick={()=>loadJobEdit(job)}>編集</button>
                     <button className="ghost compact" onClick={()=>duplicateJob(job)}>複製</button>
                     {job.status!=="cancelled" && !job.assignedStaffId && (
                       job.publishable
                         ? <button className="ghost compact" onClick={()=>changePublication(job,"stop")}>募集停止</button>
-                        : <button className="ghost compact" onClick={()=>changePublication(job,"publish")}>募集開始</button>
+                        : <button className="ghost compact" onClick={()=>changePublication(job,"publish")}>{job.mailIntake?"募集内容を確認":"募集開始"}</button>
                     )}
-                    {job.status==="assigned" && !job.applicationAdminConfirmed && <button className="ghost compact" disabled={operationKeys.includes("job:"+job.id)} onClick={()=>confirmJobApplication(job)}>応募確認</button>}
-                    {job.applicationAdminConfirmed && <span className="mini-tag">確認済み</span>}
+                    {job.status==="assigned" && !job.applicationAdminConfirmed && <button className="ghost compact" disabled={operationKeys.includes("job:"+job.id)||job.cancelled||job.sourceMissing||job.assignmentUnresolved||job.mailIntakeReviewRequired||(Boolean(job.mailIntake)&&job.pendingSourceWrite)||!job.assignedStaffId} onClick={()=>confirmJobApplication(job)}>応募確認</button>}
+                    {job.applicationAdminConfirmed && !job.cancelled && job.status==="assigned" && <span className="mini-tag">管理者確認済み</span>}
                     <button className="ghost compact" disabled={resubmissionBusy} onClick={()=>openReportReview(job)}>報告書を確認</button>
                     <button className="ghost compact" onClick={()=>loadExpenseReview(job.id,true)}>経費</button>
                     <button className="ghost compact" onClick={()=>openJobSheet(job)}>スプシ</button>
@@ -3903,7 +3943,7 @@ function downloadCsv(filename:string,content:string) {
         )}
       </section></WorkspacePanel>
 
-      <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">経費画面を読み込んでいます…</p>}><AdminExpensePanel openReport={id=>{const job=jobs.find(job=>job.id===id);if(job)openReportReview(job);}} focusRequest={expenseFocusRequest} active={workspace==="submissions"} jobs={jobs} expenseJobId={expenseJobId} expenseValues={expenseValues} expenseNote={expenseNote} expenseStatus={expenseStatus} expenseBusy={expenseBusy} expenseReady={expenseReady} loadExpenseReview={loadExpenseReview} saveExpenseDraft={saveExpenseDraft} completeExpense={completeExpense} setExpenseValues={setExpenseValues} setExpenseNote={setExpenseNote} openSheet={()=>{const job=jobs.find(item=>item.id===expenseJobId);if(job)void openJobSheet(job);}}/></Suspense></WorkspacePanel>
+      <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">経費画面を読み込んでいます…</p>}><AdminExpensePanel openReport={id=>{const job=jobs.find(job=>job.id===id);if(job)openReportReview(job);}} focusRequest={expenseFocusRequest} active={workspace==="submissions"} jobs={jobs} expenseJobId={expenseJobId} expenseValues={expenseValues} expenseNote={expenseNote} expenseStatus={expenseStatus} expenseBusy={expenseBusy} expenseReady={expenseReady} expenseHoldReason={expenseReadyRef.current?.holdReason} loadExpenseReview={loadExpenseReview} saveExpenseDraft={saveExpenseDraft} completeExpense={completeExpense} setExpenseValues={setExpenseValues} setExpenseNote={setExpenseNote} openSheet={()=>{const job=jobs.find(item=>item.id===expenseJobId);if(job)void openJobSheet(job);}}/></Suspense></WorkspacePanel>
 
       <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel" ref={reviewPanelRef} tabIndex={-1} aria-labelledby="submission-materials-heading">
         <div className="section-heading">
@@ -3936,7 +3976,8 @@ function downloadCsv(filename:string,content:string) {
           ))}
         </div>
         <textarea disabled={resubmissionBusy} value={resubmitNote} onChange={(event) => setResubmitNote(event.target.value)} placeholder="必要なら補足を入力" />
-        <button onClick={createResubmission} disabled={!timelineReady||timelineBusy||resubmissionBusy||resubmissionNeedsReview}>{resubmissionBusy?"依頼中…":selectedSourceFile ? "この画像の再送を依頼する" : "案件全体へ再提出を依頼する"}</button>
+        {mailSubmissionHeld(jobs.find(job=>job.id===selectedAdminJobId))&&<p role="status">受信内容・勤務条件を確認中です。提出履歴は確認できますが、再提出依頼・確認完了は保留します。</p>}
+        <button onClick={createResubmission} disabled={!timelineReady||timelineBusy||resubmissionBusy||resubmissionNeedsReview||mailSubmissionHeld(jobs.find(job=>job.id===selectedAdminJobId))}>{resubmissionBusy?"依頼中…":selectedSourceFile ? "この画像の再送を依頼する" : "案件全体へ再提出を依頼する"}</button>
         <button className="ghost" disabled={resubmissionBusy} onClick={()=>void refreshResubmissionList()}>依頼一覧を再読込</button>
         <div className="resubmit-list">
           {resubmissions.map((item) => (
@@ -3945,7 +3986,7 @@ function downloadCsv(filename:string,content:string) {
               <span>{item.status === "open" ? "対応待ち" : item.status === "submitted" ? "確認待ち" : "完了"}</span>
               <div className="row-actions">
                 {item.status === "submitted" && <button className="ghost compact" onClick={() => openComparison(item.id)}>旧・新を比較</button>}
-                {item.status === "submitted" && <button className="ghost compact" disabled={operationKeys.includes("resubmission:"+item.id)} onClick={() => completeResubmission(item.id)}>確認完了</button>}
+                {item.status === "submitted" && <button className="ghost compact" disabled={operationKeys.includes("resubmission:"+item.id)||mailSubmissionHeld(jobs.find(job=>job.id===item.jobId))} onClick={() => completeResubmission(item.id)}>確認完了</button>}
               </div>
             </div>
           ))}

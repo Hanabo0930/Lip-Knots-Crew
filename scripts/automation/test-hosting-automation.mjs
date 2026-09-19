@@ -47,7 +47,7 @@ for (const [workflowPath, evidenceFolder] of [
   [".github/workflows/staging-hosting-preview.yml", "hosting-preview-evidence"],
   [".github/workflows/staging-hosting-promote.yml", "hosting-promote-evidence"],
 ]) {
-  const workflow = readFileSync(resolve(repoRoot, workflowPath), "utf8");
+  const workflow = readFileSync(resolve(repoRoot, workflowPath), "utf8").replace(/\r\n/g, "\n");
   const jobEnvBlocks = workflow.matchAll(/^    env:\n((?:      [^\n]*\n)*)/gmu);
   for (const [, jobEnv] of jobEnvBlocks) {
     assert.doesNotMatch(
@@ -79,11 +79,11 @@ for (const [workflowPath, evidenceFolder] of [
 const promoteWorkflow = readFileSync(
   resolve(repoRoot, ".github/workflows/staging-hosting-promote.yml"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 const previewWorkflow = readFileSync(
   resolve(repoRoot, ".github/workflows/staging-hosting-preview.yml"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 assert.ok(
   previewWorkflow.includes(
     [

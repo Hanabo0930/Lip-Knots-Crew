@@ -5,6 +5,9 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { z } from "zod";
 import { db } from "./firebase";
 import { hashText } from "./case-id";
+import { allocateAdminJobGroup, stageAdminJobGroup } from "./job-group-creation";
+import { createCaseMailJobGroup } from "./case-mail-job-creation";
+import { readMailPublication } from "./case-mail-publication";
 import { assignmentPreparationPatch } from "./assignment-preparation-core";
 import { prepareAdminEditIntent, EditSourceSnapshot, adminEditValueMatches, currentAdminEditValues } from "./admin-edit-state-core";
 import {
@@ -50,6 +53,7 @@ const DuplicateSchema = z.object({
 const PublicationSchema = z.object({
   jobIds: z.array(z.string().min(1)).min(1).max(100),
   action: z.enum(["publish", "schedule", "stop", "draft"]),
+  expectedRevisions: z.record(z.string(), z.number().int().min(0)).optional(),
   publishAt: z.string().nullable().optional(),
 });
 
@@ -96,95 +100,25 @@ export const createAdminJobGroup = onCall(async (request) => {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
+  if (request.data && Object.hasOwn(request.data, "mailIntake")) {
+    return createCaseMailJobGroup(request.data, companyId, session.uid, raw => {
+      const normalized = normalizeJobInput(CreateSchema.parse(raw));
+      if (normalized.errors.length) throw new HttpsError("invalid-argument", normalized.errors.join(" / "));
+      return normalized.value;
+    });
+  }
   const parsed = CreateSchema.parse(request.data ?? {});
   const normalized = normalizeJobInput(parsed);
   if (normalized.errors.length) {
     throw new HttpsError("invalid-argument", normalized.errors.join(" / "));
   }
 
-  const groupId = `group_${hashText(`${companyId}|${randomUUID()}`, 24)}`;
-  const now = Timestamp.now();
+  const allocation = allocateAdminJobGroup(companyId, normalized.value.workDate, normalized.value.slots);
   const rowCreationConfigured = await nativeJobSourceEnabled(companyId);
-  const sourceReady = false;
-  const publication = resolvePublication({
-    requestedMode: normalized.value.publicationMode,
-    publishAt: normalized.value.publishAt,
-    sourceReady,
-    nowIso: now.toDate().toISOString(),
-  });
-
   const batch = db.batch();
-  const jobIds: string[] = [];
-  const rowQueueRef = rowCreationConfigured
-    ? db.collection("sheetRowCreateQueue").doc()
-    : null;
-
-  for (let slot = 1; slot <= normalized.value.slots; slot++) {
-    const jobRef = db.collection("jobs").doc();
-    jobIds.push(jobRef.id);
-    batch.set(jobRef, {
-      companyId,
-      caseId: `LKC-ADMIN-${normalized.value.workDate.replace(/-/g, "")}-${jobRef.id.slice(0, 8).toUpperCase()}`,
-      groupId,
-      slotNumber: slot,
-      slotCount: normalized.value.slots,
-      workDate: normalized.value.workDate,
-      dateKey: normalized.value.workDate,
-      clientName: normalized.value.clientName,
-      storeName: normalized.value.storeName,
-      storeAddress: normalized.value.storeAddress,
-      storeNearestStation: normalized.value.storeNearestStation,
-      makerName: normalized.value.makerName,
-      menuName: normalized.value.menuName,
-      entryTime: normalized.value.entryTime,
-      workTime: normalized.value.workTime,
-      subcontractorName: normalized.value.subcontractorName,
-      basePay: normalized.value.basePay,
-      status: publication.status,
-      publishable: publication.publishable,
-      recruitmentStopped: publication.recruitmentStopped,
-      scheduledPublishAt: publication.scheduledPublishAt
-        ? Timestamp.fromDate(new Date(publication.scheduledPublishAt))
-        : null,
-      publicationBlockedReason: publication.blockedReason,
-      requestedPublicationMode: normalized.value.publicationMode,
-      requestedPublishAt: normalized.value.publishAt
-        ? Timestamp.fromDate(new Date(normalized.value.publishAt))
-        : null,
-      sourceReady,
-      sourceCreationStatus: rowCreationConfigured ? "pending" : "disabled",
-      source: { type: "admin_created", createdBy: session.uid },
-      adminCreated: true,
-      revision: 0,
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
-
-  batch.set(db.collection("jobGroups").doc(groupId), {
-    companyId,
-    jobIds,
-    slotCount: normalized.value.slots,
-    createdBy: session.uid,
-    createdAt: now,
-    sourceReady,
-    publication,
-    rowCreationConfigured,
-    rowCreationQueueId: rowQueueRef?.id ?? null,
-  });
-  if (rowQueueRef) {
-    batch.set(rowQueueRef, {
-      companyId,
-      groupId,
-      jobIds,
-      status: "pending",
-      attempts: 0,
-      actorUid: session.uid,
-      idempotencyKey: `job-group-create:${groupId}`,
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
+  const result = stageAdminJobGroup(batch, { companyId, actorUid: session.uid, input: normalized.value, ...allocation,
+    rowQueueId: rowCreationConfigured ? db.collection("sheetRowCreateQueue").doc().id : null, now: Timestamp.now() });
+  const { groupId, jobIds } = result;
   await batch.commit();
 
   await writeAudit(companyId, session.uid, "job.group.create", {
@@ -194,17 +128,7 @@ export const createAdminJobGroup = onCall(async (request) => {
     publicationMode: normalized.value.publicationMode,
   });
 
-  return {
-    groupId,
-    jobIds,
-    sourceReady,
-    publication,
-    rowCreationQueued: Boolean(rowQueueRef),
-    rowCreationQueueId: rowQueueRef?.id ?? null,
-    warning: rowQueueRef
-      ? "月別タブへの安全追加を開始しました。検算完了まで案件は下書きです。"
-      : "新規行の安全なスプシ作成が未有効のため、案件は下書きで保存しました。",
-  };
+  return result;
 });
 
 export const duplicateAdminJob = onCall(async (request) => {
@@ -342,9 +266,21 @@ export const updateJobPublication = onCall(async (request) => {
     const updated: string[] = [];
     const blocked: string[] = [];
 
+    // 全候補の追加読取を先に終え、複数案件でもtransactionの読取後書込を守る。
+    const mailChecks = new Map<string, Awaited<ReturnType<typeof readMailPublication>>>();
+    if (input.action === "publish") for (const snap of snapshots) {
+      if (snap.exists && snap.data()?.companyId === companyId && snap.data()?.mailIntake) {
+        mailChecks.set(snap.id, await readMailPublication(tx, snap.id, snap.data()!, input.expectedRevisions?.[snap.id], now.toDate()));
+      }
+    }
     for (const snap of snapshots) {
       if (!snap.exists || snap.data()?.companyId !== companyId) continue;
       const job = snap.data()!;
+      if ((job.mailIntakeReviewRequired === true || job.mailTargetHold != null) && ["publish","schedule"].includes(input.action)) { blocked.push(snap.id); continue; }
+      if (job.mailIntake && input.action === "schedule") {
+        blocked.push(snap.id);
+        continue;
+      }
       if (job.cancelled === true || job.status === "cancelled") {
         blocked.push(snap.id);
         continue;
@@ -385,6 +321,8 @@ export const updateJobPublication = onCall(async (request) => {
         continue;
       }
 
+      const mailCheck = mailChecks.get(snap.id);
+      if (job.mailIntake && (!mailCheck || mailCheck.issue)) { blocked.push(snap.id); continue; }
       const sourceReady = job.sourceReady === true ||
         job.source?.type === "google_sheets_readonly" ||
         Boolean(job.sheetRef?.spreadsheetId);
@@ -405,6 +343,7 @@ export const updateJobPublication = onCall(async (request) => {
           ? Timestamp.fromDate(new Date(publication.scheduledPublishAt))
           : FieldValue.delete(),
         publicationBlockedReason: publication.blockedReason ?? FieldValue.delete(),
+        ...(job.mailIntake ? { mailPublication: { ...mailCheck!.confirmation!, actorUid: session.uid, confirmedAt: now } } : {}),
         updatedAt: now,
         revision: FieldValue.increment(1),
       }, { merge: true });
@@ -438,39 +377,27 @@ export const publishScheduledJobs = onSchedule(
       .limit(500)
       .get();
 
-    const batch = db.batch();
     const stateCache = new Map<string, boolean>();
-    for (const job of due.docs) {
-      const data = job.data();
-      const companyId = String(data.companyId ?? "");
-      if (!stateCache.has(companyId)) {
-        stateCache.set(companyId, companyId ? (await getProductionOperationalState(companyId)).operational : false);
-      }
-      if (!stateCache.get(companyId)) continue;
-      const sourceReady = data.sourceReady === true ||
-        data.source?.type === "google_sheets_readonly" ||
-        Boolean(data.sheetRef?.spreadsheetId);
-      if (!sourceReady || data.cancelled === true || data.assignedStaffId) {
-        batch.set(job.ref, {
-          status: sourceReady ? data.status : "draft",
-          publishable: false,
-          recruitmentStopped: true,
-          publicationBlockedReason: sourceReady ? "invalid_state" : "sheet_source_not_ready",
-          updatedAt: FieldValue.serverTimestamp(),
-        }, { merge: true });
-        continue;
-      }
-      batch.set(job.ref, {
-        status: "open",
-        publishable: true,
-        recruitmentStopped: false,
-        scheduledPublishAt: FieldValue.delete(),
-        publicationBlockedReason: FieldValue.delete(),
-        publishedAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true });
+    for (const dueJob of due.docs) {
+      const companyId=String(dueJob.data().companyId??"");
+      if(!stateCache.has(companyId))stateCache.set(companyId,companyId?(await getProductionOperationalState(companyId)).operational:false);
+      if(!stateCache.get(companyId))continue;
+      // 予約取得後の保留・担当・取消を上書きしないよう、公開直前に再読込する。
+      await db.runTransaction(async tx=>{
+        const job=await tx.get(dueJob.ref),data=job.data();
+        if(!data||data.companyId!==companyId||data.status!=="scheduled"||
+          !(data.scheduledPublishAt instanceof Timestamp)||data.scheduledPublishAt.toMillis()>Timestamp.now().toMillis())return;
+        if(data.mailTargetHold!=null||data.mailIntakeReviewRequired===true)return;
+        const sourceReady=data.sourceReady===true||data.source?.type==="google_sheets_readonly"||Boolean(data.sheetRef?.spreadsheetId);
+        if(!sourceReady||data.cancelled===true||data.assignedStaffId||data.mailIntake){
+          tx.set(job.ref,{status:sourceReady?data.status:"draft",publishable:false,recruitmentStopped:true,
+            publicationBlockedReason:sourceReady?"invalid_state":"sheet_source_not_ready",updatedAt:FieldValue.serverTimestamp()},{merge:true});
+          return;
+        }
+        tx.set(job.ref,{status:"open",publishable:true,recruitmentStopped:false,scheduledPublishAt:FieldValue.delete(),
+          publicationBlockedReason:FieldValue.delete(),publishedAt:FieldValue.serverTimestamp(),updatedAt:FieldValue.serverTimestamp()},{merge:true});
+      });
     }
-    if (!due.empty) await batch.commit();
   }
 );
 
@@ -668,6 +595,12 @@ export const adminEditJobInputs = onCall(async (request) => {
       }
     }
 
+    if (job.mailIntake) {
+      update.publishable = false; update.recruitmentStopped = true;
+      update.scheduledPublishAt = FieldValue.delete(); update.mailPublication = FieldValue.delete();
+      const assigned = input.fields.assignedStaffId !== undefined ? input.fields.assignedStaffId : job.assignedStaffId;
+      update.status = job.cancelled === true ? "cancelled" : assigned ? "assigned" : job.status === "draft" ? "draft" : "stopped";
+    }
     const nextJob = { ...job, ...update };
     if (input.fields.assignedStaffId !== undefined && !input.fields.assignedStaffId) {
       nextJob.assignedStaffId = null; nextJob.assignedStaffName = null;

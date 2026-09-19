@@ -1,4 +1,4 @@
-export type ApplicationAttempt={requestId:string;startedAt:number;mailApplicationId?:string;mailApplicationRevision?:number};
+export type ApplicationAttempt={requestId:string;startedAt:number;expectedJobRevision?:number;mailApplicationId?:string;mailApplicationRevision?:number};
 const failure=()=>new Error("応募確認用の保存記録を確認できません。ブラウザーの保存設定を確認し、シフトで応募結果を確認してください。");
 export function applicationAttemptOwner(companyId:string,staffId:string,uid:string):string{
  if([companyId,staffId,uid].some(value=>typeof value!=="string"||!value.trim()))throw failure();
@@ -10,11 +10,13 @@ function recordKey(owner:string,jobId:string){if(typeof jobId!=="string"||!jobId
 function attemptValue(value:unknown):ApplicationAttempt{
  const row=value as Partial<ApplicationAttempt>|null;
  if(!row||typeof row.requestId!=="string"||!row.requestId.trim()||row.requestId.includes("/")||typeof row.startedAt!=="number"||!Number.isFinite(row.startedAt)||row.startedAt<0)throw failure();
+ if(row.expectedJobRevision!==undefined&&(!Number.isSafeInteger(row.expectedJobRevision)||row.expectedJobRevision<0))throw failure();
+ const base={requestId:row.requestId,startedAt:row.startedAt,...(row.expectedJobRevision!==undefined?{expectedJobRevision:row.expectedJobRevision}:{})};
  if(row.mailApplicationId!==undefined||row.mailApplicationRevision!==undefined){
   if(typeof row.mailApplicationId!=="string"||!/^[a-f0-9]{64}$/.test(row.mailApplicationId)||!Number.isSafeInteger(row.mailApplicationRevision)||row.mailApplicationRevision!<1)throw failure();
-  return {requestId:row.requestId,startedAt:row.startedAt,mailApplicationId:row.mailApplicationId,mailApplicationRevision:row.mailApplicationRevision};
+  return {...base,mailApplicationId:row.mailApplicationId,mailApplicationRevision:row.mailApplicationRevision};
  }
- return {requestId:row.requestId,startedAt:row.startedAt};
+ return base;
 }
 export function loadSavedApplicationAttempts(owner:string):Map<string,ApplicationAttempt>{
  try{

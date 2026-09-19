@@ -5,6 +5,7 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { db, messaging } from "./firebase";
 import { applyQuietHours, tokyoParts } from "./notification-time";
 import { getProductionOperationalState } from "./system-safety";
+import { parseOperationalReminder, operationalReminderIsCurrent } from "./operational-reminder";
 import { incrementProductionMetrics } from "./production-metrics";
 import {
   classifyPushFailureCodes,
@@ -20,6 +21,9 @@ type QueueData = {
   body: string;
   route?: string;
   category?: string;
+  reminderContext?: unknown;
+  bundledQueueIds?: string[];
+  bundledInto?: string;
   status?: string;
   deliverAt?: Timestamp;
   quietDeferred?: boolean;
@@ -132,14 +136,20 @@ async function dispatchQueueDocument(
       return null;
     }
 
+    const content = await currentReminderContent(current, ref.id, reference => tx.get(reference));
+    if (!content) {
+      tx.update(ref, { status: "superseded", supersededReason: "reminder_no_longer_current", completedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+      return null;
+    }
     tx.update(ref, {
+      ...content,
       status: "sending",
       leaseToken,
       attempts: FieldValue.increment(1),
       startedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
-    return current;
+    return { ...current, ...content };
   });
 
   if (!data) return;
@@ -177,12 +187,18 @@ async function dispatchQueueDocument(
         });
         return;
       }
+      // FCMとの間を一括取引にはできないため、各送信直前にも再確認する。
+      const content = await currentReminderContent(data, ref.id, reference => reference.get());
+      if (!content) {
+        await updateLeasedQueue(ref, leaseToken, { status: "superseded", supersededReason: "reminder_no_longer_current", completedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+        return;
+      }
       const chunk = tokens.slice(index, index + 500);
       const result = await messaging.sendEachForMulticast({
         tokens: chunk.map((item) => item.token),
         data: {
           title: data.title,
-          body: data.body,
+          body: content.body ?? data.body,
           route: data.route ?? "/",
           category: data.category ?? "general",
           ...stringData(data.data),
@@ -222,6 +238,7 @@ async function dispatchQueueDocument(
       chunk.forEach((item) => processed.add(pushTokenHash(item.token)));
       // 生のPushトークンはキューへ複製せず、応答確認済みの端末をハッシュで記録します。
       const saved = await updateLeasedQueue(ref, leaseToken, {
+        ...content,
         processedTokenHashes: [...processed],
         successCount,
         failureCount,
@@ -259,6 +276,45 @@ async function dispatchQueueDocument(
     });
     if (saved && !retry) throw error;
   }
+}
+
+async function currentReminderContent(
+  data: QueueData, queueId: string,
+  read: (ref: FirebaseFirestore.DocumentReference) => Promise<FirebaseFirestore.DocumentSnapshot>
+): Promise<{ body?: string } | null> {
+  if (data.category === "quiet_digest") {
+    const ids = data.bundledQueueIds;
+    if (!Array.isArray(ids) || !ids.length || ids.length > 300 || ids.some(id => typeof id !== "string" || !id || id.includes("/")) || new Set(ids).size !== ids.length) return null;
+    let count = 0;
+    for (const id of ids) {
+      const child = (await read(db.collection("notificationQueue").doc(id))).data() as QueueData | undefined;
+      if (!child || child.status !== "bundled" || child.bundledInto !== queueId || child.category === "quiet_digest" || notificationGroupKey(child) !== notificationGroupKey(data)) continue;
+      if (await currentReminderContent(child, id, read)) count++;
+    }
+    return count ? { body: count + "件のお知らせ・対応事項があります。" } : null;
+  }
+  // 旧通知には当時の担当・版がない。推測で補完せず、旧キューの点検は再開前の運用条件とする。
+  if (data.reminderContext === undefined) return {};
+  const context = parseOperationalReminder(data.reminderContext);
+  if (!context || (data.targetStaffId ? data.targetStaffId !== context.staffId : data.targetRole !== "admin") || data.targetUid) return null;
+  const job = await read(db.collection("jobs").doc(context.jobId));
+  const current = job.data();
+  if (!operationalReminderIsCurrent(context, data.companyId, current)) return null;
+  if (context.kind === "assignment-receipt") {
+    const staff = data.targetStaffId === context.staffId && data.category === "job_assigned" && data.route === "/shifts/" + context.jobId;
+    const admin = data.targetRole === "admin" && data.category === "job_application_admin" && data.route === "/admin/jobs/" + context.jobId;
+    if (!staff && !admin) return null;
+  }
+  if (context.kind === "resubmission") {
+    if (data.category !== "resubmission_request" || data.targetStaffId !== context.staffId || data.route !== "/resubmissions/" + context.requestId) return null;
+    const request = (await read(db.collection("resubmissionRequests").doc(context.requestId!))).data();
+    if (!request || request.companyId !== data.companyId || request.staffId !== context.staffId || request.jobId !== context.jobId || request.type !== context.requestType || request.status !== "open") return null;
+  }
+  if (context.kind === "netprint") {
+    const items = current?.netPrint?.items as Array<{ number?: string; printed?: boolean }>;
+    return { body: items.filter(item => item.number && item.printed !== true).length + "件の資料をできるだけ早く印刷してください。" };
+  }
+  return {};
 }
 
 async function updateLeasedQueue(

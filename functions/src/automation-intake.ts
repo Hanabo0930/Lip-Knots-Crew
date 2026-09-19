@@ -232,6 +232,8 @@ export const listMyMailApplications = onCall(async request => {
       if (jobData && jobData.companyId !== companyId) throw new HttpsError("permission-denied","案件の所属が一致しません。");
       const text = (key:string) => typeof jobData?.[key] === "string" ? jobData[key] : "";
       const job = {id:candidate.jobId,workDate:candidate.workDate,dateKey:candidate.workDate,
+        ...(Number.isSafeInteger(jobData?.revision) ? {revision:jobData!.revision} : {}),
+        menuConditions:Array.isArray(jobData?.menuConditions)?jobData.menuConditions.filter((item:unknown)=>typeof item==="string"):[],
         clientName:text("clientName"),makerName:text("makerName"),menuName:text("menuName"),
         storeName:text("storeName"),workTime:text("workTime"),storeAddress:text("storeAddress"),
         basePay:typeof jobData?.basePay==="number"&&Number.isFinite(jobData.basePay)?jobData.basePay:null,

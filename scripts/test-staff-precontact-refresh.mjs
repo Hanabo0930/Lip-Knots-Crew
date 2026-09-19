@@ -66,3 +66,9 @@ for(const [flag,reason] of [['sourceMissing','取込元'],['applicationUnconfirm
  assert.equal(html.includes('事前連絡を入力し、内容を確認して送信'),false);assert.equal(html.includes('反映は未確認'),false);
 }
 console.log('Precontact readiness notices passed: three blocked states precede input/sync instructions.');
+
+for(const flags of [{mailIntakeReviewRequired:true},{mailIntake:{},pendingSourceWrite:true},{mailIntake:{},adminEditSheetWrite:{pending:true}}]){
+ const context={React,selectedJob:{...flags,preContactNeedsReview:true,preContactSyncPending:true}};runInNewContext(readinessCode+syncCode,context);
+ const html=renderToStaticMarkup(React.createElement(context.SyncNotice));assert.ok(html.includes("受信内容・勤務条件"));assert.equal(html.includes("事前連絡を入力し、内容を確認して送信"),false);
+}
+console.log("受信案件の保留表示3条件成功");

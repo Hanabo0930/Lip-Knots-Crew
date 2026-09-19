@@ -12,13 +12,15 @@ import {
 import { queueDocumentData } from "./notification-core";
 import { tokyoParts } from "./notification-time";
 import { cancellationSheetWriteIdentity } from "./sheet-write-core";
-import { assignmentPreparationPatch } from "./assignment-preparation-core";
+import { mailPreparationContext, applicationConfirmationIdentity, assignmentPreparationPatch, nextAssignmentRevision, resetApplicationConfirmation } from "./assignment-preparation-core";
 import { assertProductionOperational } from "./system-safety";
 import { readMailApplicationForAssignment } from "./automation-intake";
+import { readMailPublication } from "./case-mail-publication";
 
 const ApplySchema = z.object({
   jobId: z.string().min(1),
   requestId: z.string().min(8).max(120),
+  expectedJobRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   mailApplicationId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   mailApplicationRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
 }).refine(value => (value.mailApplicationId === undefined) === (value.mailApplicationRevision === undefined), {
@@ -55,6 +57,10 @@ export const applyToJob = onCall(async (request) => {
       if ((previous.mailApplicationId ?? null) !== (input.mailApplicationId ?? null)) {
         throw new HttpsError("failed-precondition", "前回と異なる応募候補です。確定状況を確認してください。");
       }
+      if ((previous.expectedJobRevision ?? null) !== (input.expectedJobRevision ?? null) ||
+          (previous.mailApplicationRevision !== undefined && previous.mailApplicationRevision !== (input.mailApplicationRevision ?? null))) {
+        throw new HttpsError("failed-precondition", "前回と異なる確認版です。「シフト」で確定状況を確認してください。");
+      }
       const response = previous.result;
       if (response?.ok !== true || response.jobId !== input.jobId ||
           typeof response.assignedAt !== "string" || !Number.isFinite(Date.parse(response.assignedAt))) {
@@ -87,12 +93,23 @@ export const applyToJob = onCall(async (request) => {
         "申し訳ありません。この案件は先に他のスタッフで確定しました。"
       );
     }
-    if (job.recruitmentStopped === true || job.cancelled === true) {
+    if (job.recruitmentStopped === true || job.cancelled === true || job.mailIntakeReviewRequired === true || job.mailTargetHold != null) {
       throw new HttpsError("failed-precondition", "この案件は募集を終了しています。");
     }
 
     if (job.sourceMissing === true || job.assignmentUnresolved === true || job.applicationUnconfirmed === true || job.publishable !== true) {
       throw new HttpsError("failed-precondition", "募集内容の公開・取込・手配確認が完了していません。シフトを更新してください。");
+    }
+    if (job.mailIntake) {
+      const checked = await readMailPublication(tx, input.jobId, job, input.expectedJobRevision, new Date(), "apply");
+      const confirmed = job.mailPublication as Record<string, unknown> | undefined;
+      if (checked.issue || !checked.confirmation || !confirmed ||
+          confirmed.context !== checked.confirmation.context ||
+          confirmed.receiptRevision !== checked.confirmation.receiptRevision ||
+          confirmed.candidateRevision !== checked.confirmation.candidateRevision) {
+        throw new HttpsError("failed-precondition", checked.issue || "募集内容が更新されました。一覧を更新して確認してください。",
+          { reason: "case_mail_job_changed", accepted: false, jobId: input.jobId, requestId: input.requestId, expectedJobRevision: input.expectedJobRevision ?? null });
+      }
     }
     const workDate = dateKeyFromIso(String(job.dateKey));
     if (workDate < tokyoParts(new Date()).dateKey) {
@@ -118,13 +135,15 @@ export const applyToJob = onCall(async (request) => {
     const now = Timestamp.now();
 
     tx.update(jobRef, {
+      revision: nextAssignmentRevision(job),
       status: "assigned",
       assignedStaffId: staffId,
       assignedStaffName: displayName,
       assignedUid: session.uid,
       assignedAt: now,
       ...assignmentPreparationPatch(job, { ...job, assignedStaffId: staffId, assignedStaffName: displayName }),
-      assignmentSheetWrite: { queueId: queueRef.id, identity: cancellationSheetWriteIdentity({ ...job, assignedStaffId: staffId, assignedStaffName: displayName }) },
+      assignmentSheetWrite: { queueId: queueRef.id, identity: cancellationSheetWriteIdentity({ ...job, assignedStaffId: staffId, assignedStaffName: displayName }),
+        ...(job.mailIntake ? { confirmation: applicationConfirmationIdentity({ ...job, status: "assigned", assignedStaffId: staffId, assignedStaffName: displayName }) } : {}) },
       applicationUnconfirmed: true,
       updatedAt: now,
     });
@@ -153,14 +172,18 @@ export const applyToJob = onCall(async (request) => {
       createdAt: now,
     });
 
+    const receiptContext = job.mailIntake ? { version: 1 as const, kind: "assignment-receipt" as const,
+      jobId: input.jobId, staffId, dateKey: workDate, revision: nextAssignmentRevision(job),
+      assignmentOperationId: queueRef.id, assignedAtMs: now.toMillis(), assignmentContext: mailPreparationContext({ ...job, status: "assigned", assignedStaffId: staffId, assignedStaffName: displayName }) } : undefined;
     const staffNotificationRef = db.collection("notificationQueue").doc();
     tx.set(staffNotificationRef, queueDocumentData({
       companyId,
       targetStaffId: staffId,
-      title: "応募が確定しました",
-      body: `${String(job.workDate ?? workDate)} ${String(job.storeName ?? "")}`,
+      title: "応募を受け付けました",
+      body: `${String(job.workDate ?? workDate)} ${String(job.storeName ?? "")} / シフトで担当の確認状況を確認してください。`,
       route: `/shifts/${input.jobId}`,
       category: "job_assigned",
+      ...(receiptContext ? {reminderContext:receiptContext} : {}),
       dedupeKey: `${input.jobId}_${staffId}_assigned`,
     }));
 
@@ -172,6 +195,7 @@ export const applyToJob = onCall(async (request) => {
       body: `${displayName} / ${String(job.storeName ?? "")}`,
       route: `/admin/jobs/${input.jobId}`,
       category: "job_application_admin",
+      ...(receiptContext ? {reminderContext:receiptContext} : {}),
       dedupeKey: `${input.jobId}_${staffId}_admin`,
     }));
 
@@ -181,6 +205,8 @@ export const applyToJob = onCall(async (request) => {
       assignmentRequestId: input.requestId, sheetQueueId: queueRef.id,
     });
     tx.set(idempotencyRef, {
+      expectedJobRevision: input.expectedJobRevision ?? null,
+      mailApplicationRevision: input.mailApplicationRevision ?? null,
       mailApplicationId: input.mailApplicationId ?? null,
       uid: session.uid,
       companyId,
@@ -234,6 +260,8 @@ export const adminCancelJob = onCall(async (request) => {
     if (job.cancelled === true && job.status === "cancelled" && job.cancellationReason === input.reason && !ownsActiveLock) return;
     const now = Timestamp.now();
     tx.update(jobRef, {
+      ...resetApplicationConfirmation(),
+      revision: nextAssignmentRevision(job),
       status: "cancelled",
       cancelled: true,
       assignmentSheetWrite: null,

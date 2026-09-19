@@ -32,21 +32,32 @@ assert.equal(tokyoParts(new Date("2026-07-15T23:30:00.000Z")).dateKey, "2026-07-
 assert.equal(isWithinMinuteWindow(new Date("2026-07-14T23:02:00.000Z"), 8, 0), true);
 assert.equal(isWithinMinuteWindow(new Date("2026-07-14T23:06:00.000Z"), 8, 0), false);
 
-// Friday -> Saturday 11:00 JST
-assert.equal(
-  submissionDeadline("2026-07-17").toDate().toISOString(),
-  "2026-07-18T02:00:00.000Z"
-);
-// Saturday -> Monday 11:00 JST
-assert.equal(
-  submissionDeadline("2026-07-18").toDate().toISOString(),
-  "2026-07-20T02:00:00.000Z"
-);
-// Sunday -> Monday 11:00 JST
-assert.equal(
-  submissionDeadline("2026-07-19").toDate().toISOString(),
-  "2026-07-20T02:00:00.000Z"
-);
+// 翌平日11時。海の日・振替休日・国民の休日・年越しを含める。
+const deadlineCases = [
+  ["2026-07-15", "2026-07-16"],
+  ["2026-07-17", "2026-07-21"],
+  ["2026-07-18", "2026-07-21"],
+  ["2026-07-19", "2026-07-21"],
+  ["2026-07-20", "2026-07-21"],
+  ["2026-09-18", "2026-09-24"],
+  ["2026-09-21", "2026-09-24"],
+  ["2026-09-22", "2026-09-24"],
+  ["2026-04-30", "2026-05-01"],
+  ["2026-05-01", "2026-05-07"],
+  ["2026-12-31", "2027-01-04"],
+  ["2027-03-19", "2027-03-23"],
+  ["2027-04-30", "2027-05-06"],
+  ["2027-11-22", "2027-11-24"],
+] as const;
+for (const [workDate, expected] of deadlineCases) {
+  const deadline = submissionDeadline(workDate);
+  assert.ok(deadline, workDate);
+  assert.equal(deadline.toDate().toISOString(), expected + "T02:00:00.000Z", workDate);
+}
+for (const dateKey of ["2028-01-01", "2099-09-20", "2027-12-31", "2025-12-31",
+  "2026-02-30", "2026-13-01", "2026-1-01", "", "not-a-date"]) {
+  assert.equal(submissionDeadline(dateKey), null, dateKey);
+}
 
 assert.ok(Timestamp.now().toMillis() > 0);
 console.log("notification time tests passed");

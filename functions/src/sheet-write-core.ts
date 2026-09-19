@@ -12,9 +12,15 @@ export function expectedMatches(current:unknown,expected?:ExpectedValue):boolean
 export function valuesEquivalent(a:unknown,b:unknown):boolean{return normalizeComparable(a)===normalizeComparable(b);}
 export function columnToNumber(column:string):number{let n=0;for(const c of column.toUpperCase()){if(c<"A"||c>"Z")throw new Error(`不正な列: ${column}`);n=n*26+c.charCodeAt(0)-64;}return n;}
 
+// 提出状態の新旧操作を、担当・日付・元タブ・案件版とともに識別する。
+export function submissionSheetWriteIdentity(job: Record<string, unknown>): string {
+  return JSON.stringify([job.companyId ?? null, cancellationSheetWriteIdentity(job), job.revision ?? 0]);
+}
+
 // 取消・復帰の作成時と実行時で、同じ案件・担当・勤務日・元タブを照合する。
 export function cancellationSheetWriteIdentity(job: Record<string, unknown>): string {
   const sheet = job.sheetRef && typeof job.sheetRef === "object" ? job.sheetRef as Record<string, unknown> : {};
   return JSON.stringify([job.caseId ?? null, job.assignedStaffId ?? null, job.assignedStaffName ?? null,
-    job.dateKey ?? null, job.workDate ?? null, sheet.spreadsheetId ?? null, sheet.sheetId ?? null, sheet.sheetName ?? null]);
+    job.dateKey ?? null, job.workDate ?? null, sheet.spreadsheetId ?? null, sheet.sheetId ?? null, sheet.sheetName ?? null,
+    ...(job.mailIntake ? [job.mailIntakeHold ?? null] : []), ...(job.mailTargetHold != null ? [job.mailTargetHold] : [])]);
 }

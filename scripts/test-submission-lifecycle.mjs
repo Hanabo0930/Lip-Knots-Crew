@@ -25,7 +25,7 @@ function merge(old,data){
 }
 function harness(sourceFiles=null,compiledFiles=null){
   const records=new Map(),modules=new Map(),versions=new Map();let serial=0,allocated=0;
-  const h={records,env:{APP_ENVIRONMENT:'development'},documentReads:0,queryReads:0,returnedDocuments:0,copies:0,deletes:0,failDelete:false,failCopy:false,failWrite:null,loseCopyResponse:false,getError:null,conflictMismatch:false,beforeCopy:null,afterCopy:null,loaded:[],driveFiles:new Map()};
+  const h={records,env:{APP_ENVIRONMENT:'development',LKC_SHEET_WRITE_MODE:'active'},documentReads:0,queryReads:0,returnedDocuments:0,copies:0,deletes:0,failDelete:false,failCopy:false,failWrite:null,loseCopyResponse:false,getError:null,conflictMismatch:false,beforeCopy:null,afterCopy:null,loaded:[],driveFiles:new Map()};
   const snap=ref=>{const value=copy(records.get(ref.path));return {ref,id:ref.id,exists:records.has(ref.path),data:()=>copy(value)};};
   function commit(writes){
     const next=new Map(records);
@@ -773,7 +773,9 @@ for(const scope of ['file','submission'])await test('comparison returns explicit
 
 // 同じメモリDBに実API・原本照合・転送処理を接続し、スタッフと管理者の往復を検証する。
 async function staffAdminJourneyHarness() {
- const h=harness(),companyId='synthetic-company',jobId=h.loadModule('./case-id').createJobIdFromPersistedCaseId(companyId,'synthetic-case'),dateKey='2026-09-20',sheetId='synthetic-sheet',sheetName='2026.9';
+ // 応募可能な翌日の合成案件を使い、暦日が進んでも過去案件にならないようにする。
+ const dateKey=new Date(Date.now()+33*3600000).toISOString().slice(0,10),sheetName=dateKey.slice(0,4)+'.'+Number(dateKey.slice(5,7));
+ const h=harness(),companyId='synthetic-company',jobId=h.loadModule('./case-id').createJobIdFromPersistedCaseId(companyId,'synthetic-case'),sheetId='synthetic-sheet';
  h.jobId=jobId;h.records.set('jobs/'+jobId,h.records.get('jobs/synthetic-job'));h.records.delete('jobs/synthetic-job');const start=h.start;h.start=(count,patch={})=>start(count,{jobId,...patch});
  h.current=()=>h.records.get('jobs/'+jobId);
  Object.assign(h.current(),{status:'open',assignedStaffId:null,assignedStaffName:null,revision:0,publishable:true,caseId:'synthetic-case',workDate:dateKey,makerName:'Synthetic maker',menuName:'Synthetic menu',workTime:'10:00-18:00',sheetRef:{spreadsheetId:sheetId,sheetId:1,sheetName,currentRow:2}});

@@ -96,7 +96,7 @@ function harness() {
     const source = fs.readFileSync(new URL("../functions/src/" + name.slice(2) + ".ts", import.meta.url), "utf8");
     const exports = {}; modules.set(name, exports);
     runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-      { exports, require: load, Date, console }, { timeout: 5000 });
+      { exports, require: load, Date, console, process: { env: { LKC_SHEET_WRITE_MODE: "active" } } }, { timeout: 5000 });
     return exports;
   }
   const management = load("./job-management"), key = load("./case-mail-job-creation").caseMailRecordKey;

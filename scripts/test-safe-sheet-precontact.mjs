@@ -11,22 +11,23 @@ const dateKey="2099-09-20",sheetId="synthetic-sheet",sheetName="2099.9";
 const pending=()=>({companyId,jobId,operation:"precontact.submit",dateKey,updates:{temperature:36.5,arrivalTime:"09:30"},expected:{temperature:{mode:"blank"},arrivalTime:{mode:"blank"}},status:"pending",attempts:0,actorStaffId:staffId,actorUid:"synthetic-user",idempotencyKey:`precontact:${jobId}:${queueId}`});
 const job=()=>({companyId,caseId:"synthetic-case",dateKey,workDate:dateKey,status:"assigned",assignedStaffId:staffId,assignedStaffName:"Synthetic Staff",cancelled:false,preContactNeedsReview:false,preContactSyncPending:true,preContact:{source:"app",staffId,dateKey,operationId:queueId,temperature:36.5,arrivalTime:"09:30",submittedAt:Timestamp.now()},sheetRef:{spreadsheetId:sheetId,sheetId:1,sheetName,currentRow:2}});
 function clone(v){if(v instanceof Timestamp)return v;if(Array.isArray(v))return v.map(clone);if(v&&typeof v==="object")return Object.fromEntries(Object.entries(v).map(([k,v])=>[k,clone(v)]));return v;}
-function harness(){
+function harness(environment={LKC_SHEET_WRITE_MODE:"active"},compiled=false){
  const records=new Map([
   [`sheetSyncQueue/${queueId}`,pending()],[`jobs/${jobId}`,job()],
   [`companies/${companyId}/sheetMappings/shift`,{enabled:true,spreadsheetId:sheetId,idColumn:"Q",columns:{temperature:"G",arrivalTime:"H",staffName:"B",workDate:"A"},operations:{"precontact.submit":{values:["temperature","arrivalTime"]}}}]
  ]);
- const h={records,reads:0,writes:[],authCalls:0,metrics:[],idRows:[["案件ID"],["synthetic-case"]],cells:new Map([["A2",dateKey],["B2","Synthetic Staff"],["G2",""],["H2",""],["Q2","synthetic-case"]]),operational:true,beforeCellRead:null,afterCellRead:null,onWrite:null,onCommit:null,failMetrics:false,failRead:false,failAfterWrite:false,failCompletion:false};
+ const h={records,env:{...environment},dbReads:0,dbWrites:0,transactions:0,reads:0,writes:[],authCalls:0,metrics:[],idRows:[["案件ID"],["synthetic-case"]],cells:new Map([["A2",dateKey],["B2","Synthetic Staff"],["G2",""],["H2",""],["Q2","synthetic-case"]]),operational:true,beforeCellRead:null,afterCellRead:null,onWrite:null,onCommit:null,failMetrics:false,failRead:false,failAfterWrite:false,failCompletion:false};
  let serial=0;
  const snapshot=ref=>{const value=clone(records.get(ref.path));return {id:ref.id,ref,exists:records.has(ref.path),data:()=>clone(value)};};
- const apply=items=>{for(const item of items){const old=records.get(item.ref.path)||{},next=item.merge?{...old}:{};
+ const apply=items=>{h.dbWrites+=items.length;for(const item of items){const old=records.get(item.ref.path)||{},next=item.merge?{...old}:{};
   for(const [key,value]of Object.entries(item.data)){if(value?.__delete){delete next[key];continue;}if(key.includes(".")){const parts=key.split(".");let target=next;for(const part of parts.slice(0,-1))target=target[part]={...target[part]};target[parts.at(-1)]=clone(value);}else next[key]=value?.__increment!==undefined?Number(old[key]??0)+value.__increment:clone(value);}
   records.set(item.ref.path,next);
  }};
- const ref=path=>({path,id:path.split("/").at(-1),get:async()=>snapshot(ref(path)),set:async(data,options)=>apply([{ref:ref(path),data,merge:options?.merge}])});
- const collection=(name,filters=[])=>({add:async data=>{const target=ref(name+"/synthetic-add-"+(++serial));await target.set(data);return target;},doc:(id)=>ref(name+"/"+(id||"synthetic-auto-"+(++serial))),where:(key,op,value)=>collection(name,[...filters,[key,op,value]]),orderBy:()=>collection(name,filters),limit:()=>collection(name,filters),get:async()=>{const docs=[...records].filter(([path,value])=>path.startsWith(name+"/")&&filters.every(([key,op,test])=>op==="=="?value[key]===test:op==="in"?test.includes(value[key]):value[key]?.toMillis()<=test.toMillis())).map(([path])=>snapshot(ref(path)));return {docs,size:docs.length,empty:docs.length===0};}});
- const db={collection,doc:ref,getAll:async(...refs)=>refs.map(snapshot),runTransaction:async callback=>{
-  for(let attempt=0;attempt<5;attempt++){const writes=[],reads=[];const writer={get:async target=>{assert.equal(writes.length,0);const snap=snapshot(target);reads.push([target.path,JSON.stringify(snap.data())]);return snap;},set:(ref,data,options)=>writes.push({ref,data,merge:options?.merge}),update:(ref,data)=>writes.push({ref,data,merge:true}),create:(ref,data)=>{assert.ok(!records.has(ref.path));writes.push({ref,data,merge:false});}};
+ const ref=path=>({path,id:path.split("/").at(-1),get:async()=>{h.dbReads++;return snapshot(ref(path));},set:async(data,options)=>apply([{ref:ref(path),data,merge:options?.merge}])});
+ const collection=(name,filters=[])=>({add:async data=>{const target=ref(name+"/synthetic-add-"+(++serial));await target.set(data);return target;},doc:(id)=>ref(name+"/"+(id||"synthetic-auto-"+(++serial))),where:(key,op,value)=>collection(name,[...filters,[key,op,value]]),orderBy:()=>collection(name,filters),limit:()=>collection(name,filters),get:async()=>{h.dbReads++;const docs=[...records].filter(([path,value])=>path.startsWith(name+"/")&&filters.every(([key,op,test])=>op==="=="?value[key]===test:op==="in"?test.includes(value[key]):value[key]?.toMillis()<=test.toMillis())).map(([path])=>snapshot(ref(path)));return {docs,size:docs.length,empty:docs.length===0};}});
+ const db={collection,doc:ref,getAll:async(...refs)=>{h.dbReads+=refs.length;return refs.map(snapshot);},runTransaction:async callback=>{
+  h.transactions++;
+  for(let attempt=0;attempt<5;attempt++){const writes=[],reads=[];const writer={get:async target=>{h.dbReads++;assert.equal(writes.length,0);const snap=snapshot(target);reads.push([target.path,JSON.stringify(snap.data())]);return snap;},set:(ref,data,options)=>writes.push({ref,data,merge:options?.merge}),update:(ref,data)=>writes.push({ref,data,merge:true}),create:(ref,data)=>{assert.ok(!records.has(ref.path));writes.push({ref,data,merge:false});}};
   const result=await callback(writer);await h.onCommit?.(writes);
   if(reads.some(([path,before])=>JSON.stringify(records.get(path))!==before))continue;
   if(h.failCompletion&&writes.some(w=>w.data.status==="completed"))throw Error("synthetic completion store failure");
@@ -49,15 +50,47 @@ function harness(){
   "./production-metrics":{incrementProductionMetrics:async(...args)=>{if(h.failMetrics)throw Error("synthetic metrics unavailable");h.metrics.push(args);}},
   googleapis:{google:{auth:{GoogleAuth:class{constructor(){h.authCalls++;}}},sheets:()=>sheets}}
  };
- function load(name){if(Object.hasOwn(boundaries,name))return boundaries[name];assert.ok(["./case-mail-resolution-core","./case-mail-preparation-core","./submission-status","./submission-integrity","./submission-deadline-policy","./safe-sheet-writes","./sheet-write-core","./shift-parser","./case-id","./admin-operations","./admin-operations-core","./utils","./jobs","./analytics","./analytics-core","./notification-core","./notification-time","./japan-business-day","./netprint","./netprint-state-core", "./assignment-preparation-core", "./admin-edit-state-core", "./job-management-core", "./job-management", "./automation-intake", "./automation-recruitment-core", "./automation-bridge-core", "./case-mail-publication", "./case-mail-publication-core", "./job-group-creation", "./case-mail-job-creation", "./case-mail-collision"].includes(name),"Unexpected import "+name);if(modules.has(name))return modules.get(name);const exports={};modules.set(name,exports);const source=fs.readFileSync(new URL("../functions/src/"+name.slice(2)+".ts",import.meta.url),"utf8");runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports,require:load,Date,console:{warn(){},error(){}}});return exports;}
+ function load(name){if(Object.hasOwn(boundaries,name))return boundaries[name];assert.ok(["./case-mail-resolution-core","./case-mail-preparation-core","./submission-status","./submission-integrity","./submission-deadline-policy","./safe-sheet-writes","./sheet-write-control","./sheet-write-core","./shift-parser","./case-id","./admin-operations","./admin-operations-core","./utils","./jobs","./analytics","./analytics-core","./notification-core","./notification-time","./japan-business-day","./netprint","./netprint-state-core", "./assignment-preparation-core", "./admin-edit-state-core", "./job-management-core", "./job-management", "./automation-intake", "./automation-recruitment-core", "./automation-bridge-core", "./case-mail-publication", "./case-mail-publication-core", "./job-group-creation", "./case-mail-job-creation", "./case-mail-collision"].includes(name),"Unexpected import "+name);if(modules.has(name))return modules.get(name);const exports={};modules.set(name,exports);const source=fs.readFileSync(new URL("../functions/"+(compiled?"lib/":"src/")+name.slice(2)+(compiled?".js":".ts"),import.meta.url),"utf8");runInNewContext(compiled?source:ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports,require:load,Date,process:{env:h.env},console:{warn(){},error(){}}});return exports;}
  const worker=load("./safe-sheet-writes"),admin=load("./admin-operations"),qref=ref(`sheetSyncQueue/${queueId}`);
- return Object.assign(h,{core:(module,name,...args)=>load(module)[name](...args),admin:(name,data={},auth={uid:"synthetic-admin",token:{companyId,role:"admin"}})=>admin[name]({auth,data}),queue:()=>records.get(qref.path),job:()=>records.get(`jobs/${jobId}`),mapping:()=>records.get(`companies/${companyId}/sheetMappings/shift`),run:async eventQueue=>worker.processSafeSheetWrite({data:{after:eventQueue?{...snapshot(qref),data:()=>clone(eventQueue)}:snapshot(qref)}}),call:(module,name,data,auth={uid:"synthetic-admin",token:{companyId,role:"admin"}})=>load(module)[name]({auth,data}),queueResult:async id=>admin.updateExpenseReviewFromQueue({data:{after:snapshot(ref(`sheetSyncQueue/${id}`))}}),runQueue:async id=>worker.processSafeSheetWrite({data:{after:snapshot(ref(`sheetSyncQueue/${id}`))}}),retry:()=>worker.retrySafeSheetWrites()});
+ return Object.assign(h,{rawEvent:event=>worker.processSafeSheetWrite(event),core:(module,name,...args)=>load(module)[name](...args),admin:(name,data={},auth={uid:"synthetic-admin",token:{companyId,role:"admin"}})=>admin[name]({auth,data}),queue:()=>records.get(qref.path),job:()=>records.get(`jobs/${jobId}`),mapping:()=>records.get(`companies/${companyId}/sheetMappings/shift`),run:async eventQueue=>worker.processSafeSheetWrite({data:{after:eventQueue?{...snapshot(qref),data:()=>clone(eventQueue)}:snapshot(qref)}}),call:(module,name,data,auth={uid:"synthetic-admin",token:{companyId,role:"admin"}})=>load(module)[name]({auth,data}),queueResult:async id=>admin.updateExpenseReviewFromQueue({data:{after:snapshot(ref(`sheetSyncQueue/${id}`))}}),runQueue:async id=>worker.processSafeSheetWrite({data:{after:snapshot(ref(`sheetSyncQueue/${id}`))}}),retry:()=>worker.retrySafeSheetWrites()});
 }
 const results=[];
 const testPrefix=process.argv.find(arg=>arg.startsWith('--test-name-prefix='))?.slice('--test-name-prefix='.length);
 const failedFrom=process.argv.find(arg=>arg.startsWith("--test-failed-from="))?.slice("--test-failed-from=".length);
 const failedNames=failedFrom?new Set(JSON.parse(fs.readFileSync(failedFrom,"utf8")).results.filter(row=>!row.passed).map(row=>row.name)):null;
 async function test(name,fn){if((testPrefix&&!name.startsWith(testPrefix))||(failedNames&&!failedNames.has(name)))return;try{await fn();results.push({name,passed:true});}catch(error){results.push({name,passed:false,error:error.message});}}
+// 実際の2入口をTS・build済みJSで呼び、キュー・DB・Sheets・計測の副作用を確認する。
+const pauseModes=[undefined,"paused","invalid","","ACTIVE"," active","active "];
+function assertPauseUnchanged(h,before,cells){
+ assert.equal(JSON.stringify([...h.records]),before);assert.equal(JSON.stringify([...h.cells]),cells);
+ assert.equal(h.dbReads,0);assert.equal(h.dbWrites,0);assert.equal(h.transactions,0);
+ assert.equal(h.reads,0);assert.equal(h.writes.length,0);assert.equal(h.authCalls,0);assert.equal(h.metrics.length,0);
+}
+for(const compiled of [false,true])for(const mode of pauseModes)for(const via of ["event","scheduler"]){
+ await test(`sheet pause ${compiled?"compiled":"source"} ${mode===undefined?"unset":JSON.stringify(mode)} ${via}`,async()=>{
+  const h=harness({APP_ENVIRONMENT:"staging",...(mode===undefined?{}:{LKC_SHEET_WRITE_MODE:mode})},compiled);
+  for(const [i,status]of ["pending","retry_wait","processing","blocked","paused_global","completed","dead_letter"].entries())h.records.set(`sheetSyncQueue/preserved-${i}`,{...pending(),status,retryAt:Timestamp.fromMillis(0),attempts:3,claimToken:"old-claim",writeVerificationRequired:true});
+  // 定期処理が通常なら再試行する依頼と、結果未確認で保留する依頼を併存させる。
+  h.records.set("sheetSyncQueue/due-retry",{...pending(),status:"retry_wait",retryAt:Timestamp.fromMillis(0)});
+  const before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);
+  for(let repeat=0;repeat<2;repeat++)if(via==="event"){
+   for(const key of h.records.keys())if(key.startsWith("sheetSyncQueue/"))await h.runQueue(key.split("/").at(-1));
+   await h.run(pending());
+  }else await h.retry();
+  assertPauseUnchanged(h,before,cells);
+ });
+}
+for(const compiled of [false,true])for(const environment of [undefined,"development","production"])for(const via of ["event","scheduler"]){
+ await test(`sheet pause defaults ${compiled?"compiled":"source"} ${environment??"unset"} ${via}`,async()=>{
+  const h=harness(environment===undefined?{}:{APP_ENVIRONMENT:environment},compiled),before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);
+  await(via==="event"?h.run():h.retry());assertPauseUnchanged(h,before,cells);
+ });
+}
+for(const compiled of [false,true]){
+ await test(`sheet pause ignores event payload ${compiled?"compiled":"source"}`,async()=>{const h=harness({},compiled),before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);await h.rawEvent({get data(){assert.fail("paused worker inspected event payload");}});assertPauseUnchanged(h,before,cells);});
+ await test(`sheet active normal ${compiled?"compiled":"source"}`,async()=>{const h=harness({APP_ENVIRONMENT:"staging",LKC_SHEET_WRITE_MODE:"active"},compiled);await h.run();assert.equal(h.queue().status,"completed");assert.equal(h.job().preContactSyncPending,false);assert.equal(h.writes.length,1);});
+ await test(`sheet active retry ${compiled?"compiled":"source"}`,async()=>{const h=harness({APP_ENVIRONMENT:"staging",LKC_SHEET_WRITE_MODE:"active"},compiled);Object.assign(h.queue(),{status:"retry_wait",retryAt:Timestamp.fromMillis(0)});await h.retry();assert.equal(h.queue().status,"pending");await h.run();assert.equal(h.queue().status,"completed");assert.equal(h.writes.length,1);});
+}
 function assertVerificationHeld(h,writeCount=0){
  assert.equal(h.queue().status,"blocked");assert.equal(h.queue().errorType,"verification_required");assert.equal(h.queue().writeVerificationRequired,true);assert.equal(h.queue().retryAt,null);
  assert.equal(h.writes.length,writeCount);assert.equal(h.job().preContactSyncPending,true);

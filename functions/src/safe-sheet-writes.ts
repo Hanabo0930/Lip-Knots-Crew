@@ -1,3 +1,4 @@
+import { sheetWriteExecutionPaused } from "./sheet-write-control";
 import { caseMailSubmissionContext } from "./submission-integrity";
 import { caseMailPreparationHeld } from "./case-mail-preparation-core";
 import { createHash, randomUUID } from "node:crypto";
@@ -29,6 +30,8 @@ type Mapping = {
 };
 
 export const processSafeSheetWrite = onDocumentWritten("sheetSyncQueue/{queueId}", async event => {
+  // claim・計測より前に停止し、依頼の状態や試行回数を保持する。
+  if (sheetWriteExecutionPaused()) return;
   const after = event.data?.after;
   if (!after?.exists || after.data()?.status !== "pending") return;
   // 遅延イベントの本文ではなく、transactionで獲得した最新の依頼を使う。
@@ -54,6 +57,8 @@ export const processSafeSheetWrite = onDocumentWritten("sheetSyncQueue/{queueId}
 });
 
 export const retrySafeSheetWrites = onSchedule({ schedule: "every 5 minutes", timeZone: "Asia/Tokyo", timeoutSeconds: 300 }, async () => {
+  // 停止中は再試行の予約変更や期限切れ処理も行わない。
+  if (sheetWriteExecutionPaused()) return;
   const now = Timestamp.now();
   const snap = await db.collection("sheetSyncQueue").where("status", "==", "retry_wait").where("retryAt", "<=", now).limit(100).get();
   // status/retryAtの既存索引を使う。中断した処理を再書込せず、管理者の確認対象へ移す。

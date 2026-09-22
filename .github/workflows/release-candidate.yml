@@ -153,6 +153,14 @@ jobs:
           node scripts/test-staging-shift-integrity-reader.mjs
           node scripts/test-admin-reassignment-locks.mjs
           npm test
+      - name: Validate isolated Firestore business journey
+        timeout-minutes: 5
+        run: |
+          node scripts/test-local-firestore-acceptance-safety.mjs
+          test -x "$JAVA_HOME_21_X64/bin/java"
+          node -e "require('firebase-tools/lib/emulator/downloadableEmulators').downloadIfNecessary('firestore')"
+          emulator_jar=$(node -p "require('firebase-tools/lib/emulator/downloadableEmulators').getDownloadDetails('firestore').downloadPath")
+          node scripts/run-local-firestore-acceptance.mjs --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-firestore
       - name: Publish Functions summary
         if: always()
         run: |

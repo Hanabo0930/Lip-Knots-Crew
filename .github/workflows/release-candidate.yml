@@ -188,6 +188,7 @@ jobs:
         run: |
           npm run test:automation-safety
           python3 scripts/automation/test-hosting-api-readiness.py
+          python3 scripts/automation/test-sheet-worker-migration.py
           npm audit --omit=dev --audit-level=high
       - name: Publish security summary
         if: always()

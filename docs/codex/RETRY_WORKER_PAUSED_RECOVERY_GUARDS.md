@@ -40,17 +40,29 @@ node scripts/automation/test-staging-scope.mjs
 
 - `run-staging-firebase-deploy.cjs`から専用runnerへ分岐する。workflowが確認したmainのSHA、実際のHEAD、追跡ファイルの変更不存在、既存の停止値・3ソースのpinを検査する。固定版`firebase-tools@15.24.0`の正規command runnerを使用し、CLIの認証・権限・設定の検査を維持する。
 - `run-retry-worker-recovery.mjs`は、固定STAGINGのproject番号、Compute既定identity、FAILED Function、Run/Schedulerの不存在、既存のproject Invoker bindingを読む。identityを推測で補わず、読取エラーを不存在として扱わない。生の環境変数やIAM本文は結果へ出力しない。
-- `retry-worker-recovery-core.mjs`は、CLIの計画を1 codebase・1 changeset・retry更新1件に限定する。Function作成・削除、再作成/移行、旧worker混在、IAM変更、API有効化、service account作成、Artifact Registryのcleanup設定変更を拒否する。CLIが要求する既存service agent生成は存在の読取に置き換える。
+- `retry-worker-recovery-core.mjs`は、CLIの計画を1 codebase・1 changeset・retry更新1件に限定する。Function作成・削除、再作成/移行、旧worker混在、IAM変更、API有効化、service account作成、Artifact Registryのcleanup設定変更を拒否する。CLIが要求する既存service agent生成はAPI・IAM構成の照合に置き換える。
 - Invoker処理は既存の無条件project bindingの再読取で代替し、IAM書込みへ転送しない。Function更新後、ACTIVE/Ready、同一revision/宛先/identity、両停止値、公開binding不存在、Invokerチェック有効を確認してからScheduler作成へ進む。shellのHTTP向け公開設定は通らない。
 - Schedulerは固定名・POST・Functionと同じURI・既定identityのOIDCに限定し、不存在を再確認してcreate APIのみを使う。同時作成で競合した場合も既存jobの上書きは行わない。最後にFunction/Run/Schedulerと既存権限を再照合する。
 
 Invokerチェックの判定はCloud Runの`run.googleapis.com/invoker-iam-disabled`設定、Scheduler作成は`POST /v1/{parent}/jobs`を使用する。[Cloud Runのアクセス設定](https://docs.cloud.google.com/run/docs/securing/managing-access)、[Cloud Schedulerのcreate API](https://docs.cloud.google.com/scheduler/docs/reference/rest/v1/projects.locations.jobs/create)
 
-新規93試験は、固定版CLIのFunction/Scheduler変換と合成の送信先を使い、正常な更新1件・Scheduler作成1件、IAM書込0、範囲外拒否、権限変化、競合作成、事後照合失敗、現行allowlistでの拒否を確認する。ネットワーク呼出しは禁止し、実配備・実業務呼出しは0。CIにもこの試験を追加した。
+専用経路導入時の93試験は、固定版CLIのFunction/Scheduler変換と合成の送信先を使い、正常な更新1件・Scheduler作成1件、IAM書込0、範囲外拒否、権限変化、競合作成、事後照合失敗、現行allowlistでの拒否を確認する。ネットワーク呼出しは禁止し、実配備・実業務呼出しは0。CIにもこの試験を追加した。
 
 読取点検で、gcloudの`json(bindings.role,bindings.members,bindings.condition)`が`null`を返し、`spec.template.spec.containers.env`ではコンテナー配列が欠落することを確認した。配列の親を取得する形式へ変更し、IAMは`bindings,etag,version`を保持する。bindingがない有効なサービスpolicyと、読取結果が不明な`null`を区別する。取得情報はメモリ内で検証し、policy本文やコンテナー環境値をログへ出さない。
 
-この実測に基づく合成の再現試験7件を追加し、復旧経路の試験は合計100件。修正前の誤停止と、修正後の停止値・公開binding・条件付き権限・不明policyの検査を確認する。実環境のサービスエージェント読取や有効アクセス確認は別の前提条件であり、取得形式の修正によって権限不足を回避しない。
+この実測に基づく合成の再現試験7件を追加し、取得形式修正時点の復旧経路の試験は合計100件。修正前の誤停止と、修正後の停止値・公開binding・条件付き権限・不明policyの検査を確認する。実環境のサービスエージェント読取や有効アクセス確認は別の前提条件であり、取得形式の修正によって権限不足を回避しない。
+
+## Google管理サービスエージェントの構成検証
+
+Google管理のサービスエージェントは利用者project内に作成されず、直接アクセスできない。そのため通常service accountの直接getを成功条件にしない。[Googleのサービスアカウント種別](https://docs.cloud.google.com/iam/docs/service-account-types#service-agents)
+
+PubSub・Eventarc・Cloud Schedulerについて、固定projectから読んだ番号と対応するservice agent member、正確なserviceAgent roleの無条件binding、有効APIを照合する。権限の欠落・別番号・別principal種別・条件付きbinding・該当するdeleted memberの残存・API無効/不明・読取失敗は停止する。Google管理側のdisabled状態、内部ライフサイクル、IAM deny/PABを含む有効アクセス、実際のOIDC呼出し成功の証明には置き換えない。
+
+API状態は`gcloud services list --enabled`から`config.name,state`を取得する。固定版CLIの`ensureApi.check`には永続キャッシュがあるため、この構成検証では使わない。生成要求の受付時に対象APIとbindingを読み、さらに計画受付・Function更新直前・Scheduler作成前・最終照合で3サービスを読み直す。読み取った直後の外部変更を原子的に防ぐものではない。
+
+生成要求の代替は従来どおりPubSub/Eventarcの2つに限定し、Schedulerの生成は許可しない。`generateServiceIdentity`はCLI互換の完了応答、`generateServiceIdentityAndPoll`はvoidを返す。サービスエージェントの直接get、作成、API有効化、IAM書込へのfallbackはない。Schedulerの既存serviceAgent roleは認証トークンの生成に必要な設定として検証する。[Schedulerの認証仕様](https://docs.cloud.google.com/scheduler/docs/http-target-auth)
+
+今回60件の合成試験を追加し、復旧経路の試験は合計160件。直接getの禁止、3サービスのrole/member/API不一致、deleted member、読取拒否、CLIキャッシュが成功でもAPIが無効なら停止、処理途中の構成消失、最終検証の証明範囲を確認する。最終結果の`serviceAgents: api-and-role-bindings-only`は構成検証のみを表す。workerのallowlistは変更せず、実runnerは引き続きクラウド読取前に配備対象を拒否する。
 
 実配備前には、次を別途満たす必要がある。
 

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import http from "node:http";
 import https from "node:https";
-import { PROJECT, REGION, TARGET, FUNCTION, SERVICE, JOB, assertRecoveryBefore, assertExistingInvoker,
+import { PROJECT, REGION, TARGET, FUNCTION, SERVICE, JOB, assertRecoveryBefore, assertExistingInvoker, assertServiceAgentConfiguration,
   assertRecoveryPlan, assertReadyFunction, assertReadyService, assertScheduler, installRecoveryAdapters } from "./retry-worker-recovery-core.mjs";
 import { loadRecoveryModules, recoveryReader, verifyRecoveryAfter, runRetryWorkerRecovery } from "./run-retry-worker-recovery.mjs";
 const require = createRequire(import.meta.url), root = fileURLToPath(new URL("../../", import.meta.url));
@@ -17,7 +17,15 @@ assert.equal(require(path.join(cliRoot, "package.json")).version, "15.24.0");
 const clone = value => structuredClone(value);
 const context = {projectNumber: "123456789012", identity: "123456789012-compute@developer.gserviceaccount.com", sourceSha: "a".repeat(40)};
 const env = {APP_ENVIRONMENT: "staging", EXPECTED_FIREBASE_PROJECT_ID: PROJECT, LKC_SHEET_WRITE_MODE: "paused", LKC_NOTIFICATION_DELIVERY_MODE: "paused"};
-const policy = {bindings: [{role: "roles/run.invoker", members: [`serviceAccount:${context.identity}`]}]};
+const agents = [
+  {api: "pubsub.googleapis.com", suffix: "gcp-sa-pubsub", role: "roles/pubsub.serviceAgent"},
+  {api: "eventarc.googleapis.com", suffix: "gcp-sa-eventarc", role: "roles/eventarc.serviceAgent"},
+  {api: "cloudscheduler.googleapis.com", suffix: "gcp-sa-cloudscheduler", role: "roles/cloudscheduler.serviceAgent"},
+];
+const enabledServices = agents.map(a => ({config: {name: a.api}, state: "ENABLED"}));
+const agentEmail = a => `service-${context.projectNumber}@${a.suffix}.iam.gserviceaccount.com`;
+const agentBinding = a => ({role: a.role, members: [`serviceAccount:${agentEmail(a)}`]});
+const policy = {bindings: [{role: "roles/run.invoker", members: [`serviceAccount:${context.identity}`]}, ...agents.map(agentBinding)]};
 const endpoint = {id: TARGET, project: PROJECT, region: REGION, platform: "gcfv2", runtime: "nodejs22", entryPoint: TARGET,
   timeoutSeconds: 300, scheduleTrigger: {schedule: "every 5 minutes", timeZone: "Asia/Tokyo"}, environmentVariables: env, serviceAccount: context.identity};
 const plan = {default: {regionalChangesets: {one: {endpointsToCreate: [], endpointsToDelete: [], endpointsToSkip: [], endpointsToUpdate: [{endpoint, unsafe: false}]}}}};
@@ -47,16 +55,18 @@ for (const mutate of [x => x.extra = x.default, x => x.default.rolesToAdd = ["ro
 }
 function harness() {
   const modules = Object.fromEntries(Object.entries(native).map(([key, object]) => [key, typeof object === "function" ? object : Object.fromEntries(Object.getOwnPropertyNames(object).map(k => [k, object[k]]))]));
-  const state = {updates: 0, schedulers: 0, iamWrites: 0, forbidden: 0, policy: clone(policy), fn: clone(fn), service: clone(service), job: null};
+  const state = {updates: 0, schedulers: 0, iamWrites: 0, forbidden: 0, policy: clone(policy), enabledServices: clone(enabledServices), directGets: 0, fn: clone(fn), service: clone(service), job: null};
   for (const [key, names] of Object.entries({run: ["setInvokerCreate", "setInvokerUpdate", "setIamPolicy", "updateService", "replaceService"], resourceManager: ["setIamPolicy", "addServiceAccountToRoles", "addServiceAccountRoles", "removeServiceAccountRoles"], iam: ["createServiceAccount", "deleteServiceAccount", "createServiceAccountKey"], serviceUsage: ["generateServiceIdentity", "generateServiceIdentityAndPoll"], artifacts: ["setCleanupPolicy", "setCleanupPolicies", "updateRepository", "optOutRepository"], gcf: ["createFunction", "deleteFunction"], scheduler: ["deleteJob"]})) {
     for (const name of names) modules[key][name] = async () => { state.forbidden++; if (/Iam|Invoker/.test(name)) state.iamWrites++; };
   }
   modules.ensureApi.check = async () => state.apiEnabled ?? true;
-  modules.iam.getServiceAccount = async (project, email) => ({email, disabled: state.agentDisabled ?? false});
+  modules.iam.getServiceAccount = async () => { state.directGets++; throw Error("DIRECT_SERVICE_AGENT_GET_FORBIDDEN"); };
   modules.gcf.updateFunction = async () => { state.updates++; return {name: "synthetic-operation"}; };
   modules.scheduler.createOrReplaceJob = async () => { state.forbidden++; };
   modules.createScheduler = async value => { if (state.schedulerConflict) throw Error("SCHEDULER_ALREADY_EXISTS_AT_CREATE"); state.schedulers++; state.job = {...value, state: "ENABLED"}; };
-  const read = {fn: async () => state.fn, service: async () => state.service, job: async () => state.job, projectPolicy: async () => state.policy,
+  const read = {fn: async () => state.fn, service: async () => state.service, job: async () => state.job,
+    projectPolicy: async () => { if (state.policyReadError) throw Error("RETRY_METADATA_READ_FAILED"); return state.policy; },
+    enabledServices: async () => { if (state.apiReadError) throw Error("RETRY_METADATA_READ_FAILED"); return state.enabledServices; },
     assertPrivateService: async () => { if (state.public) throw Error("RETRY_PUBLIC_BINDING_FOUND"); }};
   modules.fabricator.applyPlan = async function(value) {
     const ep = value.default.regionalChangesets.one.endpointsToUpdate[0].endpoint;
@@ -83,8 +93,103 @@ await test("concurrent Scheduler creation cannot overwrite", async () => { const
 await test("private Run check gates Scheduler", async () => { const h = harness(); h.state.public = true; await assert.rejects(h.modules.fabricator.applyPlan(plan), /PUBLIC_BINDING_FOUND/); assert.equal(h.state.schedulers, 0); });
 await test("missing API is not enabled", async () => { const h = harness(); h.state.apiEnabled = false; await assert.rejects(h.modules.ensureApi.ensure(PROJECT, "run.googleapis.com"), /API_ENABLEMENT_NOT_ALLOWED/); assert.equal(h.state.forbidden, 0); });
 await test("best effort cannot enable missing API", async () => { const h = harness(); h.state.apiEnabled = false; await assert.rejects(h.modules.ensureApi.bestEffortEnsure(PROJECT, "run.googleapis.com"), /API_ENABLEMENT_NOT_ALLOWED/); });
-await test("agent generate replaced by read", async () => { const h = harness(); assert.equal((await h.modules.serviceUsage.generateServiceIdentity(context.projectNumber, "pubsub.googleapis.com")).done, true); assert.equal(h.state.forbidden, 0); });
-await test("missing agent rejected", async () => { const h = harness(); h.state.agentDisabled = true; await assert.rejects(h.modules.serviceUsage.generateServiceIdentity(context.projectNumber, "pubsub.googleapis.com"), /SERVICE_AGENT_MISSING/); });
+await test("agent generation uses configuration without direct get", async () => {
+  const h = harness();
+  for (const a of agents.slice(0, 2)) {
+    assert.deepEqual(await h.modules.serviceUsage.generateServiceIdentity(context.projectNumber, a.api), {done: true, response: {email: agentEmail(a)}});
+    assert.equal(await h.modules.serviceUsage.generateServiceIdentityAndPoll(context.projectNumber, a.api), undefined);
+  }
+  assert.equal(h.state.directGets, 0); assert.equal(h.state.forbidden, 0);
+});
+await test("missing agent binding rejected", async () => { const h = harness(); h.state.policy.bindings.splice(1, 1); await assert.rejects(h.modules.serviceUsage.generateServiceIdentity(context.projectNumber, "pubsub.googleapis.com"), /SERVICE_AGENT_BINDING_REQUIRED/); });
+// すべて合成値。Google管理エージェントを直接getできなくても、構成照合は可能。
+for (const a of agents) {
+  await test(`exact ${a.api} configuration`, () => assert.equal(assertServiceAgentConfiguration(policy, enabledServices, context, a.api), agentEmail(a)));
+  for (const [name, mutate] of [
+    ["missing", b => b.members = []],
+    ["wrong role", b => b.role = "roles/viewer"],
+    ["wrong project", b => b.members = b.members.map(m => m.replace(context.projectNumber, "999999999999"))],
+    ["wrong principal type", b => b.members = b.members.map(m => m.replace("serviceAccount:", "user:"))],
+    ["deleted", b => b.members = b.members.map(m => `deleted:${m}?uid=123`)],
+    ["conditional", b => b.condition = {expression: "true"}],
+    ["unknown condition", b => b.condition = null],
+    ["malformed members", b => b.members = "unknown"],
+  ]) {
+    await test(`${a.api} rejects ${name} binding`, () => {
+      const value = clone(policy); mutate(value.bindings.find(b => b.role === a.role));
+      assert.throws(() => assertServiceAgentConfiguration(value, enabledServices, context, a.api), /SERVICE_AGENT_/);
+    });
+  }
+  await test(`${a.api} rejects live and deleted bindings together`, () => {
+    const value = clone(policy); value.bindings.push({role: "roles/viewer", members: [`deleted:serviceAccount:${agentEmail(a)}?uid=123`]});
+    assert.throws(() => assertServiceAgentConfiguration(value, enabledServices, context, a.api), /DELETED_BINDING/);
+  });
+  await test(`${a.api} requires API enabled even with correct IAM`, () => {
+    for (const value of [enabledServices.filter(s => s.config.name !== a.api), enabledServices.map(s => s.config.name === a.api ? {...s, state: "DISABLED"} : s), [...enabledServices, {config: {name: a.api}, state: "ENABLED"}]]) {
+      assert.throws(() => assertServiceAgentConfiguration(policy, value, context, a.api), /SERVICE_AGENT_API_REQUIRED/);
+    }
+  });
+}
+for (const value of [null, {}, {bindings: null}, {bindings: [null]}, {bindings: [{role: "roles/viewer", members: [null]}]}]) {
+  await test("unknown service agent policy never passes", () => assert.throws(() => assertServiceAgentConfiguration(value, enabledServices, context, agents[0].api), /SERVICE_AGENT_POLICY_UNKNOWN/));
+}
+for (const value of [null, {}, [null], [{config: {name: agents[0].api}}]]) {
+  await test("unknown API state never passes", () => assert.throws(() => assertServiceAgentConfiguration(policy, value, context, agents[0].api), /SERVICE_API_STATE_UNKNOWN/));
+}
+for (const [number, api] of [["999", agents[0].api], [context.projectNumber, "unknown.googleapis.com"], [context.projectNumber, agents[2].api], [context.projectNumber, "toString"]]) {
+  await test("generation request stays limited to two fixed APIs", async () => {
+    const h = harness(); await assert.rejects(h.modules.serviceUsage.generateServiceIdentity(number, api), /PROJECT_NUMBER_MISMATCH|SERVICE_AGENT_SCOPE_INVALID/);
+    assert.equal(h.state.directGets, 0); assert.equal(h.state.forbidden, 0);
+  });
+}
+for (const error of ["policyReadError", "apiReadError"]) {
+  await test(`${error} never falls back to agent creation`, async () => {
+    const h = harness(); h.state[error] = true;
+    await assert.rejects(h.modules.serviceUsage.generateServiceIdentity(context.projectNumber, agents[0].api), /METADATA_READ_FAILED/);
+    assert.equal(h.state.directGets, 0); assert.equal(h.state.forbidden, 0);
+  });
+}
+await test("cached CLI API success cannot bypass fresh disabled API", async () => {
+  const h = harness(); h.state.apiEnabled = true; h.state.enabledServices = [];
+  await assert.rejects(h.modules.fabricator.applyPlan(clone(plan)), /SERVICE_AGENT_API_REQUIRED/);
+  assert.equal(h.state.updates, 0); assert.equal(h.state.schedulers, 0); assert.equal(h.state.forbidden, 0);
+});
+for (const a of agents) {
+  await test(`missing ${a.api} role blocks plan before writes`, async () => {
+    const h = harness(); h.state.policy.bindings = h.state.policy.bindings.filter(b => b.role !== a.role);
+    await assert.rejects(h.modules.fabricator.applyPlan(clone(plan)), /SERVICE_AGENT_BINDING_REQUIRED/);
+    assert.equal(h.state.updates, 0); assert.equal(h.state.schedulers, 0);
+  });
+}
+await test("role loss after plan blocks Function update", async () => {
+  const h = harness(); await h.modules.fabricator.applyPlan(clone(plan));
+  h.state.policy.bindings = h.state.policy.bindings.filter(b => b.role !== agents[1].role);
+  await assert.rejects(h.modules.gcf.updateFunction(fn), /SERVICE_AGENT_BINDING_REQUIRED/);
+  assert.equal(h.state.updates, 1);
+});
+await test("scheduler role loss blocks scheduler write", async () => {
+  const h = harness(); await h.modules.fabricator.applyPlan(clone(plan));
+  h.state.policy.bindings = h.state.policy.bindings.filter(b => b.role !== agents[2].role);
+  await assert.rejects(h.modules.scheduler.createOrReplaceJob(job), /SERVICE_AGENT_BINDING_REQUIRED/);
+  assert.equal(h.state.schedulers, 1);
+});
+await test("configuration loss blocks successful final verification", async () => {
+  const h = harness(); await h.modules.fabricator.applyPlan(clone(plan)); h.state.enabledServices = [];
+  await assert.rejects(verifyRecoveryAfter(h.read, context), /SERVICE_AGENT_API_REQUIRED/);
+});
+await test("final result explicitly limits service agent proof", async () => {
+  const h = harness(); await h.modules.fabricator.applyPlan(clone(plan));
+  assert.equal((await verifyRecoveryAfter(h.read, context)).serviceAgents, "api-and-role-bindings-only");
+});
+await test("API reader uses uncached fixed project state", () => {
+  let call;
+  const read = recoveryReader(args => { call = args; return JSON.stringify(enabledServices); });
+  assert.deepEqual(read.enabledServices(), enabledServices);
+  assert.deepEqual(call, ["services", "list", "--enabled", `--project=${PROJECT}`, "--format=json(config.name,state)"]);
+});
+for (const stderr of ["PERMISSION_DENIED", "NOT_FOUND", "UNAUTHENTICATED"]) {
+  await test("API read failure remains failure", () => assert.throws(() => recoveryReader(() => { throw {stderr}; }).enabledServices(), /METADATA_READ_FAILED/));
+}
 await test("default identity never guessed", async () => { const h = harness(); assert.equal(await h.modules.compute.getDefaultServiceAccount(context.projectNumber), context.identity); await assert.rejects(h.modules.compute.getDefaultServiceAccount("999"), /PROJECT_NUMBER_MISMATCH/); });
 await test("invoker cannot run before verified plan", async () => { const h = harness(); await assert.rejects(h.modules.run.setInvokerUpdate(PROJECT, SERVICE, [context.identity]), /INVOKER_REQUEST_INVALID/); assert.equal(h.state.iamWrites, 0); });
 for (const args of [["other", SERVICE, [context.identity]], [PROJECT, SERVICE + "other", [context.identity]], [PROJECT, SERVICE, ["public"]], [PROJECT, SERVICE, ["private"]], [PROJECT, SERVICE, [context.identity, "other"]]]) {

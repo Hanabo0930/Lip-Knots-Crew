@@ -114,6 +114,7 @@ jobs:
           node scripts/test-submission-acceptance-result.mjs
           node scripts/test-expense-completion-integrity.mjs
           node scripts/test-safe-sheet-precontact.mjs
+          node scripts/test-sheet-row-creation-pause.mjs
           node scripts/test-emulator-seed-safety.mjs
           node scripts/test-shift-import-lease.mjs
           node scripts/test-staff-import-revocation.mjs

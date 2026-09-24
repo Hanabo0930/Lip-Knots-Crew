@@ -1,3 +1,4 @@
+import { sheetWriteExecutionPaused } from "./sheet-write-control";
 import { createHash } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
@@ -78,6 +79,8 @@ const PreviewSchema = z.object({
 export const processSheetRowCreation = onDocumentWritten(
   "sheetRowCreateQueue/{queueId}",
   async (event) => {
+    // 停止中は依頼の状態変更や原本照合へ進まない。
+    if (sheetWriteExecutionPaused()) return;
     const after = event.data?.after;
     if (!after?.exists) return;
     const queue = after.data() as QueueDocument;
@@ -111,6 +114,8 @@ export const retrySheetRowCreation = onSchedule(
     memory: "1GiB",
   },
   async () => {
+    // 再試行の予約変更も、明示的な有効化まで停止する。
+    if (sheetWriteExecutionPaused()) return;
     const due = await db.collection("sheetRowCreateQueue")
       .where("status", "==", "retry_wait")
       .where("retryAt", "<=", Timestamp.now())

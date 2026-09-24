@@ -1,6 +1,17 @@
 # 定期書戻しworkerの停止固定ガード
 
-この変更は、`retrySafeSheetWrites`を停止状態で復旧するための配備保護を追加する。worker配備許可・allowlist・IAM権限を増やさない。現行の配備コマンドは引き続き両sheet workerを対象外として拒否する。
+## 現行の限定入口
+
+`retrySafeSheetWrites`だけを許可リストへ追加する。通常の確認語では拒否し、`RECOVER_LKC_STAGING_RETRY_PAUSED`、main、単独指定、固定STAGING/リージョンがすべて必要。既存の停止値・ソースpin・専用runnerと保護環境を維持する。旧`processSafeSheetWrite`、IAM公開化、業務キュー再実行、停止解除は対象外。
+
+workflow入力はoperation=deploy、source_ref=main、functions=retrySafeSheetWrites、transfer_mode=preserve、confirmation=RECOVER_LKC_STAGING_RETRY_PAUSED。通常CIに成功した同じコミットを使用する。この入口の存在は、未承認のIAM付与や実配備を自動で許可するものではない。
+
+専用範囲試験13件、停止worker試験72件、復旧経路160件で、別branch・混在対象・重複・通常確認語・停止値の欠落/active/重複を拒否する。実クラウド書込みは合成試験で実施しない。
+
+以下は経路の保護と実配備時の条件。
+
+
+`retrySafeSheetWrites`の停止復旧を専用入口に限定し、旧workerを対象外に保つ。IAM権限はこのコードでは変更しない。
 
 ## 実装された保護
 
@@ -36,7 +47,7 @@ node scripts/automation/test-staging-scope.mjs
 
 ## 実装済みの専用経路と実配備の条件
 
-専用経路は実装済みだが、配備allowlistは変更していない。外側runnerと専用runnerの両方で既存の範囲検査を行い、現在はクラウド読取・配備前にretry対象を拒否する。経路の実装・合成試験成功は、実配備の許可や実環境での復旧成功を意味しない。
+外側runnerと専用runnerの両方で、単独指定・main・専用確認語を検査する。通常確認語や旧workerはクラウド読取前に拒否する。経路の実装・合成試験成功は、実環境での復旧成功を意味しない。
 
 - `run-staging-firebase-deploy.cjs`から専用runnerへ分岐する。workflowが確認したmainのSHA、実際のHEAD、追跡ファイルの変更不存在、既存の停止値・3ソースのpinを検査する。固定版`firebase-tools@15.24.0`の正規command runnerを使用し、CLIの認証・権限・設定の検査を維持する。
 - `run-retry-worker-recovery.mjs`は、固定STAGINGのproject番号、Compute既定identity、FAILED Function、Run/Schedulerの不存在、既存のproject Invoker bindingを読む。identityを推測で補わず、読取エラーを不存在として扱わない。生の環境変数やIAM本文は結果へ出力しない。
@@ -46,7 +57,7 @@ node scripts/automation/test-staging-scope.mjs
 
 Invokerチェックの判定はCloud Runの`run.googleapis.com/invoker-iam-disabled`設定、Scheduler作成は`POST /v1/{parent}/jobs`を使用する。[Cloud Runのアクセス設定](https://docs.cloud.google.com/run/docs/securing/managing-access)、[Cloud Schedulerのcreate API](https://docs.cloud.google.com/scheduler/docs/reference/rest/v1/projects.locations.jobs/create)
 
-専用経路導入時の93試験は、固定版CLIのFunction/Scheduler変換と合成の送信先を使い、正常な更新1件・Scheduler作成1件、IAM書込0、範囲外拒否、権限変化、競合作成、事後照合失敗、現行allowlistでの拒否を確認する。ネットワーク呼出しは禁止し、実配備・実業務呼出しは0。CIにもこの試験を追加した。
+専用経路導入時の93試験は、固定版CLIのFunction/Scheduler変換と合成の送信先を使い、正常な更新1件・Scheduler作成1件、IAM書込0、範囲外拒否、権限変化、競合作成、事後照合失敗、許可範囲外の拒否を確認する。ネットワーク呼出しは禁止し、実配備・実業務呼出しは0。CIにもこの試験を追加した。
 
 読取点検で、gcloudの`json(bindings.role,bindings.members,bindings.condition)`が`null`を返し、`spec.template.spec.containers.env`ではコンテナー配列が欠落することを確認した。配列の親を取得する形式へ変更し、IAMは`bindings,etag,version`を保持する。bindingがない有効なサービスpolicyと、読取結果が不明な`null`を区別する。取得情報はメモリ内で検証し、policy本文やコンテナー環境値をログへ出さない。
 
@@ -62,16 +73,16 @@ API状態は`gcloud services list --enabled`から`config.name,state`を取得�
 
 生成要求の代替は従来どおりPubSub/Eventarcの2つに限定し、Schedulerの生成は許可しない。`generateServiceIdentity`はCLI互換の完了応答、`generateServiceIdentityAndPoll`はvoidを返す。サービスエージェントの直接get、作成、API有効化、IAM書込へのfallbackはない。Schedulerの既存serviceAgent roleは認証トークンの生成に必要な設定として検証する。[Schedulerの認証仕様](https://docs.cloud.google.com/scheduler/docs/http-target-auth)
 
-今回60件の合成試験を追加し、復旧経路の試験は合計160件。直接getの禁止、3サービスのrole/member/API不一致、deleted member、読取拒否、CLIキャッシュが成功でもAPIが無効なら停止、処理途中の構成消失、最終検証の証明範囲を確認する。最終結果の`serviceAgents: api-and-role-bindings-only`は構成検証のみを表す。workerのallowlistは変更せず、実runnerは引き続きクラウド読取前に配備対象を拒否する。
+今回60件の合成試験を追加し、復旧経路の試験は合計160件。直接getの禁止、3サービスのrole/member/API不一致、deleted member、読取拒否、CLIキャッシュが成功でもAPIが無効なら停止、処理途中の構成消失、最終検証の証明範囲を確認する。最終結果の`serviceAgents: api-and-role-bindings-only`は構成検証のみを表す。この構成検証自体はIAMを変更せず、実runnerの専用確認語検査より後に実行する。
 
 実配備前には、次を別途満たす必要がある。
 
 1. 通常CI・main統合後の同一候補SHAについて、現状の失敗/欠落状態、既存identityと権限を再確認し、退避記録をCドライブの非公開作業場所へ保存する。
-2. 限定allowlistと実配備の明示承認を得る。想定する変更はretry Function更新1件、対応Cloud Run service作成1件、Scheduler job作成1件、および正規CLIに伴うソースアップロード・ビルド成果物。旧worker・別Scheduler・IAM拡大は含まない。
+2. 本限定入口を含む変更と実配備の明示承認を確認する。想定する変更はretry Function更新1件、対応Cloud Run service作成1件、Scheduler job作成1件、および正規CLIに伴うソースアップロード・ビルド成果物。旧worker・別Scheduler・IAM拡大は含まない。
 3. Schedulerは作成時にENABLEDとなり得るが、Functionの先頭停止ガードにより書戻し・通知を停止する。Scheduler自体の停止を要求する場合は、その操作も別途承認・実装する。手動起動、業務キュー再実行、停止解除は行わない。
 4. IAM/API/service agent不足、FAILED Functionの削除/再作成、想定外の資源変更が必要なら停止する。途中失敗では既に更新済みのpaused Functionが残り得る。自動削除や旧書込み再開によるロールバックは行わず、状態を再読取して次の対応を判断する。
 
-完了結果は`paused-configuration-verified`であり、設定の照合結果に限定する。IAM deny等を含む有効アクセスや実際のOIDC呼出し成功は証明しない。専用経路は現行allowlistのため実環境では未実行であり、実復旧と旧worker静止の確認は残る。
+完了結果は`paused-configuration-verified`であり、設定の照合結果に限定する。IAM deny等を含む有効アクセスや実際のOIDC呼出し成功は証明しない。専用経路の実復旧と旧worker静止の確認は、合成試験とは別に残る。
 
 onScheduleの配備ではHTTP FunctionとScheduler jobが自動作成される。先頭停止ガードは作成直後から必要となる。[Firebaseの定期実行仕様](https://firebase.google.com/docs/functions/schedule-functions)
 

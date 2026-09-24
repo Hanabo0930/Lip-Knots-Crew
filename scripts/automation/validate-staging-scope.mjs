@@ -75,6 +75,12 @@ export function validatePlan(plan) {
     if (new Set(functions).size !== functions.length) throw new Error("FUNCTION_LIST_HAS_DUPLICATES");
     const rejected = functions.filter((name) => !safetyConfig.allowedFunctions.includes(name));
     if (rejected.length) throw new Error(`FUNCTIONS_NOT_ALLOWED:${rejected.join(",")}`);
+    // 定期workerは専用の確認語・main・単独指定でだけ停止復旧を許可する。
+    if (functions.includes("retrySafeSheetWrites")) {
+      if (sourceRef !== "main" || functions.length !== 1) throw new Error("RETRY_RECOVERY_MAIN_SINGLE_TARGET_REQUIRED");
+      if (plan.confirmation !== safetyConfig.confirmations.retryWorkerRecovery) throw new Error("RETRY_RECOVERY_CONFIRMATION_REJECTED");
+      return { mode, project, region, sourceRef, functions };
+    }
     if (plan.confirmation !== safetyConfig.confirmations.functionsDeploy) {
       throw new Error("FUNCTIONS_CONFIRMATION_REJECTED");
     }

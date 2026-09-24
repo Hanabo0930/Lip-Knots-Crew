@@ -102,13 +102,20 @@ try {
   });
   const runner = fs.readFileSync(path.join(root, 'scripts/automation/run-staging-firebase-deploy.cjs'), 'utf8');
   check(() => { assert.ok(runner.indexOf('assertSheetWorkerRecovery(plan, source)') < runner.indexOf('const cli = resolveCli()')); assert.ok(runner.includes('validatePlan({')); });
-  // 配備許可は増えていない。現行runnerはCLIを起動する前にworker両方を拒否する。
-  for (const name of ['retrySafeSheetWrites', 'processSafeSheetWrite']) {
-    check(() => assert.throws(() => validatePlan({mode: 'functions-deploy', project: plan.project, region: plan.region, sourceRef: 'main', functions: name, confirmation: safetyConfig.confirmations.functionsDeploy}), /FUNCTIONS_NOT_ALLOWED/));
+  // 通常の確認語ではretryを通さず、旧workerは引き続き対象外。
+  for (const [name, expected] of [['retrySafeSheetWrites', /RETRY_RECOVERY_CONFIRMATION_REJECTED/], ['processSafeSheetWrite', /FUNCTIONS_NOT_ALLOWED/]]) {
+    check(() => assert.throws(() => validatePlan({mode: 'functions-deploy', project: plan.project, region: plan.region, sourceRef: 'main', functions: name, confirmation: safetyConfig.confirmations.functionsDeploy}), expected));
     const result = spawnSync(process.execPath, [path.join(root, 'scripts/automation/run-staging-firebase-deploy.cjs')], {encoding: 'utf8', env: {PATH: '', SystemRoot: process.env.SystemRoot ?? '', LKC_PROJECT_ID: plan.project, LKC_REGION: plan.region, LKC_SOURCE_REF: 'main', LKC_FUNCTIONS: name, LKC_CONFIRMATION: safetyConfig.confirmations.functionsDeploy, LKC_SOURCE_DIRECTORY: temp}});
-    check(() => { assert.equal(result.status, 1); assert.match(result.stderr, /FUNCTIONS_NOT_ALLOWED/); assert.doesNotMatch(result.stdout + result.stderr, /synthetic-never-print|PINNED_FIREBASE_CLI_NOT_FOUND/); });
+    check(() => { assert.equal(result.status, 1); assert.match(result.stderr, expected); assert.doesNotMatch(result.stdout + result.stderr, /synthetic-never-print|PINNED_FIREBASE_CLI_NOT_FOUND/); });
   }
-  console.log(JSON.stringify({sheetWorkerRecoveryTests: cases, cloudOperations: false, allowlistExpanded: false}));
+  // 専用確認語でも停止値が不正ならCLI探索前に拒否する。
+  populate();
+  for (const value of [base.replace('LKC_SHEET_WRITE_MODE=paused', 'LKC_SHEET_WRITE_MODE=active'), base.replace('LKC_SHEET_WRITE_MODE=paused\n', ''), base + 'LKC_SHEET_WRITE_MODE=paused\n']) {
+    fs.writeFileSync(dotenv, value);
+    const result = spawnSync(process.execPath, [path.join(root, 'scripts/automation/run-staging-firebase-deploy.cjs')], {encoding: 'utf8', env: {PATH: '', SystemRoot: process.env.SystemRoot ?? '', LKC_PROJECT_ID: plan.project, LKC_REGION: plan.region, LKC_SOURCE_REF: 'main', LKC_FUNCTIONS: 'retrySafeSheetWrites', LKC_CONFIRMATION: safetyConfig.confirmations.retryWorkerRecovery, LKC_SOURCE_DIRECTORY: temp}});
+    check(() => { assert.equal(result.status, 1); assert.match(result.stderr, /SHEET_WORKER_PAUSE_CONFIG_INVALID/); assert.doesNotMatch(result.stdout + result.stderr, /synthetic-never-print|PINNED_FIREBASE_CLI_NOT_FOUND/); });
+  }
+  console.log(JSON.stringify({sheetWorkerRecoveryTests: cases, cloudOperations: false, retryOnlyAllowlisted: true}));
 } finally {
   if (path.dirname(path.resolve(temp)) !== path.resolve(os.tmpdir()) || !path.basename(temp).startsWith('lkc-sheet-worker-')) throw Error('Unexpected temp location');
   fs.rmSync(temp, {recursive: true, force: true});

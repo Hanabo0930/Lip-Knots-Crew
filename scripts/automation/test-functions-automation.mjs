@@ -111,6 +111,7 @@ const expectedFunctions = [
   "submitPilotOutcome",
   "decidePilotExpansion",
   "loginGateway",
+  "retrySafeSheetWrites",
 ];
 
 assert.deepEqual(

@@ -24,6 +24,7 @@
 
 ```text
 node scripts/automation/test-staging-sheet-worker.mjs
+node scripts/automation/test-retry-worker-recovery.mjs
 node scripts/automation/test-functions-automation.mjs
 node scripts/automation/test-staging-notification-pause.mjs
 node scripts/automation/test-notification-auth-guard.mjs
@@ -33,18 +34,28 @@ node scripts/automation/test-staging-scope.mjs
 
 新規試験はソース改変、停止値欠落/重複/未知値、別dotenv、旧worker混在、異なる環境、版固定、実runnerでのallowlist拒否を確認する。合成ファイルを一時ディレクトリに作り、クラウドや実業務APIは呼ばない。
 
-## 限定復旧案と未実装の配備経路
+## 実装済みの専用経路と実配備の条件
 
-将来の明示承認対象は、retry Function 1件、対応Cloud Run service 1件、Firebaseが自動作成するScheduler job 1件に限定する。旧workerや別Schedulerは含めない。
+専用経路は実装済みだが、配備allowlistは変更していない。外側runnerと専用runnerの両方で既存の範囲検査を行い、現在はクラウド読取・配備前にretry対象を拒否する。経路の実装・合成試験成功は、実配備の許可や実環境での復旧成功を意味しない。
 
-現在のshellは定期worker用の配備後分岐を持たず、CLIアダプターも定期workerのInvoker設定を拒否する。このため、allowlistに名前を足すだけでは復旧できない。実配備前には次を順に満たす必要がある。
+- `run-staging-firebase-deploy.cjs`から専用runnerへ分岐する。workflowが確認したmainのSHA、実際のHEAD、追跡ファイルの変更不存在、既存の停止値・3ソースのpinを検査する。固定版`firebase-tools@15.24.0`の正規command runnerを使用し、CLIの認証・権限・設定の検査を維持する。
+- `run-retry-worker-recovery.mjs`は、固定STAGINGのproject番号、Compute既定identity、FAILED Function、Run/Schedulerの不存在、既存のproject Invoker bindingを読む。identityを推測で補わず、読取エラーを不存在として扱わない。生の環境変数やIAM本文は結果へ出力しない。
+- `retry-worker-recovery-core.mjs`は、CLIの計画を1 codebase・1 changeset・retry更新1件に限定する。Function作成・削除、再作成/移行、旧worker混在、IAM変更、API有効化、service account作成、Artifact Registryのcleanup設定変更を拒否する。CLIが要求する既存service agent生成は存在の読取に置き換える。
+- Invoker処理は既存の無条件project bindingの再読取で代替し、IAM書込みへ転送しない。Function更新後、ACTIVE/Ready、同一revision/宛先/identity、両停止値、公開binding不存在、Invokerチェック有効を確認してからScheduler作成へ進む。shellのHTTP向け公開設定は通らない。
+- Schedulerは固定名・POST・Functionと同じURI・既定identityのOIDCに限定し、不存在を再確認してcreate APIのみを使う。同時作成で競合した場合も既存jobの上書きは行わない。最後にFunction/Run/Schedulerと既存権限を再照合する。
 
-1. 同一候補SHA・ソース・停止設定・現状の欠落/失敗状態を確認し、退避記録を非公開の作業場所に保存する。
-2. Schedulerが使う正確なidentityと既存の有効なInvoker権限を読み取る。追加IAMが必要ならそこで停止し、権限を自動拡大しない。
-3. 承認されたidentityだけを扱い、HTTP用の`--no-invoker-iam-check`を実行しない専用配備経路と事後照合を完成させる。これを実装せずallowlistを拡大しない。
-4. 指定対象への限定allowlist、停止状態での配備、必要ならScheduler停止をそれぞれ明示承認の範囲へ含める。通常CI・main統合・既存保護環境を通す。
-5. 配備後は同じソース、ACTIVE/Ready、Function/Runのpaused値、Schedulerの正しい宛先・identity、Invokerチェック有効・公開binding不存在を読み取り確認する。業務キュー再実行・手動起動・停止解除による動作確認は行わない。
-6. FAILED Functionの削除/再作成、追加IAM、想定外の資源変更が要求されたら停止する。失敗時に旧書込みを再開するロールバックは行わない。
+Invokerチェックの判定はCloud Runの`run.googleapis.com/invoker-iam-disabled`設定、Scheduler作成は`POST /v1/{parent}/jobs`を使用する。[Cloud Runのアクセス設定](https://docs.cloud.google.com/run/docs/securing/managing-access)、[Cloud Schedulerのcreate API](https://docs.cloud.google.com/scheduler/docs/reference/rest/v1/projects.locations.jobs/create)
+
+新規93試験は、固定版CLIのFunction/Scheduler変換と合成の送信先を使い、正常な更新1件・Scheduler作成1件、IAM書込0、範囲外拒否、権限変化、競合作成、事後照合失敗、現行allowlistでの拒否を確認する。ネットワーク呼出しは禁止し、実配備・実業務呼出しは0。CIにもこの試験を追加した。
+
+実配備前には、次を別途満たす必要がある。
+
+1. 通常CI・main統合後の同一候補SHAについて、現状の失敗/欠落状態、既存identityと権限を再確認し、退避記録をCドライブの非公開作業場所へ保存する。
+2. 限定allowlistと実配備の明示承認を得る。想定する変更はretry Function更新1件、対応Cloud Run service作成1件、Scheduler job作成1件、および正規CLIに伴うソースアップロード・ビルド成果物。旧worker・別Scheduler・IAM拡大は含まない。
+3. Schedulerは作成時にENABLEDとなり得るが、Functionの先頭停止ガードにより書戻し・通知を停止する。Scheduler自体の停止を要求する場合は、その操作も別途承認・実装する。手動起動、業務キュー再実行、停止解除は行わない。
+4. IAM/API/service agent不足、FAILED Functionの削除/再作成、想定外の資源変更が必要なら停止する。途中失敗では既に更新済みのpaused Functionが残り得る。自動削除や旧書込み再開によるロールバックは行わず、状態を再読取して次の対応を判断する。
+
+完了結果は`paused-configuration-verified`であり、設定の照合結果に限定する。IAM deny等を含む有効アクセスや実際のOIDC呼出し成功は証明しない。専用経路は現行allowlistのため実環境では未実行であり、実復旧と旧worker静止の確認は残る。
 
 onScheduleの配備ではHTTP FunctionとScheduler jobが自動作成される。先頭停止ガードは作成直後から必要となる。[Firebaseの定期実行仕様](https://firebase.google.com/docs/functions/schedule-functions)
 

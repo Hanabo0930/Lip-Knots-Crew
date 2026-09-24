@@ -103,8 +103,12 @@ export function assertReadyService(service, fn, context) {
 }
 export function assertScheduler(job, fn, context, requireState = false) {
   const target = job?.httpTarget;
+  // APIが追加するルート末尾の / だけを許可し、URL全体の正規化はしない。
+  const serviceUri = fn.serviceConfig.uri;
+  const matchesService = target?.uri === serviceUri ||
+    (typeof serviceUri === "string" && !serviceUri.endsWith("/") && target?.uri === `${serviceUri}/`);
   if (job?.name !== JOB || job.schedule !== "every 5 minutes" || job.timeZone !== "Asia/Tokyo" || job.pubsubTarget ||
-      target?.uri !== fn.serviceConfig.uri || target.httpMethod !== "POST" || target.oauthToken || target.body ||
+      !matchesService || target.httpMethod !== "POST" || target.oauthToken || target.body ||
       target.oidcToken?.serviceAccountEmail !== context.identity ||
       (target.oidcToken.audience != null && target.oidcToken.audience !== target.uri) ||
       (requireState && !["ENABLED", "PAUSED"].includes(job.state))) fail("RETRY_SCHEDULER_NOT_VERIFIED");

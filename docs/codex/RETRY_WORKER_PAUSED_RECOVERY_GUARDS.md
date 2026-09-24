@@ -95,3 +95,9 @@ firebase-functionsのonScheduleは未指定の再試行設定も`retryConfig: {}
 空のplain objectだけを許可し、設定値を含むobject、null、配列、他の型、未知のschedule keyは拒否する。CLIのScheduler変換は空のretryConfigを送信内容から除外する。関数名・地域・実行者・停止ソース・単独更新・IAM拒否の条件は維持する。
 
 実SDK→固定CLIのmanifest解析/Backend変換→ガード→固定CLIのFunction/Scheduler変換を回帰試験に追加した。修正前に誤停止を再現し、修正後は合成更新1件・Scheduler作成1件、空retryConfigの送信除外を確認する。値のある再試行設定や未知項目は更新前に拒否する。クラウド呼出し・実配備・ハンドラー呼出しは行わない。
+
+## Scheduler応答のルートURL
+
+Scheduler APIの作成後応答では、宛先URIとOIDC audienceにルート末尾の `/` が追加される場合がある。Functionが返す同じサービスURIとの文字列比較で最終検証が誤停止したため、完全一致に加えて末尾の `/` 一つだけを許可する。パス、クエリ、fragment、明示port、資格情報、別hostなどは正規化せず拒否し、指定されたaudienceはScheduler宛先との完全一致を維持する。
+
+実測応答を合成データにした読み取り専用の事後検証と、宛先の境界条件を回帰試験へ追加する。作成済み資源を再配備するための変更ではなく、FAILEDかつRun/Scheduler欠落という復旧前提も変更しない。設定検証だけで認証成功を断定せず、実際の定期起動結果は別途読み取りで確認する。

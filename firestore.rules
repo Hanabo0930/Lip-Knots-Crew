@@ -24,7 +24,9 @@ service cloud.firestore {
     }
     function activeIdentity() {
       return !exists(/databases/$(database)/documents/authIdentities/$(request.auth.uid)) ||
-        get(/databases/$(database)/documents/authIdentities/$(request.auth.uid)).data.active == true;
+        (get(/databases/$(database)/documents/authIdentities/$(request.auth.uid)).data.active == true &&
+          get(/databases/$(database)/documents/authIdentities/$(request.auth.uid)).data.companyId == companyId() &&
+          get(/databases/$(database)/documents/authIdentities/$(request.auth.uid)).data.staffId == staffId());
     }
     function activeStaff() {
       return isStaff() &&

@@ -17,3 +17,9 @@ node scripts/run-local-firestore-acceptance.mjs --suite rules --java <java21> --
 認証claimは合成値であり、実Auth tokenの署名検証・実ログイン・配備済みRulesを証明しない。クラウドへの配備や実データ変更は行わない。Firestoreルールの成功をStorageルールやサーバーAPI認証の証明へ拡張しない。
 
 [Firebase公式：Firestore Rulesのテスト](https://firebase.google.com/docs/firestore/security/test-rules-emulator)
+
+## 古い認証claimと現在の本人登録
+
+authIdentitiesが存在する場合はactiveだけでなくcompanyId/staffIdの一致も要求する。別所属・別本人へ変更された登録や必要項目のない登録は拒否する。authIdentities未作成の従来互換経路は維持するため、この変更を全利用者の再認証保証とは扱わない。
+
+追加6条件の修正前は、拒否すべき会社/本人不一致と項目欠落の4条件が通過した。修正後は既存31条件と合わせた37条件を実Rulesで検証する。サーバーAPIの認証処理や実Auth署名・トークン失効の検証とは別である。

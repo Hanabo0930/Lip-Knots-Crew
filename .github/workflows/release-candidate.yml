@@ -164,6 +164,7 @@ jobs:
           emulator_jar=$(node -p "require('firebase-tools/lib/emulator/downloadableEmulators').getDownloadDetails('firestore').downloadPath")
           node scripts/run-local-firestore-acceptance.mjs --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-firestore
           node scripts/run-local-firestore-acceptance.mjs --suite rules --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-firestore-rules
+          node scripts/run-local-firestore-acceptance.mjs --suite mail --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-case-mail
       - name: Publish Functions summary
         if: always()
         run: |

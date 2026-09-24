@@ -87,3 +87,11 @@ API状態は`gcloud services list --enabled`から`config.name,state`を取得�
 onScheduleの配備ではHTTP FunctionとScheduler jobが自動作成される。先頭停止ガードは作成直後から必要となる。[Firebaseの定期実行仕様](https://firebase.google.com/docs/functions/schedule-functions)
 
 稼働中の`processSafeSheetWrite`は別工程。新規到着の静止と旧実行の終了を別々に確認する。Cloud Runのtimeout後も処理が続く場合があるため、時間待ちや新revisionへのtraffic切替だけを終了証明にしない。[Cloud Runのtimeout仕様](https://docs.cloud.google.com/run/docs/configuring/request-timeout)
+
+## 実SDKの空の定期再試行設定
+
+firebase-functionsのonScheduleは未指定の再試行設定も`retryConfig: {}`として出力し、固定CLIのmanifest解析・backend変換でも空objectが残る。従来のschedule/timeZoneだけのkey検査では、配備計画の段階で`RETRY_ENDPOINT_SCOPE_INVALID`となった。
+
+空のplain objectだけを許可し、設定値を含むobject、null、配列、他の型、未知のschedule keyは拒否する。CLIのScheduler変換は空のretryConfigを送信内容から除外する。関数名・地域・実行者・停止ソース・単独更新・IAM拒否の条件は維持する。
+
+実SDK→固定CLIのmanifest解析/Backend変換→ガード→固定CLIのFunction/Scheduler変換を回帰試験に追加した。修正前に誤停止を再現し、修正後は合成更新1件・Scheduler作成1件、空retryConfigの送信除外を確認する。値のある再試行設定や未知項目は更新前に拒否する。クラウド呼出し・実配備・ハンドラー呼出しは行わない。

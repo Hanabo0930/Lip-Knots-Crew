@@ -50,7 +50,10 @@ export function assertEndpoint(endpoint, context) {
   if (endpoint?.id !== TARGET || endpoint.project !== PROJECT || endpoint.region !== REGION || endpoint.platform !== "gcfv2" ||
       endpoint.runtime !== "nodejs22" || endpoint.entryPoint !== TARGET || endpoint.timeoutSeconds !== 300 ||
       endpoint.scheduleTrigger?.schedule !== "every 5 minutes" || endpoint.scheduleTrigger?.timeZone !== "Asia/Tokyo" ||
-      Object.keys(endpoint.scheduleTrigger).some(k => !["schedule", "timeZone"].includes(k)) ||
+      Object.keys(endpoint.scheduleTrigger).some(k => !["schedule", "timeZone", "retryConfig"].includes(k)) ||
+      (endpoint.scheduleTrigger.retryConfig !== undefined &&
+        (endpoint.scheduleTrigger.retryConfig === null || typeof endpoint.scheduleTrigger.retryConfig !== "object" ||
+          Object.getPrototypeOf(endpoint.scheduleTrigger.retryConfig) !== Object.prototype || Object.keys(endpoint.scheduleTrigger.retryConfig).length !== 0)) ||
       (endpoint.serviceAccount != null && endpoint.serviceAccount !== context.identity) ||
       ["httpsTrigger", "callableTrigger", "eventTrigger", "taskQueueTrigger", "blockingTrigger"].some(k => endpoint[k] != null) ||
       endpoint.secretEnvironmentVariables?.length) fail("RETRY_ENDPOINT_SCOPE_INVALID");

@@ -21,10 +21,11 @@ async function fixture() {
   const body=Buffer.from(['実施日：'+workDate.replaceAll('-','/'),'クライアント：合成取引先','店舗：合成店舗','メーカー：合成メーカー','メニュー：試食','入店時間：09:30','実施時間：10:00～18:00','人数：1名'].join('\n'));
   const source={rawMessage:{id:'synthetic-message',threadId:'synthetic-thread',internalDate:String(Date.now()),payload:{partId:'0',mimeType:'text/plain',headers:[{name:'From',value:'sender@example.invalid'},{name:'To',value:'info@lipknots.com'},{name:'Subject',value:'新規手配依頼'}],body:{size:body.length,data:body.toString('base64url')}}},documents:[]};
   // Gmail取得だけを合成境界へ置換し、解析と保存・作成は実装本体を使う。
-  const receiver=createCaseMailReceiver(config,{fetch:async request=>{assert.equal(request.messageId,source.rawMessage.id);syntheticFetches++;return structuredClone(source);},parse:analyzeFetchedCaseMail});
+  const hooks={};
+  const receiver=createCaseMailReceiver(config,{fetch:async request=>{assert.equal(request.messageId,source.rawMessage.id);syntheticFetches++;await hooks.afterFetch?.();return structuredClone(source);},parse:analyzeFetchedCaseMail});
   const auth={uid:companyId+'-admin',token:{role:'admin',companyId}};
   const command=(received,operationId='synthetic-operation')=>({mailIntake:{receiptId:received.receiptId,candidateId:received.candidateIds[0],expectedReceiptRevision:received.revision,expectedRevision:1,operationId}});
-  return {companyId,config,source,auth,command,receive:()=>receiver({messageId:source.rawMessage.id}),
+  return {companyId,config,source,auth,command,hooks,receive:()=>receiver({messageId:source.rawMessage.id}),
     create:(received,operationId,user=auth)=>createAdminJobGroup.run({auth:user,data:command(received,operationId)}),
     list:async name=>(await db.collection(name).where('companyId','==',companyId).get()).docs};
 }
@@ -68,6 +69,24 @@ try {
     await db.doc('companyFeatureSettings/'+h.companyId).update({caseMailIntakeEnabled:true});
     await db.doc('automationIngestPrincipals/'+caseMailRecordKey(h.companyId,h.config.uid)).update({active:false});
     await assert.rejects(h.receive(),e=>e.code==='failed-precondition');assert.equal(syntheticFetches,before);assert.equal((await h.list('caseMailIntakeReceipts')).length,0);
+  });
+  await test('取得中に受信停止へ変わった場合は再確認して保存拒否',async()=>{
+    const h=await fixture();h.hooks.afterFetch=()=>db.doc('companyFeatureSettings/'+h.companyId).update({caseMailIntakeEnabled:false});
+    await assert.rejects(h.receive(),e=>e.code==='failed-precondition');
+    for(const name of ['caseMailIntakeReceipts','caseMailIntakeCandidates','jobs','auditLogs'])assert.equal((await h.list(name)).length,0,name);
+  });
+  await test('登録後の原文変更は案件を増やさず旧内容保持・募集保留へ遷移',async()=>{
+    const h=await fixture(),received=await h.receive();await h.create(received);
+    const original=(await h.list('jobs'))[0],before=original.data();
+    const body=Buffer.from(h.source.rawMessage.payload.body.data,'base64url').toString('utf8').replace('合成店舗','変更後の合成店舗');
+    h.source.rawMessage.payload.body={size:Buffer.byteLength(body),data:Buffer.from(body).toString('base64url')};
+    const changed=await h.receive();assert.equal(changed.status,'review');assert.equal(changed.revision,received.revision+1);
+    const current=(await original.ref.get()).data();
+    for(const key of ['caseId','workDate','storeName','groupId','mailIntake'])assert.deepEqual(current[key],before[key],key);
+    assert.equal(current.publishable,false);assert.equal(current.recruitmentStopped,true);assert.equal(current.mailIntakeReviewRequired,true);
+    await assert.rejects(h.create(changed,'operation-changed'),e=>e.code==='failed-precondition');
+    const replay=await h.receive();assert.equal(replay.replayed,true);assert.equal(replay.revision,changed.revision);
+    assert.equal((await h.list('jobs')).length,1);assert.equal((await h.list('sheetRowCreateQueue')).length,1);assert.equal((await h.list('auditLogs')).length,3);
   });
 } finally {
   await db.terminate();const stats=network.stats();network.restore();

@@ -38,6 +38,33 @@ const job = {name: JOB, state: "ENABLED", schedule: "every 5 minutes", timeZone:
 const before = {...context, fn: {...fn, state: "FAILED", serviceConfig: {}}, service: null, job: null, projectPolicy: policy};
 async function test(name, callback) { try { await callback(); cases++; } catch (error) { throw Error(name + ": " + error.message); } }
 await test("missing recovery baseline", () => assertRecoveryBefore(before));
+// Scheduler APIが付与するルート末尾の / を、別パスへの許可と区別する。
+await test("Scheduler API root slash response passes read-only verification", async () => {
+  const h = harness(); h.state.job = clone(job);
+  h.state.job.httpTarget.uri += "/";
+  h.state.job.httpTarget.oidcToken.audience = h.state.job.httpTarget.uri;
+  const result = await verifyRecoveryAfter(h.read, context);
+  assert.equal(result.retryRecovery, "paused-configuration-verified");
+  assert.equal(h.state.updates, 0); assert.equal(h.state.schedulers, 0); assert.equal(h.state.forbidden, 0);
+});
+for (const suffix of ["//", "/other", "/../", "/?x=1", "/#fragment", ":443/", ".other.invalid/", "/%2f", "\\", " "]) {
+  await test("Scheduler rejects non-root or rewritten destination " + suffix, () => {
+    const value = clone(job); value.httpTarget.uri += suffix;
+    value.httpTarget.oidcToken.audience = value.httpTarget.uri;
+    assert.throws(() => assertScheduler(value, fn, context, true), /RETRY_SCHEDULER_NOT_VERIFIED/);
+  });
+}
+await test("Scheduler root slash keeps exact audience requirement", () => {
+  const value = clone(job); value.httpTarget.uri += "/";
+  value.httpTarget.oidcToken.audience = fn.serviceConfig.uri;
+  assert.throws(() => assertScheduler(value, fn, context, true), /RETRY_SCHEDULER_NOT_VERIFIED/);
+});
+await test("Scheduler rejects credentials even for the same hostname", () => {
+  const value = clone(job); value.httpTarget.uri = value.httpTarget.uri.replace("https://", "https://user@");
+  value.httpTarget.oidcToken.audience = value.httpTarget.uri;
+  assert.throws(() => assertScheduler(value, fn, context, true), /RETRY_SCHEDULER_NOT_VERIFIED/);
+});
+
 for (const mutate of [x => x.fn.state = "ACTIVE", x => x.fn.name += "other", x => x.fn.buildConfig.runtime = "nodejs20", x => x.fn.environment = "GEN_1", x => x.fn.serviceConfig.revision = "old", x => x.service = {}, x => x.job = {}, x => x.projectNumber = "other", x => x.identity = "other@example.invalid", x => x.projectPolicy.bindings = []]) {
   await test("reject mismatched baseline", () => { const x = clone(before); mutate(x); assert.throws(() => assertRecoveryBefore(x)); });
 }

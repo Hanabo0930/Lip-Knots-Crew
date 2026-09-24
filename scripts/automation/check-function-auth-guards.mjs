@@ -1168,6 +1168,8 @@ function checkSendTestPush() {
 
 function checkProcessNotificationQueue() {
   const source = sourceFile("functions/src/notifications.ts");
+  const core = sourceFile("functions/src/notification-core.ts");
+  const pause = core.match(/export function notificationDeliveryPaused\(\): boolean \{([^}]*)\}/)?.[1]?.replace(/\s+/g, "") ?? "";
   const block = functionBlock(source, "processNotificationQueue");
   const dispatcherStart = source.indexOf("async function dispatchQueueDocument");
   const dispatcherEnd = source.indexOf("async function bundleQuietNotifications");
@@ -1175,11 +1177,8 @@ function checkProcessNotificationQueue() {
     ? ""
     : source.slice(dispatcherStart, dispatcherEnd < 0 ? source.length : dispatcherEnd);
   const checks = {
-    deliveryPause: [
-      'const mode = process.env.LKC_NOTIFICATION_DELIVERY_MODE;',
-      'if (mode !== undefined && mode !== "active") return true;',
-      'return process.env.APP_ENVIRONMENT === "staging" && mode !== "active";',
-    ].every(text => source.includes(text))
+    deliveryPause: pause === 'constmode=process.env.LKC_NOTIFICATION_DELIVERY_MODE;if(mode!==undefined&&mode!=="active")returntrue;returnprocess.env.APP_ENVIRONMENT==="staging"&&mode!=="active";'
+      && /import \{ notificationDeliveryPaused \} from "\.\/notification-core";/.test(source)
       && /async \(event\) => \{\s*if \(notificationDeliveryPaused\(\)\) return;/.test(block)
       && /\): Promise<void> \{\s*if \(notificationDeliveryPaused\(\)\) return;/.test(dispatcher),
     exactEventTrigger: /onDocumentCreated\s*\(\s*"notificationQueue\/\{queueId\}"/.test(block),

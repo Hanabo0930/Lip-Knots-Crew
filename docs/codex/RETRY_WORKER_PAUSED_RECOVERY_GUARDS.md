@@ -48,6 +48,10 @@ Invokerチェックの判定はCloud Runの`run.googleapis.com/invoker-iam-disab
 
 新規93試験は、固定版CLIのFunction/Scheduler変換と合成の送信先を使い、正常な更新1件・Scheduler作成1件、IAM書込0、範囲外拒否、権限変化、競合作成、事後照合失敗、現行allowlistでの拒否を確認する。ネットワーク呼出しは禁止し、実配備・実業務呼出しは0。CIにもこの試験を追加した。
 
+読取点検で、gcloudの`json(bindings.role,bindings.members,bindings.condition)`が`null`を返し、`spec.template.spec.containers.env`ではコンテナー配列が欠落することを確認した。配列の親を取得する形式へ変更し、IAMは`bindings,etag,version`を保持する。bindingがない有効なサービスpolicyと、読取結果が不明な`null`を区別する。取得情報はメモリ内で検証し、policy本文やコンテナー環境値をログへ出さない。
+
+この実測に基づく合成の再現試験7件を追加し、復旧経路の試験は合計100件。修正前の誤停止と、修正後の停止値・公開binding・条件付き権限・不明policyの検査を確認する。実環境のサービスエージェント読取や有効アクセス確認は別の前提条件であり、取得形式の修正によって権限不足を回避しない。
+
 実配備前には、次を別途満たす必要がある。
 
 1. 通常CI・main統合後の同一候補SHAについて、現状の失敗/欠落状態、既存identityと権限を再確認し、退避記録をCドライブの非公開作業場所へ保存する。

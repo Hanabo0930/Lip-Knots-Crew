@@ -30,7 +30,7 @@ for(const changes of [{project:"other"},{region:"us-central1"},{functions:[]},{f
  assert.throws(()=>installInvokerAdapter({setInvokerCreate(){}},{...plan,...changes}),/INVALID_INVOKER_PLAN/);cases++;
 }
 assert.throws(()=>installInvokerAdapter({},plan),/CLI_INVOKER_CONTRACT_CHANGED/);cases++;
-for(const name of ["finalizeStagedUpload","processNotificationQueue"]){
+for(const name of ["finalizeStagedUpload","processNotificationQueue","retrySafeSheetWrites","processSafeSheetWrite"]){
  const mock={setInvokerCreate(){iamWrites++;}};installInvokerAdapter(mock,{...plan,functions:[name]});
  await assert.rejects(mock.setInvokerCreate(plan.project,"projects/"+plan.project+"/locations/"+plan.region+"/services/"+name.toLowerCase(),["public"]));cases++;
 }

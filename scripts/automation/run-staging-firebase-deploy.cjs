@@ -11,7 +11,7 @@ function installInvokerAdapter(run, plan, log = console.log) {
     || !Array.isArray(plan.functions) || !plan.functions.length
     || plan.functions.some(name => !/^[A-Za-z][A-Za-z0-9]*$/.test(name))) throw Error("INVALID_INVOKER_PLAN");
   if (typeof run.setInvokerCreate !== "function") throw Error("CLI_INVOKER_CONTRACT_CHANGED");
-  const services = new Set(plan.functions.filter(name => !["finalizeStagedUpload", "processNotificationQueue"].includes(name)).map(name => name.toLowerCase()));
+  const services = new Set(plan.functions.filter(name => !["finalizeStagedUpload", "processNotificationQueue", "retrySafeSheetWrites", "processSafeSheetWrite"].includes(name)).map(name => name.toLowerCase()));
   run.setInvokerCreate = async (projectId, serviceName, invokers) => {
     const prefix = "projects/" + plan.project + "/locations/" + plan.region + "/services/";
     if (projectId !== plan.project || typeof serviceName !== "string" || !serviceName.startsWith(prefix)
@@ -49,6 +49,8 @@ async function main() {
   if (!fs.statSync(path.join(source, "firebase.json")).isFile()) throw Error("INVALID_SOURCE_DIRECTORY");
   const {assertNotificationDeliveryPaused} = await import(pathToFileURL(path.join(__dirname, "validate-staging-notification-pause.mjs")).href);
   assertNotificationDeliveryPaused(plan, source);
+  const {assertSheetWorkerRecovery} = await import(pathToFileURL(path.join(__dirname, "validate-staging-sheet-worker.mjs")).href);
+  assertSheetWorkerRecovery(plan, source);
   const cli = resolveCli();
   const run = require(path.join(cli.root, "lib/gcp/run.js"));
   installInvokerAdapter(run, plan);

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import process from "node:process";
+import { assertRetryWorkerSource } from "./validate-staging-sheet-worker.mjs";
 
 function valueAfter(flag, fallback = "") {
   const index = process.argv.indexOf(flag);
@@ -20,6 +21,7 @@ const requestedFunctions = parseCsv(
   valueAfter("--functions", "requestStaffLoginLink,getSubmissionProcessingStatus,driveFilePreview"),
 );
 const supportedFunctions = new Set([
+  "retrySafeSheetWrites",
   "listCaseMailReceipts",
   "getCaseMailReceipt",
   "getCaseMailTargetPreview",
@@ -1419,6 +1421,10 @@ const checkers = {
   processNotificationQueue: checkProcessNotificationQueue,
 };
 
+checkers.retrySafeSheetWrites = () => {
+  try { assertRetryWorkerSource(sourceFile); return true; } catch { return false; }
+};
+
 const results = requestedFunctions.map((name) => ({
   name,
   passed: checkers[name](),
@@ -1430,10 +1436,12 @@ const appCheckEnforced = /enforceAppCheck\s*:\s*true/.test(loadedSource);
 console.log(`SOURCE_REF=${ref}`);
 console.log(`SOURCE_GUARD_FUNCTIONS=${requestedFunctions.join(",")}`);
 for (const { name, passed } of results) {
-  console.log(`APP_LEVEL_AUTH_${name}=${passed ? "PASS" : "FAIL"}`);
+  const label = name === "retrySafeSheetWrites" ? "SCHEDULED_SOURCE" : "APP_LEVEL_AUTH";
+  console.log(`${label}_${name}=${passed ? "PASS" : "FAIL"}`);
 }
 console.log(`APP_CHECK_ENFORCED=${appCheckEnforced ? "true" : "false"}`);
 console.log("APP_CHECK_HANDLING=Firebase Auth, company boundaries, user-owned push tokens, scoped preview tokens, or trusted event identity checks are enforced by function type.");
+if (requestedFunctions.includes("retrySafeSheetWrites")) console.log("SCHEDULED_RUNTIME_IAM=NOT_VERIFIED_BY_SOURCE_GUARD");
 console.log(`SOURCE_GUARD_STATUS=${allPass ? "PASS" : "FAIL"}`);
 
 if (requirePass && !allPass) process.exitCode = 1;

@@ -31,9 +31,21 @@ for(const changes of [{project:"other"},{region:"us-central1"},{functions:[]},{f
 }
 assert.throws(()=>installInvokerAdapter({},plan),/CLI_INVOKER_CONTRACT_CHANGED/);cases++;
 for(const name of ["finalizeStagedUpload","processNotificationQueue","retrySafeSheetWrites","processSafeSheetWrite"]){
- const mock={setInvokerCreate(){iamWrites++;}};installInvokerAdapter(mock,{...plan,functions:[name]});
+ const mock={setInvokerCreate(){iamWrites++;},setInvokerUpdate(){iamWrites++;}};installInvokerAdapter(mock,{...plan,functions:[name]});
  await assert.rejects(mock.setInvokerCreate(plan.project,"projects/"+plan.project+"/locations/"+plan.region+"/services/"+name.toLowerCase(),["public"]));cases++;
 }
+for(const name of ["retrySafeSheetWrites","processSafeSheetWrite"]){
+ const mock={setInvokerCreate(){iamWrites++;},setInvokerUpdate(){iamWrites++;}};
+ installInvokerAdapter(mock,{...plan,functions:[name]});
+ for(const invokers of [["public"],["synthetic-scheduler@example.invalid"],["private"]]){
+  await assert.rejects(mock.setInvokerUpdate(plan.project,"projects/"+plan.project+"/locations/"+plan.region+"/services/"+name.toLowerCase(),invokers),/SHEET_WORKER_INVOKER_UPDATE_NOT_AUTHORIZED/);cases++;
+ }
+ assert.throws(()=>installInvokerAdapter({setInvokerCreate(){}},{...plan,functions:[name]}),/CLI_INVOKER_CONTRACT_CHANGED/);cases++;
+}
+const untouchedUpdate=()=>{};
+const ordinary={setInvokerCreate(){},setInvokerUpdate:untouchedUpdate};
+installInvokerAdapter(ordinary,plan);
+assert.equal(ordinary.setInvokerUpdate,untouchedUpdate);cases++;
 const base=path.resolve("synthetic-package"),root=path.join(base,"firebase-tools"),binary=path.join(root,"lib","bin","firebase.js");
 function io(version=VERSION,name="firebase-tools",target=binary){return {existsSync:()=>true,realpathSync:()=>target,readFileSync:()=>JSON.stringify({name,version})};}
 assert.deepEqual(resolveCli(base,io()),{root,binary});cases++;

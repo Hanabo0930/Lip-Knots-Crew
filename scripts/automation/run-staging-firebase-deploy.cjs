@@ -11,7 +11,13 @@ function installInvokerAdapter(run, plan, log = console.log) {
     || !Array.isArray(plan.functions) || !plan.functions.length
     || plan.functions.some(name => !/^[A-Za-z][A-Za-z0-9]*$/.test(name))) throw Error("INVALID_INVOKER_PLAN");
   if (typeof run.setInvokerCreate !== "function") throw Error("CLI_INVOKER_CONTRACT_CHANGED");
-  const services = new Set(plan.functions.filter(name => !["finalizeStagedUpload", "processNotificationQueue", "retrySafeSheetWrites", "processSafeSheetWrite"].includes(name)).map(name => name.toLowerCase()));
+  const sheetWorkers = ["retrySafeSheetWrites", "processSafeSheetWrite"];
+  // 定期workerは更新時もCLIがIAMを設定する。作成経路の除外だけでは不十分。
+  if (plan.functions.some(name => sheetWorkers.includes(name))) {
+    if (typeof run.setInvokerUpdate !== "function") throw Error("CLI_INVOKER_CONTRACT_CHANGED");
+    run.setInvokerUpdate = async () => { throw Error("SHEET_WORKER_INVOKER_UPDATE_NOT_AUTHORIZED"); };
+  }
+  const services = new Set(plan.functions.filter(name => !["finalizeStagedUpload", "processNotificationQueue", ...sheetWorkers].includes(name)).map(name => name.toLowerCase()));
   run.setInvokerCreate = async (projectId, serviceName, invokers) => {
     const prefix = "projects/" + plan.project + "/locations/" + plan.region + "/services/";
     if (projectId !== plan.project || typeof serviceName !== "string" || !serviceName.startsWith(prefix)

@@ -7,7 +7,7 @@
 - Functions配備用dotenvに`LKC_SHEET_WRITE_MODE=paused`を固定出力する。通知停止も維持し、解除用inputは追加しない。
 - `validate-staging-sheet-worker.mjs`をFirebase CLI起動前に実行する。retry単独、固定STAGING/リージョン、停止値・通知値の完全一致、重複・不足・別dotenvの不存在を確認する。
 - `processSafeSheetWrite`を含む計画は、旧実行の静止が未証明として拒否する。
-- 定期workerをHTTP callable向けのInvoker公開化アダプターから明示的に除外する。公開化要求もprivate identity要求も既存IAM処理へ転送しない。
+- 定期workerをHTTP callable向けのInvoker公開化アダプターから明示的に除外する。作成時の公開化要求・private identity要求を既存IAM処理へ転送せず、workerを含む計画のInvoker更新経路も拒否する。
 - workflowの検査ジョブが確認したコミットSHAを出力し、配備ジョブはそのSHAをcheckoutする。ビルド前にもHEADを照合する。
 
 ## ソースの検証範囲

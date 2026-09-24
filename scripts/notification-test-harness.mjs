@@ -7,8 +7,8 @@ const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const { Timestamp: RealTimestamp } = require('firebase-admin/firestore');
 
-export function setup(at = '2026-09-11T21:59:00+09:00', environment = {}) {
-  const state = { now: Date.parse(at), records: new Map(), sent: [], metrics: [], revokedUids: [], transactionRetries: 0, operational: true, failSend: false, errors: [], suppressExpectedErrors: false };
+export function setup(at = '2026-09-11T21:59:00+09:00', environment = {}, compiled = false) {
+  const state = { queryReads: 0, now: Date.parse(at), records: new Map(), sent: [], metrics: [], revokedUids: [], transactionRetries: 0, operational: true, failSend: false, errors: [], suppressExpectedErrors: false };
   class Clock extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
     static now() { return state.now; }
@@ -32,6 +32,7 @@ export function setup(at = '2026-09-11T21:59:00+09:00', environment = {}) {
     orderBy: (key, direction) => query(name, filters, limit, [key, direction], after),
     startAfter: doc => query(name, filters, limit, order, doc.ref.path),
     get: async () => {
+      state.queryReads++;
       if (name === 'pushTokens') state.onResolve?.();
       let entries = [...state.records].filter(([path, data]) => path.startsWith(name + '/') && filters.every(([key, op, value]) => op === '==' ? scalar(data[key]) === scalar(value) : op === '<=' ? scalar(data[key]) <= scalar(value) : op === '>=' ? scalar(data[key]) >= scalar(value) : assert.fail('Unsupported operator ' + op)));
       entries.sort((a, b) => (order ? (scalar(a[1][order[0]]) - scalar(b[1][order[0]])) * (order[1] === 'desc' ? -1 : 1) : 0) || a[0].localeCompare(b[0]));
@@ -82,7 +83,8 @@ export function setup(at = '2026-09-11T21:59:00+09:00', environment = {}) {
     assert.ok(['./case-mail-preparation-core', './assignment-preparation-core', './netprint-state-core', './sheet-write-core', './resubmissions', './submission-integrity', './operational-reminder', './notification-core', './notifications', './notification-time', './japan-business-day', './push-delivery', './devices', './push-tokens', './utils', './case-id', './device-authentication', './reminder-scheduler', './staff-tasks', './task-core'].includes(name), name);
     if (modules[name]) return modules[name];
     const exports = {}; modules[name] = exports;
-    runInNewContext(ts.transpileModule(fs.readFileSync('functions/src/' + name.slice(2) + '.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, require: load, Date: Clock, console: moduleConsole, process: { env: { ...environment } } });
+    const source = fs.readFileSync('functions/' + (compiled ? 'lib/' : 'src/') + name.slice(2) + (compiled ? '.js' : '.ts'), 'utf8');
+    runInNewContext(compiled ? source : ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, require: load, Date: Clock, console: moduleConsole, process: { env: { ...environment } } });
     return exports;
   }
   const core = load('./notification-core'), worker = load('./notifications');

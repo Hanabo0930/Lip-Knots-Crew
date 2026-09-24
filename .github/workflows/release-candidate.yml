@@ -123,6 +123,7 @@ jobs:
           node scripts/test-notification-delivery.mjs
           node scripts/test-notification-delivery-pause.mjs
           node scripts/test-precontact-reminder-readiness.mjs
+          node scripts/test-reminder-generation-pause.mjs
           node scripts/automation/test-notification-auth-guard.mjs
           node scripts/automation/test-staging-notification-pause.mjs
           node scripts/automation/test-staging-sheet-worker.mjs

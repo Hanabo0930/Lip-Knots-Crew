@@ -4,6 +4,13 @@ import { db } from "./firebase";
 import type { OperationalReminderContext } from "./operational-reminder";
 import { applyQuietHours } from "./notification-time";
 
+// 定期生成と送信に同じ停止判定を適用し、設定誤りでも処理を進めない。
+export function notificationDeliveryPaused(): boolean {
+  const mode = process.env.LKC_NOTIFICATION_DELIVERY_MODE;
+  if (mode !== undefined && mode !== "active") return true;
+  return process.env.APP_ENVIRONMENT === "staging" && mode !== "active";
+}
+
 export type NotificationTarget =
   | { targetStaffId: string; targetRole?: never; targetUid?: never }
   | { targetRole: "admin"; targetStaffId?: never; targetUid?: never }

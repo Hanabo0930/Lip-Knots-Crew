@@ -262,6 +262,6 @@ await test("service policy projection preserves public members", () => {
 await test("null policy remains unknown, never private", () => {
   assert.throws(() => projectedMetadataReader({servicePolicy: null}).assertPrivateService(), /RUN_POLICY_UNKNOWN/);
 });
-await test("live runner still rejects unchanged allowlist first", async () => { await assert.rejects(runRetryWorkerRecovery({plan: {project: PROJECT, region: REGION, sourceRef: "main", functions: [TARGET]}, source: root, sourceSha: context.sourceSha, cliRoot}, {read: {before() { assert.fail("must not read cloud"); }}}), /FUNCTIONS_NOT_ALLOWED/); });
+await test("live runner requires dedicated recovery confirmation before cloud", async () => { await assert.rejects(runRetryWorkerRecovery({plan: {project: PROJECT, region: REGION, sourceRef: "main", functions: [TARGET]}, source: root, sourceSha: context.sourceSha, cliRoot}, {read: {before() { assert.fail("must not read cloud"); }}}), /RETRY_RECOVERY_CONFIRMATION_REJECTED/); });
 assert.equal(network, 0);
-console.log(JSON.stringify({retryWorkerRecoveryTests: cases, cloudCalls: network, realDeployments: 0, allowlistExpanded: false}));
+console.log(JSON.stringify({retryWorkerRecoveryTests: cases, cloudCalls: network, realDeployments: 0, retryOnlyAllowlisted: true}));

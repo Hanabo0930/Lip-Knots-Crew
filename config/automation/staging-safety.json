@@ -96,7 +96,8 @@
     "getProductionSloDashboard",
     "submitPilotOutcome",
     "decidePilotExpansion",
-    "loginGateway"
+    "loginGateway",
+    "retrySafeSheetWrites"
   ],
   "allowedHostingTargets": [
     "staff",
@@ -121,6 +122,7 @@
     "functionsDeploy": "DEPLOY_LKC_STAGING_FUNCTIONS",
     "gmailSmoke": "SEND_LKC_STAGING_GMAIL_SMOKE",
     "hostingPromote": "PROMOTE_LKC_STAGING_HOSTING",
-    "wifBootstrap": "BOOTSTRAP_LKC_STAGING_WIF"
+    "wifBootstrap": "BOOTSTRAP_LKC_STAGING_WIF",
+    "retryWorkerRecovery": "RECOVER_LKC_STAGING_RETRY_PAUSED"
   }
 }

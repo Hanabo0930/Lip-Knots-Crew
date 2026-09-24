@@ -329,3 +329,10 @@ Standing completion authorization includes the ten admin core callables listed a
 - 外部連携15 API（getAutomationRegistry/saveAutomationRegistry/cancelAutomationRegistryAttempt/listHeldMailApplications/getHeldMailApplication/recheckHeldMailApplication/cancelHeldMailApplicationReview/previewCaseMailCampaignRegistration/registerCaseMailCampaign/cancelCaseMailCampaignRegistration/getCaseMailImportSnapshot/listAutomationNoticeReceipts/getAutomationNoticeHandoff/receiveCaseMailApplication/receiveAutomationNoticeReceipt）を、正式CI/通常マージ/保護環境経由のSTAGING限定配備へ含める。初回callableの公開IAM作成要求は固定版CLIアダプターで対象プロジェクト/リージョン/指定関数/public単独を照合し、IAMを書かず既存のCloud Run設定・公開binding不存在検証へ委ねる。アプリ内認証は必須。mainのfirestore.indexes.jsonと完全一致するautomationApplicationReceipts（companyId/route/__name__ ASC）とautomationNoticeReceipts（companyId/current.jobId/__name__ ASC）のCOLLECTION索引2定義のみ不足時に作成可能。索引変更/削除、Rules、実業務文書更新、実受信/実送信、原本書込、Productionは対象外。受付/転送pausedを維持する。
 
 - 初期設定・招待・月作成・GAS監査の12 HTTP APIも既存の完成包括承認に基づくSTAGING限定反映へ含める。正式CI/通常マージ/保護環境を維持し、旧配備物を退避する。配備後は未認証拒否のみ確認し、招待の実送信、実月タブ作成、原本変更、GAS実配備、業務文書操作、本番アクセスは行わない。転送pausedを維持する。
+
+## 停止固定retry workerの限定復旧
+
+- `retrySafeSheetWrites`だけを、専用確認語`RECOVER_LKC_STAGING_RETRY_PAUSED`・main・単独指定で既存の保護付きFunctions workflowから復旧する。`processSafeSheetWrite`は対象外。
+- 専用runner、停止ソースpin、`LKC_SHEET_WRITE_MODE=paused`、`LKC_NOTIFICATION_DELIVERY_MODE=paused`、既存の転送停止を維持する。HTTP向けInvoker公開化を適用しない。
+- 対象はFAILED retry Functionの更新、対応するRunサービスと固定名Schedulerの作成、正規ビルドに伴う成果物だけ。Schedulerが定期起動しても関数先頭で停止し、業務キュー・原本・通知へ進まない。手動起動・再試行・停止解除は対象外。
+- この許可リストはIAM追加の包括承認ではない。IAM変更は具体的に承認されたロール/対象/期限だけ。拒否・構成変化・別資源・削除再作成・想定外の権限不足があれば停止し、保護を迂回しない。失敗時は読み取りで状態を保存し、旧コードへ自動復帰しない。

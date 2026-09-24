@@ -225,7 +225,7 @@ console.log(`staging automation safety tests passed (${13 + rejectedPlans.length
 
 const recoveredFunctions=["confirmApplication","createResubmissionRequest","getMyResubmissionRequests","getAdminResubmissionRequests","completeResubmissionRequest"];
 assert.deepEqual(validatePlan({...base, sourceRef:"main", mode:"functions-deploy", functions:recoveredFunctions.join(","), confirmation:safetyConfig.confirmations.functionsDeploy}).functions,recoveredFunctions);
-assert.throws(()=>validatePlan({...base,mode:"functions-deploy",functions:[...recoveredFunctions,"retrySafeSheetWrites"].join(","),confirmation:safetyConfig.confirmations.functionsDeploy}),/FUNCTIONS_NOT_ALLOWED:retrySafeSheetWrites/);
+assert.throws(()=>validatePlan({...base,mode:"functions-deploy",functions:[...recoveredFunctions,"retrySafeSheetWrites"].join(","),confirmation:safetyConfig.confirmations.functionsDeploy}),/RETRY_RECOVERY_MAIN_SINGLE_TARGET_REQUIRED/);
 
 const businessRecoveryFunctions=["getExpenseReview","saveExpenseReviewDraft","completeExpenseReview","getJobSheetLink","markNetPrintPrinted","adminCancelJob","duplicateAdminJob"];
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:businessRecoveryFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,businessRecoveryFunctions);
@@ -255,3 +255,17 @@ assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",
 
 const loginJourneyFunctions=["bootstrapSession","requestStaffLoginLink","loginGateway"];
 assert.deepEqual(validatePlan({...base,sourceRef:"main",mode:"functions-deploy",functions:loginJourneyFunctions.join(","),confirmation:safetyConfig.confirmations.functionsDeploy}).functions,loginJourneyFunctions);
+
+// 停止復旧は通常の配備確認語から分離する。
+const retryPlan = {...base, sourceRef: "main", mode: "functions-deploy", functions: "retrySafeSheetWrites", confirmation: safetyConfig.confirmations.retryWorkerRecovery};
+assert.deepEqual(validatePlan(retryPlan).functions, ["retrySafeSheetWrites"]);
+let retryCases = 1;
+for (const change of [
+  {confirmation: safetyConfig.confirmations.functionsDeploy}, {confirmation: ""}, {confirmation: undefined},
+  {sourceRef: "automation/retry-source"}, {sourceRef: "cursor/retry-source"},
+  {functions: "retrySafeSheetWrites,bootstrapSession"}, {functions: "bootstrapSession,retrySafeSheetWrites"},
+  {functions: "retrySafeSheetWrites,retrySafeSheetWrites"}, {functions: "processSafeSheetWrite"},
+  {project: "other"}, {region: "us-central1"},
+]) { assert.throws(() => validatePlan({...retryPlan, ...change})); retryCases++; }
+assert.throws(() => validatePlan({...retryPlan, functions: "bootstrapSession"}), /FUNCTIONS_CONFIRMATION_REJECTED/); retryCases++;
+console.log(JSON.stringify({retryScopeTests: retryCases, retryOnly: true, dedicatedConfirmation: true, cloudOperations: false}));

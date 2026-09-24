@@ -30,6 +30,7 @@ service cloud.firestore {
       return isStaff() &&
         exists(/databases/$(database)/documents/staffProfiles/$(staffId())) &&
         get(/databases/$(database)/documents/staffProfiles/$(staffId())).data.active == true &&
+        sameCompany(get(/databases/$(database)/documents/staffProfiles/$(staffId())).data.companyId) &&
         activeIdentity();
     }
     function emergencyUnlocked() {
@@ -128,8 +129,8 @@ service cloud.firestore {
 
 
     match /deviceSessions/{sessionId} {
-      allow read: if signedIn() && (
-        (isAdmin() && sameCompany(resource.data.companyId)) ||
+      allow read: if signedIn() && sameCompany(resource.data.companyId) && (
+        isAdmin() ||
         (activeStaff() && resource.data.staffId == staffId())
       );
       allow write: if false;
@@ -154,7 +155,7 @@ service cloud.firestore {
     }
 
     match /announcementReceipts/{receiptId} {
-      allow read: if signedIn() && (
+      allow read: if signedIn() && sameCompany(resource.data.companyId) && (
         isAdmin() || (activeStaff() && resource.data.staffId == staffId())
       );
       allow write: if false;

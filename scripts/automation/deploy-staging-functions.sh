@@ -49,6 +49,7 @@ for function_name in "${function_names[@]}"; do
     driveFilePreview) service_name="drivefilepreview" ;;
     createUploadSession) service_name="createuploadsession" ;;
     finalizeStagedUpload) service_name="" ;;
+    retrySafeSheetWrites) service_name="" ;; # 専用runnerで認証・停止・Schedulerを照合済み
     registerDeviceSession) service_name="registerdevicesession" ;;
     heartbeatDeviceSession) service_name="heartbeatdevicesession" ;;
     listMyDevices) service_name="listmydevices" ;;

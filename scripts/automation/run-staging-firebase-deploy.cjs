@@ -58,6 +58,12 @@ async function main() {
   const {assertSheetWorkerRecovery} = await import(pathToFileURL(path.join(__dirname, "validate-staging-sheet-worker.mjs")).href);
   assertSheetWorkerRecovery(plan, source);
   const cli = resolveCli();
+  if (plan.functions.includes("retrySafeSheetWrites")) {
+    const {runRetryWorkerRecovery} = await import(pathToFileURL(path.join(__dirname, "run-retry-worker-recovery.mjs")).href);
+    const result = await runRetryWorkerRecovery({cliRoot: cli.root, plan, source, sourceSha: process.env.LKC_VERIFIED_SOURCE_SHA});
+    console.log(JSON.stringify(result));
+    return;
+  }
   const run = require(path.join(cli.root, "lib/gcp/run.js"));
   installInvokerAdapter(run, plan);
   process.chdir(source);

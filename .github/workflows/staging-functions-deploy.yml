@@ -241,6 +241,7 @@ jobs:
       - name: Deploy only the explicit Functions allowlist
         working-directory: guardrails
         env:
+          LKC_VERIFIED_SOURCE_SHA: ${{ needs.guard.outputs.source_sha }}
           LKC_SOURCE_REF: ${{ inputs.source_ref }}
           LKC_FUNCTIONS: ${{ inputs.functions }}
           LKC_CONFIRMATION: ${{ inputs.confirmation }}

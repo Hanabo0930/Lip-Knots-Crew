@@ -113,6 +113,50 @@ await test("read errors do not become missing", () => { for (const stderr of ["P
 await test("exact absent Run accepted", () => assert.equal(recoveryReader(() => { throw {stderr: "ERROR: (gcloud.run.services.describe) Cannot find service [retrysafesheetwrites]."}; }).service(), null));
 await test("missing Scheduler accepted", () => assert.equal(recoveryReader(() => { throw {stderr: "ERROR: (gcloud.scheduler.jobs.describe) NOT_FOUND: requested job not found"}; }).job(), null));
 await test("all reads fixed project and no writes", () => { const calls = [], read = recoveryReader(args => { calls.push(args); return args[0] === "projects" && args[1] === "describe" ? JSON.stringify({projectId: PROJECT, projectNumber: context.projectNumber}) : args[0] === "compute" ? JSON.stringify({defaultServiceAccount: context.identity}) : "{}"; }); read.before(); read.assertPrivateService(); assert.ok(calls.every(a => !a.includes("deploy") && !a.includes("update") && !a.includes("set-iam-policy") && a.some(x => x === PROJECT || x === `--project=${PROJECT}`))); });
+// 実gcloudの読取で確認した投影結果を、個人情報を含まない合成値で再現する。
+// 配列の子だけを指定するとbindingsはnull、containersは欠落する。
+function projectedMetadataReader({projectPolicy = policy, servicePolicy = {etag: "synthetic"}} = {}) {
+  return recoveryReader(args => {
+    const format = args.find(a => a.startsWith("--format="));
+    if (args[0] === "projects" && args[1] === "get-iam-policy") {
+      return JSON.stringify(format === "--format=json(bindings,etag,version)" ? projectPolicy : null);
+    }
+    if (args[0] === "run" && args[2] === "get-iam-policy") {
+      return JSON.stringify(format === "--format=json(bindings,etag,version)" ? servicePolicy : null);
+    }
+    if (args[0] === "run" && args[2] === "describe") {
+      const result = clone(service);
+      if (!format.slice("--format=json(".length, -1).split(",").includes("spec.template.spec.containers")) {
+        delete result.spec.template.spec.containers;
+      }
+      return JSON.stringify(result);
+    }
+    assert.fail("unexpected metadata command");
+  });
+}
+await test("project policy projection preserves binding arrays", () => {
+  assertExistingInvoker(projectedMetadataReader().projectPolicy(), context.identity);
+});
+await test("project policy projection preserves conditional bindings", () => {
+  const value = {bindings: [{...policy.bindings[0], condition: {expression: "true"}}]};
+  assert.throws(() => assertExistingInvoker(projectedMetadataReader({projectPolicy: value}).projectPolicy(), context.identity), /EXISTING_INVOKER_REQUIRED/);
+});
+await test("project policy projection preserves public members", () => {
+  const value = {bindings: [...policy.bindings, {role: "roles/run.invoker", members: ["allUsers"]}]};
+  assert.throws(() => assertExistingInvoker(projectedMetadataReader({projectPolicy: value}).projectPolicy(), context.identity), /PUBLIC_BINDING_FOUND/);
+});
+await test("Run projection preserves paused container environment", () => {
+  assertReadyService(projectedMetadataReader().service(), fn, context);
+});
+await test("service policy without bindings preserves valid envelope", () => {
+  projectedMetadataReader().assertPrivateService();
+});
+await test("service policy projection preserves public members", () => {
+  assert.throws(() => projectedMetadataReader({servicePolicy: {bindings: [{members: ["allAuthenticatedUsers"]}]}}).assertPrivateService(), /PUBLIC_BINDING_FOUND/);
+});
+await test("null policy remains unknown, never private", () => {
+  assert.throws(() => projectedMetadataReader({servicePolicy: null}).assertPrivateService(), /RUN_POLICY_UNKNOWN/);
+});
 await test("live runner still rejects unchanged allowlist first", async () => { await assert.rejects(runRetryWorkerRecovery({plan: {project: PROJECT, region: REGION, sourceRef: "main", functions: [TARGET]}, source: root, sourceSha: context.sourceSha, cliRoot}, {read: {before() { assert.fail("must not read cloud"); }}}), /FUNCTIONS_NOT_ALLOWED/); });
 assert.equal(network, 0);
 console.log(JSON.stringify({retryWorkerRecoveryTests: cases, cloudCalls: network, realDeployments: 0, allowlistExpanded: false}));

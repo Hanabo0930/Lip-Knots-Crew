@@ -8,7 +8,8 @@ import { PROJECT, REGION, TARGET, PREFIX, FUNCTION, SERVICE, JOB, assertIdentity
 const require = createRequire(import.meta.url);
 const fail = code => { throw Error(code); };
 const FN_FIELDS = "name,state,environment,buildConfig.runtime,buildConfig.entryPoint,serviceConfig.service,serviceConfig.serviceAccountEmail,serviceConfig.revision,serviceConfig.uri,serviceConfig.timeoutSeconds,serviceConfig.secretEnvironmentVariables,serviceConfig.environmentVariables.APP_ENVIRONMENT,serviceConfig.environmentVariables.EXPECTED_FIREBASE_PROJECT_ID,serviceConfig.environmentVariables.LKC_SHEET_WRITE_MODE,serviceConfig.environmentVariables.LKC_NOTIFICATION_DELIVERY_MODE";
-const SERVICE_FIELDS = "metadata.name,metadata.annotations,status,spec.template.spec.serviceAccountName,spec.template.spec.containers.env";
+// 配列は親フィールドを取得する。子だけの投影はnullや配列欠落になる。
+const SERVICE_FIELDS = "metadata.name,metadata.annotations,status,spec.template.spec.serviceAccountName,spec.template.spec.containers";
 
 // 任意コマンドは受け付けず、固定資源の読取だけを実装する。stderrやpolicy本文を表示しない。
 export function recoveryReader(execute = (args) => execFileSync("gcloud", args, {encoding: "utf8", timeout: 45000, stdio: ["ignore", "pipe", "pipe"]})) {
@@ -25,9 +26,10 @@ export function recoveryReader(execute = (args) => execFileSync("gcloud", args, 
   const fn = () => read(["functions", "describe", TARGET, "--gen2", `--project=${PROJECT}`, `--region=${REGION}`, `--format=json(${FN_FIELDS})`]);
   const service = () => read(["run", "services", "describe", "retrysafesheetwrites", `--project=${PROJECT}`, `--region=${REGION}`, `--format=json(${SERVICE_FIELDS})`], true);
   const job = () => read(["scheduler", "jobs", "describe", `firebase-schedule-${TARGET}-${REGION}`, `--project=${PROJECT}`, `--location=${REGION}`, "--format=json(name,state,schedule,timeZone,httpTarget.uri,httpTarget.httpMethod,httpTarget.oidcToken,httpTarget.oauthToken,httpTarget.body,pubsubTarget)"], true);
-  const projectPolicy = () => read(["projects", "get-iam-policy", PROJECT, "--format=json(bindings.role,bindings.members,bindings.condition)"]);
+  // etag/versionを含め、bindingがないサービスの有効なpolicyも保持する。
+  const projectPolicy = () => read(["projects", "get-iam-policy", PROJECT, "--format=json(bindings,etag,version)"]);
   const assertPrivateService = () => {
-    const policy = read(["run", "services", "get-iam-policy", "retrysafesheetwrites", `--project=${PROJECT}`, `--region=${REGION}`, "--format=json(bindings.role,bindings.members)"]);
+    const policy = read(["run", "services", "get-iam-policy", "retrysafesheetwrites", `--project=${PROJECT}`, `--region=${REGION}`, "--format=json(bindings,etag,version)"]);
     if (!policy || typeof policy !== "object" || Array.isArray(policy) || (!Array.isArray(policy.bindings) && policy.bindings !== undefined)) fail("RETRY_RUN_POLICY_UNKNOWN");
     if ((policy.bindings ?? []).some(b => b.members?.some(m => ["allUsers", "allAuthenticatedUsers"].includes(m)))) fail("RETRY_PUBLIC_BINDING_FOUND");
   };

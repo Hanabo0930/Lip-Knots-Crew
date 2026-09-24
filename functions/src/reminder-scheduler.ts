@@ -2,7 +2,7 @@ import { caseMailPreparationHeld, type CaseMailPreparation } from "./case-mail-p
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { db } from "./firebase";
-import { enqueueNotification, notificationQueueId, queueDocumentData, type QueueNotificationInput } from "./notification-core";
+import { enqueueNotification, notificationDeliveryPaused, notificationQueueId, queueDocumentData, type QueueNotificationInput } from "./notification-core";
 import { getProductionOperationalState } from "./system-safety";
 import { SUBMISSION_BUSINESS_DAY_SEARCH_LIMIT } from "./japan-business-day";
 import {
@@ -58,6 +58,7 @@ export const scheduleOperationalReminders = onSchedule(
     maxInstances: 1,
   },
   async () => {
+    if (notificationDeliveryPaused()) return;
     const now = new Date();
     const settingsSnap = await db.collection("notificationSettings")
       .where("enabled", "==", true)

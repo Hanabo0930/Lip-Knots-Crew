@@ -3,6 +3,7 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onDocumentCreated } from "firebase-functions/v2/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { db, messaging } from "./firebase";
+import { notificationDeliveryPaused } from "./notification-core";
 import { applyQuietHours, tokyoParts } from "./notification-time";
 import { getProductionOperationalState } from "./system-safety";
 import { parseOperationalReminder, operationalReminderIsCurrent } from "./operational-reminder";
@@ -41,13 +42,6 @@ type TokenRecord = {
   id: string;
   token: string;
 };
-
-// STAGINGの通常配備は送信を保留し、設定誤りでも既存キューを消費しない。
-function notificationDeliveryPaused(): boolean {
-  const mode = process.env.LKC_NOTIFICATION_DELIVERY_MODE;
-  if (mode !== undefined && mode !== "active") return true;
-  return process.env.APP_ENVIRONMENT === "staging" && mode !== "active";
-}
 
 /**
  * 即時通知は作成トリガーで処理します。未来時刻・静穏時間明けの通知は

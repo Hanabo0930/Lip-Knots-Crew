@@ -8,15 +8,18 @@ import {fileURLToPath} from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2), option = name => args[args.indexOf(name)+1];
 for (const name of ['--java','--jar','--evidence']) if (!args.includes(name) || !option(name) || option(name).startsWith('--')) throw new Error('Required: --java --jar --evidence');
+const suite = args.includes('--suite') ? option('--suite') : 'business';
+if (!['business','rules'].includes(suite)) throw new Error('UNKNOWN_LOCAL_ACCEPTANCE_SUITE');
 const java = path.resolve(option('--java')), jar = path.resolve(option('--jar')), evidence = path.resolve(option('--evidence'));
 const expected = JSON.parse(fs.readFileSync(path.join(root,'node_modules/firebase-tools/lib/emulator/downloadableEmulatorInfo.json'),'utf8')).firestore;
 if (fs.statSync(jar).size !== expected.expectedSize || crypto.createHash('sha256').update(fs.readFileSync(jar)).digest('hex') !== expected.expectedChecksumSHA256) throw new Error('EMULATOR_BINARY_MISMATCH');
-if (!fs.existsSync(path.join(root,'functions/lib/jobs.js'))) throw new Error('BUILD_FUNCTIONS_FIRST');
+if (suite === 'business' && !fs.existsSync(path.join(root,'functions/lib/jobs.js'))) throw new Error('BUILD_FUNCTIONS_FIRST');
 if (fs.existsSync(evidence)) throw new Error('USE_NEW_EVIDENCE_DIRECTORY');
 fs.mkdirSync(evidence,{recursive:true});
 const isolatedHome=path.join(evidence,'isolated-home');fs.mkdirSync(isolatedHome);
-const rules = path.join(evidence,'local-deny.rules');
-fs.writeFileSync(rules,"rules_version = '2'; service cloud.firestore { match /databases/{database}/documents { match /{document=**} { allow read, write: if false; } } }\n");
+const rules = path.join(evidence,'local.rules');
+if (suite === 'rules') fs.copyFileSync(path.join(root,'firestore.rules'),rules);
+else fs.writeFileSync(rules,"rules_version = '2'; service cloud.firestore { match /databases/{database}/documents { match /{document=**} { allow read, write: if false; } } }\n");
 const reserve = net.createServer();
 await new Promise((resolve,reject)=>{reserve.once('error',reject);reserve.listen(0,'127.0.0.1',resolve);});
 const port = reserve.address().port;
@@ -25,7 +28,7 @@ const project = 'demo-lkc-accept-' + crypto.randomBytes(5).toString('hex');
 const env = {};
 for (const key of ['PATH','Path','SystemRoot','SYSTEMROOT','TEMP','TMP','WINDIR']) if (process.env[key]) env[key] = process.env[key];
 const emulatorLog = fs.openSync(path.join(evidence,'emulator.log'),'wx');
-const emulator = spawn(java,['-Djava.net.preferIPv4Stack=true','-jar',jar,'--host','127.0.0.1','--port',String(port),'--project_id',project,'--single_project_mode','true','--single_project_mode_error','true','--rules',rules],{cwd:evidence,env,windowsHide:true,stdio:['ignore',emulatorLog,emulatorLog]});
+const emulator = spawn(java,['-Djava.net.preferIPv4Stack=true','-Duser.language=en','-Duser.country=US','-jar',jar,'--host','127.0.0.1','--port',String(port),'--project_id',project,'--single_project_mode','true','--single_project_mode_error','true','--rules',rules],{cwd:evidence,env,windowsHide:true,stdio:['ignore',emulatorLog,emulatorLog]});
 let exited = false, startError, activeChild;
 const interrupt=()=>{activeChild?.kill();if(!exited)emulator.kill();};
 process.once('SIGINT',interrupt);process.once('SIGTERM',interrupt);
@@ -42,9 +45,9 @@ try {
     await new Promise(resolve=>setTimeout(resolve,200));
   }
   if(exited) throw new Error('EMULATOR_EXITED');
-  fs.writeFileSync(path.join(evidence,'runtime.json'),JSON.stringify({project,host:'127.0.0.1',port,firestoreVersion:expected.version,jarSha256:expected.expectedChecksumSHA256,realCloud:false},null,2)+'\n');
+  fs.writeFileSync(path.join(evidence,'runtime.json'),JSON.stringify({project,host:'127.0.0.1',port,firestoreVersion:expected.version,jarSha256:expected.expectedChecksumSHA256,realCloud:false,suite,rulesSha256:crypto.createHash('sha256').update(fs.readFileSync(rules)).digest('hex')},null,2)+'\n');
   const log=fs.openSync(path.join(evidence,'tests.log'),'wx');
-  const child=spawn(process.execPath,[path.join(root,'scripts/test-local-firestore-acceptance.mjs'),path.join(evidence,'result.json')],{
+  const child=spawn(process.execPath,[path.join(root,suite === 'rules' ? 'scripts/test-local-firestore-rules.mjs' : 'scripts/test-local-firestore-acceptance.mjs'),path.join(evidence,'result.json')],{
     cwd:root,windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...env,HOME:isolatedHome,USERPROFILE:isolatedHome,APPDATA:isolatedHome,LOCALAPPDATA:isolatedHome,CLOUDSDK_CONFIG:isolatedHome,METADATA_SERVER_DETECTION:'none',APP_ENVIRONMENT:'development',GCLOUD_PROJECT:project,EXPECTED_FIREBASE_PROJECT_ID:project,
       FIREBASE_CONFIG:JSON.stringify({projectId:project,storageBucket:'synthetic-bucket'}),FIRESTORE_EMULATOR_HOST:'127.0.0.1:'+port,
       LKC_SHEET_WRITE_MODE:'paused',LKC_NOTIFICATION_MODE:'paused',LKC_SUBMISSION_TRANSFER_MODE:'paused',LKC_UPLOAD_ACCEPTANCE_MODE:'paused'}});

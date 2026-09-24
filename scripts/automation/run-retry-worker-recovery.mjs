@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { assertSheetWorkerRecovery } from "./validate-staging-sheet-worker.mjs";
 import { PROJECT, REGION, TARGET, PREFIX, FUNCTION, SERVICE, JOB, assertIdentity, assertRecoveryBefore, assertReadyFunction,
-  assertReadyService, assertExistingInvoker, assertScheduler, installRecoveryAdapters } from "./retry-worker-recovery-core.mjs";
+  assertReadyService, assertExistingInvoker, assertScheduler, verifyRecoveryServiceAgents, installRecoveryAdapters } from "./retry-worker-recovery-core.mjs";
 const require = createRequire(import.meta.url);
 const fail = code => { throw Error(code); };
 const FN_FIELDS = "name,state,environment,buildConfig.runtime,buildConfig.entryPoint,serviceConfig.service,serviceConfig.serviceAccountEmail,serviceConfig.revision,serviceConfig.uri,serviceConfig.timeoutSeconds,serviceConfig.secretEnvironmentVariables,serviceConfig.environmentVariables.APP_ENVIRONMENT,serviceConfig.environmentVariables.EXPECTED_FIREBASE_PROJECT_ID,serviceConfig.environmentVariables.LKC_SHEET_WRITE_MODE,serviceConfig.environmentVariables.LKC_NOTIFICATION_DELIVERY_MODE";
@@ -28,12 +28,14 @@ export function recoveryReader(execute = (args) => execFileSync("gcloud", args, 
   const job = () => read(["scheduler", "jobs", "describe", `firebase-schedule-${TARGET}-${REGION}`, `--project=${PROJECT}`, `--location=${REGION}`, "--format=json(name,state,schedule,timeZone,httpTarget.uri,httpTarget.httpMethod,httpTarget.oidcToken,httpTarget.oauthToken,httpTarget.body,pubsubTarget)"], true);
   // etag/versionを含め、bindingがないサービスの有効なpolicyも保持する。
   const projectPolicy = () => read(["projects", "get-iam-policy", PROJECT, "--format=json(bindings,etag,version)"]);
+  // CLIのAPI有効化キャッシュを使わず、固定projectの現在の状態を読む。
+  const enabledServices = () => read(["services", "list", "--enabled", `--project=${PROJECT}`, "--format=json(config.name,state)"]);
   const assertPrivateService = () => {
     const policy = read(["run", "services", "get-iam-policy", "retrysafesheetwrites", `--project=${PROJECT}`, `--region=${REGION}`, "--format=json(bindings,etag,version)"]);
     if (!policy || typeof policy !== "object" || Array.isArray(policy) || (!Array.isArray(policy.bindings) && policy.bindings !== undefined)) fail("RETRY_RUN_POLICY_UNKNOWN");
     if ((policy.bindings ?? []).some(b => b.members?.some(m => ["allUsers", "allAuthenticatedUsers"].includes(m)))) fail("RETRY_PUBLIC_BINDING_FOUND");
   };
-  return {fn, service, job, projectPolicy, assertPrivateService, before() {
+  return {fn, service, job, projectPolicy, enabledServices, assertPrivateService, before() {
     const project = read(["projects", "describe", PROJECT, "--format=json(projectId,projectNumber)"]);
     if (project.projectId !== PROJECT) fail("RETRY_PROJECT_MISMATCH");
     const identity = read(["compute", "project-info", "describe", `--project=${PROJECT}`, "--format=json(defaultServiceAccount)"]).defaultServiceAccount;
@@ -57,8 +59,9 @@ export async function verifyRecoveryAfter(read, context) {
   await read.assertPrivateService();
   assertExistingInvoker(await read.projectPolicy(), context.identity);
   assertScheduler(await read.job(), fn, context, true);
+  await verifyRecoveryServiceAgents(read, context);
   return {retryRecovery: "paused-configuration-verified", businessInvocation: false, iamWritten: false,
-    authentication: "configuration-only-not-invoked", sourceSha: context.sourceSha};
+    authentication: "configuration-only-not-invoked", serviceAgents: "api-and-role-bindings-only", sourceSha: context.sourceSha};
 }
 export async function runRetryWorkerRecovery({cliRoot, plan, source, sourceSha}, dependencies = {}) {
   // この関数へ来る前にも既存validatePlanが必要。内部入口でも独立に再確認する。

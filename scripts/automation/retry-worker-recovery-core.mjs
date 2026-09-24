@@ -15,6 +15,30 @@ export function assertExistingInvoker(policy, identity) {
   if (policy.bindings.some(b => b.members?.some(m => ["allUsers", "allAuthenticatedUsers"].includes(m)))) fail("RETRY_PUBLIC_BINDING_FOUND");
   if (!policy.bindings.some(b => b.role === "roles/run.invoker" && !b.condition && b.members?.includes(`serviceAccount:${identity}`))) fail("RETRY_EXISTING_INVOKER_REQUIRED");
 }
+// Google管理エージェントの内部状態ではなく、既存のAPI・IAM構成だけを検証する。
+const SERVICE_AGENTS = Object.freeze({
+  "pubsub.googleapis.com": {suffix: "gcp-sa-pubsub", role: "roles/pubsub.serviceAgent"},
+  "eventarc.googleapis.com": {suffix: "gcp-sa-eventarc", role: "roles/eventarc.serviceAgent"},
+  "cloudscheduler.googleapis.com": {suffix: "gcp-sa-cloudscheduler", role: "roles/cloudscheduler.serviceAgent"},
+});
+export function assertServiceAgentConfiguration(policy, enabledServices, context, service) {
+  assertIdentity(context.identity, context.projectNumber);
+  if (!Object.hasOwn(SERVICE_AGENTS, service)) fail("RETRY_SERVICE_AGENT_SCOPE_INVALID");
+  if (!Array.isArray(enabledServices) || enabledServices.some(s => !s || typeof s.config?.name !== "string" || typeof s.state !== "string")) fail("RETRY_SERVICE_API_STATE_UNKNOWN");
+  const matches = enabledServices.filter(s => s.config.name === service);
+  if (matches.length !== 1 || matches[0].state !== "ENABLED") fail("RETRY_SERVICE_AGENT_API_REQUIRED");
+  if (!Array.isArray(policy?.bindings) || policy.bindings.some(b => !b || typeof b.role !== "string" || !Array.isArray(b.members) || b.members.some(m => typeof m !== "string"))) fail("RETRY_SERVICE_AGENT_POLICY_UNKNOWN");
+  const {suffix, role} = SERVICE_AGENTS[service];
+  const email = `service-${context.projectNumber}@${suffix}.iam.gserviceaccount.com`;
+  const member = `serviceAccount:${email}`;
+  if (policy.bindings.some(b => b.members.some(m => m === `deleted:${member}` || m.startsWith(`deleted:${member}?`)))) fail("RETRY_SERVICE_AGENT_DELETED_BINDING");
+  if (!policy.bindings.some(b => b.role === role && !Object.hasOwn(b, "condition") && b.members.includes(member))) fail("RETRY_SERVICE_AGENT_BINDING_REQUIRED");
+  return email;
+}
+export async function verifyRecoveryServiceAgents(read, context) {
+  const enabledServices = await read.enabledServices(), policy = await read.projectPolicy();
+  for (const service of Object.keys(SERVICE_AGENTS)) assertServiceAgentConfiguration(policy, enabledServices, context, service);
+}
 export function assertRecoveryBefore(snapshot) {
   assertIdentity(snapshot.identity, snapshot.projectNumber);
   if (snapshot.fn?.name !== FUNCTION || snapshot.fn.state !== "FAILED" || snapshot.fn.environment !== "GEN_2" ||
@@ -95,7 +119,7 @@ export function installRecoveryAdapters(modules, context, read) {
     [serviceUsage, ["generateServiceIdentity", "generateServiceIdentityAndPoll"]],
     [artifacts, ["checkCleanupPolicy", "setCleanupPolicy", "setCleanupPolicies", "updateRepository", "optOutRepository"]]];
   if (contracts.some(([object, names]) => names.some(name => typeof object?.[name] !== "function"))) fail("RETRY_CLI_CONTRACT_CHANGED");
-  const original = {applyPlan: fabricator.applyPlan, update: gcf.updateFunction, schedule: modules.createScheduler, apiCheck: ensureApi.check, getAccount: iam.getServiceAccount};
+  const original = {applyPlan: fabricator.applyPlan, update: gcf.updateFunction, schedule: modules.createScheduler, apiCheck: ensureApi.check};
   const deny = async () => fail("RETRY_UNAUTHORIZED_CLOUD_MUTATION");
   let planVerified = false, functionUpdated = false, schedulerWritten = false;
   const existingInvoker = async (project, service, invokers) => {
@@ -111,12 +135,14 @@ export function installRecoveryAdapters(modules, context, read) {
     if (planVerified) fail("RETRY_PLAN_ALREADY_APPLIED");
     assertRecoveryPlan(plan, context);
     assertExistingInvoker(await read.projectPolicy(), context.identity);
+    await verifyRecoveryServiceAgents(read, context);
     planVerified = true;
     return original.applyPlan.call(this, plan);
   };
   gcf.updateFunction = async fn => {
     if (!planVerified) fail("RETRY_PLAN_REQUIRED");
     assertFunctionUpdate(fn, context);
+    await verifyRecoveryServiceAgents(read, context);
     const result = await original.update(fn); functionUpdated = true; return result;
   };
   scheduler.createOrReplaceJob = async job => {
@@ -126,6 +152,7 @@ export function installRecoveryAdapters(modules, context, read) {
     await read.assertPrivateService();
     assertExistingInvoker(await read.projectPolicy(), context.identity);
     assertScheduler(job, fn, context);
+    await verifyRecoveryServiceAgents(read, context);
     if (await read.job() !== null) fail("RETRY_SCHEDULER_ALREADY_EXISTS");
     const result = await original.schedule(job); schedulerWritten = true; return result;
   };
@@ -137,15 +164,15 @@ export function installRecoveryAdapters(modules, context, read) {
     if (![PROJECT, context.projectNumber].includes(String(project))) fail("RETRY_API_PROJECT_MISMATCH");
     if (!await original.apiCheck(project, api, "functions", true)) fail("RETRY_API_ENABLEMENT_NOT_ALLOWED");
   };
-  // CLIはGen2で既存service agentにもgenerateを要求する。存在確認だけで代替する。
-  serviceUsage.generateServiceIdentity = serviceUsage.generateServiceIdentityAndPoll = async (number, service) => {
+  // CLIの生成要求を構成照合へ置換する。直接get・生成・権限追加は実行しない。
+  serviceUsage.generateServiceIdentity = async (number, service) => {
     if (String(number) !== context.projectNumber) fail("RETRY_PROJECT_NUMBER_MISMATCH");
-    const suffix = {"pubsub.googleapis.com": "gcp-sa-pubsub", "eventarc.googleapis.com": "gcp-sa-eventarc"}[service];
-    if (!suffix) fail("RETRY_SERVICE_AGENT_SCOPE_INVALID");
-    const email = `service-${context.projectNumber}@${suffix}.iam.gserviceaccount.com`;
-    const account = await original.getAccount(PROJECT, email);
-    if (account?.email !== email || account.disabled) fail("RETRY_SERVICE_AGENT_MISSING");
+    if (!["pubsub.googleapis.com", "eventarc.googleapis.com"].includes(service)) fail("RETRY_SERVICE_AGENT_SCOPE_INVALID");
+    const email = assertServiceAgentConfiguration(await read.projectPolicy(), await read.enabledServices(), context, service);
     return {done: true, response: {email}};
+  };
+  serviceUsage.generateServiceIdentityAndPoll = async (number, service) => {
+    await serviceUsage.generateServiceIdentity(number, service);
   };
   // 今回はリポジトリのcleanup設定を変更しない。CLIの任意設定工程だけを省く。
   artifacts.checkCleanupPolicy = async () => ({locationsToSetup: [], locationsWithErrors: []});

@@ -81,6 +81,34 @@ function harness() {
   const status = installRecoveryAdapters(modules, context, read);
   return {modules, state, read, status};
 }
+// 実SDKのmanifestと固定CLI変換を通し、手作りendpointだけでは見逃した空設定を検証する。
+await test("real SDK empty schedule retry config survives pinned CLI discovery", async () => {
+  let invoked = 0;
+  const {onSchedule} = require("firebase-functions/v2/scheduler");
+  const sdk = onSchedule({schedule: "every 5 minutes", timeZone: "Asia/Tokyo", timeoutSeconds: 300, region: REGION}, async () => { invoked++; });
+  const {buildFromV1Alpha1} = require(path.join(cliRoot, "lib/deploy/functions/runtimes/discovery/v1alpha1.js"));
+  const {toBackend} = require(path.join(cliRoot, "lib/deploy/functions/build.js"));
+  const manifest = {specVersion: "v1alpha1", endpoints: {[TARGET]: {...sdk.__endpoint, entryPoint: TARGET, environmentVariables: env}}};
+  const backend = toBackend(buildFromV1Alpha1(manifest, PROJECT, REGION, "nodejs22"), {});
+  const actual = backend.endpoints[REGION][TARGET];
+  assert.deepEqual(actual.scheduleTrigger.retryConfig, {});
+  const candidate = clone(plan); candidate.default.regionalChangesets.one.endpointsToUpdate[0].endpoint = actual;
+  assertRecoveryPlan(candidate, context);
+  const h = harness(); await h.modules.fabricator.applyPlan(candidate); h.status.assertCompleted();
+  assert.equal(h.state.updates, 1); assert.equal(h.state.schedulers, 1); assert.equal(h.state.forbidden, 0);
+  assert.equal(h.state.job.retryConfig, undefined); assert.equal(invoked, 0);
+});
+for (const retryConfig of [null, [], 0, false, "", {retryCount: 0}, {retryCount: 3}, {minBackoffSeconds: 5}, {unknown: true}]) {
+  await test("configured or malformed schedule retry remains rejected", async () => {
+    const candidate = clone(plan); candidate.default.regionalChangesets.one.endpointsToUpdate[0].endpoint.scheduleTrigger.retryConfig = retryConfig;
+    const h = harness(); await assert.rejects(h.modules.fabricator.applyPlan(candidate), /RETRY_ENDPOINT_SCOPE_INVALID/);
+    assert.equal(h.state.updates, 0); assert.equal(h.state.schedulers, 0);
+  });
+}
+await test("unknown schedule key remains rejected beside empty retry", () => {
+  const candidate = clone(plan); Object.assign(candidate.default.regionalChangesets.one.endpointsToUpdate[0].endpoint.scheduleTrigger, {retryConfig: {}, unknown: true});
+  assert.throws(() => assertRecoveryPlan(candidate, context), /RETRY_ENDPOINT_SCOPE_INVALID/);
+});
 await test("execute paused recovery without IAM writes", async () => { const h = harness(); await h.modules.fabricator.applyPlan(clone(plan)); h.status.assertCompleted(); const result = await verifyRecoveryAfter(h.read, context); assert.equal(result.iamWritten, false); assert.equal(h.state.updates, 1); assert.equal(h.state.schedulers, 1); assert.equal(h.state.forbidden, 0); });
 for (const [key, method] of [["run", "setIamPolicy"], ["run", "updateService"], ["run", "replaceService"], ["gcf", "createFunction"], ["gcf", "deleteFunction"], ["scheduler", "deleteJob"], ["resourceManager", "setIamPolicy"], ["resourceManager", "addServiceAccountToRoles"], ["iam", "createServiceAccount"], ["iam", "createServiceAccountKey"], ["artifacts", "setCleanupPolicy"]]) {
   await test("deny " + method, async () => { const h = harness(); await assert.rejects(h.modules[key][method](), /UNAUTHORIZED_CLOUD_MUTATION/); assert.equal(h.state.forbidden, 0); });

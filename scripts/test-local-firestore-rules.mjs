@@ -91,6 +91,19 @@ try {
   await seed.doc('staffProfiles/staff-a').update({active:true});
   await seed.doc('authIdentities/staff-a').set({active:false,companyId:'company-a',staffId:'staff-a'});
   await test('失効済み本人identityの読取を拒否',()=>denied(read(staff,'tasks/own')));
+  await seed.doc('authIdentities/staff-a').set({active:true,companyId:'company-b',staffId:'staff-a'});
+  await test('最新identityが別会社なら古いclaimを拒否',()=>denied(read(staff,'tasks/own')));
+  await seed.doc('authIdentities/staff-a').set({active:true,companyId:'company-a',staffId:'staff-other'});
+  await test('最新identityが別スタッフなら古いclaimを拒否',()=>denied(read(staff,'tasks/own')));
+  await seed.doc('authIdentities/staff-a').set({active:true,staffId:'staff-a'});
+  await test('会社情報のないidentityを拒否',()=>denied(read(staff,'tasks/own')));
+  await seed.doc('authIdentities/staff-a').set({active:true,companyId:'company-a'});
+  await test('本人情報のないidentityを拒否',()=>denied(read(staff,'tasks/own')));
+  await seed.doc('authIdentities/staff-a').set({active:true,companyId:'company-a',staffId:'staff-a'});
+  await test('会社と本人が一致する有効identityは許可',async()=>assert.ok((await read(staff,'tasks/own')).exists()));
+  await seed.doc('authIdentities/staff-a').delete();
+  await test('identity未作成の既存互換経路は維持',async()=>assert.ok((await read(staff,'tasks/own')).exists()));
+
 } finally {
   for(const {db,app} of clients){await clientApi.terminate(db);await appApi.deleteApp(app);}
   await seed.terminate();await adminApp.deleteApp(app);

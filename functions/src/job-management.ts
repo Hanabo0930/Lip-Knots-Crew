@@ -351,13 +351,10 @@ export const updateJobPublication = onCall(async (request) => {
       if (publication.blockedReason) blocked.push(snap.id);
       else updated.push(snap.id);
     }
+    stageAudit(tx, companyId, session.uid, "job.publication.update", {
+      action: input.action, updated, blocked, publishAt: input.publishAt ?? null,
+    });
     return { updated, blocked };
-  });
-  await writeAudit(companyId, session.uid, "job.publication.update", {
-    action: input.action,
-    updated,
-    blocked,
-    publishAt: input.publishAt ?? null,
   });
 
   return { updated, blocked };
@@ -630,17 +627,15 @@ export const adminEditJobInputs = onCall(async (request) => {
     }
     tx.set(jobRef, update, { merge: true });
 
-    return {
+    const result = {
       revision: currentRevision + 1,
       sheetWriteQueued: writeEnabled && Object.keys(sheetUpdates).length > 0,
       pendingSourceWrite: hasSheetEdits || job.pendingSourceWrite === true,
     };
-  });
-
-  await writeAudit(companyId, session.uid, "job.admin_edit", {
-    jobId: input.jobId,
-    fields: Object.keys(input.fields),
-    result,
+    stageAudit(tx, companyId, session.uid, "job.admin_edit", {
+      jobId: input.jobId, fields: Object.keys(input.fields), result,
+    });
+    return result;
   });
   return result;
 });
@@ -762,29 +757,13 @@ function copyableJobFields(source: FirebaseFirestore.DocumentData) {
 
 // 案件と監査を同じcommitに含め、監査だけの失敗を作成失敗として返さない。
 function stageAudit(
-  batch: FirebaseFirestore.WriteBatch,
+  batch: { create(ref: FirebaseFirestore.DocumentReference, data: FirebaseFirestore.DocumentData): unknown },
   companyId: string,
   actorUid: string,
   action: string,
   detail: Record<string, unknown>
 ): void {
   batch.create(db.collection("auditLogs").doc(), {
-    companyId,
-    actorUid,
-    action,
-    detail,
-    requestId: requestId("audit"),
-    createdAt: FieldValue.serverTimestamp(),
-  });
-}
-
-async function writeAudit(
-  companyId: string,
-  actorUid: string,
-  action: string,
-  detail: Record<string, unknown>
-): Promise<void> {
-  await db.collection("auditLogs").add({
     companyId,
     actorUid,
     action,

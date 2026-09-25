@@ -11,10 +11,10 @@ const initial={companyId:'company',status:'draft',sourceReady:true,revision:2,da
 const clone=v=>v===undefined?undefined:structuredClone(v);
 function setup({job=initial,concurrent,count=0}={}) {
  const records=new Map(job?[['jobs/job',{...job}]]:[]),logs=[],reads=[],committed=[];
- let version=0,injected=false,attempts=0;
- const ref=(name,id)=>({path:name+'/'+id,id});
+ let version=0,injected=false,attempts=0,serial=0;
+ const ref=(name,id="generated-"+(++serial))=>({path:name+'/'+id,id});
  const snapshot=r=>({id:r.id,ref:r,exists:records.has(r.path),data:()=>clone(records.get(r.path))});
- const apply=pending=>{for(const item of pending){const old=records.get(item.ref.path)??{};const data=Object.fromEntries(Object.entries(item.data).map(([key,value])=>[key,value?.increment!==undefined?(Number(old[key]??0)+value.increment):value]));records.set(item.ref.path,{...old,...data});committed.push(item);}};
+ const apply=pending=>{for(const item of pending)if(item.create)assert.ok(!records.has(item.ref.path));for(const item of pending){const old=records.get(item.ref.path)??{};const data=Object.fromEntries(Object.entries(item.data).map(([key,value])=>[key,value?.increment!==undefined?(Number(old[key]??0)+value.increment):value]));records.set(item.ref.path,{...old,...data});if(item.ref.path.startsWith("auditLogs/"))logs.push({collection:"auditLogs",data});committed.push(item);}};
  const inject=()=>{if(concurrent&&!injected){records.set('jobs/job',{...records.get('jobs/job'),...concurrent});version++;injected=true;}};
  const query=(name,filters=[],limit=Infinity)=>({
   doc:id=>ref(name,id),add:async data=>{logs.push({collection:name,data});return{id:'log'};},
@@ -25,7 +25,7 @@ function setup({job=initial,concurrent,count=0}={}) {
   batch:()=>{const pending=[];return{set:(r,d)=>pending.push({ref:r,data:d}),commit:async()=>{inject();apply(pending);}};},
   runTransaction:async callback=>{for(let retry=0;retry<3;retry++){
    attempts++;const pending=[],seen=version;
-   const result=await callback({getAll:async(...refs)=>{assert.equal(pending.length,0);return refs.map(r=>{const saved=clone(records.get(r.path));return{...snapshot(r),data:()=>saved};});},set:(r,d)=>pending.push({ref:r,data:d})});
+   const result=await callback({getAll:async(...refs)=>{assert.equal(pending.length,0);return refs.map(r=>{const saved=clone(records.get(r.path));return{...snapshot(r),data:()=>saved};});},create:(r,d)=>pending.push({ref:r,data:d,create:true}),set:(r,d)=>pending.push({ref:r,data:d})});
    inject();if(seen!==version)continue;apply(pending);return result;
   }throw Error('transaction retry exhausted');},
  };
@@ -47,13 +47,13 @@ for(const action of ['publish','schedule','draft','stop'])for(const [label,concu
  const t=setup({concurrent});const result=await t.publish(action,{publishAt:'2026-09-17T00:00:00Z'});
  const saved=t.records.get('jobs/job');assert.equal(saved.status,concurrent.status??initial.status);assert.equal(saved.companyId,concurrent.companyId??'company');
  assert.equal(t.attempts(),2,'Conflicting reads must be retried');
- const expectedWrites=label==='assignment'&&action==='stop'?1:0;assert.equal(t.committed.length,expectedWrites);
+ const expectedWrites=label==='assignment'&&action==='stop'?1:0;assert.equal(t.committed.filter(w=>w.ref.path.startsWith("jobs/")).length,expectedWrites);
  assert.equal(result.updated.length,expectedWrites);assert.equal(t.logs.length,1,'Only final transaction result is audited');
 });
 for(const [action,status]of [['publish','open'],['schedule','scheduled'],['draft','draft'],['stop','stopped']])await test('normal '+action,async()=>{
  const t=setup(),r=await t.publish(action,{publishAt:'2026-09-17T00:00:00Z'});assert.equal(t.records.get('jobs/job').status,status);assert.equal(r.updated.length,1);assert.equal(t.records.get('jobs/job').revision,3);
 });
-for(const job of [null,{...initial,companyId:'other'},{...initial,cancelled:true,status:'cancelled'}])await test('uneditable '+JSON.stringify(job),async()=>{const t=setup({job});const r=await t.publish('publish');assert.equal(t.committed.length,0);assert.equal(r.updated.length,0);});
+for(const job of [null,{...initial,companyId:'other'},{...initial,cancelled:true,status:'cancelled'}])await test('uneditable '+JSON.stringify(job),async()=>{const t=setup({job});const r=await t.publish('publish');assert.equal(t.committed.filter(w=>w.ref.path.startsWith("jobs/")).length,0);assert.equal(r.updated.length,0);});
 await test('source not ready remains draft',async()=>{const t=setup({job:{...initial,sourceReady:false}});const r=await t.publish('publish');assert.equal(t.records.get('jobs/job').status,'draft');assert.equal(r.blocked.length,1);});
 await test('untrusted company ignored',async()=>{const t=setup();await t.publish('publish',{companyId:'other'});assert.equal(t.records.get('jobs/job').companyId,'company');});
 for(const count of [0,4999,5000,5001])await test('export count '+count,async()=>{

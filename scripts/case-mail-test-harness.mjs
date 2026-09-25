@@ -64,6 +64,7 @@ function harness() {
           if (!ref.path) { const result = await ref.get(); queryReads.push({ query: ref, before: JSON.stringify(result.docs.map(doc => [doc.ref.path, doc.data()])) }); return result; }
           reads.set(ref.path, JSON.stringify(records.get(ref.path))); return snap(ref);
         }, set: (ref, data, options) => writes.push({ ref, data: clone(data), merge: options?.merge }) };
+        tx.create = (ref, data) => writes.push({ref,data:clone(data),create:true});
         tx.update = (ref, data) => writes.push({ref,data:clone(data),merge:true});
         tx.getAll = async (...refs) => Promise.all(refs.map(item => tx.get(item)));
         const result = await callback(tx); await h.beforeCommit?.({ attempt, reads, writes });

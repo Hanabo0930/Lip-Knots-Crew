@@ -180,11 +180,12 @@ jobs:
           node scripts/run-local-firestore-acceptance.mjs --suite received-staff-journey --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-received-staff-journey
           node scripts/run-local-firestore-acceptance.mjs --suite admin-creation-audit --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-admin-creation-audit
           node scripts/run-local-firestore-acceptance.mjs --suite admin-mutation-audit --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-admin-mutation-audit
-      - name: Validate native creation retry transactions
+      - name: Validate native creation retry and mail cancellation transactions
         timeout-minutes: 3
         run: |
           emulator_jar=$(node -p "require('firebase-tools/lib/emulator/downloadableEmulators').getDownloadDetails('firestore').downloadPath")
           node scripts/run-local-firestore-acceptance.mjs --suite native-creation-retry --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-native-creation-retry
+          node scripts/run-local-firestore-acceptance.mjs --suite mail-cancellation-journey --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-mail-cancellation-journey
       - name: Publish Functions summary
         if: always()
         run: |

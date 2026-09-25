@@ -71,6 +71,7 @@ reject('updateJobPublication','batch.create(db.collection("auditLogs").doc(),','
 reject('adminEditJobInputs','stageAudit(tx, companyId, session.uid, "job.admin_edit",','stageAudit(db.batch(), companyId, session.uid, "job.admin_edit",');
 reject('adminEditJobInputs','stageAudit(tx, companyId, session.uid, "job.admin_edit",','stageAudit(tx, "other", session.uid, "job.admin_edit",');
 reject('adminEditJobInputs','batch.create(db.collection("auditLogs").doc(),','batch.set(db.collection("auditLogs").doc(),',true);
+reject('adminRestoreCancelledJob','staffSnap.data()?.active !== true','false');
 reject('createAdminJobGroup','createNativeJobGroup(request.data, companyId, session.uid, "create"','createNativeJobGroup(request.data, "other", session.uid, "create"');
 for(const before of ['command.expectedCompanyId !== companyId','command.expectedActorUid !== actorUid','receipt.inputHash !== inputHash','receipt[key] !== value','group.companyId !== companyId','job.companyId !== companyId','job.nativeCreationReceiptId !== receiptId','tx.create(receiptRef,','tx.create(db.collection("auditLogs").doc(),','tx.create(ref,']) {
  const p='functions/src/native-job-creation.ts';assert.ok(sources[p].includes(before));assert.deepEqual(run('createAdminJobGroup',files=>{files[p]=files[p].replace(before,before.startsWith('tx.create')?before.replace('tx.create','tx.set'):'false');}),{passed:false,exitCode:1},before);cases++;

@@ -507,7 +507,7 @@ function checkAdminCore(name) {
     adminRestoreCancelledJob: [
       'RestoreSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
       'if(!jobSnap.exists||jobSnap.data()?.companyId!==companyId)', 'if(job.cancelled!==true&&job.status!=="cancelled")',
-      'if(!staffSnap.exists||staffSnap.data()?.companyId!==companyId)throw',
+      'if(!staffSnap.exists||staffSnap.data()?.companyId!==companyId)throw', 'if(staffSnap.data()?.active!==true)throw',
       'currentLock?.companyId!==companyId||currentLock.staffId!==assignedStaffId||currentLock.dateKey!==dateKey',
       'lockSnap.data()?.active===true&&lockSnap.data()?.jobId!==input.jobId',
       'tx.set(lockRef,{companyId,staffId:assignedStaffId,dateKey,jobId:input.jobId,active:true,',

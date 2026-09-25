@@ -105,7 +105,7 @@ for(const status of ["open","assigned","cancelled"])await test("変更受信は"
 });
 for(const assigned of [false,true])await test("取消復帰でも募集停止を維持（担当"+assigned+"）",async()=>{
  const h=await setup();await h.publishNow();Object.assign(h.job(),{status:"cancelled",cancelled:true,recruitmentStopped:false});
- if(assigned){h.job().assignedStaffId="staff-1";h.job().assignedStaffName="合成スタッフ";h.records.set("staffProfiles/staff-1",{companyId});}
+ if(assigned){h.job().assignedStaffId="staff-1";h.job().assignedStaffName="合成スタッフ";h.records.set("staffProfiles/staff-1",{companyId,active:true});}
  await h.load("./analytics").adminRestoreCancelledJob({auth:h.auth,data:{jobId:h.jobId,note:"合成復帰",expectedRevision:h.job().revision}});
  assert.equal(h.job().publishable,false);assert.equal(h.job().recruitmentStopped,true);assert.equal(h.job().cancelled,false);
  assert.equal(h.job().status,assigned?"assigned":"open");assert.equal(h.job().mailPublication,undefined);

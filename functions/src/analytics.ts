@@ -269,6 +269,7 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
       const lockRef = db.collection("staffDayLocks").doc(lockId);
       const [lockSnap, staffSnap] = await Promise.all([tx.get(lockRef), tx.get(db.collection("staffProfiles").doc(assignedStaffId))]);
       if (!staffSnap.exists || staffSnap.data()?.companyId !== companyId) throw new HttpsError("failed-precondition", "復帰する担当者の会社情報を確認できません。");
+      if (staffSnap.data()?.active !== true) throw new HttpsError("failed-precondition", "復帰する担当者が有効ではありません。担当者を確認してください。");
       const currentLock = lockSnap.data();
       if (lockSnap.exists && (currentLock?.companyId !== companyId || currentLock.staffId !== assignedStaffId || currentLock.dateKey !== dateKey)) throw new HttpsError("failed-precondition", "勤務枠の所属情報が一致しません。");
       if (

@@ -30,7 +30,7 @@ for (const moduleName of ['jobs', 'analytics']) {
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   function setup(lock, jobPatch = {}) {
     const records = new Map([['jobs/old-job', { companyId, assignedStaffId: staffId, dateKey, status: 'assigned', ...jobPatch }]]);
-    records.set(`staffProfiles/${staffId}`,{companyId});
+    records.set(`staffProfiles/${staffId}`,{companyId,active:true});
     if (lock) records.set(lockPath, { ...lock });
     let generated = 0;
     const committed = [];
@@ -71,7 +71,7 @@ for (const moduleName of ['jobs', 'analytics']) {
     return { records, committed, reads, cancel, restore:()=>exports.adminRestoreCancelledJob({auth:{uid:"synthetic-admin",token:{companyId,role:"admin"}},data:{jobId:"old-job",note:"合成復帰"}}) };
   }
   if(moduleName==='analytics'){
-    for(const mode of ['valid','missing-lock','inactive-lock','unassigned','other-job','lock-company','lock-staff','lock-date','staff-missing','staff-company','date-missing']){
+    for(const mode of ['valid','missing-lock','inactive-lock','unassigned','other-job','lock-company','lock-staff','lock-date','staff-missing','staff-company','staff-inactive','staff-active-missing','date-missing']){
       const test=setup(ownLock,{cancelled:true,status:'cancelled'});
       if(mode==='missing-lock')test.records.delete(lockPath);
       if(mode==='inactive-lock'){test.records.get(lockPath).active=false;test.records.get(lockPath).jobId='previous-job';}
@@ -82,6 +82,8 @@ for (const moduleName of ['jobs', 'analytics']) {
       if(mode==='lock-date')test.records.get(lockPath).dateKey='2099-01-01';
       if(mode==='staff-missing')test.records.delete('staffProfiles/'+staffId);
       if(mode==='staff-company')test.records.get('staffProfiles/'+staffId).companyId='other';
+      if(mode==='staff-inactive')test.records.get('staffProfiles/'+staffId).active=false;
+      if(mode==='staff-active-missing')delete test.records.get('staffProfiles/'+staffId).active;
       if(mode==='date-missing')test.records.get('jobs/old-job').dateKey='';
       if(['valid','missing-lock','inactive-lock','unassigned'].includes(mode)){await test.restore();assert.equal(test.records.get('jobs/old-job').status,mode==='unassigned'?'open':'assigned');if(mode!=='unassigned')assert.equal(test.records.get(lockPath).active,true);}
       else{await assert.rejects(test.restore(),{code:'failed-precondition'},mode);assert.equal(test.committed.length,0,mode);}

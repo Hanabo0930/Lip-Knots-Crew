@@ -6,6 +6,7 @@ import { z } from "zod";
 import { db } from "./firebase";
 import { hashText, createJobIdFromPersistedCaseId } from "./case-id";
 import { allocateAdminJobGroup, stageAdminJobGroup } from "./job-group-creation";
+import { createNativeJobGroup } from "./native-job-creation";
 import { createCaseMailJobGroup } from "./case-mail-job-creation";
 import { readMailPublication } from "./case-mail-publication";
 import { assignmentPreparationPatch } from "./assignment-preparation-core";
@@ -100,6 +101,13 @@ export const createAdminJobGroup = onCall(async (request) => {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
+  if (request.data && Object.hasOwn(request.data, "nativeCreation")) {
+    return createNativeJobGroup(request.data, companyId, session.uid, "create", async raw => {
+      const normalized = normalizeJobInput(CreateSchema.parse(raw));
+      if (normalized.errors.length) throw new HttpsError("invalid-argument", normalized.errors.join(" / "));
+      return { input: normalized.value };
+    });
+  }
   if (request.data && Object.hasOwn(request.data, "mailIntake")) {
     return createCaseMailJobGroup(request.data, companyId, session.uid, raw => {
       const normalized = normalizeJobInput(CreateSchema.parse(raw));
@@ -134,6 +142,27 @@ export const duplicateAdminJob = onCall(async (request) => {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
+  if (request.data && Object.hasOwn(request.data, "nativeCreation")) {
+    return createNativeJobGroup(request.data, companyId, session.uid, "duplicate", async (raw, tx) => {
+      const command = DuplicateSchema.parse(raw);
+      if (command.sourceJobId.includes("/")) throw new HttpsError("invalid-argument", "複製元を確認できません。");
+      const source = (await tx.get(db.collection("jobs").doc(command.sourceJobId))).data();
+      if (!source || source.companyId !== companyId) throw new HttpsError("not-found", "複製元の案件が見つかりません。");
+      const normalized = normalizeJobInput({
+        workDate: command.workDate ?? String(source.dateKey ?? source.workDate ?? ""),
+        clientName: String(source.clientName ?? ""), storeName: String(source.storeName ?? ""),
+        storeAddress: String(source.storeAddress ?? ""), storeNearestStation: String(source.storeNearestStation ?? ""),
+        makerName: String(source.makerName ?? ""), menuName: String(source.menuName ?? ""),
+        entryTime: String(source.entryTime ?? ""), workTime: String(source.workTime ?? ""),
+        subcontractorName: String(source.subcontractorName ?? ""), slots: command.slots, basePay: numberOrNull(source.basePay),
+        publicationMode: command.publicationMode, publishAt: command.publishAt ?? null,
+      });
+      if (normalized.errors.length) throw new HttpsError("invalid-argument", normalized.errors.join(" / "));
+      const extraFields = Object.fromEntries(["clientChargeInputs", "staffPaymentInputs", "financials"]
+        .filter(key => source[key] !== undefined).map(key => [key, source[key]]));
+      return { input: normalized.value, sourceJobId: command.sourceJobId, extraFields };
+    });
+  }
   const input = DuplicateSchema.parse(request.data ?? {});
   const source = await requireCompanyJob(companyId, input.sourceJobId);
 

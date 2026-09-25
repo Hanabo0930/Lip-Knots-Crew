@@ -38,6 +38,7 @@ jobs:
           fi
           npm run test:admin-startup
           node scripts/test-admin-action-confirmation.mjs
+          node scripts/test-native-creation-retry-client.mjs
           node scripts/test-admin-expense-recovery.mjs
           node scripts/test-admin-expense-status.mjs
       - name: Validate Staff workflows and company isolation
@@ -58,6 +59,7 @@ jobs:
           node scripts/test-case-mail-entry-readiness.mjs
           node scripts/test-admin-import-snapshot.mjs
           node scripts/test-submission-attempt-browser.mjs
+          node scripts/test-native-creation-retry-browser.mjs release-evidence/ci-native-creation-browser
           node scripts/test-admin-comparison-pages.mjs
           node scripts/test-case-mail-review-browser.mjs release-evidence/ci-mail-review --resolve-only
       - name: Run release orchestration regressions
@@ -178,6 +180,11 @@ jobs:
           node scripts/run-local-firestore-acceptance.mjs --suite received-staff-journey --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-received-staff-journey
           node scripts/run-local-firestore-acceptance.mjs --suite admin-creation-audit --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-admin-creation-audit
           node scripts/run-local-firestore-acceptance.mjs --suite admin-mutation-audit --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-admin-mutation-audit
+      - name: Validate native creation retry transactions
+        timeout-minutes: 3
+        run: |
+          emulator_jar=$(node -p "require('firebase-tools/lib/emulator/downloadableEmulators').getDownloadDetails('firestore').downloadPath")
+          node scripts/run-local-firestore-acceptance.mjs --suite native-creation-retry --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-native-creation-retry
       - name: Publish Functions summary
         if: always()
         run: |

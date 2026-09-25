@@ -33,7 +33,7 @@ function setup({job=initial,concurrent,count=0}={}) {
  const boundary={
   'node:crypto':{randomUUID:()=>assert.fail('no group creation')},
   'firebase-admin/firestore':{FieldValue:{delete:()=>null,increment:n=>({increment:n}),serverTimestamp:()=>now},Timestamp:{now:()=>now,fromDate:date=>({date})}},
-  'firebase-functions/v2/https':{onCall:(options,handler)=>handler??options,HttpsError},'firebase-functions/v2/scheduler':{onSchedule:()=>null},zod:{z},'./firebase':{db},'./case-id':{hashText:()=>''},'./assignment-preparation-core':{},'./admin-edit-state-core':{},'./job-management-core':pure.exports,'./job-group-creation':{},'./case-mail-job-creation':{},'./case-mail-publication':{readMailPublication:()=>assert.fail('non-mail path must not use mail proof')},
+  'firebase-functions/v2/https':{onCall:(options,handler)=>handler??options,HttpsError},'firebase-functions/v2/scheduler':{onSchedule:()=>null},zod:{z},'./firebase':{db},'./case-id':{hashText:()=>''},'./assignment-preparation-core':{},'./admin-edit-state-core':{},'./job-management-core':pure.exports,'./job-group-creation':{},'./native-job-creation':{createNativeJobGroup:()=>assert.fail('publication/export must not create')},'./case-mail-job-creation':{},'./case-mail-publication':{readMailPublication:()=>assert.fail('non-mail path must not use mail proof')},
   './utils':{requireAdmin:r=>{if(r.auth?.token.role!=='admin')throw new HttpsError('permission-denied','admin required');return r.auth;},companyFromClaims:t=>t.companyId,requestId:()=> 'request'},
   './system-safety':{assertProductionOperational:async()=>{},getProductionOperationalState:async()=>({operational:true})},
  };

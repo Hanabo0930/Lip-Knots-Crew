@@ -12,7 +12,7 @@ let cases=0;
 function run(name,source=sources[files[name]]) {
  const lines=[],process={argv:['node','guard','--functions',name,'--require-pass'],exitCode:0,exit:code=>{throw Error('unexpected exit '+code);}};
  runInNewContext(guard,{process,console:{log:x=>lines.push(x),error:x=>lines.push(x)},execFileSync:(cmd,args)=>{
-  assert.equal(cmd,'git');assert.equal(args[0],'show');assert.equal(args[1].split(':').at(-1),'functions/src/'+files[name]+'.ts');return source;
+  assert.equal(cmd,'git');assert.equal(args[0],'show');const target=args[1].split(':').at(-1);if(['functions/src/native-job-creation.ts','functions/src/job-group-creation.ts'].includes(target))return read(target);assert.equal(target,'functions/src/'+files[name]+'.ts');return source;
  }},{timeout:3000});
  return {passed:lines.includes('SOURCE_GUARD_STATUS=PASS'),exitCode:process.exitCode};
 }

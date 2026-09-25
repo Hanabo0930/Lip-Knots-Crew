@@ -1,3 +1,4 @@
+import { submitNativeCreation } from "./native-creation-client";
 import { expenseReadinessMessage } from "./expense-readiness";
 import type { SheetWriteIssue } from "./AdminSheetIssuePanel";
 import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -43,6 +44,7 @@ const AdminStaffDevicePanel=lazy(()=>import("./AdminStaffDevicePanel"));
 const AdminComparisonPanel=lazy(()=>import("./AdminComparisonPanel"));
 const AdminExpensePanel = lazy(() => import("./AdminExpensePanel"));
 const JobSafeEditPanel = lazy(() => import("./JobSafeEditPanel"));
+const NativeCreationRecovery = lazy(() => import("./NativeCreationRecovery"));
 const CaseMailIntakeEntry = lazy(() => import("./CaseMailIntakeEntry"));
 
 export type Job = {
@@ -3069,14 +3071,15 @@ async function createJobGroupAction(isCurrent:()=>boolean) {
       return;
     }
     if (!functions) return;
-    const response=await httpsCallable(functions,"createAdminJobGroup")({
+    const response=await submitNativeCreation({kind:"create",input:{
       ...jobForm,
       slots:Number(jobForm.slots),
       basePay:jobForm.basePay===""?null:Number(jobForm.basePay),
       publishAt:jobForm.publishAt?new Date(jobForm.publishAt).toISOString():null,
-    });
-    if(!isCurrent())return;
-    const data=response.data as {jobIds?:string[];warning?:string|null};
+    }},isCurrent);
+    if(!response||!isCurrent())return;
+    if(response.nativeCreationReceipt.status==="cancelled"){setMessage("未完了の作成依頼は取り消されています。");return;}
+    const data=response as {jobIds?:string[];warning?:string|null};
     const resultMessage=data.warning || `${data.jobIds?.length ?? 0}名分の案件を作成しました。`;
     setJobForm((current)=>({...blankJobForm,workDate:current.workDate}));
     await refreshJobsAfterAction(resultMessage,isCurrent);
@@ -3106,11 +3109,12 @@ async function duplicateJobAction(job:Job,isCurrent:()=>boolean) {
   }
   if (!functions) return;
   try {
-    const response=await httpsCallable(functions,"duplicateAdminJob")({
+    const response=await submitNativeCreation({kind:"duplicate",input:{
       sourceJobId:job.id,workDate:date,slots,publicationMode:"draft",publishAt:null,
-    });
-    if(!isCurrent())return;
-    await refreshJobsAfterAction(`${(response.data as {jobIds?:string[]}).jobIds?.length ?? 0}件を複製しました。`,isCurrent);
+    }},isCurrent);
+    if(!response||!isCurrent())return;
+    if(response.nativeCreationReceipt.status==="cancelled"){setMessage("未完了の複製依頼は取り消されています。");return;}
+    await refreshJobsAfterAction(`${response.jobIds?.length ?? 0}件を複製しました。`,isCurrent);
   } catch(error) {
     if(isCurrent())setMessage(error instanceof Error?error.message:String(error));
   }
@@ -3791,7 +3795,7 @@ function downloadCsv(filename:string,content:string) {
 
 <WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p>受信候補を準備中…</p>}><CaseMailIntakeEntry onCreated={()=>void refreshAdminJobs()} onReviewJob={(id,action)=>{const job=jobs.find(item=>item.id===id);if(!job){setMessage("案件一覧を更新して対象案件を確認してください。");return;}if(action==="edit")loadJobEdit(job);else {openWorkspace("jobs");prepareCancellation(job);}}}/></Suspense></WorkspacePanel>
 
-<WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel job-create-panel">
+<WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={null}><NativeCreationRecovery/></Suspense><section className="panel job-create-panel">
   <div className="section-heading">
     <div>
       <h2>案件を追加</h2>

@@ -425,6 +425,15 @@ async function writeJobsAndLocks(
       }
       const jobRefs = chunk.map((job) => db.collection("jobs").doc(job.jobId));
       const snapshots = await tx.getAll(...jobRefs);
+      // 旧方式の管理者案件を別IDで再作成しない。曖昧な既存対応は移し替えず停止する。
+      for (const [index, job] of chunk.entries()) {
+        if (!/^LKC-(?:ADMIN|DUP)-/.test(job.caseId) || snapshots[index]?.data()?.mailIntake) continue;
+        const existing = await tx.get(db.collection("jobs")
+          .where("companyId", "==", job.companyId).where("caseId", "==", job.caseId).limit(2));
+        if (existing.docs.some((doc) => doc.id !== job.jobId)) {
+          throw new HttpsError("failed-precondition", "管理者案件の旧IDまたは重複を検出しました。既存の案件を保持して取込を停止しました。");
+        }
+      }
       const now = Timestamp.now();
       const plans = chunk.map((job, index) => {
         const ref = jobRefs[index];
@@ -448,9 +457,9 @@ async function writeJobsAndLocks(
         if (old?.mailIntake && old.cancelled === true && !job.cancelled && !(override?.active === true && override.type === "restore")) {
           throw new HttpsError("failed-precondition", "受信案件の取消解除は明示的な復帰操作を確認してください。");
         }
-        const preserveMailPublication = Boolean(old?.mailIntake || old?.mailTargetReview) && job.status === "open" &&
-          (old?.status === "draft" || old?.status === "stopped");
-        const effectiveStatus = preserveAppOverride || preserveMailPublication ? String(old?.status ?? job.status) : job.status;
+        const preserveAppPublication = Boolean(old?.mailIntake || old?.mailTargetReview || old?.adminCreated) && job.status === "open" &&
+          ["draft", "stopped", "scheduled"].includes(String(old?.status));
+        const effectiveStatus = preserveAppOverride || preserveAppPublication ? String(old?.status ?? job.status) : job.status;
         const effectiveCancelled = preserveAppOverride ? old?.cancelled === true : job.cancelled;
         const isActiveAssignment = effectiveStatus === "assigned" && !effectiveCancelled && resolvedStaffId !== null;
         const oldStaffId = typeof old?.assignedStaffId === "string" ? old.assignedStaffId : null;
@@ -491,10 +500,10 @@ async function writeJobsAndLocks(
           assignmentUnresolved:
             effectiveStatus === "assigned" && job.assignedStaffName !== "" && !resolvedStaffId,
           status: effectiveStatus,
-          publishable: preserveMailPublication ? false : preserveAppOverride
+          publishable: preserveAppPublication ? false : preserveAppOverride
             ? old?.publishable === true
             : job.publishable,
-          recruitmentStopped: preserveMailPublication ? true : preserveAppOverride
+          recruitmentStopped: preserveAppPublication ? true : preserveAppOverride
             ? old?.recruitmentStopped === true
             : job.recruitmentStopped,
           cancelled: effectiveCancelled,

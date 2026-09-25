@@ -4,7 +4,7 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { z } from "zod";
 import { db } from "./firebase";
-import { hashText } from "./case-id";
+import { hashText, createJobIdFromPersistedCaseId } from "./case-id";
 import { allocateAdminJobGroup, stageAdminJobGroup } from "./job-group-creation";
 import { createCaseMailJobGroup } from "./case-mail-job-creation";
 import { readMailPublication } from "./case-mail-publication";
@@ -176,12 +176,14 @@ export const duplicateAdminJob = onCall(async (request) => {
     ? db.collection("sheetRowCreateQueue").doc()
     : null;
   for (let slot = 1; slot <= input.slots; slot++) {
-    const ref = db.collection("jobs").doc();
+    const seed = db.collection("jobs").doc().id;
+    const caseId = `LKC-DUP-${normalized.value.workDate.replace(/-/g, "")}-${seed.slice(0, 8).toUpperCase()}`;
+    const ref = db.collection("jobs").doc(createJobIdFromPersistedCaseId(companyId, caseId));
     jobIds.push(ref.id);
     batch.set(ref, {
       ...copyableJobFields(source),
       companyId,
-      caseId: `LKC-DUP-${normalized.value.workDate.replace(/-/g, "")}-${ref.id.slice(0, 8).toUpperCase()}`,
+      caseId,
       groupId,
       slotNumber: slot,
       slotCount: input.slots,

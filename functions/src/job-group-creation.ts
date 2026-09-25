@@ -4,8 +4,8 @@ import { db } from "./firebase";
 import { hashText, createJobIdFromPersistedCaseId } from "./case-id";
 import { AdminJobInput, resolvePublication } from "./job-management-core";
 
-// 固定caseIdの生成は共用し、受信案件だけ再取込と同じjobId規則を選ぶ。
-export function allocateAdminJobGroup(companyId: string, workDate: string, slots: number, persistedIdentity = false) {
+// 新規案件は原本再取込と同じ固定caseIdから内部IDを決める。
+export function allocateAdminJobGroup(companyId: string, workDate: string, slots: number, persistedIdentity = true) {
   const groupId = "group_" + hashText(companyId + "|" + randomUUID(), 24);
   const jobs = Array.from({ length: slots }, () => {
     const ref = db.collection("jobs").doc();

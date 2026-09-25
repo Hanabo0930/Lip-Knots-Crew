@@ -501,33 +501,44 @@ export const cleanupExpiredLoginTokens = onSchedule(
     timeoutSeconds: 300,
   },
   async () => {
+    const cutoff = Timestamp.now();
     const [expiredGatewayTokens, expiredCodeStates] = await Promise.all([
       db.collection("loginGatewayTokens")
-        .where("expiresAt", "<", Timestamp.now())
+        .where("expiresAt", "<", cutoff)
         .limit(250)
         .get(),
       db.collection("loginLinkRateLimits")
-        .where("loginCodeExpiresAt", "<", Timestamp.now())
+        .where("loginCodeExpiresAt", "<", cutoff)
         .limit(250)
         .get(),
     ]);
 
-    const batch = db.batch();
-    expiredGatewayTokens.docs.forEach((doc) => batch.delete(doc.ref));
-    expiredCodeStates.docs.forEach((doc) => batch.update(doc.ref, {
-      loginCodeHash: FieldValue.delete(),
-      loginCodeCompanyId: FieldValue.delete(),
-      loginCodeStaffId: FieldValue.delete(),
-      loginCodeGatewayTokenHash: FieldValue.delete(),
-      loginCodeActive: FieldValue.delete(),
-      loginCodeExpiresAt: FieldValue.delete(),
-      loginCodeSource: FieldValue.delete(),
-      loginCodeBatchId: FieldValue.delete(),
-      loginCodeCreatedAt: FieldValue.delete(),
-      loginCodeUsedAt: FieldValue.delete(),
-      loginCodeInvalidatedAt: FieldValue.delete(),
-    }));
-    if (!expiredGatewayTokens.empty || !expiredCodeStates.empty) await batch.commit();
+    const candidates = [...expiredGatewayTokens.docs, ...expiredCodeStates.docs];
+    if (candidates.length === 0) return;
+    const gatewayPaths = new Set(expiredGatewayTokens.docs.map(doc => doc.ref.path));
+    // 検索後の再発行や別の清掃と競合しても、新しいログイン情報を消さない。
+    await db.runTransaction(async transaction => {
+      const current = await transaction.getAll(...candidates.map(doc => doc.ref));
+      current.forEach(doc => {
+        const gateway = gatewayPaths.has(doc.ref.path);
+        const expiresAt = doc.data()?.[gateway ? "expiresAt" : "loginCodeExpiresAt"];
+        if (!doc.exists || !(expiresAt instanceof Timestamp) || expiresAt.toMillis() >= cutoff.toMillis()) return;
+        if (gateway) transaction.delete(doc.ref);
+        else transaction.update(doc.ref, {
+          loginCodeHash: FieldValue.delete(),
+          loginCodeCompanyId: FieldValue.delete(),
+          loginCodeStaffId: FieldValue.delete(),
+          loginCodeGatewayTokenHash: FieldValue.delete(),
+          loginCodeActive: FieldValue.delete(),
+          loginCodeExpiresAt: FieldValue.delete(),
+          loginCodeSource: FieldValue.delete(),
+          loginCodeBatchId: FieldValue.delete(),
+          loginCodeCreatedAt: FieldValue.delete(),
+          loginCodeUsedAt: FieldValue.delete(),
+          loginCodeInvalidatedAt: FieldValue.delete(),
+        });
+      });
+    });
   }
 );
 

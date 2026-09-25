@@ -20,6 +20,7 @@ function client(name,claims) {
 const staff=client('staff-a',{role:'staff',companyId:'company-a',staffId:'staff-a'});
 const otherStaff=client('staff-other',{role:'staff',companyId:'company-a',staffId:'staff-other'});
 const manager=client('admin-a',{role:'admin',companyId:'company-a'});
+const anotherManager=client('admin-other',{role:'admin',companyId:'company-a'});
 const managerB=client('admin-b',{role:'admin',companyId:'company-b'});
 const staleStaff=client('staff-stale',{role:'staff',companyId:'company-a',staffId:'staff-b'});
 const anonymous=client('anonymous');
@@ -52,6 +53,7 @@ try {
     'deviceSessions/own':{companyId:'company-a',staffId:'staff-a',active:true},
     'deviceSessions/foreign':{companyId:'company-b',staffId:'staff-a',active:true},
     'deviceSessions/legacy':{staffId:'staff-a',active:true},
+    'nativeJobCreationReceipts/synthetic-own':{version:1,companyId:'company-a',actorUid:'admin-a',operationId:'synthetic-operation',kind:'create',status:'committed'},
     'sheetSyncQueue/own':{companyId:'company-a',status:'pending'},
     'sheetSyncQueue/foreign':{companyId:'company-b',status:'pending'},
   };
@@ -86,6 +88,15 @@ try {
   await test('会社とstaffProfileが不一致の古いclaimを拒否',()=>denied(read(staleStaff,'jobs/open-a')));
   await test('スタッフの業務データ直接書換えを拒否',()=>denied(clientApi.setDoc(clientApi.doc(staff,'jobs/open-a'),{companyId:'company-a',status:'assigned'})));
   await test('管理者の業務データ直接書換えも拒否',()=>denied(clientApi.setDoc(clientApi.doc(manager,'announcementReceipts/own'),{companyId:'company-a',staffId:'staff-a'})));
+  // 受領記録は同じ管理者本人でもクライアントから変更できない。
+  for(const [role,db] of [['依頼した管理者',manager],['同社の別管理者',anotherManager],['別会社の管理者',managerB],['スタッフ',staff],['未認証',anonymous]]) {
+    const path='nativeJobCreationReceipts/synthetic-own';
+    await test(role+'の作成受領記録直接読取を拒否',()=>denied(read(db,path)));
+    await test(role+'の会社条件付き作成受領記録一覧を拒否',()=>denied(list(db,'nativeJobCreationReceipts',['companyId','company-a'])));
+    await test(role+'の作成受領記録新規作成を拒否',()=>denied(clientApi.setDoc(clientApi.doc(db,'nativeJobCreationReceipts/new-'+role),{companyId:'company-a',actorUid:'admin-a',status:'cancelled'})));
+    await test(role+'の作成受領記録更新を拒否',()=>denied(clientApi.updateDoc(clientApi.doc(db,path),{status:'cancelled'})));
+    await test(role+'の作成受領記録削除を拒否',()=>denied(clientApi.deleteDoc(clientApi.doc(db,path))));
+  }
   await seed.doc('staffProfiles/staff-a').update({active:false});
   await test('停止済みスタッフの案件読取を拒否',()=>denied(read(staff,'jobs/open-a')));
   await seed.doc('staffProfiles/staff-a').update({active:true});

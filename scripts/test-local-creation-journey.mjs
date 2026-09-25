@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
 import {localAcceptanceEnvironment,blockNonEmulatorConnections} from './local-firestore-acceptance-safety.mjs';
 const environment=localAcceptanceEnvironment(process.env),network=blockNonEmulatorConnections(environment.port);
@@ -96,6 +97,20 @@ try{
   for(const [i,id] of received.candidateIds.entries()){const out=await h.create({...received,candidateIds:[id]},'slot-'+i);created.push(out);const queue=db.doc('sheetRowCreateQueue/'+out.rowCreationQueueId);await worker.processSheetRowCreation.run({data:{after:await queue.get()}});assert.equal((await queue.get()).data().status,'completed');}
   const ids=created.flatMap(x=>x.jobIds),revision=async()=>Object.fromEntries((await db.getAll(...ids.map(id=>db.doc('jobs/'+id)))).map(snap=>[snap.id,snap.data().revision]));assert.equal((await h.publish(ids,await revision())).blocked.length,2);await h.import();assert.deepEqual(new Set((await h.publish(ids,await revision())).updated),new Set(ids));assert.equal(h.sheet.inserted,2);
   for(const id of ids){const job=(await db.doc('jobs/'+id).get()).data();assert.equal(job.status,'open');assert.equal(h.sheet.rows.filter(row=>row[54]===job.caseId).length,1);}
+ });
+
+ for(const kind of ['create','duplicate'])for(const mode of ['draft','immediate','scheduled'])await test('受領記録→行作成→原本取込→同じ依頼の結果確認 '+kind+'/'+mode,async()=>{
+  const h=await fixture();let initialRows=0;
+  if(kind==='duplicate'){await h.start();await h.run();initialRows=1;}
+  const input=kind==='create'?{workDate,clientName:'合成取引先',storeName:'合成再送店舗',makerName:'合成メーカー',menuName:'試食',entryTime:'09:30',workTime:'10:00～18:00',slots:2,publicationMode:mode,publishAt:mode==='scheduled'?new Date(Date.now()+3600000).toISOString():null}:{sourceJobId:h.job.id,workDate,slots:2,publicationMode:mode,publishAt:mode==='scheduled'?new Date(Date.now()+3600000).toISOString():null};
+  const command={operationId:crypto.randomUUID(),expectedCompanyId:h.companyId,expectedActorUid:h.auth.uid,action:'create',input};const api=kind==='create'?management.createAdminJobGroup:management.duplicateAdminJob;
+  const invoke=action=>api.run({auth:h.auth,data:{nativeCreation:{...command,action:action??'create'}}});
+  await invoke();const created=await invoke();assert.equal(created.replayed,true);assert.equal((await h.list('nativeJobCreationReceipts')).length,1);
+  const queue=db.doc('sheetRowCreateQueue/'+created.rowCreationQueueId),event={data:{after:await queue.get()}};await worker.processSheetRowCreation.run(event);assert.equal((await queue.get()).data().status,'completed');await worker.processSheetRowCreation.run(event);assert.equal(h.sheet.inserted,initialRows+2);
+  const priorJobs=await db.getAll(...created.jobIds.map(id=>db.doc('jobs/'+id)));
+  await h.import();const all=await h.list('jobs');for(const id of created.jobIds){const job=(await db.doc('jobs/'+id).get()).data();assert.equal(all.filter(d=>d.data().caseId===job.caseId).length,1);assert.ok(job.nativeCreationReceiptId);assert.ok((await db.doc('adminJobEditSources/'+id).get()).exists);const prior=priorJobs.find(doc=>doc.id===id).data();for(const field of ['status','publishable','recruitmentStopped','scheduledPublishAt'])assert.deepEqual(job[field],prior[field],field);assert.equal(job.nativeCreationReceiptId,prior.nativeCreationReceiptId);}
+  const state=async()=>Object.fromEntries(await Promise.all(['jobs','jobGroups','sheetRowCreateQueue','auditLogs','nativeJobCreationReceipts','adminJobEditSources'].map(async name=>[name,(await h.list(name)).map(d=>({id:d.id,data:d.data(),updateTime:d.updateTime})).sort((a,b)=>a.id.localeCompare(b.id))])));
+  const before=await state();assert.deepEqual((await invoke()).jobIds,created.jobIds);assert.equal((await invoke('cancel')).nativeCreationReceipt.status,'committed');assert.deepEqual(await state(),before);assert.equal(h.sheet.inserted,initialRows+2);
  });
 
 }finally{

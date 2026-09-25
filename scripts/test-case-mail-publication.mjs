@@ -118,19 +118,16 @@ await test("複数募集の追加読取は全書込より前に行う",async()=>
  assert.equal(out.updated.length,2);
 });
 await test("行作成完了の古いスナップショットで受信案件の担当/取消/募集を戻さない",async()=>{
- const source=fs.readFileSync(new URL("../functions/src/sheet-row-creation.ts",import.meta.url),"utf8"),start=source.indexOf("    const now = Timestamp.now();\n    const batch = db.batch();",source.indexOf("const verification = await verifyInsertedRows(")),end=source.indexOf("    await batch.commit();",start);
+ const source=fs.readFileSync(new URL("../functions/src/sheet-row-creation.ts",import.meta.url),"utf8"),start=source.indexOf("function publicationUpdateForSourceReady("),end=source.indexOf("function copyRequest(",start);
  assert.ok(start>0&&end>start);
  const code=ts.transpileModule(source.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const status of ["assigned","cancelled","stopped"]){
-  const writes=[],old={id:"mail-job",mailIntake:{receiptId:"receipt"},status:"draft",requestedPublicationMode:"immediate"};
-  const ref=(name,id="new")=>({path:name+"/"+id});
-  runInNewContext(code,{Timestamp,FieldValue:{delete:()=>null,increment:n=>n},db:{batch:()=>({set:(ref,data)=>writes.push({ref,data})}),collection:name=>({doc:id=>ref(name,id)})},
-   jobs:[old],inserted:{startRow:2,endRow:2,sheetId:1,sheetName:"2099.10"},mapping:{spreadsheetId:"synthetic-sheet"},queueRef:ref("sheetRowCreateQueue","queue"),
-   queue:{companyId,groupId:"group",jobIds:["mail-job"]},verification:{ok:true},idempotencyRef:null,requestId:()=> "audit",
-   publicationAfterSourceReady:()=>({status:"open",publishable:true,recruitmentStopped:false,scheduledPublishAt:null})});
-  const update=writes.find(write=>write.ref.path==="jobs/mail-job").data;
+  const old={id:"mail-job",mailIntake:{receiptId:"receipt"},status:"draft",requestedPublicationMode:"immediate"};
+  const current={...old,status};
+  const update=runInNewContext(code+"\npublicationUpdateForSourceReady(current,old)",{Timestamp,FieldValue:{delete:()=>null},current,old});
   for(const key of ["status","publishable","recruitmentStopped"])assert.equal(Object.hasOwn(update,key),false);
-  assert.equal({...{status},...update}.status,status);
+  assert.equal({...current,...update}.status,status);
  }
+
 });
 console.log("受信下書き・原本照合・手動募集: "+count+"条件成功（合成DB/原本行のみ）");

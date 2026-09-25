@@ -169,6 +169,7 @@ jobs:
           node scripts/run-local-firestore-acceptance.mjs --suite mail --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-case-mail
           node scripts/run-local-firestore-acceptance.mjs --suite login-cleanup --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-login-cleanup
           node scripts/run-local-firestore-acceptance.mjs --suite row-queue --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-row-queue
+          node scripts/run-local-firestore-acceptance.mjs --suite row-success --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-row-success
       - name: Publish Functions summary
         if: always()
         run: |

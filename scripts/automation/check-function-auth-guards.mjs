@@ -361,6 +361,18 @@ function checkAtomicCreationAudit(source, block, action) {
     && !helper.includes('db.batch(') && !helper.includes('.commit(');
 }
 
+function checkAtomicMutationAudit(source, block, action, close) {
+  const start = source.indexOf("function stageAudit("), end = source.indexOf("\n}", start);
+  const helper = source.slice(start, end).replace(/\s+/g, "");
+  const transaction = block.indexOf('awaitdb.runTransaction(async(tx)=>{');
+  const call = block.indexOf(`stageAudit(tx,companyId,session.uid,"${action}",`);
+  const finish = block.indexOf(close);
+  return start >= 0 && end > start && transaction >= 0 && call > transaction && finish > call
+    && !block.includes('writeAudit(') && block.split('stageAudit(').length === 2
+    && helper.includes('batch.create(db.collection("auditLogs").doc(),{companyId,actorUid,action,detail,requestId:requestId("audit"),createdAt:FieldValue.serverTimestamp(),});')
+    && !helper.includes('db.batch(') && !helper.includes('.commit(');
+}
+
 function checkAdminCore(name) {
   const modules = { getSheetWriteIssues: "admin-operations", getOperationsDashboard: "analytics", getStaffPerformance: "analytics", createAdminJobGroup: "job-management", updateJobPublication: "job-management", adminEditJobInputs: "job-management", generateJobExport: "job-management", updateNetPrintNumbers: "netprint", adminSetJobCancellation: "analytics", adminRestoreCancelledJob: "analytics" };
   const source = sourceFile("functions/src/" + modules[name] + ".ts");
@@ -422,7 +434,7 @@ function checkAdminCore(name) {
       'readMailPublication(tx,snap.id,snap.data()!,input.expectedRevisions?.[snap.id],now.toDate())',
       'if(job.mailIntake&&(!mailCheck||mailCheck.issue)){blocked.push(snap.id);continue;}',
       'constpublication=resolvePublication({', 'tx.set(snap.ref,', 'revision:FieldValue.increment(1)',
-      'return{updated,blocked};', 'awaitwriteAudit(companyId,session.uid,"job.publication.update",',
+      'return{updated,blocked};', 'stageAudit(tx,companyId,session.uid,"job.publication.update",',
     ],
     adminEditJobInputs: [
       'EditSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
@@ -473,6 +485,7 @@ function checkAdminCore(name) {
     ],
   };
   if (!has(requirements[name])) return false;
+  if (["updateJobPublication","adminEditJobInputs"].includes(name) && !checkAtomicMutationAudit(source, block, name === "updateJobPublication" ? "job.publication.update" : "job.admin_edit", name === "updateJobPublication" ? "return{updated,blocked};});" : "returnresult;});")) return false;
   if (name === "createAdminJobGroup" && block.includes("stageAdminJobGroup(") && !checkAtomicCreationAudit(source, block, "job.group.create")) return false;
   if (name === "createAdminJobGroup" && block.includes("stageAdminJobGroup(")) {
     const shared = compact(sourceFile("functions/src/job-group-creation.ts"));

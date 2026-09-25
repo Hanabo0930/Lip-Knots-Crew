@@ -28,6 +28,7 @@ function harness(rows,clock){
   const apply=pending=>{
     const next=new Map(records);
     for(const p of pending){
+      if(p.create)assert.ok(!next.has(p.ref.path),"create existing document");
       if(p.remove){next.delete(p.ref.path);continue;}
       if(p.update)assert.ok(next.has(p.ref.path),'update missing document');
       const value=p.merge?{...next.get(p.ref.path)}:{};
@@ -40,7 +41,7 @@ function harness(rows,clock){
   const collection=(name,filters=[])=>({add:async data=>{const r=ref(name);await r.set(data);return r;},doc:id=>ref(name,id),where:(field,op,value)=>{assert.equal(op,'==');return collection(name,[...filters,[field,value]]);},limit:()=>collection(name,filters),get:async()=>({docs:[...records].filter(([k,v])=>k.startsWith(name+'/')&&filters.every(([f,x])=>v[f]===x)).map(([k])=>snap(ref(name,k.slice(name.length+1))))})});
   const db={collection,runTransaction:async callback=>{
     const pending=[];const get=async r=>{assert.equal(pending.length,0,'transaction read after write');return snap(r);};
-    const result=await callback({get,getAll:(...refs)=>Promise.all(refs.map(get)),set:(ref,data,options)=>pending.push({ref,data,merge:options?.merge}),update:(ref,data)=>pending.push({ref,data,merge:true,update:true}),delete:ref=>pending.push({ref,remove:true})});
+    const result=await callback({create:(ref,data)=>pending.push({ref,data,create:true}),get,getAll:(...refs)=>Promise.all(refs.map(get)),set:(ref,data,options)=>pending.push({ref,data,merge:options?.merge}),update:(ref,data)=>pending.push({ref,data,merge:true,update:true}),delete:ref=>pending.push({ref,remove:true})});
     await h.beforeCommit?.(pending);apply(pending);h.commits.push(pending);await h.afterCommit?.(pending);return result;
   }};
   const sheets={spreadsheets:{get:async input=>{assert.equal(input.spreadsheetId,sheetId);return {data:{sheets:[{properties:{sheetId:1,title:'2099.9',gridProperties:{rowCount:100,columnCount:55}}},{properties:{sheetId:2,title:'2099.10',hidden:!h.secondTab}}]}};},values:{get:async input=>{

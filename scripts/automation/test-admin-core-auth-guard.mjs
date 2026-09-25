@@ -65,4 +65,10 @@ reject('createAdminJobGroup','stageAudit(batch, companyId, session.uid, "job.gro
 reject('createAdminJobGroup','stageAudit(batch, companyId, session.uid, "job.group.create",','await batch.commit(); stageAudit(batch, companyId, session.uid, "job.group.create",');
 reject('createAdminJobGroup','batch.create(db.collection("auditLogs").doc(),','batch.set(db.collection("auditLogs").doc(),',true);
 reject('createAdminJobGroup','    companyId,\n    actorUid,\n    action,\n    detail,','    companyId: "other",\n    actorUid,\n    action,\n    detail,',true);
+reject('updateJobPublication','stageAudit(tx, companyId, session.uid, "job.publication.update",','stageAudit(db.batch(), companyId, session.uid, "job.publication.update",');
+reject('updateJobPublication','stageAudit(tx, companyId, session.uid, "job.publication.update",','stageAudit(tx, "other", session.uid, "job.publication.update",');
+reject('updateJobPublication','batch.create(db.collection("auditLogs").doc(),','batch.set(db.collection("auditLogs").doc(),',true);
+reject('adminEditJobInputs','stageAudit(tx, companyId, session.uid, "job.admin_edit",','stageAudit(db.batch(), companyId, session.uid, "job.admin_edit",');
+reject('adminEditJobInputs','stageAudit(tx, companyId, session.uid, "job.admin_edit",','stageAudit(tx, "other", session.uid, "job.admin_edit",');
+reject('adminEditJobInputs','batch.create(db.collection("auditLogs").doc(),','batch.set(db.collection("auditLogs").doc(),',true);
 console.log(JSON.stringify({adminCoreAuthGuardTests:cases,functions:Object.keys(modules),cloudOperations:false}));

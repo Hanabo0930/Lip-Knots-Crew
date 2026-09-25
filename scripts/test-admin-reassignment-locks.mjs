@@ -20,7 +20,7 @@ const schemaEnd = source.indexOf('export const createAdminJobGroup', schemaStart
 const handlerStart = source.indexOf('export const adminEditJobInputs');
 const handlerEnd = source.indexOf('export const generateJobExport', handlerStart);
 assert.ok(schemaStart >= 0 && schemaEnd > schemaStart && handlerStart >= 0 && handlerEnd > handlerStart);
-const code = ts.transpileModule(source.slice(schemaStart, schemaEnd) + source.slice(handlerStart, handlerEnd), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(source.slice(schemaStart, schemaEnd) + source.slice(handlerStart, handlerEnd) + source.slice(source.indexOf('function stageAudit('),source.indexOf('function numberValue(')), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 class HttpsError extends Error { constructor(code, message) { super(message); this.code = code; } }
 const companyId = 'company-a', dateKey = '2026-09-20';
 const oldPath = `staffDayLocks/${companyId}_staff-a_${dateKey}`;
@@ -45,10 +45,12 @@ function setup(lock, options = {}) {
         attempts.push({ writes, reads });
         const result = await callback({
           get: async ref => { assert.equal(writes.length, 0, 'reads must precede all writes'); reads.push(ref.path); return snapshot(ref); },
+          create: (ref, data) => writes.push({ path: ref.path, data: structuredClone(data), create:true }),
           set: (ref, data) => writes.push({ path: ref.path, data: structuredClone(data) }),
         });
         if (options.retry && !retried) { retried = true; options.retry(records); continue; }
-        for (const write of writes) records.set(write.path, { ...records.get(write.path), ...write.data });
+        for (const write of writes) if(write.create)assert.ok(!records.has(write.path));
+        for (const write of writes) { records.set(write.path, { ...records.get(write.path), ...write.data }); if(write.path.startsWith("auditLogs/"))audits.push(write.data); }
         commits.push(writes); return result;
       }
     },
@@ -58,9 +60,9 @@ function setup(lock, options = {}) {
     exports, db, assignmentPreparationPatch, prepareAdminEditIntent, adminEditValueMatches, currentAdminEditValues, z: dependency('zod').z, HttpsError, onCall: callback => callback,
     requireAdmin: request => { if (request.auth.token.role !== 'admin') throw new HttpsError('permission-denied', 'admin required'); return request.auth; },
     companyFromClaims: token => token.companyId, assertProductionOperational: async () => {},
-    Timestamp: { now: () => 12345 }, FieldValue: { delete: () => '__deleted__' },
+    Timestamp: { now: () => 12345 }, FieldValue: { delete: () => '__deleted__', serverTimestamp:()=>12345 },
     normalizeMoneyRecord: () => ({ errors: [], values: {} }), clientInputKeys: [], staffInputKeys: [],
-    buildExpected: () => { throw new Error('Unexpected sheet queue'); }, writeAudit: async (...args) => audits.push(args),
+    buildExpected: () => { throw new Error('Unexpected sheet queue'); }, requestId:()=> 'synthetic-audit-request',
   }, { timeout: 3000 });
   return { records, commits, attempts, audits, run: (fields, revision = 1, role = 'admin') => exports.adminEditJobInputs({ auth: { uid: 'synthetic-admin', token: { companyId, role } }, data: { jobId: 'job-a', fields, revision } }) };
 }

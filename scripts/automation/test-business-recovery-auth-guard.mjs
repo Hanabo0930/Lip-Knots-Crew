@@ -97,7 +97,7 @@ const mutations={
   ['createdBy: session.uid','createdBy: input.uid'],
   ['if (rowQueueRef)','if (true)'],
   ['await batch.commit();',''],
-  ['await writeAudit(companyId, session.uid, "job.group.duplicate",','await writeAudit(input.companyId, session.uid, "job.group.duplicate",'],
+  ['stageAudit(batch, companyId, session.uid, "job.group.duplicate",','stageAudit(batch, input.companyId, session.uid, "job.group.duplicate",'],
  ],
 };
 for(const [name,pairs]of Object.entries(mutations))for(const [before,after]of pairs)reject(name,before,after);
@@ -112,5 +112,9 @@ for(const before of ['feature.data()?.adminJobCreationSourceReady === true','map
  reject('duplicateAdminJob',before,'true',true);
 const allowed=JSON.parse(read('config/automation/staging-safety.json')).allowedFunctions;
 assert.ok(Object.keys(files).every(name=>allowed.includes(name)));cases++;
+reject('duplicateAdminJob','stageAudit(batch, companyId, session.uid, "job.group.duplicate",','stageAudit(db.batch(), companyId, session.uid, "job.group.duplicate",');
+reject('duplicateAdminJob','stageAudit(batch, companyId, session.uid, "job.group.duplicate",','await batch.commit(); stageAudit(batch, companyId, session.uid, "job.group.duplicate",');
+reject('duplicateAdminJob','batch.create(db.collection("auditLogs").doc(),','batch.set(db.collection("auditLogs").doc(),',true);
+reject('duplicateAdminJob','    companyId,\n    actorUid,\n    action,\n    detail,','    companyId: "other",\n    actorUid,\n    action,\n    detail,',true);
 console.log(JSON.stringify({businessRecoveryAuthGuardTests:cases,functions:Object.keys(files),cloudOperations:false}));
 

@@ -20,6 +20,7 @@ function harness() {
   function apply(writes) {
     const next = new Map(records);
     for (const write of writes) {
+      if (write.create && next.has(write.ref.path)) throw Object.assign(new Error("synthetic ALREADY_EXISTS"), { code: 6 });
       const value = write.merge ? { ...next.get(write.ref.path) } : {};
       for (const [key, field] of Object.entries(write.data)) {
         assert.notEqual(field, undefined, "undefined write");
@@ -53,7 +54,7 @@ function harness() {
     collection: name => query(name),
     doc: full => { const split = full.lastIndexOf("/"); return ref(full.slice(0, split), full.slice(split + 1)); },
     getAll: async (...refs) => refs.map(snap),
-    batch: () => { const writes = []; return { set: (ref, data, options) => writes.push({ ref, data: clone(data), merge: options?.merge }), commit: async () => apply(writes) }; },
+    batch: () => { const writes = []; return { create: (ref, data) => writes.push({ ref, data: clone(data), create: true }), set: (ref, data, options) => writes.push({ ref, data: clone(data), merge: options?.merge }), commit: async () => apply(writes) }; },
     runTransaction: async callback => {
       for (let attempt = 0; attempt < 12; attempt++) {
         h.attempts++;

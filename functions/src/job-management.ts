@@ -119,14 +119,13 @@ export const createAdminJobGroup = onCall(async (request) => {
   const result = stageAdminJobGroup(batch, { companyId, actorUid: session.uid, input: normalized.value, ...allocation,
     rowQueueId: rowCreationConfigured ? db.collection("sheetRowCreateQueue").doc().id : null, now: Timestamp.now() });
   const { groupId, jobIds } = result;
-  await batch.commit();
-
-  await writeAudit(companyId, session.uid, "job.group.create", {
+  stageAudit(batch, companyId, session.uid, "job.group.create", {
     groupId,
     jobIds,
     slots: normalized.value.slots,
     publicationMode: normalized.value.publicationMode,
   });
+  await batch.commit();
 
   return result;
 });
@@ -238,13 +237,12 @@ export const duplicateAdminJob = onCall(async (request) => {
       updatedAt: now,
     });
   }
-  await batch.commit();
-
-  await writeAudit(companyId, session.uid, "job.group.duplicate", {
+  stageAudit(batch, companyId, session.uid, "job.group.duplicate", {
     groupId,
     sourceJobId: input.sourceJobId,
     jobIds,
   });
+  await batch.commit();
 
   return {
     groupId,
@@ -761,6 +759,24 @@ function copyableJobFields(source: FirebaseFirestore.DocumentData) {
   );
 }
 
+
+// 案件と監査を同じcommitに含め、監査だけの失敗を作成失敗として返さない。
+function stageAudit(
+  batch: FirebaseFirestore.WriteBatch,
+  companyId: string,
+  actorUid: string,
+  action: string,
+  detail: Record<string, unknown>
+): void {
+  batch.create(db.collection("auditLogs").doc(), {
+    companyId,
+    actorUid,
+    action,
+    detail,
+    requestId: requestId("audit"),
+    createdAt: FieldValue.serverTimestamp(),
+  });
+}
 
 async function writeAudit(
   companyId: string,

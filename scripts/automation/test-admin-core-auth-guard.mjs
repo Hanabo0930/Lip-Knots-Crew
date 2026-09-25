@@ -61,4 +61,8 @@ for(const [file,before,after]of [
  assert.deepEqual(run("createAdminJobGroup",files=>{files[p]=files[p].replace(before,after);}),{passed:false,exitCode:1},before);cases++;
 }
 assert.ok(Object.keys(modules).every(name=>JSON.parse(read('config/automation/staging-safety.json')).allowedFunctions.includes(name)));cases++;
+reject('createAdminJobGroup','stageAudit(batch, companyId, session.uid, "job.group.create",','stageAudit(db.batch(), companyId, session.uid, "job.group.create",');
+reject('createAdminJobGroup','stageAudit(batch, companyId, session.uid, "job.group.create",','await batch.commit(); stageAudit(batch, companyId, session.uid, "job.group.create",');
+reject('createAdminJobGroup','batch.create(db.collection("auditLogs").doc(),','batch.set(db.collection("auditLogs").doc(),',true);
+reject('createAdminJobGroup','    companyId,\n    actorUid,\n    action,\n    detail,','    companyId: "other",\n    actorUid,\n    action,\n    detail,',true);
 console.log(JSON.stringify({adminCoreAuthGuardTests:cases,functions:Object.keys(modules),cloudOperations:false}));

@@ -350,6 +350,17 @@ function checkImportIssues(name) {
   ]);
 }
 
+function checkAtomicCreationAudit(source, block, action) {
+  const call = `stageAudit(batch,companyId,session.uid,"${action}",`;
+  const start = source.indexOf("function stageAudit(");
+  const end = source.indexOf("\n}", start);
+  if (start < 0 || end < start || !block.includes(call) || block.indexOf(call) > block.indexOf('awaitbatch.commit();')
+      || block.split('awaitbatch.commit();').length !== 2) return false;
+  const helper = source.slice(start, end).replace(/\s+/g, "");
+  return helper.includes('batch.create(db.collection("auditLogs").doc(),{companyId,actorUid,action,detail,requestId:requestId("audit"),createdAt:FieldValue.serverTimestamp(),});')
+    && !helper.includes('db.batch(') && !helper.includes('.commit(');
+}
+
 function checkAdminCore(name) {
   const modules = { getSheetWriteIssues: "admin-operations", getOperationsDashboard: "analytics", getStaffPerformance: "analytics", createAdminJobGroup: "job-management", updateJobPublication: "job-management", adminEditJobInputs: "job-management", generateJobExport: "job-management", updateNetPrintNumbers: "netprint", adminSetJobCancellation: "analytics", adminRestoreCancelledJob: "analytics" };
   const source = sourceFile("functions/src/" + modules[name] + ".ts");
@@ -391,7 +402,7 @@ function checkAdminCore(name) {
       'constrowCreationConfigured=awaitnativeJobSourceEnabled(companyId);', 'constbatch=db.batch();',
       'stageAdminJobGroup(batch,{companyId,actorUid:session.uid,input:normalized.value,...allocation,',
       'rowQueueId:rowCreationConfigured?db.collection("sheetRowCreateQueue").doc().id:null,',
-      'awaitbatch.commit();', 'awaitwriteAudit(companyId,session.uid,"job.group.create",',
+      'awaitbatch.commit();', 'stageAudit(batch,companyId,session.uid,"job.group.create",',
       'if(request.data&&Object.hasOwn(request.data,"mailIntake")){',
       'returncreateCaseMailJobGroup(request.data,companyId,session.uid,raw=>{',
       'normalizeJobInput(CreateSchema.parse(raw))',
@@ -462,6 +473,7 @@ function checkAdminCore(name) {
     ],
   };
   if (!has(requirements[name])) return false;
+  if (name === "createAdminJobGroup" && block.includes("stageAdminJobGroup(") && !checkAtomicCreationAudit(source, block, "job.group.create")) return false;
   if (name === "createAdminJobGroup" && block.includes("stageAdminJobGroup(")) {
     const shared = compact(sourceFile("functions/src/job-group-creation.ts"));
     const intake = compact(sourceFile("functions/src/case-mail-job-creation.ts"));
@@ -668,12 +680,12 @@ function checkBusinessRecovery(name) {
     'tx.set(db.collection("notificationQueue").doc(),queueDocumentData({companyId,targetStaffId:job.assignedStaffId,',
   ]);
   const native = compact(source.slice(source.indexOf('async function nativeJobSourceEnabled('), source.indexOf('async function requireCompanyJob(')));
-  return ['feature.data()?.adminJobCreationSourceReady===true', 'mapping.data()?.enabled===true', 'mapping.data()?.rowCreation?.enabled===true'].every(x=>native.includes(x))
+  return checkAtomicCreationAudit(source, block, 'job.group.duplicate') && ['feature.data()?.adminJobCreationSourceReady===true', 'mapping.data()?.enabled===true', 'mapping.data()?.rowCreation?.enabled===true'].every(x=>native.includes(x))
     && has(['DuplicateSchema.parse(request.data??{})', 'normalizeJobInput(createData)', 'if(normalized.errors.length)',
       'awaitnativeJobSourceEnabled(companyId)', 'constsourceReady=false;', 'constbatch=db.batch();',
       'batch.set(ref,{...copyableJobFields(source),companyId,', 'createdBy:session.uid',
       'if(rowQueueRef){batch.set(rowQueueRef,{companyId,', 'awaitbatch.commit();',
-      'awaitwriteAudit(companyId,session.uid,"job.group.duplicate",']);
+      'stageAudit(batch,companyId,session.uid,"job.group.duplicate",']);
 }
 
 function checkResubmission(name) {

@@ -279,19 +279,23 @@ async function executeRowCreation(
     : null;
 
   if (idempotencyRef) {
-    const existing = await idempotencyRef.get();
-    if (
-      existing.exists &&
-      existing.data()?.status === "completed" &&
-      existing.data()?.queueId !== queueRef.id
-    ) {
-      await queueRef.set({
+    const finished = await db.runTransaction(async (tx) => {
+      const current = await tx.get(queueRef);
+      if (!ownsQueueAttempt(current.data(), queue)) return true;
+      const existing = await tx.get(idempotencyRef);
+      if (existing.data()?.status !== "completed" ||
+          existing.data()?.queueId === queueRef.id) return false;
+      if (existing.data()?.companyId !== queue.companyId) {
+        throw new BlockedError("行作成の完了記録の会社が一致しません。");
+      }
+      tx.set(queueRef, {
         status: "completed",
         duplicateOf: existing.data()?.queueId ?? null,
         completedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
-      return;
-    }
+      return true;
+    });
+    if (finished) return;
   }
 
   const mapping = await loadMapping(queue.companyId);
@@ -307,11 +311,25 @@ async function executeRowCreation(
     Boolean(job.sheetRef?.currentRow)
   );
   if (alreadyReady) {
-    await queueRef.set({
-      status: "completed",
-      alreadyCompleted: true,
-      completedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
+    await db.runTransaction(async (tx) => {
+      const current = await tx.get(queueRef);
+      if (!ownsQueueAttempt(current.data(), queue)) return;
+      const currentJobs = await tx.getAll(
+        ...queue.jobIds.map((id) => db.collection("jobs").doc(id))
+      );
+      if (!currentJobs.every((snap) => snap.exists &&
+          snap.data()?.companyId === queue.companyId &&
+          snap.data()?.groupId === queue.groupId &&
+          snap.data()?.sourceReady === true &&
+          snap.data()?.sheetRef?.spreadsheetId && snap.data()?.sheetRef?.currentRow)) {
+        throw new BlockedError("行作成済み案件の現在の状態が一致しません。");
+      }
+      tx.set(queueRef, {
+        status: "completed",
+        alreadyCompleted: true,
+        completedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+    });
     return;
   }
 
@@ -329,6 +347,7 @@ async function executeRowCreation(
     endRow: number;
     caseIds: string[];
   } | null = null;
+  let finalizing = false;
 
   try {
     const sheets = await createSheetsClient();
@@ -364,111 +383,146 @@ async function executeRowCreation(
     if (!verification.ok) {
       const rollbackEnabled = mapping.rowCreation?.rollbackOnVerificationFailure !== false;
       if (rollbackEnabled) {
-        const rolledBack = await rollbackInsertedRows(sheets, mapping, inserted);
+        const rolledBack = await rollbackInsertedRows(sheets, mapping, inserted, lock);
         if (!rolledBack) {
           throw new ManualInterventionError(
             `検算失敗、かつ自動ロールバックを安全に実行できません: ${verification.errors.join(" / ")}`
           );
         }
         inserted = null;
+      } else {
+        throw new ManualInterventionError("検算に失敗しました。自動ロールバックは無効のため原本を確認してください。");
       }
       throw new BlockedError(
         `新規行の検算に失敗したため元へ戻しました: ${verification.errors.join(" / ")}`
       );
     }
 
+    const completedRows = inserted;
     const now = Timestamp.now();
-    const batch = db.batch();
-    jobs.forEach((job, index) => {
-      const row = inserted!.startRow + index;
-      const publication = publicationAfterSourceReady(job);
-      batch.set(db.collection("jobs").doc(job.id), {
-        sheetRef: {
-          spreadsheetId: mapping.spreadsheetId,
-          sheetId: inserted!.sheetId,
-          sheetName: inserted!.sheetName,
-          currentRow: row,
-          headerRow: mapping.rowCreation?.headerRow ?? 1,
-        },
-        source: {
-          type: "google_sheets_admin_created",
-          spreadsheetId: mapping.spreadsheetId,
-          sheetName: inserted!.sheetName,
-          row,
-          queueId: queueRef.id,
-        },
+    const auditRef = db.collection("auditLogs").doc();
+    finalizing = true;
+    await db.runTransaction(async (tx) => {
+      const currentQueue = await tx.get(queueRef);
+      const currentLock = await tx.get(lock.ref);
+      if (!ownsQueueAttempt(currentQueue.data(), queue) ||
+          currentLock.data()?.token !== lock.token ||
+          !(currentLock.data()?.leaseUntil instanceof Timestamp) ||
+          currentLock.data()!.leaseUntil.toMillis() <= Date.now()) {
+        // 別の実行が原本を扱っている可能性があり、自動削除へ進めない。
+        throw new ManualInterventionError("行追加後に実行権が変わりました。原本と依頼を確認してください。");
+      }
+      const group = await tx.get(db.collection("jobGroups").doc(queue.groupId));
+      const currentMapping = await tx.get(db.doc(`companies/${queue.companyId}/sheetMappings/shift`));
+      const snapshots = await tx.getAll(...jobs.map((job) => db.collection("jobs").doc(job.id)));
+      const byId = new Map(snapshots.map((snap) => [snap.id, snap]));
+      if (!group.exists || group.data()?.companyId !== queue.companyId ||
+          !currentMapping.exists || JSON.stringify(currentMapping.data()) !== JSON.stringify(mapping)) {
+        throw new BlockedError("行追加中にグループまたは書込設定が変わりました。");
+      }
+      const currentJobs = jobs.map((original) => {
+        const snap = byId.get(original.id);
+        const current = snap?.data();
+        if (!snap?.exists || current?.companyId !== queue.companyId ||
+            current.groupId !== queue.groupId || current.caseId !== original.caseId ||
+            JSON.stringify(inputValuesForJob(current as JobRecord, mapping)) !==
+              JSON.stringify(inputValuesForJob(original, mapping))) {
+          throw new BlockedError("行追加中に案件の会社・所属・原本入力が変わりました。");
+        }
+        return { ...current, id: original.id } as JobRecord;
+      });
+      if (idempotencyRef) {
+        const receipt = await tx.get(idempotencyRef);
+        if (receipt.exists && (receipt.data()?.companyId !== queue.companyId ||
+            (receipt.data()?.status === "completed" && receipt.data()?.queueId !== queueRef.id))) {
+          throw new ManualInterventionError("行追加中に別の完了記録が作成されました。原本を確認してください。");
+        }
+      }
+      currentJobs.forEach((job, index) => {
+        const row = completedRows.startRow + index;
+        const publicationUpdate = publicationUpdateForSourceReady(job, jobs[index]!);
+        tx.set(db.collection("jobs").doc(job.id), {
+          sheetRef: {
+            spreadsheetId: mapping.spreadsheetId,
+            sheetId: completedRows.sheetId,
+            sheetName: completedRows.sheetName,
+            currentRow: row,
+            headerRow: mapping.rowCreation?.headerRow ?? 1,
+          },
+          source: {
+            type: "google_sheets_admin_created",
+            spreadsheetId: mapping.spreadsheetId,
+            sheetName: completedRows.sheetName,
+            row,
+            queueId: queueRef.id,
+          },
+          sourceReady: true,
+          sourceCreationStatus: "completed",
+          sourceCreationError: FieldValue.delete(),
+          pendingSourceWrite: false,
+          pendingSourceFields: FieldValue.delete(),
+          ...publicationUpdate,
+          sourceCreatedAt: now,
+          updatedAt: now,
+          revision: FieldValue.increment(1),
+        }, { merge: true });
+      });
+
+      tx.set(db.collection("jobGroups").doc(queue.groupId), {
         sourceReady: true,
         sourceCreationStatus: "completed",
-        sourceCreationError: FieldValue.delete(),
-        pendingSourceWrite: false,
-        pendingSourceFields: FieldValue.delete(),
-        // 受信案件の現在の募集・担当・取消は、行作成開始時の状態で戻さない。
-        ...(job.mailIntake ? {} : {
-          status: publication.status,
-          publishable: publication.publishable,
-          recruitmentStopped: publication.recruitmentStopped,
-          scheduledPublishAt: publication.scheduledPublishAt,
-          publicationBlockedReason: FieldValue.delete(),
-        }),
-        sourceCreatedAt: now,
+        sheetName: completedRows.sheetName,
+        startRow: completedRows.startRow,
+        endRow: completedRows.endRow,
         updatedAt: now,
-        revision: FieldValue.increment(1),
       }, { merge: true });
-    });
 
-    batch.set(db.collection("jobGroups").doc(queue.groupId), {
-      sourceReady: true,
-      sourceCreationStatus: "completed",
-      sheetName: inserted.sheetName,
-      startRow: inserted.startRow,
-      endRow: inserted.endRow,
-      updatedAt: now,
-    }, { merge: true });
-
-    batch.set(queueRef, {
-      status: "completed",
-      sheetName: inserted.sheetName,
-      sheetId: inserted.sheetId,
-      startRow: inserted.startRow,
-      endRow: inserted.endRow,
-      verification,
-      completedAt: now,
-      updatedAt: now,
-    }, { merge: true });
-
-    batch.set(db.collection("auditLogs").doc(), {
-      companyId: queue.companyId,
-      actorUid: queue.actorUid ?? null,
-      action: "sheet.rows.create",
-      queueId: queueRef.id,
-      groupId: queue.groupId,
-      jobIds: queue.jobIds,
-      sheetName: inserted.sheetName,
-      startRow: inserted.startRow,
-      endRow: inserted.endRow,
-      verification,
-      requestId: requestId("audit"),
-      createdAt: now,
-    });
-
-    if (idempotencyRef) {
-      batch.set(idempotencyRef, {
-        companyId: queue.companyId,
-        queueId: queueRef.id,
+      tx.set(queueRef, {
         status: "completed",
-        sheetName: inserted.sheetName,
-        startRow: inserted.startRow,
-        endRow: inserted.endRow,
+        sheetName: completedRows.sheetName,
+        sheetId: completedRows.sheetId,
+        startRow: completedRows.startRow,
+        endRow: completedRows.endRow,
+        verification,
         completedAt: now,
-      });
-    }
+        updatedAt: now,
+      }, { merge: true });
 
-    await batch.commit();
+      tx.set(auditRef, {
+        companyId: queue.companyId,
+        actorUid: queue.actorUid ?? null,
+        action: "sheet.rows.create",
+        queueId: queueRef.id,
+        groupId: queue.groupId,
+        jobIds: queue.jobIds,
+        sheetName: completedRows.sheetName,
+        startRow: completedRows.startRow,
+        endRow: completedRows.endRow,
+        verification,
+        requestId: requestId("audit"),
+        createdAt: now,
+      });
+
+      if (idempotencyRef) {
+        tx.set(idempotencyRef, {
+          companyId: queue.companyId,
+          queueId: queueRef.id,
+          status: "completed",
+          sheetName: completedRows.sheetName,
+          startRow: completedRows.startRow,
+          endRow: completedRows.endRow,
+          completedAt: now,
+        });
+      }
+    });
   } catch (error) {
+    if (finalizing && !(error instanceof BlockedError) && !(error instanceof ManualInterventionError)) {
+      error = new ManualInterventionError(`完了保存の成否を確定できません。原本を削除せず確認してください: ${error instanceof Error ? error.message : String(error)}`);
+    }
     if (inserted && !(error instanceof ManualInterventionError)) {
       try {
         const sheets = await createSheetsClient();
-        const rolledBack = await rollbackInsertedRows(sheets, mapping, inserted);
+        const rolledBack = await rollbackInsertedRows(sheets, mapping, inserted, lock);
         if (!rolledBack) {
           error = new ManualInterventionError(
             `処理失敗後の自動ロールバックを安全に実行できません。元エラー: ${
@@ -909,8 +963,15 @@ async function rollbackInsertedRows(
     startRow: number;
     endRow: number;
     caseIds: string[];
-  }
+  },
+  lock: { ref: FirebaseFirestore.DocumentReference; token: string }
 ): Promise<boolean> {
+  const ownsLock = async () => {
+    const current = (await lock.ref.get()).data();
+    return current?.token === lock.token && current.leaseUntil instanceof Timestamp &&
+      current.leaseUntil.toMillis() > Date.now();
+  };
+  if (!await ownsLock()) return false;
   const idRange =
     `'${quoteSheetName(inserted.sheetName)}'!${mapping.idColumn}${inserted.startRow}:` +
     `${mapping.idColumn}${inserted.endRow}`;
@@ -923,6 +984,7 @@ async function rollbackInsertedRows(
   const expected = inserted.caseIds.map(String);
   if (JSON.stringify(current) !== JSON.stringify(expected)) return false;
 
+  if (!await ownsLock()) return false;
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: mapping.spreadsheetId,
     requestBody: {
@@ -1082,6 +1144,21 @@ function inputValuesForJob(
   };
 }
 
+function publicationUpdateForSourceReady(
+  current: JobRecord,
+  original: JobRecord
+): FirebaseFirestore.DocumentData {
+  const state = (job: JobRecord) => [
+    job.status, job.publishable, job.recruitmentStopped, job.scheduledPublishAt,
+    job.requestedPublicationMode, job.requestedPublishAt, job.cancelled,
+    job.assignedStaffId, job.appOverride,
+  ];
+  // 受信案件と、作成中に操作された募集・担当・取消の状態を保持する。
+  if (current.mailIntake || original.mailIntake || current.cancelled === true || current.status !== "draft" ||
+      current.assignedStaffId || JSON.stringify(state(current)) !== JSON.stringify(state(original))) return {};
+  return { ...publicationAfterSourceReady(current), publicationBlockedReason: FieldValue.delete() };
+}
+
 function publicationAfterSourceReady(job: JobRecord): {
   status: string;
   publishable: boolean;
@@ -1202,6 +1279,17 @@ async function claimQueue(
   });
 }
 
+function ownsQueueAttempt(
+  current: FirebaseFirestore.DocumentData | undefined,
+  claimed: QueueDocument
+): boolean {
+  return current?.status === "processing" &&
+    current.companyId === claimed.companyId &&
+    current.groupId === claimed.groupId &&
+    current.attempts === Number(claimed.attempts ?? 0) + 1 &&
+    JSON.stringify(current.jobIds) === JSON.stringify(claimed.jobIds);
+}
+
 async function failQueue(
   ref: FirebaseFirestore.DocumentReference,
   claimed: QueueDocument,
@@ -1212,11 +1300,7 @@ async function failQueue(
     const current = snap.data() as QueueDocument | undefined;
     const attempts = Number(claimed.attempts ?? 0) + 1;
     // 別の試行や変更後の依頼へ、古い処理の失敗を反映しない。
-    if (!snap.exists || current?.status !== "processing" ||
-        current.companyId !== claimed.companyId ||
-        current.groupId !== claimed.groupId ||
-        current.attempts !== attempts ||
-        JSON.stringify(current.jobIds) !== JSON.stringify(claimed.jobIds)) return;
+    if (!ownsQueueAttempt(current, claimed)) return;
 
     const jobRefs = claimed.jobIds.map((id) => db.collection("jobs").doc(id));
     const groupRef = claimed.groupId

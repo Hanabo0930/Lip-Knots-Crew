@@ -21,7 +21,7 @@ const remember=path=>{const ref=db.doc(path);refs.push(ref);return ref;};
 async function fixture(status='pending'){
  const id='synthetic-row-'+(++sequence),companyId=id,job=remember('jobs/'+id),queue=remember('sheetRowCreateQueue/'+id),mapping=remember('companies/'+companyId+'/sheetMappings/shift');
  const retryAt=Timestamp.fromMillis(Date.now()-60000),future=Timestamp.fromMillis(Date.now()+3600000);
- await job.set({companyId,sourceReady:true,sheetRef:{spreadsheetId:'synthetic-only',currentRow:2}});
+ await job.set({companyId,groupId:id,sourceReady:true,sheetRef:{spreadsheetId:'synthetic-only',currentRow:2}});
  await mapping.set({enabled:true,spreadsheetId:'synthetic-only',idColumn:'A',identityColumns:{workDate:'B',clientName:'C',storeName:'D',workTime:'E'},rowCreation:{enabled:true}});
  await queue.set({companyId,groupId:id,jobIds:[id],status,attempts:2,retryAt});
  const snapshot=await queue.get();return {id,companyId,job,queue,mapping,retryAt,future,event:()=>workers.processSheetRowCreation.run({data:{after:snapshot}})};

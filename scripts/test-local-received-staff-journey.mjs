@@ -74,12 +74,37 @@ async function fixture(slots=1){
  h.run=()=>worker.processSheetRowCreation.run(h.event);h.publishCurrent=async()=>h.publish(h.created.jobIds,{[h.job.id]:(await h.job.get()).data().revision});return h;
 }
 async function test(name,body){try{await body();results.push({name,passed:true});console.log('PASS '+name);}catch(error){results.push({name,passed:false,error:String(error.stack??error)});console.error('FAIL '+name+' '+error.message);}}
-async function assignedFixture(){
- const h=await (await fixture()).start();await h.run();await h.import();assert.deepEqual((await h.publishCurrent()).updated,[h.job.id]);
+async function assignedFixture(nativeKind){
+ const h=await fixture();
+ if(nativeKind){
+  const input=nativeKind==='create'?{workDate,clientName:'合成取引先',storeName:'合成店舗',makerName:'合成メーカー',menuName:'試食',entryTime:'09:30',workTime:'10:00～18:00',slots:1,publicationMode:'draft'}:{sourceJobId:(await h.start()).job.id,workDate,slots:1,publicationMode:'draft'};
+  if(nativeKind==='duplicate')await h.run();
+  const command={operationId:crypto.randomUUID(),expectedCompanyId:h.companyId,expectedActorUid:h.auth.uid,input,action:'create'};
+  const api=nativeKind==='create'?management.createAdminJobGroup:management.duplicateAdminJob;
+  h.retryNative=action=>api.run({auth:h.auth,data:{nativeCreation:{...command,action:action??'create'}}});
+  h.created=await h.retryNative();h.job=db.doc('jobs/'+h.created.jobIds[0]);h.queue=db.doc('sheetRowCreateQueue/'+h.created.rowCreationQueueId);h.event={data:{after:await h.queue.get()}};
+ }else await h.start();
+ await h.run();await h.import();assert.deepEqual((await h.publishCurrent()).updated,[h.job.id]);
  h.staff=[0,1].map(i=>({uid:h.companyId+'-uid-'+i,token:{role:'staff',companyId:h.companyId,staffId:h.companyId+'-staff-'+i}}));
  for(const [i,user] of h.staff.entries())await db.doc('staffProfiles/'+user.token.staffId).set({companyId:h.companyId,active:true,displayName:'Synthetic Staff '+i});
  h.publishedRevision=(await h.job.get()).data().revision;
  h.apply=(i=0,requestId='synthetic-apply-request')=>jobs.applyToJob.run({auth:h.staff[i],data:{jobId:h.job.id,requestId,expectedJobRevision:h.publishedRevision}});return h;
+}
+// 作成結果の再確認は、その後に進んだ業務の値と更新時刻を変えない。
+async function assertNativeReplayKeepsState(h){
+ const receipt=(await h.job.get()).data().nativeCreationReceiptId;assert.ok(receipt);
+ const collections=['jobs','jobGroups','sheetRowCreateQueue','sheetSyncQueue','auditLogs','nativeJobCreationReceipts','adminJobEditSources','expenseReviews','notificationQueue','staffDayLocks','submissions','resubmissionRequests'];
+ const snapshots=docs=>docs.map(d=>({id:d.id,data:d.data(),updateTime:d.updateTime})).sort((a,b)=>a.id.localeCompare(b.id));
+ const capture=async()=>{
+  const saved=Object.fromEntries(await Promise.all(collections.map(async name=>[name,snapshots(await h.list(name))])));
+  saved.submissionFiles=Object.fromEntries(await Promise.all((await h.list('submissions')).map(async doc=>[doc.id,snapshots((await doc.ref.collection('files').get()).docs)])));
+  return saved;
+ };
+ const before=await capture(),writeCount=sheetWrites,copies=driveCopies,stored=structuredClone([...storageObjects]);
+ assert.deepEqual((await h.retryNative()).jobIds,h.created.jobIds);
+ assert.equal((await h.retryNative('cancel')).nativeCreationReceipt.status,'committed');
+ assert.deepEqual(await capture(),before);assert.equal(sheetWrites,writeCount);assert.equal(driveCopies,copies);assert.deepEqual([...storageObjects],stored);
+ assert.equal((await h.job.get()).data().nativeCreationReceiptId,receipt);
 }
 try{
  const admin=load('admin-operations'),writes=load('safe-sheet-writes');
@@ -122,14 +147,14 @@ try{
   const completedWrites=sheetWrites;await writes.processSafeSheetWrite.run(preEvent);assert.equal(sheetWrites,completedWrites);
 
  });
- await test('受信案件の受信から担当・事前連絡・提出・差替完了までの連結',async()=>{
-  const h=await assignedFixture();await db.doc('companies/'+h.companyId+'/sheetMappings/shift').update({operations:{'job.assign':{values:['staffName']},'precontact.submit':{values:['temperature','arrivalTime']},'submission.report':{values:['reportSubmitted']}}});await h.apply();const assigned=(await h.job.get()).data();await admin.confirmApplication.run({auth:h.auth,data:{jobId:h.job.id,expectedRevision:assigned.revision}});
+ for(const kind of [undefined,'create','duplicate'])await test((kind?'新再送契約 '+kind:'受信案件')+'の担当・事前連絡・提出・差替完了までの連結',async()=>{
+  const h=await assignedFixture(kind);await db.doc('companies/'+h.companyId+'/sheetMappings/shift').update({operations:{'job.assign':{values:['staffName']},'precontact.submit':{values:['temperature','arrivalTime']},'submission.report':{values:['reportSubmitted']}}});await h.apply();const assigned=(await h.job.get()).data();await admin.confirmApplication.run({auth:h.auth,data:{jobId:h.job.id,expectedRevision:assigned.revision}});
   const queues=await h.list('sheetSyncQueue');assert.equal(queues.length,1);const event={data:{after:await queues[0].ref.get()}};await writes.processSafeSheetWrite.run(event);const done=(await queues[0].ref.get()).data();assert.equal(done.status,'completed',JSON.stringify({status:done.status,error:done.errorMessage}));
   assert.equal(h.sheet.rows.find(row=>row[54]===assigned.caseId)[1],'Synthetic Staff 0');await h.import();const confirmed=(await h.job.get()).data();assert.equal(confirmed.status,'assigned');assert.equal(confirmed.assignedStaffId,h.staff[0].token.staffId);assert.equal(confirmed.applicationUnconfirmed,false);assert.equal(confirmed.applicationAdminConfirmed,true);
   const count=sheetWrites;await writes.processSafeSheetWrite.run(event);assert.equal(sheetWrites,count);assert.equal((await h.list('staffDayLocks')).filter(doc=>doc.data().active).length,1);
   const precontact=require('../functions/lib/precontact.js');
   const request={auth:h.staff[0],data:{jobId:h.job.id,dateKey:workDate,expectedRevision:confirmed.revision,temperature:36.5,arrivalTime:'09:30'}};
-  await assert.rejects(()=>precontact.submitPreContact.run({...request,data:{...request.data,expectedRevision:confirmed.revision-1}}),error=>error.code==='failed-precondition');
+  if(!kind)await assert.rejects(()=>precontact.submitPreContact.run({...request,data:{...request.data,expectedRevision:confirmed.revision-1}}),error=>error.code==='failed-precondition');
   await precontact.submitPreContact.run(request);
   const submitted=(await h.job.get()).data();assert.equal(submitted.preContactSyncPending,true);assert.equal(submitted.preContact.temperature,36.5);
   const pending=(await h.list('sheetSyncQueue')).filter(doc=>doc.data().operation==='precontact.submit');assert.equal(pending.length,1);
@@ -141,7 +166,7 @@ try{
   await db.doc('companies/'+h.companyId+'/settings/drive').set({rootFolderId:'synthetic-root'});process.env.LKC_SUBMISSION_TRANSFER_MODE='active';
   const start=async patch=>uploads.createUploadSession.run({auth:h.staff[0],data:{jobId:h.job.id,type:'report',expectedRevision:(await h.job.get()).data().revision,files:[{originalName:'synthetic.png',contentType:'image/png',size:100,contentSha256:'a'.repeat(64)}],...patch}});
   const finish=file=>{storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:'a'.repeat(64)}});return uploads.finalizeStagedUpload.run({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:'1',md5Hash:'AAAAAAAAAAAAAAAAAAAAAA=='}});};
-  await assert.rejects(()=>start({expectedRevision:0}),e=>e.code==='failed-precondition');
+  if(!kind)await assert.rejects(()=>start({expectedRevision:0}),e=>e.code==='failed-precondition');
   const copiesBefore=driveCopies;const clientRequestId=crypto.randomUUID();const sessions=await Promise.all([start({clientRequestId}),start({clientRequestId})]);assert.equal(sessions[0].submissionId,sessions[1].submissionId);const first=sessions[0];await finish(first.files[0]);await finish(first.files[0]);assert.equal(driveCopies-copiesBefore,1);
   const original=(await db.doc('submissions/'+first.submissionId+'/files/'+first.files[0].fileId).get()).data().driveFileId;assert.ok(original);assert.equal((await db.doc('submissions/'+first.submissionId).get()).data().completedFiles,1);
   const reports=(await h.list('sheetSyncQueue')).filter(doc=>doc.data().operation==='submission.report');assert.equal(reports.length,1);await writes.processSafeSheetWrite.run({data:{after:await reports[0].ref.get()}});assert.equal((await reports[0].ref.get()).data().status,'completed');
@@ -150,13 +175,14 @@ try{
   const replacement=await start({clientRequestId:crypto.randomUUID(),purpose:'replacement',resubmissionRequestId:resubmissionRequest.requestId});await finish(replacement.files[0]);assert.equal((await db.doc('resubmissionRequests/'+resubmissionRequest.requestId).get()).data().status,'submitted');
   const comparison=await views.getResubmissionComparison.run({auth:h.auth,data:resubmissionRequest});assert.equal(comparison.replacements.length,1);
   await Promise.all([requests.completeResubmissionRequest.run({auth:h.auth,data:resubmissionRequest}),requests.completeResubmissionRequest.run({auth:h.auth,data:resubmissionRequest})]);assert.equal((await db.doc('resubmissionRequests/'+resubmissionRequest.requestId).get()).data().status,'completed');assert.equal(driveCopies-copiesBefore,2);assert.ok(driveFiles.has(original));
+  if(kind)await assertNativeReplayKeepsState(h);
 
 
  });
 
  // API間で保存された確認情報を渡し、原本反映とDB確定の両順序を検証する。
- async function expenseFixture(){
-  const h=await assignedFixture();
+ async function expenseFixture(kind){
+  const h=await assignedFixture(kind);
   const expenseColumns={transportation:'AK',purchase8:'AL',purchase10:'AM',netPrintCost:'AO',postageCost:'AP'};
   await db.doc('companies/'+h.companyId+'/sheetMappings/shift').update({operations:{'job.assign':{values:['staffName']},'expense.review':{values:Object.keys(expenseColumns)}}});
   await h.apply();await admin.confirmApplication.run({auth:h.auth,data:{jobId:h.job.id,expectedRevision:(await h.job.get()).data().revision}});
@@ -173,8 +199,8 @@ try{
   return h;
  }
 
- for(const importFirst of [false,true])await test('受信案件の経費下書き・書戻し・確定・再読込: '+(importFirst?'読取先行':'確定先行'),async()=>{
-  const h=await expenseFixture(),read=await h.read();assert.equal(read.job.receivedMail,true);assert.equal(read.writeBlockedReason,null);assert.equal(read.currentValues.transportation,1000);
+ for(const [kind,importFirst] of [[undefined,false],[undefined,true],['create',true],['duplicate',true]])await test((kind?'新再送契約 '+kind:'受信案件')+'の経費下書き・書戻し・確定・再読込: '+(importFirst?'読取先行':'確定先行'),async()=>{
+  const h=await expenseFixture(kind),read=await h.read();if(kind)assert.notEqual(read.job.receivedMail,true);else assert.equal(read.job.receivedMail,true);assert.equal(read.writeBlockedReason,null);assert.equal(read.currentValues.transportation,1000);
   await h.write(false);assert.equal((await h.review.get()).data().status,'draft');
   await assert.rejects(()=>h.write(true,{expectedVersion:read.reviewVersion}),e=>e.code==='failed-precondition');
   await h.write(true);assert.equal((await h.review.get()).data().status,'queued');assert.equal((await h.job.get()).data().expenses.transportation,1000);
@@ -184,6 +210,7 @@ try{
   if(importFirst)await h.import();await h.finalize();assert.equal((await h.review.get()).data().status,'completed');
   if(!importFirst)await h.import();const job=(await h.job.get()).data();assert.equal(job.expenses.transportation,1500);assert.equal(job.expenses.netPrintCost,200);assert.equal(job.expenseReviewStatus,'completed');
   await h.runExpense();assert.equal(sheetWrites,count+1);const saved=(await h.job.get()).data();await h.finalize();assert.deepEqual((await h.job.get()).data(),saved);
+  if(kind){await jobs.adminCancelJob.run({auth:h.auth,data:{jobId:h.job.id,reason:'合成取消'}});assert.equal((await h.job.get()).data().status,'cancelled');await assertNativeReplayKeepsState(h);}
  });
  await test('受信変更は確認済み経費依頼の原本書戻しを停止',async()=>{
   const h=await expenseFixture();await h.write(true);const beforeWrites=sheetWrites;

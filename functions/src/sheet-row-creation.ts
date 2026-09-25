@@ -83,20 +83,10 @@ export const processSheetRowCreation = onDocumentWritten(
     if (sheetWriteExecutionPaused()) return;
     const after = event.data?.after;
     if (!after?.exists) return;
-    const queue = after.data() as QueueDocument;
-    if (queue.status !== "pending") return;
-    const state = await getProductionOperationalState(queue.companyId);
-    if (!state.operational) {
-      await after.ref.set({
-        status: "paused_global",
-        pauseReason: state.reason,
-        updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true });
-      return;
-    }
-
-    const claimed = await claimQueue(after.ref);
-    if (!claimed) return;
+    if (after.data()?.status !== "pending") return;
+    // 遅延イベントの内容ではなく、現在の依頼を確認して実行権を得る。
+    const queue = await claimQueue(after.ref);
+    if (!queue) return;
 
     try {
       await executeRowCreation(after.ref, queue);
@@ -116,18 +106,27 @@ export const retrySheetRowCreation = onSchedule(
   async () => {
     // 再試行の予約変更も、明示的な有効化まで停止する。
     if (sheetWriteExecutionPaused()) return;
+    const cutoff = Timestamp.now();
     const due = await db.collection("sheetRowCreateQueue")
       .where("status", "==", "retry_wait")
-      .where("retryAt", "<=", Timestamp.now())
+      .where("retryAt", "<=", cutoff)
       .limit(50)
       .get();
 
-    const batch = db.batch();
-    due.docs.forEach((doc) => batch.set(doc.ref, {
-      status: "pending",
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true }));
-    if (!due.empty) await batch.commit();
+    for (const doc of due.docs) {
+      await db.runTransaction(async (tx) => {
+        const current = await tx.get(doc.ref);
+        const data = current.data();
+        // 検索後の完了・削除・予約変更を古い検索結果で戻さない。
+        if (!current.exists || data?.status !== "retry_wait" ||
+            !(data.retryAt instanceof Timestamp) ||
+            data.retryAt.toMillis() > cutoff.toMillis()) return;
+        tx.set(doc.ref, {
+          status: "pending",
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      });
+    }
   }
 );
 
@@ -1179,17 +1178,27 @@ async function createSheetsClient(): Promise<sheets_v4.Sheets> {
 
 async function claimQueue(
   ref: FirebaseFirestore.DocumentReference
-): Promise<boolean> {
+): Promise<QueueDocument | null> {
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
-    if (!snap.exists || snap.data()?.status !== "pending") return false;
+    if (!snap.exists || snap.data()?.status !== "pending") return null;
+    const queue = snap.data() as QueueDocument;
+    const state = await getProductionOperationalState(queue.companyId);
+    if (!state.operational) {
+      tx.set(ref, {
+        status: "paused_global",
+        pauseReason: state.reason,
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+      return null;
+    }
     tx.set(ref, {
       status: "processing",
       attempts: FieldValue.increment(1),
       processingStartedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
-    return true;
+    return queue;
   });
 }
 

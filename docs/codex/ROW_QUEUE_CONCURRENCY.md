@@ -1,0 +1,15 @@
+# 行作成キューの遅延イベント・再試行競合
+
+遅れて届いた pending イベントが、完了・実行中・停止済みの依頼を paused_global に戻す場合がありました。再試行の検索と更新の間に完了・予約変更・削除された依頼も、古い検索結果で pending に戻していました。
+
+実行権取得時にトランザクションで現在の依頼を読み、pending の場合だけ運用状態を確認して停止または実行中へ移します。処理対象の会社と案件も取得時の内容を使います。再試行は検索時刻を固定し、各依頼の現在の状態・期限・存在を再確認してから pending にします。環境の停止判定と再試行上限50件は維持します。
+
+`test-local-row-queue.mjs` は隔離 Firestore Emulator と実 SDK で、遅延・重複配送、状態変更、削除、会社・案件変更、再試行期限変更、50件上限の22条件を確認します。運用状態取得だけを合成境界に置換し、Sheets接続を禁止します。修正前は22条件中18条件で問題を再現し、修正後は22条件すべて成功しました。既存の停止試験36条件は TypeScript とコンパイル後 JavaScript の両方を確認します。
+
+```sh
+npm --prefix functions run build
+node scripts/test-sheet-row-creation-pause.mjs
+node scripts/run-local-firestore-acceptance.mjs --suite row-queue --java /path/to/java --jar /path/to/cloud-firestore-emulator.jar --evidence /path/to/evidence
+```
+
+この修正は行作成中の外部書込と業務文書更新を一体で原子化するものではありません。運用設定の取得も依頼のトランザクションとは独立した読取です。実環境での新規到着停止・旧実行終了は別途確認が必要です。worker の配備、実キューの再実行、停止解除、実表への書込はこの検証に含みません。

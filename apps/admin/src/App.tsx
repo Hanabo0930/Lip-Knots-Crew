@@ -3088,8 +3088,12 @@ async function createJobGroupAction(isCurrent:()=>boolean) {
 }
 
 async function duplicateJobAction(job:Job,isCurrent:()=>boolean) {
-  const date=window.prompt("複製後の実施日",job.workDate) || job.workDate;
-  const slots=Number(window.prompt("募集人数","1") || "1");
+  const enteredDate=window.prompt("複製後の実施日",job.workDate);
+  if(enteredDate===null)return;
+  const date=enteredDate || job.workDate;
+  const enteredSlots=window.prompt("募集人数","1");
+  if(enteredSlots===null)return;
+  const slots=Number(enteredSlots || "1");
   if (!firebaseConfigured) {
     const copies=Array.from({length:Math.max(1,Math.min(20,slots))},(_,index)=>({
       ...job,id:`demo_copy_${Date.now()}_${index}`,workDate:date,dateKey:date,

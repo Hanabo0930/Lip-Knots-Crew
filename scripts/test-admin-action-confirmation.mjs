@@ -183,3 +183,17 @@ for(const demo of [false,true]){
  const test=setup();test.deps.jobEditBaselineRef.current={...test.deps.jobEdit,clientName:'Before'};test.deps.jobEdit.unexpected='Do not send';await test.handlers.saveJobEdit();assert.equal(Object.hasOwn(test.state.payload.fields,'unexpected'),false);changeCases++;
 }
 console.log('Changed-only save: '+changeCases+' synthetic API/demo cases passed.');
+for(const demo of [false,true])for(const cancelAt of [0,1]){
+ const test=setup({demo});let prompts=0;
+ test.deps.window.prompt=(_label,value)=>prompts++===cancelAt?null:value;
+ const before=JSON.stringify(test.state.jobs);
+ await test.handlers.duplicateJob({id:'j',workDate:'2026-09-20'});
+ assert.equal(prompts,cancelAt+1);assert.equal(test.state.calls.length,0);
+ assert.equal(JSON.stringify(test.state.jobs),before);assert.deepEqual(test.state.messages,[]);
+ assert.equal(test.state.refreshes,0);assert.equal(test.deps.adminJobActionRef.current,null);
+ test.deps.window.prompt=(_label,value)=>value;
+ await test.handlers.duplicateJob({id:'j',workDate:'2026-09-20'});
+ assert.equal(test.state.calls.length,demo?0:1);assert.equal(test.state.jobs.length,demo?2:1);
+ assert.match(test.state.messages.at(-1),/複製/);assert.equal(test.deps.adminJobActionRef.current,null);
+}
+console.log('Duplicate cancellation: date/slots cancel stop immediately in API/demo; a later confirmed action succeeds (4 cases).');

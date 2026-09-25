@@ -3,17 +3,19 @@ import fs from 'node:fs';
 import {createRequire} from 'node:module';
 import {localAcceptanceEnvironment,blockNonEmulatorConnections} from './local-firestore-acceptance-safety.mjs';
 const environment=localAcceptanceEnvironment(process.env),network=blockNonEmulatorConnections(environment.port);
-const require=createRequire(import.meta.url),{Timestamp,Query}=require('firebase-admin/firestore');
+const require=createRequire(import.meta.url),{Timestamp,Query,DocumentReference}=require('firebase-admin/firestore');
 const {db}=require('../functions/lib/firebase.js'),safety=require('../functions/lib/system-safety.js');
 const previousMode=process.env.LKC_SHEET_WRITE_MODE;
 process.env.LKC_SHEET_WRITE_MODE='active';
-let operational=true,operationalCompanies=[],afterQuery=null,sequence=0,sheetsCalls=0;
+let operational=true,operationalCompanies=[],afterQuery=null,afterDocument=null,sequence=0,sheetsCalls=0;
 const originalState=safety.getProductionOperationalState;
 safety.getProductionOperationalState=async companyId=>{operationalCompanies.push(companyId);return {operational,reason:'synthetic-global-pause'};};
 const {google}=require('googleapis'),originalSheets=google.sheets;
 google.sheets=()=>{sheetsCalls++;throw Error('UNEXPECTED_SHEETS_ACCESS');};
 const workers=require('../functions/lib/sheet-row-creation.js'),originalGet=Query.prototype.get;
 Query.prototype.get=async function(...args){const result=await originalGet.apply(this,args);if(afterQuery)await afterQuery(result);return result;};
+const originalDocumentGet=DocumentReference.prototype.get;
+DocumentReference.prototype.get=async function(...args){const result=await originalDocumentGet.apply(this,args);if(afterDocument)await afterDocument(this,result);return result;};
 const refs=[],results=[];
 const remember=path=>{const ref=db.doc(path);refs.push(ref);return ref;};
 async function fixture(status='pending'){
@@ -26,7 +28,7 @@ async function fixture(status='pending'){
 }
 async function test(name,body){
  try{await body();results.push({name,passed:true});console.log('PASS '+name);}catch(error){results.push({name,passed:false,error:String(error.stack??error)});console.error('FAIL '+name+' '+error.message);}
- finally{afterQuery=null;operational=true;operationalCompanies=[];if(refs.length){const batch=db.batch();for(const ref of refs.splice(0))batch.delete(ref);await batch.commit();}}
+ finally{afterQuery=null;afterDocument=null;operational=true;operationalCompanies=[];if(refs.length){const batch=db.batch();for(const ref of refs.splice(0))batch.delete(ref);await batch.commit();}}
 }
 try{
  for(const status of ['completed','processing','retry_wait','blocked','manual_intervention','paused_global'])await test('遅延pendingイベントが現在の'+status+'を変えない',async()=>{
@@ -56,8 +58,40 @@ try{
   const batch=db.batch(),queues=[];for(let i=0;i<51;i++){const ref=remember('sheetRowCreateQueue/synthetic-limit-'+i);queues.push(ref);batch.set(ref,{status:'retry_wait',retryAt:Timestamp.fromMillis(Date.now()-60000),attempts:2});}await batch.commit();
   await workers.retrySheetRowCreation.run({});const docs=await db.getAll(...queues);assert.equal(docs.filter(d=>d.data().status==='pending').length,50);assert.equal(docs.filter(d=>d.data().status==='retry_wait').length,1);
  });
+ for(const mode of ['deleted-job','foreign-job','moved-job','deleted-group','foreign-group','valid'])await test('失敗時の案件・グループ保護 '+mode,async()=>{
+  const h=await fixture(),group=remember('jobGroups/'+h.id);await group.set({companyId:h.companyId,sourceCreationStatus:'pending'});await h.job.update({groupId:h.id});
+  await h.mapping.update({enabled:false});
+  if(mode==='deleted-job')await h.job.delete();
+  if(mode==='foreign-job')await h.job.update({companyId:'synthetic-other-company'});
+  if(mode==='moved-job')await h.job.update({groupId:'synthetic-other-group'});
+  if(mode==='deleted-group')await group.delete();
+  if(mode==='foreign-group')await group.update({companyId:'synthetic-other-company'});
+  const target=mode.endsWith('job')?h.job:group,before=await target.get();
+  await h.event();assert.equal((await h.queue.get()).data().status,'blocked');
+  if(mode==='valid'){assert.equal((await h.job.get()).data().sourceCreationStatus,'blocked');assert.equal((await group.get()).data().sourceCreationStatus,'blocked');}
+  else assert.deepEqual((await target.get()).data(),before.data());
+ });
+ for(const mode of ['completed','paused_global','retry_wait','pending','deleted','company','group','jobs','attempt'])await test('旧処理の失敗で新しい依頼状態を戻さない '+mode,async()=>{
+  const h=await fixture(),group=remember('jobGroups/'+h.id);await group.set({companyId:h.companyId,sourceCreationStatus:'pending'});await h.job.update({groupId:h.id});await h.mapping.update({enabled:false});
+  const beforeJob=(await h.job.get()).data(),beforeGroup=(await group.get()).data();let changed=false,preserved;
+  afterDocument=async ref=>{if(!changed&&ref.path===h.mapping.path){changed=true;
+   if(mode==='deleted')await h.queue.delete();
+   else await h.queue.update(mode==='company'?{companyId:'synthetic-other'}:mode==='group'?{groupId:'synthetic-other'}:mode==='jobs'?{jobIds:[]}:mode==='attempt'?{attempts:99}:{status:mode});
+   preserved=(await h.queue.get()).data();
+  }};
+  await h.event();assert.equal(changed,true);assert.deepEqual((await h.queue.get()).data(),preserved);assert.deepEqual((await h.job.get()).data(),beforeJob);assert.deepEqual((await group.get()).data(),beforeGroup);
+ });
+ for(const previous of [undefined,2,4])await test('システム失敗の再試行上限 '+String(previous),async()=>{
+  const h=await fixture(),group=remember('jobGroups/'+h.id);await h.job.update({groupId:h.id});await group.set({companyId:h.companyId});
+  if(previous===undefined){const data=(await h.queue.get()).data();delete data.attempts;await h.queue.set(data);}else await h.queue.update({attempts:previous});
+  let failed=false;afterDocument=async ref=>{if(!failed&&ref.path===h.mapping.path){failed=true;throw Error('synthetic-system-failure');}};
+  const started=Date.now();await h.event();const result=(await h.queue.get()).data(),attempts=(previous??0)+1;assert.equal(failed,true);assert.equal(result.attempts,attempts);assert.equal(result.errorType,'system');
+  assert.equal(result.status,attempts<5?'retry_wait':'dead_letter');
+  if(attempts<5){assert.ok(result.retryAt instanceof Timestamp);assert.ok(result.retryAt.toMillis()>=started+Math.min(30,2**attempts)*60000);}else assert.equal(result.retryAt,null);
+  assert.equal((await h.job.get()).data().sourceCreationStatus,result.status);assert.equal((await group.get()).data().sourceCreationStatus,result.status);
+ });
 }finally{
- Query.prototype.get=originalGet;safety.getProductionOperationalState=originalState;google.sheets=originalSheets;
+ DocumentReference.prototype.get=originalDocumentGet;Query.prototype.get=originalGet;safety.getProductionOperationalState=originalState;google.sheets=originalSheets;
  if(previousMode===undefined)delete process.env.LKC_SHEET_WRITE_MODE;else process.env.LKC_SHEET_WRITE_MODE=previousMode;
  await db.terminate();const stats=network.stats();network.restore();
  const result={project:environment.project,passed:results.filter(x=>x.passed).length,failed:results.filter(x=>!x.passed).length+(stats.blocked||sheetsCalls?1:0),network:stats,sheetsCalls,firestore:'real SDK / local emulator',operationalGate:'synthetic state boundary',realMessages:0,realSheetWrites:0,results};

@@ -13,9 +13,10 @@ function harness(mode,compiled){
  const state={collections:0,reads:0,writes:0,batches:0,commits:0,operationalReads:0,sheets:0,auth:0,changes:[]};
  const env={APP_ENVIRONMENT:"staging",...(mode===undefined?{}:{LKC_SHEET_WRITE_MODE:mode})};
  const reference={id:"synthetic-row-queue",set:async value=>{state.writes++;state.changes.push(value);}};
- const doc={ref:reference,data:()=>({companyId:"synthetic-company",status:"pending"}),exists:true};
+ const data={companyId:"synthetic-company",status:"pending",retryAt:Timestamp.fromMillis(0)};
+ const doc={ref:reference,data:()=>data,exists:true};
  const query={where(){return this;},limit(){return this;},async get(){state.reads++;return {docs:[doc],empty:false};}};
- const db={collection(name){assert.equal(name,"sheetRowCreateQueue");state.collections++;return query;},batch(){state.batches++;return {set(ref,value){assert.equal(ref,reference);state.writes++;state.changes.push(value);},async commit(){state.commits++;}};}};
+ const db={async runTransaction(callback){const result=await callback({get:async ref=>{assert.equal(ref,reference);return doc;},set(ref,value){assert.equal(ref,reference);state.writes++;state.changes.push(value);}});state.commits++;return result;},collection(name){assert.equal(name,"sheetRowCreateQueue");state.collections++;return query;},batch(){state.batches++;return {set(ref,value){assert.equal(ref,reference);state.writes++;state.changes.push(value);},async commit(){state.commits++;}};}};
  const boundaries={"node:crypto":crypto,zod:require("zod"),"./firebase":{db},
   "firebase-admin/firestore":{Timestamp,FieldValue:{serverTimestamp:()=>Timestamp.now()}},
   "firebase-functions/v2/https":{HttpsError,onCall:(...args)=>args.at(-1)},
@@ -36,7 +37,7 @@ function harness(mode,compiled){
   return exports;
  }
  const worker=load("./sheet-row-creation");
- return {state,event:()=>worker.processSheetRowCreation({data:{after:doc}}),retry:()=>worker.retrySheetRowCreation()};
+ return {state,event:()=>worker.processSheetRowCreation({data:{after:doc}}),retry:()=>{data.status="retry_wait";return worker.retrySheetRowCreation();}};
 }
 const results=[];
 async function test(name,callback){try{await callback();results.push({name,passed:true});}catch(error){results.push({name,passed:false,error:error.message});}}

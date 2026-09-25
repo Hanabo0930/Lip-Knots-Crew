@@ -91,7 +91,7 @@ export const processSheetRowCreation = onDocumentWritten(
     try {
       await executeRowCreation(after.ref, queue);
     } catch (error) {
-      await failQueue(after.ref, error);
+      await failQueue(after.ref, queue, error);
     }
   }
 );
@@ -1204,55 +1204,58 @@ async function claimQueue(
 
 async function failQueue(
   ref: FirebaseFirestore.DocumentReference,
+  claimed: QueueDocument,
   error: unknown
 ): Promise<void> {
-  const snap = await ref.get();
-  const attempts = Number(snap.data()?.attempts ?? 1);
-  const blocked =
-    error instanceof BlockedError ||
-    error instanceof ManualInterventionError;
-  const retryable = !blocked && attempts < 5;
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const current = snap.data() as QueueDocument | undefined;
+    const attempts = Number(claimed.attempts ?? 0) + 1;
+    // 別の試行や変更後の依頼へ、古い処理の失敗を反映しない。
+    if (!snap.exists || current?.status !== "processing" ||
+        current.companyId !== claimed.companyId ||
+        current.groupId !== claimed.groupId ||
+        current.attempts !== attempts ||
+        JSON.stringify(current.jobIds) !== JSON.stringify(claimed.jobIds)) return;
 
-  const status = error instanceof ManualInterventionError
-    ? "manual_intervention"
-    : blocked
-      ? "blocked"
-      : retryable
-        ? "retry_wait"
-        : "dead_letter";
-  const errorMessage = error instanceof Error ? error.message : String(error);
-  const batch = db.batch();
-  batch.set(ref, {
-    status,
-    errorType: error instanceof ManualInterventionError
+    const jobRefs = claimed.jobIds.map((id) => db.collection("jobs").doc(id));
+    const groupRef = claimed.groupId
+      ? db.collection("jobGroups").doc(claimed.groupId)
+      : null;
+    const targets = [...jobRefs, ...(groupRef ? [groupRef] : [])];
+    const related = targets.length ? await tx.getAll(...targets) : [];
+    const blocked =
+      error instanceof BlockedError ||
+      error instanceof ManualInterventionError;
+    const retryable = !blocked && attempts < 5;
+    const status = error instanceof ManualInterventionError
       ? "manual_intervention"
-      : blocked
-        ? "blocked"
-        : "system",
-    errorMessage,
-    retryAt: retryable
-      ? Timestamp.fromMillis(Date.now() + Math.min(30, 2 ** attempts) * 60_000)
-      : null,
-    failedAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
-  }, { merge: true });
+      : blocked ? "blocked" : retryable ? "retry_wait" : "dead_letter";
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    tx.set(ref, {
+      status,
+      errorType: error instanceof ManualInterventionError
+        ? "manual_intervention" : blocked ? "blocked" : "system",
+      errorMessage,
+      retryAt: retryable
+        ? Timestamp.fromMillis(Date.now() + Math.min(30, 2 ** attempts) * 60_000)
+        : null,
+      failedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
 
-  const data = snap.data() as QueueDocument | undefined;
-  for (const jobId of data?.jobIds ?? []) {
-    batch.set(db.collection("jobs").doc(jobId), {
-      sourceCreationStatus: status,
-      sourceCreationError: errorMessage,
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-  }
-  if (data?.groupId) {
-    batch.set(db.collection("jobGroups").doc(data.groupId), {
-      sourceCreationStatus: status,
-      sourceCreationError: errorMessage,
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-  }
-  await batch.commit();
+    // 削除済み・別会社・別グループの業務文書を作成または更新しない。
+    for (const target of related) {
+      const data = target.data();
+      if (!target.exists || data?.companyId !== claimed.companyId) continue;
+      if (target.ref.path !== groupRef?.path && data.groupId !== claimed.groupId) continue;
+      tx.set(target.ref, {
+        sourceCreationStatus: status,
+        sourceCreationError: errorMessage,
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
+  });
 }
 
 async function acquireLock(

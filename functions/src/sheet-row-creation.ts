@@ -516,6 +516,7 @@ async function executeRowCreation(
       }
     });
   } catch (error) {
+    if (error instanceof UncertainRowInsertionError) inserted = error.planned;
     if (finalizing && !(error instanceof BlockedError) && !(error instanceof ManualInterventionError)) {
       error = new ManualInterventionError(`完了保存の成否を確定できません。原本を削除せず確認してください: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -544,7 +545,9 @@ async function executeRowCreation(
       await db.collection("sheetRowManualInterventions").add({
         companyId: queue.companyId,
         queueId: queueRef.id,
-        inserted,
+        ...(error instanceof UncertainRowInsertionError
+          ? { plannedInsertion: inserted, insertionOutcome: "unknown" }
+          : { inserted, insertionOutcome: "confirmed" }),
         errorMessage: error.message,
         status: "open",
         createdAt: FieldValue.serverTimestamp(),
@@ -817,12 +820,7 @@ async function insertRows(input: {
     });
   });
 
-  await input.sheets.spreadsheets.batchUpdate({
-    spreadsheetId: input.mapping.spreadsheetId,
-    requestBody: { requests },
-  });
-
-  return {
+  const planned = {
     spreadsheetId: input.mapping.spreadsheetId,
     sheetId: input.sheetId,
     sheetName: input.sheetName,
@@ -830,6 +828,16 @@ async function insertRows(input: {
     endRow,
     caseIds: input.jobs.map((job) => String(job.caseId ?? "")),
   };
+  try {
+    await input.sheets.spreadsheets.batchUpdate({
+      spreadsheetId: input.mapping.spreadsheetId,
+      requestBody: { requests },
+    });
+  } catch (error) {
+    // 返答喪失では適用済みか判別できないため、自動再試行・削除をしない。
+    throw new UncertainRowInsertionError(planned, error);
+  }
+  return planned;
 }
 
 async function verifyInsertedRows(input: {
@@ -1406,3 +1414,19 @@ function serialize(
 
 class BlockedError extends Error {}
 class ManualInterventionError extends Error {}
+
+class UncertainRowInsertionError extends ManualInterventionError {
+  constructor(
+    readonly planned: {
+      spreadsheetId: string;
+      sheetId: number;
+      sheetName: string;
+      startRow: number;
+      endRow: number;
+      caseIds: string[];
+    },
+    cause: unknown
+  ) {
+    super(`行追加APIの成否を確定できません。予定範囲を確認してください: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+}

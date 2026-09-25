@@ -27,7 +27,7 @@ google.sheets=()=>{
   get:async request=>{syntheticSheetCalls++;assert.equal(request.spreadsheetId,'synthetic-only');return {data:{sheets:[{properties:{sheetId:1,title:'2026.9',gridProperties:{rowCount:100,columnCount:11}},conditionalFormats:[]}]}};},
   batchUpdate:async request=>{
    syntheticSheetCalls++;assert.equal(request.spreadsheetId,'synthetic-only');
-   if(request.requestBody.requests.some(r=>r.insertDimension)){sheetState.inserted=true;await sheetState.afterInsert();}
+   if(request.requestBody.requests.some(r=>r.insertDimension)){if(sheetState.beforeSendError)throw Error('synthetic-request-failed');sheetState.inserted=true;sheetState.insertCount=(sheetState.insertCount??0)+1;await sheetState.afterInsert();if(sheetState.responseLoss)throw Error('synthetic-insert-response-lost');}
    else {assert.ok(request.requestBody.requests.every(r=>r.deleteDimension));sheetState.deletes++;}
    return {data:{}};
   },
@@ -127,6 +127,18 @@ try{
   if(mode==='lock-lost')assert.equal((await h.lock.get()).data().token,'synthetic-new-owner');
   if(mode==='commit-response-lost'){assert.equal(sheetState.commitLossInjected,true);assert.equal(queue.status,'completed');assert.equal(job.sourceReady,true);}
   if(mode==='valid'){assert.equal(queue.status,'completed');assert.equal(job.sourceReady,true);assert.equal(job.status,'open');}
+ });
+ for(const mode of ['response-lost','request-failed','invalid-mapping'])await test('挿入APIの成否不明と送信前検証 '+mode,async()=>{
+  const h=await fixture(true);
+  if(mode==='invalid-mapping'){const mapping=(await h.mapping.get()).data();delete mapping.columns.caseId;await h.mapping.set(mapping);}
+  sheetState={queue:h.queue,caseId:h.id,inserted:false,insertCount:0,deletes:0,rollbackReads:0,responseLoss:mode==='response-lost',beforeSendError:mode==='request-failed',afterInsert:async()=>{}};
+  await h.event();const first=(await h.queue.get()).data();
+  if(mode==='response-lost'&&first.status==='retry_wait'){await h.queue.update({status:'pending'});sheetState.responseLoss=false;}
+  await h.event();assert.equal(sheetState.insertCount,mode==='response-lost'?1:0);assert.equal(sheetState.deletes,0);
+  const records=await db.collection('sheetRowManualInterventions').where('companyId','==',h.companyId).get();
+  assert.equal(first.status,mode==='invalid-mapping'?'blocked':'manual_intervention');assert.equal(records.size,mode==='invalid-mapping'?0:1);
+  if(mode!=='invalid-mapping'){const record=records.docs[0].data();assert.equal(record.insertionOutcome,'unknown');assert.equal(record.inserted,undefined);assert.deepEqual(record.plannedInsertion.caseIds,[h.id]);assert.equal(record.plannedInsertion.startRow,3);}
+  assert.equal((await h.job.get()).data().sourceReady,false);
  });
 }finally{
  db.runTransaction=originalTransaction;safety.getProductionOperationalState=originalState;google.sheets=originalSheets;

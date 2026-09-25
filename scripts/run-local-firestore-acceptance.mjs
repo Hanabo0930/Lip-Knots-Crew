@@ -9,7 +9,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2), option = name => args[args.indexOf(name)+1];
 for (const name of ['--java','--jar','--evidence']) if (!args.includes(name) || !option(name) || option(name).startsWith('--')) throw new Error('Required: --java --jar --evidence');
 const suite = args.includes('--suite') ? option('--suite') : 'business';
-if (!['business','rules','mail'].includes(suite)) throw new Error('UNKNOWN_LOCAL_ACCEPTANCE_SUITE');
+if (!['business','rules','mail','login-cleanup'].includes(suite)) throw new Error('UNKNOWN_LOCAL_ACCEPTANCE_SUITE');
 const java = path.resolve(option('--java')), jar = path.resolve(option('--jar')), evidence = path.resolve(option('--evidence'));
 const expected = JSON.parse(fs.readFileSync(path.join(root,'node_modules/firebase-tools/lib/emulator/downloadableEmulatorInfo.json'),'utf8')).firestore;
 if (fs.statSync(jar).size !== expected.expectedSize || crypto.createHash('sha256').update(fs.readFileSync(jar)).digest('hex') !== expected.expectedChecksumSHA256) throw new Error('EMULATOR_BINARY_MISMATCH');
@@ -47,7 +47,7 @@ try {
   if(exited) throw new Error('EMULATOR_EXITED');
   fs.writeFileSync(path.join(evidence,'runtime.json'),JSON.stringify({project,host:'127.0.0.1',port,firestoreVersion:expected.version,jarSha256:expected.expectedChecksumSHA256,realCloud:false,suite,rulesSha256:crypto.createHash('sha256').update(fs.readFileSync(rules)).digest('hex')},null,2)+'\n');
   const log=fs.openSync(path.join(evidence,'tests.log'),'wx');
-  const child=spawn(process.execPath,[path.join(root,suite === 'rules' ? 'scripts/test-local-firestore-rules.mjs' : suite === 'mail' ? 'scripts/test-local-case-mail-acceptance.mjs' : 'scripts/test-local-firestore-acceptance.mjs'),path.join(evidence,'result.json')],{
+  const child=spawn(process.execPath,[path.join(root,suite === 'rules' ? 'scripts/test-local-firestore-rules.mjs' : suite === 'mail' ? 'scripts/test-local-case-mail-acceptance.mjs' : suite === 'login-cleanup' ? 'scripts/test-local-login-cleanup.mjs' : 'scripts/test-local-firestore-acceptance.mjs'),path.join(evidence,'result.json')],{
     cwd:root,windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...env,HOME:isolatedHome,USERPROFILE:isolatedHome,APPDATA:isolatedHome,LOCALAPPDATA:isolatedHome,CLOUDSDK_CONFIG:isolatedHome,METADATA_SERVER_DETECTION:'none',APP_ENVIRONMENT:'development',GCLOUD_PROJECT:project,EXPECTED_FIREBASE_PROJECT_ID:project,
       FIREBASE_CONFIG:JSON.stringify({projectId:project,storageBucket:'synthetic-bucket'}),FIRESTORE_EMULATOR_HOST:'127.0.0.1:'+port,
       LKC_SHEET_WRITE_MODE:'paused',LKC_NOTIFICATION_MODE:'paused',LKC_SUBMISSION_TRANSFER_MODE:'paused',LKC_UPLOAD_ACCEPTANCE_MODE:'paused'}});

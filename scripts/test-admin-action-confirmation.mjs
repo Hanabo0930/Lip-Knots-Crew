@@ -198,3 +198,23 @@ for(const demo of [false,true])for(const cancelAt of [0,1]){
  assert.match(test.state.messages.at(-1),/複製/);assert.equal(test.deps.adminJobActionRef.current,null);
 }
 console.log('Duplicate cancellation: date/slots cancel stop immediately in API/demo; a later confirmed action succeeds (4 cases).');
+
+let dateCases=0;
+for(const demo of [false,true])for(const operation of ['create','schedule']){
+ for(const raw of ['not-a-date','2026-02-30T09:00','2026-01-01T24:00','2026-01-00T09:00','2026-01-01T09:60','2026-10-01']){
+  const test=setup({demo});test.deps.window.prompt=()=>raw;Object.assign(test.deps.jobForm,{publicationMode:'scheduled',publishAt:raw});
+  test.deps.window.confirm=()=>{throw Error('invalid date must not reach confirmation')};const before=JSON.stringify(test.state.jobs);
+  await (operation==='create'?test.handlers.createJobGroup():test.handlers.changePublication({id:'j'},'schedule'));
+  assert.equal(test.state.calls.length,0);assert.equal(JSON.stringify(test.state.jobs),before);assert.match(test.state.messages.at(-1),/公開日時/);assert.equal(test.state.refreshes,0);assert.equal(test.deps.adminJobActionRef.current,null);assert.equal(test.state.busy,false);dateCases++;
+ }
+ for(const raw of ['2028-02-29T09:30','2026-10-01T09:30','2026-10-01T09:30:15']){
+  const test=setup({demo});test.deps.window.prompt=()=>raw;Object.assign(test.deps.jobForm,{publicationMode:'scheduled',publishAt:raw});
+  await (operation==='create'?test.handlers.createJobGroup():test.handlers.changePublication({id:'j'},'schedule'));
+  assert.equal(test.state.calls.length,demo?0:1);if(!demo)assert.equal(test.state.payload.publishAt,new Date(raw).toISOString());assert.match(test.state.messages.at(-1),demo?/デモ/:operation==='create'?/作成/:/公開状態/);assert.equal(test.deps.adminJobActionRef.current,null);dateCases++;
+ }
+}
+for(const demo of [false,true])for(const raw of [null,'']){
+ const test=setup({demo});test.deps.window.prompt=()=>raw;const before=JSON.stringify(test.state.jobs);
+ await test.handlers.changePublication({id:'j'},'schedule');assert.equal(test.state.calls.length,0);assert.deepEqual(test.state.messages,[]);assert.equal(JSON.stringify(test.state.jobs),before);assert.equal(test.deps.adminJobActionRef.current,null);dateCases++;
+}
+console.log('Publication date input: '+dateCases+' API/demo calendar, time, valid/leap date and cancel cases passed.');

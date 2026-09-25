@@ -3049,7 +3049,17 @@ async function refreshJobsAfterAction(resultMessage:string,isCurrent:()=>boolean
   }
 }
 
+function parsePublicationDateInput(raw:string):string|null {
+  const value=raw.trim(),match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if(!match)return null;
+  const date=new Date(value),parts=match.slice(1).map(part=>Number(part??0));
+  if(!Number.isFinite(date.getTime())||date.getFullYear()!==parts[0]||date.getMonth()+1!==parts[1]||date.getDate()!==parts[2]||date.getHours()!==parts[3]||date.getMinutes()!==parts[4]||date.getSeconds()!==parts[5])return null;
+  return date.toISOString();
+}
+
 async function createJobGroupAction(isCurrent:()=>boolean) {
+  const publishAt=jobForm.publicationMode==="scheduled"?parsePublicationDateInput(jobForm.publishAt):null;
+  if(jobForm.publicationMode==="scheduled"&&!publishAt){setMessage("公開日時を正しい日付と時刻（YYYY-MM-DDTHH:mm）で入力してください。");return;}
   if (!window.confirm(`${jobForm.slots}名分の案件を下書き作成しますか？`)) return;
   setJobCreateBusy(true);
   try {
@@ -3075,7 +3085,7 @@ async function createJobGroupAction(isCurrent:()=>boolean) {
       ...jobForm,
       slots:Number(jobForm.slots),
       basePay:jobForm.basePay===""?null:Number(jobForm.basePay),
-      publishAt:jobForm.publishAt?new Date(jobForm.publishAt).toISOString():null,
+      publishAt,
     }},isCurrent);
     if(!response||!isCurrent())return;
     if(response.nativeCreationReceipt.status==="cancelled"){setMessage("未完了の作成依頼は取り消されています。");return;}
@@ -3133,9 +3143,10 @@ async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"
   }
   let publishAt:string|null=null;
   if(action==="schedule") {
-    const entered=window.prompt("公開日時（例 2026-08-01T09:00）","");
+    const entered=window.prompt("公開日時（この端末の時刻、例 2026-10-01T09:00）","");
     if(!entered)return;
-    publishAt=new Date(entered).toISOString();
+    publishAt=parsePublicationDateInput(entered);
+    if(!publishAt){setMessage("公開日時を正しい日付と時刻（YYYY-MM-DDTHH:mm）で入力してください。");return;}
   }
   if (!firebaseConfigured) {
     setJobs((current)=>current.map((item)=>item.id===job.id?{

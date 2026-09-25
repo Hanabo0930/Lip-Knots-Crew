@@ -82,14 +82,19 @@ try{
   }
   await h.event();const result=(await h.queue.get()).data();assert.equal(result.status,entry==='foreign-receipt'?'blocked':'completed');if(entry==='idempotency')assert.equal(result.duplicateOf,'synthetic-prior-queue');
  });
- const fullModes=['initial-cancel','initial-assigned','initial-stopped','mail-marker-removed','native-cancel','received-cancel','assigned','stopped','publication-change','deleted-job','foreign-job','moved-job','case-change','input-change','deleted-group','foreign-group','mapping-change','deleted-queue','queue-attempt','lock-lost','lock-expired','rollback-mismatch','rollback-error','verification-mismatch','rollback-disabled','commit-response-lost','valid'];
+ const fullModes=['newer-job-only','newer-success','newer-failure','initial-cancel','initial-assigned','initial-stopped','mail-marker-removed','native-cancel','received-cancel','assigned','stopped','publication-change','deleted-job','foreign-job','moved-job','case-change','input-change','deleted-group','foreign-group','mapping-change','deleted-queue','queue-attempt','lock-lost','lock-expired','rollback-mismatch','rollback-error','verification-mismatch','rollback-disabled','commit-response-lost','valid'];
  for(const mode of fullModes)await test('行追加・完了・取消の往復 '+mode,async()=>{
   const h=await fixture(true);
   if(['received-cancel','mail-marker-removed'].includes(mode))await h.job.update({mailIntake:{synthetic:true}});
   if(mode.startsWith('initial-'))await h.job.update({status:mode==='initial-cancel'?'cancelled':mode==='initial-assigned'?'assigned':'stopped',publishable:false,cancelled:mode==='initial-cancel'});
   if(mode==='rollback-disabled')await h.mapping.update({'rowCreation.rollbackOnVerificationFailure':false});
-  let preserved,target;
+  let preserved,target,newerGroup;
   sheetState={queue:h.queue,caseId:h.id,inserted:false,deletes:0,rollbackReads:0,commitLoss:mode==='commit-response-lost',rollbackMismatch:mode==='rollback-mismatch',rollbackError:mode==='rollback-error',verifyMismatch:['verification-mismatch','rollback-disabled'].includes(mode),afterInsert:async()=>{
+   if(mode.startsWith('newer-')){
+    target=h.job;await h.job.update({sourceReady:true,sourceCreationStatus:'completed',sheetRef:{spreadsheetId:'synthetic-new-source',currentRow:99},source:{queueId:'synthetic-new-queue'}});
+    if(mode!=='newer-job-only'){await h.group.update({sourceReady:true,sourceCreationStatus:'completed',startRow:99,endRow:99});newerGroup=(await h.group.get()).data();}
+    if(mode==='newer-failure')await h.lock.update({token:'synthetic-new-owner'});
+   }
    if(mode==='mail-marker-removed'){const current=(await h.job.get()).data();delete current.mailIntake;await h.job.set(current);}
    if(mode==='native-cancel'||mode==='received-cancel')await h.job.update({status:'cancelled',cancelled:true,publishable:false,recruitmentStopped:true});
    if(mode==='assigned')await h.job.update({status:'assigned',assignedStaffId:'synthetic-staff',publishable:false});
@@ -110,6 +115,7 @@ try{
    if(target)preserved=(await target.get()).data();
   }};
   await h.event();assert.equal(sheetState.inserted,true);if(target)assert.deepEqual((await target.get()).data(),preserved);
+  if(newerGroup)assert.deepEqual((await h.group.get()).data(),newerGroup);
   const job=(await h.job.get()).data(),queue=(await h.queue.get()).data();
   if(mode.startsWith('initial-')){assert.equal(job.status,mode==='initial-cancel'?'cancelled':mode==='initial-assigned'?'assigned':'stopped');assert.equal(job.publishable,false);}
   if(mode==='mail-marker-removed')assert.equal(job.status,'draft');
@@ -119,7 +125,7 @@ try{
   if(mode==='publication-change'){assert.equal(job.status,'draft');assert.equal(job.publishable,false);}
   if(mode==='case-change')assert.equal(job.caseId,'synthetic-new-case');
   if(mode==='input-change')assert.equal(job.storeName,'synthetic-new-store');
-  const manual=['deleted-queue','queue-attempt','lock-lost','lock-expired','rollback-mismatch','rollback-error','rollback-disabled','commit-response-lost'].includes(mode);
+  const manual=['newer-job-only','newer-success','newer-failure','deleted-queue','queue-attempt','lock-lost','lock-expired','rollback-mismatch','rollback-error','rollback-disabled','commit-response-lost'].includes(mode);
   const rollback=['deleted-job','foreign-job','moved-job','case-change','input-change','deleted-group','foreign-group','mapping-change','verification-mismatch'].includes(mode);
   const interventions=await db.collection('sheetRowManualInterventions').where('companyId','==',h.companyId).get();
   assert.equal(interventions.size,manual?1:0);assert.equal(sheetState.deletes,rollback?1:0);

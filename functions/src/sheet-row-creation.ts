@@ -416,6 +416,9 @@ async function executeRowCreation(
       const currentMapping = await tx.get(db.doc(`companies/${queue.companyId}/sheetMappings/shift`));
       const snapshots = await tx.getAll(...jobs.map((job) => db.collection("jobs").doc(job.id)));
       const byId = new Map(snapshots.map((snap) => [snap.id, snap]));
+      if (group.data()?.companyId === queue.companyId && group.data()?.sourceReady === true) {
+        throw new ManualInterventionError("別の処理でグループの原本準備が完了しました。古い追加結果を反映せず確認してください。");
+      }
       if (!group.exists || group.data()?.companyId !== queue.companyId ||
           !currentMapping.exists || JSON.stringify(currentMapping.data()) !== JSON.stringify(mapping)) {
         throw new BlockedError("行追加中にグループまたは書込設定が変わりました。");
@@ -423,6 +426,9 @@ async function executeRowCreation(
       const currentJobs = jobs.map((original) => {
         const snap = byId.get(original.id);
         const current = snap?.data();
+        if (current?.companyId === queue.companyId && current.sourceReady === true) {
+          throw new ManualInterventionError("別の処理で案件の原本準備が完了しました。現在の参照先を保持して確認してください。");
+        }
         if (!snap?.exists || current?.companyId !== queue.companyId ||
             current.groupId !== queue.groupId || current.caseId !== original.caseId ||
             JSON.stringify(inputValuesForJob(current as JobRecord, mapping)) !==
@@ -1339,7 +1345,7 @@ async function failQueue(
     // 削除済み・別会社・別グループの業務文書を作成または更新しない。
     for (const target of related) {
       const data = target.data();
-      if (!target.exists || data?.companyId !== claimed.companyId) continue;
+      if (!target.exists || data?.companyId !== claimed.companyId || data.sourceReady === true) continue;
       if (target.ref.path !== groupRef?.path && data.groupId !== claimed.groupId) continue;
       tx.set(target.ref, {
         sourceCreationStatus: status,

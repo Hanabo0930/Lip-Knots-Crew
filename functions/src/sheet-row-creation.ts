@@ -416,6 +416,9 @@ async function executeRowCreation(
       const currentMapping = await tx.get(db.doc(`companies/${queue.companyId}/sheetMappings/shift`));
       const snapshots = await tx.getAll(...jobs.map((job) => db.collection("jobs").doc(job.id)));
       const byId = new Map(snapshots.map((snap) => [snap.id, snap]));
+      if (group.data()?.companyId === queue.companyId && group.data()?.sourceReady === true) {
+        throw new ManualInterventionError("別の処理でグループの原本準備が完了しました。古い追加結果を反映せず確認してください。");
+      }
       if (!group.exists || group.data()?.companyId !== queue.companyId ||
           !currentMapping.exists || JSON.stringify(currentMapping.data()) !== JSON.stringify(mapping)) {
         throw new BlockedError("行追加中にグループまたは書込設定が変わりました。");
@@ -423,6 +426,9 @@ async function executeRowCreation(
       const currentJobs = jobs.map((original) => {
         const snap = byId.get(original.id);
         const current = snap?.data();
+        if (current?.companyId === queue.companyId && current.sourceReady === true) {
+          throw new ManualInterventionError("別の処理で案件の原本準備が完了しました。現在の参照先を保持して確認してください。");
+        }
         if (!snap?.exists || current?.companyId !== queue.companyId ||
             current.groupId !== queue.groupId || current.caseId !== original.caseId ||
             JSON.stringify(inputValuesForJob(current as JobRecord, mapping)) !==
@@ -516,6 +522,7 @@ async function executeRowCreation(
       }
     });
   } catch (error) {
+    if (error instanceof UncertainRowInsertionError) inserted = error.planned;
     if (finalizing && !(error instanceof BlockedError) && !(error instanceof ManualInterventionError)) {
       error = new ManualInterventionError(`完了保存の成否を確定できません。原本を削除せず確認してください: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -544,7 +551,9 @@ async function executeRowCreation(
       await db.collection("sheetRowManualInterventions").add({
         companyId: queue.companyId,
         queueId: queueRef.id,
-        inserted,
+        ...(error instanceof UncertainRowInsertionError
+          ? { plannedInsertion: inserted, insertionOutcome: "unknown" }
+          : { inserted, insertionOutcome: "confirmed" }),
         errorMessage: error.message,
         status: "open",
         createdAt: FieldValue.serverTimestamp(),
@@ -817,12 +826,7 @@ async function insertRows(input: {
     });
   });
 
-  await input.sheets.spreadsheets.batchUpdate({
-    spreadsheetId: input.mapping.spreadsheetId,
-    requestBody: { requests },
-  });
-
-  return {
+  const planned = {
     spreadsheetId: input.mapping.spreadsheetId,
     sheetId: input.sheetId,
     sheetName: input.sheetName,
@@ -830,6 +834,16 @@ async function insertRows(input: {
     endRow,
     caseIds: input.jobs.map((job) => String(job.caseId ?? "")),
   };
+  try {
+    await input.sheets.spreadsheets.batchUpdate({
+      spreadsheetId: input.mapping.spreadsheetId,
+      requestBody: { requests },
+    });
+  } catch (error) {
+    // 返答喪失では適用済みか判別できないため、自動再試行・削除をしない。
+    throw new UncertainRowInsertionError(planned, error);
+  }
+  return planned;
 }
 
 async function verifyInsertedRows(input: {
@@ -1331,7 +1345,7 @@ async function failQueue(
     // 削除済み・別会社・別グループの業務文書を作成または更新しない。
     for (const target of related) {
       const data = target.data();
-      if (!target.exists || data?.companyId !== claimed.companyId) continue;
+      if (!target.exists || data?.companyId !== claimed.companyId || data.sourceReady === true) continue;
       if (target.ref.path !== groupRef?.path && data.groupId !== claimed.groupId) continue;
       tx.set(target.ref, {
         sourceCreationStatus: status,
@@ -1406,3 +1420,19 @@ function serialize(
 
 class BlockedError extends Error {}
 class ManualInterventionError extends Error {}
+
+class UncertainRowInsertionError extends ManualInterventionError {
+  constructor(
+    readonly planned: {
+      spreadsheetId: string;
+      sheetId: number;
+      sheetName: string;
+      startRow: number;
+      endRow: number;
+      caseIds: string[];
+    },
+    cause: unknown
+  ) {
+    super(`行追加APIの成否を確定できません。予定範囲を確認してください: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+}

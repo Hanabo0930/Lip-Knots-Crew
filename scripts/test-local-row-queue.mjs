@@ -59,7 +59,7 @@ try{
   await workers.retrySheetRowCreation.run({});const docs=await db.getAll(...queues);assert.equal(docs.filter(d=>d.data().status==='pending').length,50);assert.equal(docs.filter(d=>d.data().status==='retry_wait').length,1);
  });
  for(const mode of ['deleted-job','foreign-job','moved-job','deleted-group','foreign-group','valid'])await test('失敗時の案件・グループ保護 '+mode,async()=>{
-  const h=await fixture(),group=remember('jobGroups/'+h.id);await group.set({companyId:h.companyId,sourceCreationStatus:'pending'});await h.job.update({groupId:h.id});
+  const h=await fixture(),group=remember('jobGroups/'+h.id);await group.set({companyId:h.companyId,sourceCreationStatus:'pending'});await h.job.update({groupId:h.id,sourceReady:false});
   await h.mapping.update({enabled:false});
   if(mode==='deleted-job')await h.job.delete();
   if(mode==='foreign-job')await h.job.update({companyId:'synthetic-other-company'});
@@ -72,7 +72,7 @@ try{
   else assert.deepEqual((await target.get()).data(),before.data());
  });
  for(const mode of ['completed','paused_global','retry_wait','pending','deleted','company','group','jobs','attempt'])await test('旧処理の失敗で新しい依頼状態を戻さない '+mode,async()=>{
-  const h=await fixture(),group=remember('jobGroups/'+h.id);await group.set({companyId:h.companyId,sourceCreationStatus:'pending'});await h.job.update({groupId:h.id});await h.mapping.update({enabled:false});
+  const h=await fixture(),group=remember('jobGroups/'+h.id);await group.set({companyId:h.companyId,sourceCreationStatus:'pending'});await h.job.update({groupId:h.id,sourceReady:false});await h.mapping.update({enabled:false});
   const beforeJob=(await h.job.get()).data(),beforeGroup=(await group.get()).data();let changed=false,preserved;
   afterDocument=async ref=>{if(!changed&&ref.path===h.mapping.path){changed=true;
    if(mode==='deleted')await h.queue.delete();
@@ -82,7 +82,7 @@ try{
   await h.event();assert.equal(changed,true);assert.deepEqual((await h.queue.get()).data(),preserved);assert.deepEqual((await h.job.get()).data(),beforeJob);assert.deepEqual((await group.get()).data(),beforeGroup);
  });
  for(const previous of [undefined,2,4])await test('システム失敗の再試行上限 '+String(previous),async()=>{
-  const h=await fixture(),group=remember('jobGroups/'+h.id);await h.job.update({groupId:h.id});await group.set({companyId:h.companyId});
+  const h=await fixture(),group=remember('jobGroups/'+h.id);await h.job.update({groupId:h.id,sourceReady:false});await group.set({companyId:h.companyId});
   if(previous===undefined){const data=(await h.queue.get()).data();delete data.attempts;await h.queue.set(data);}else await h.queue.update({attempts:previous});
   let failed=false;afterDocument=async ref=>{if(!failed&&ref.path===h.mapping.path){failed=true;throw Error('synthetic-system-failure');}};
   const started=Date.now();await h.event();const result=(await h.queue.get()).data(),attempts=(previous??0)+1;assert.equal(failed,true);assert.equal(result.attempts,attempts);assert.equal(result.errorType,'system');

@@ -5,7 +5,7 @@ const read=p=>fs.readFileSync(new URL('../../'+p,import.meta.url),'utf8').replac
 const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^import .*;\n/gm,'');
 const modules={getSheetWriteIssues:'admin-operations',getOperationsDashboard:'analytics',getStaffPerformance:'analytics',createAdminJobGroup:'job-management',updateJobPublication:'job-management',adminEditJobInputs:'job-management',generateJobExport:'job-management',updateNetPrintNumbers:'netprint',adminSetJobCancellation:'analytics',adminRestoreCancelledJob:'analytics'};
 const sources=Object.fromEntries(Object.values(modules).map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
-for(const module of ["job-group-creation","case-mail-job-creation"])sources["functions/src/"+module+".ts"]=read("functions/src/"+module+".ts");
+for(const module of ["job-group-creation","case-mail-job-creation","native-job-creation"])sources["functions/src/"+module+".ts"]=read("functions/src/"+module+".ts");
 let cases=0;
 function run(name,change){const files={...sources};change?.(files);const lines=[],process={argv:['node','guard','--functions',name,'--require-pass'],exitCode:0,exit:code=>{throw Error('Unexpected exit '+code);}};
  runInNewContext(guard,{process,console:{log:x=>lines.push(x),error:x=>lines.push(x)},execFileSync:(cmd,args)=>{assert.equal(cmd,'git');assert.equal(args[0],'show');const p=args[1].slice(args[1].indexOf(':')+1);assert.ok(Object.hasOwn(files,p));return files[p];}},{timeout:3000});
@@ -71,4 +71,8 @@ reject('updateJobPublication','batch.create(db.collection("auditLogs").doc(),','
 reject('adminEditJobInputs','stageAudit(tx, companyId, session.uid, "job.admin_edit",','stageAudit(db.batch(), companyId, session.uid, "job.admin_edit",');
 reject('adminEditJobInputs','stageAudit(tx, companyId, session.uid, "job.admin_edit",','stageAudit(tx, "other", session.uid, "job.admin_edit",');
 reject('adminEditJobInputs','batch.create(db.collection("auditLogs").doc(),','batch.set(db.collection("auditLogs").doc(),',true);
+reject('createAdminJobGroup','createNativeJobGroup(request.data, companyId, session.uid, "create"','createNativeJobGroup(request.data, "other", session.uid, "create"');
+for(const before of ['command.expectedCompanyId !== companyId','command.expectedActorUid !== actorUid','receipt.inputHash !== inputHash','receipt[key] !== value','group.companyId !== companyId','job.companyId !== companyId','job.nativeCreationReceiptId !== receiptId','tx.create(receiptRef,','tx.create(db.collection("auditLogs").doc(),','tx.create(ref,']) {
+ const p='functions/src/native-job-creation.ts';assert.ok(sources[p].includes(before));assert.deepEqual(run('createAdminJobGroup',files=>{files[p]=files[p].replace(before,before.startsWith('tx.create')?before.replace('tx.create','tx.set'):'false');}),{passed:false,exitCode:1},before);cases++;
+}
 console.log(JSON.stringify({adminCoreAuthGuardTests:cases,functions:Object.keys(modules),cloudOperations:false}));

@@ -350,6 +350,37 @@ function checkImportIssues(name) {
   ]);
 }
 
+function checkNativeCreationRetry(source, block, kind) {
+  const compact = text => text.replace(/\s+/g, "");
+  if (!compact(source).includes('import{createNativeJobGroup}from"./native-job-creation";') ||
+      !block.includes('if(request.data&&Object.hasOwn(request.data,"nativeCreation")){') ||
+      !block.includes('returncreateNativeJobGroup(request.data,companyId,session.uid,"' + kind + '",async') ||
+      block.indexOf('awaitassertProductionOperational(companyId);') > block.indexOf('returncreateNativeJobGroup(')) return false;
+  if (kind === "duplicate" && !['awaittx.get(db.collection("jobs").doc(command.sourceJobId))', '!source||source.companyId!==companyId'].every(part => block.includes(part))) return false;
+  const helper = compact(sourceFile("functions/src/native-job-creation.ts"));
+  const shared = compact(sourceFile("functions/src/job-group-creation.ts"));
+  return [
+    'envelopeSchema.safeParse(raw)', '}).strict()}).strict()',
+    'command.expectedCompanyId!==companyId||command.expectedActorUid!==actorUid',
+    'constinputHash=hashText(encoded,64)', 'hashText(JSON.stringify([companyId,command.operationId]),64)',
+    'constbinding={version:1,operationId:command.operationId,companyId,actorUid,kind}',
+    'returndb.runTransaction(asynctx=>{', 'conststored=awaittx.get(receiptRef);',
+    'Object.entries(binding).some(([key,value])=>receipt[key]!==value)||receipt.inputHash!==inputHash',
+    'receipt.status==="cancelled"', 'receipt.status!=="committed"||!saved.success',
+    'group.companyId!==companyId||group.nativeCreationReceiptId!==receiptId',
+    'job.companyId!==companyId||job.groupId!==result.groupId||job.caseId!==receipt.caseIds[index]||job.nativeCreationReceiptId!==receiptId',
+    'createJobIdFromPersistedCaseId(companyId,job.caseId)!==result.jobIds[index]',
+    'if(command.action==="cancel"){tx.create(receiptRef,{...binding,inputHash,status:"cancelled",createdAt:now});',
+    'constprepared=awaitprepare(command.input,tx);',
+    'feature?.adminJobCreationSourceReady===true&&mapping?.enabled===true&&mapping?.rowCreation?.enabled===true',
+    'tx.create(ref,{...data,...extra,nativeCreationReceiptId:receiptId});',
+    'stageAdminJobGroup(writer,{companyId,actorUid,input:prepared.input,...allocation,',
+    'tx.create(db.collection("auditLogs").doc(),{companyId,actorUid,',
+    'tx.create(receiptRef,{...binding,inputHash,status:"committed",result,caseIds:',
+  ].every(part => helper.includes(part)) && !/(?:db\.batch\(|(?:receiptRef|ref)\.(?:set|create|update)\()/.test(helper)
+    && ['constsourceReady=false;', 'constbatch=writer;', 'batch.set(jobRef,{companyId,caseId:job.caseId,', 'persistedIdentity?createJobIdFromPersistedCaseId(companyId,caseId):ref.id'].every(part => shared.includes(part));
+}
+
 function checkAtomicCreationAudit(source, block, action) {
   const call = `stageAudit(batch,companyId,session.uid,"${action}",`;
   const start = source.indexOf("function stageAudit(");
@@ -486,6 +517,7 @@ function checkAdminCore(name) {
   };
   if (!has(requirements[name])) return false;
   if (["updateJobPublication","adminEditJobInputs"].includes(name) && !checkAtomicMutationAudit(source, block, name === "updateJobPublication" ? "job.publication.update" : "job.admin_edit", name === "updateJobPublication" ? "return{updated,blocked};});" : "returnresult;});")) return false;
+  if (name === "createAdminJobGroup" && !checkNativeCreationRetry(source, block, "create")) return false;
   if (name === "createAdminJobGroup" && block.includes("stageAdminJobGroup(") && !checkAtomicCreationAudit(source, block, "job.group.create")) return false;
   if (name === "createAdminJobGroup" && block.includes("stageAdminJobGroup(")) {
     const shared = compact(sourceFile("functions/src/job-group-creation.ts"));
@@ -693,7 +725,7 @@ function checkBusinessRecovery(name) {
     'tx.set(db.collection("notificationQueue").doc(),queueDocumentData({companyId,targetStaffId:job.assignedStaffId,',
   ]);
   const native = compact(source.slice(source.indexOf('async function nativeJobSourceEnabled('), source.indexOf('async function requireCompanyJob(')));
-  return checkAtomicCreationAudit(source, block, 'job.group.duplicate') && ['feature.data()?.adminJobCreationSourceReady===true', 'mapping.data()?.enabled===true', 'mapping.data()?.rowCreation?.enabled===true'].every(x=>native.includes(x))
+  return checkNativeCreationRetry(source, block, 'duplicate') && checkAtomicCreationAudit(source, block, 'job.group.duplicate') && ['feature.data()?.adminJobCreationSourceReady===true', 'mapping.data()?.enabled===true', 'mapping.data()?.rowCreation?.enabled===true'].every(x=>native.includes(x))
     && has(['DuplicateSchema.parse(request.data??{})', 'normalizeJobInput(createData)', 'if(normalized.errors.length)',
       'awaitnativeJobSourceEnabled(companyId)', 'constsourceReady=false;', 'constbatch=db.batch();',
       'batch.set(ref,{...copyableJobFields(source),companyId,', 'createdBy:session.uid',

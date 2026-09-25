@@ -19,6 +19,7 @@ function setup({apiFailure=false,refreshFailure=false,data={},demo=false,apiWait
   httpsCallable:(_functions,name)=>async(payload)=>{state.payload=payload;state.calls.push(name);await apiWait();if(apiFailure)throw Error('API rejected');return {data:{jobIds:['new'],revision:3,...data}};},
   loadJobs:async()=>{state.refreshes++;await refreshWait();if(refreshFailure)throw Error('READ_FAILED');},
  };
+ deps.submitNativeCreation=async(start,isCurrent)=>{const response=await deps.httpsCallable(deps.functions,start.kind==='create'?'createAdminJobGroup':'duplicateAdminJob')(start.input);return isCurrent()?{...response.data,nativeCreationReceipt:{status:'committed'}}:null;};
  const handlers=Function(...Object.keys(deps),code+';return {createJobGroup,duplicateJob,changePublication,saveJobEdit,loadJobEdit};')(...Object.values(deps));
  return {state,handlers,deps};
 }

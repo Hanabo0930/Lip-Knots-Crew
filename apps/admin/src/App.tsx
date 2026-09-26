@@ -3057,7 +3057,21 @@ function parsePublicationDateInput(raw:string):string|null {
   return date.toISOString();
 }
 
+function nativeJobInputError(workDate:string,slots:number):string|null {
+  const match=/^(\d{4})-(\d{2})-(\d{2})$/.exec(workDate);
+  if(!match)return "実施日を正しい日付（YYYY-MM-DD）で入力してください。";
+  const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]);
+  const leap=year%4===0&&(year%100!==0||year%400===0);
+  const lastDay=[31,leap?29:28,31,30,31,30,31,31,30,31,30,31][month-1]??0;
+  if(year<1||month<1||month>12||day<1||day>lastDay)return "実施日を正しい日付（YYYY-MM-DD）で入力してください。";
+  if(!Number.isInteger(slots)||slots<1||slots>20)return "募集人数は1～20名の整数で入力してください。";
+  return null;
+}
+
 async function createJobGroupAction(isCurrent:()=>boolean) {
+  const workDate=jobForm.workDate.normalize("NFKC").trim(),slots=Number(jobForm.slots);
+  const inputError=nativeJobInputError(workDate,slots);
+  if(inputError){setMessage(inputError);return;}
   const publishAt=jobForm.publicationMode==="scheduled"?parsePublicationDateInput(jobForm.publishAt):null;
   if(jobForm.publicationMode==="scheduled"&&!publishAt){setMessage("公開日時を正しい日付と時刻（YYYY-MM-DDTHH:mm）で入力してください。");return;}
   if (!window.confirm(`${jobForm.slots}名分の案件を下書き作成しますか？`)) return;
@@ -3065,13 +3079,13 @@ async function createJobGroupAction(isCurrent:()=>boolean) {
   try {
     if (!firebaseConfigured) {
       const groupId=`demo_group_${Date.now()}`;
-      const created=Array.from({length:Number(jobForm.slots)||1},(_,index)=>({
-        id:`demo_new_${Date.now()}_${index}`,workDate:jobForm.workDate,
+      const created=Array.from({length:slots},(_,index)=>({
+        id:`demo_new_${Date.now()}_${index}`,workDate,
         clientName:jobForm.clientName,storeName:jobForm.storeName,makerName:jobForm.makerName,
         storeAddress:jobForm.storeAddress,storeNearestStation:jobForm.storeNearestStation,
         menuName:jobForm.menuName,entryTime:jobForm.entryTime,workTime:jobForm.workTime,
         subcontractorName:jobForm.subcontractorName,basePay:Number(jobForm.basePay)||null,
-        groupId,slotNumber:index+1,slotCount:Number(jobForm.slots)||1,
+        groupId,slotNumber:index+1,slotCount:slots,
         status:jobForm.publicationMode==="draft"?"draft":"open",
         publishable:jobForm.publicationMode!=="draft",recruitmentStopped:jobForm.publicationMode==="draft",
         revision:0,
@@ -3083,7 +3097,7 @@ async function createJobGroupAction(isCurrent:()=>boolean) {
     if (!functions) return;
     const response=await submitNativeCreation({kind:"create",input:{
       ...jobForm,
-      slots:Number(jobForm.slots),
+      workDate,slots,
       basePay:jobForm.basePay===""?null:Number(jobForm.basePay),
       publishAt,
     }},isCurrent);
@@ -3103,10 +3117,12 @@ async function createJobGroupAction(isCurrent:()=>boolean) {
 async function duplicateJobAction(job:Job,isCurrent:()=>boolean) {
   const enteredDate=window.prompt("複製後の実施日",job.workDate);
   if(enteredDate===null)return;
-  const date=enteredDate || job.workDate;
+  const date=(enteredDate || job.workDate).normalize("NFKC").trim();
   const enteredSlots=window.prompt("募集人数","1");
   if(enteredSlots===null)return;
   const slots=Number(enteredSlots || "1");
+  const inputError=nativeJobInputError(date,slots);
+  if(inputError){setMessage(inputError);return;}
   if (!firebaseConfigured) {
     const copies=Array.from({length:Math.max(1,Math.min(20,slots))},(_,index)=>({
       ...job,id:`demo_copy_${Date.now()}_${index}`,workDate:date,dateKey:date,

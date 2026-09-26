@@ -218,3 +218,20 @@ for(const demo of [false,true])for(const raw of [null,'']){
  await test.handlers.changePublication({id:'j'},'schedule');assert.equal(test.state.calls.length,0);assert.deepEqual(test.state.messages,[]);assert.equal(JSON.stringify(test.state.jobs),before);assert.equal(test.deps.adminJobActionRef.current,null);dateCases++;
 }
 console.log('Publication date input: '+dateCases+' API/demo calendar, time, valid/leap date and cancel cases passed.');
+
+let nativeInputCases=0;
+for(const demo of [false,true])for(const kind of ['create','duplicate']){
+ for(const [field,value] of [['workDate','2026-02-30'],['workDate','1900-02-29'],['workDate','2026-13-01'],['workDate','0000-01-01'],['slots','0'],['slots','1.5'],['slots','21'],['slots','invalid']]){
+  const t=setup({demo}),before=JSON.stringify(t.state.jobs);Object.assign(t.deps.jobForm,{[field]:value});let prompts=0;
+  t.deps.window.prompt=()=>++prompts===1?(field==='workDate'?value:'2026-10-01'):(field==='slots'?value:'1');
+  t.deps.window.confirm=()=>{throw Error('invalid input must fail before confirmation or stored creation attempt')};
+  await(kind==='create'?t.handlers.createJobGroup():t.handlers.duplicateJob({id:'j',workDate:'2026-10-01'}));
+  assert.equal(t.state.calls.length,0);assert.equal(JSON.stringify(t.state.jobs),before);assert.match(t.state.messages.at(-1),field==='workDate'?/実施日/:/募集人数/);assert.equal(t.deps.adminJobActionRef.current,null);assert.equal(t.state.busy,false);nativeInputCases++;
+ }
+ for(const [workDate,slots,expectedDate] of [['2028-02-29','20','2028-02-29'],[' ２０２６-１０-０１ ','1','2026-10-01']]){
+  const t=setup({demo});Object.assign(t.deps.jobForm,{workDate,slots});let prompts=0;t.deps.window.prompt=()=>++prompts===1?workDate:slots;
+  await(kind==='create'?t.handlers.createJobGroup():t.handlers.duplicateJob({id:'j',workDate:'2026-10-01'}));
+  assert.equal(t.state.calls.length,demo?0:1);if(demo){assert.equal(t.state.jobs.length,Number(slots)+1);assert.equal(t.state.jobs[0].workDate,expectedDate);}else{assert.equal(t.state.payload.workDate,expectedDate);assert.equal(t.state.payload.slots,Number(slots));}assert.equal(t.deps.adminJobActionRef.current,null);nativeInputCases++;
+ }
+}
+console.log('Native creation input: '+nativeInputCases+' API/demo invalid date/slot and normalized valid input cases passed.');

@@ -69,6 +69,19 @@ export function validatePlan(plan) {
     return { mode, project, region, sourceRef, services };
   }
 
+  if (mode === "worker-migration") {
+    const workers = ["processSafeSheetWrite", "updateExpenseReviewFromQueue", "dispatchDueNotifications",
+      "scheduleOperationalReminders", "processSheetRowCreation", "retrySheetRowCreation"];
+    const functions = parseCsv(plan.functions);
+    if (sourceRef !== "main" || functions.length !== 1 || !workers.includes(functions[0])) {
+      throw new Error("WORKER_MIGRATION_MAIN_SINGLE_TARGET_REQUIRED");
+    }
+    if (plan.confirmation !== "MIGRATE_LKC_STAGING_WORKER_PAUSED") {
+      throw new Error("WORKER_MIGRATION_CONFIRMATION_REJECTED");
+    }
+    return { mode, project, region, sourceRef, functions };
+  }
+
   if (mode === "functions-deploy") {
     const functions = parseCsv(plan.functions);
     if (!functions.length) throw new Error("FUNCTION_LIST_EMPTY");

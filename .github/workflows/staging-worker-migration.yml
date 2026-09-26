@@ -1,0 +1,154 @@
+name: Staging Worker Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Inspect metadata or update one worker after independent migration review
+        required: true
+        type: choice
+        options: [inspect, deploy]
+        default: inspect
+      target:
+        description: Exactly one approved worker
+        required: true
+        type: choice
+        options:
+          - processSafeSheetWrite
+          - updateExpenseReviewFromQueue
+          - dispatchDueNotifications
+          - scheduleOperationalReminders
+          - processSheetRowCreation
+          - retrySheetRowCreation
+      source_sha:
+        description: Exact CI-passing current main commit
+        required: true
+        type: string
+      clearance_json:
+        description: Reviewed migration evidence digests and completion attestations; no business data
+        required: false
+        type: string
+        default: "{}"
+      confirmation:
+        description: Type MIGRATE_LKC_STAGING_WORKER_PAUSED
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+concurrency:
+  group: lkc-staging-functions-deploy
+  cancel-in-progress: false
+
+env:
+  LKC_PROJECT_ID: lip-knots-crew-staging
+  LKC_REGION: asia-northeast1
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require main, first attempt and existing staging enable switch
+        env:
+          ENABLED: ${{ vars.LKC_STAGING_DEPLOY_ENABLED }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          [[ "$GITHUB_REF" == "refs/heads/main" && "$GITHUB_RUN_ATTEMPT" == "1" && "$ENABLED" == "true" ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$SOURCE_SHA" == "$GITHUB_SHA" ]]
+      - name: Checkout trusted current main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Validate dedicated scope and exact current main
+        env:
+          TARGET: ${{ inputs.target }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          node scripts/automation/validate-staging-scope.mjs --mode worker-migration --project "$LKC_PROJECT_ID" --region "$LKC_REGION" --source-ref main --functions "$TARGET" --confirmation "$LKC_CONFIRMATION"
+          [[ "$(timeout 35s git ls-remote origin refs/heads/main | cut -f1)" == "$GITHUB_SHA" ]]
+          timeout 35s git fetch --no-tags origin main
+          [[ "$(git rev-parse origin/main)" == "$GITHUB_SHA" ]]
+          node scripts/automation/check-deploy-source-integrity.mjs --repository . --base origin/main --head HEAD
+      - name: Require successful canonical CI on this exact main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          timeout 35s gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-candidate.yml/runs?head_sha=$GITHUB_SHA&event=push&per_page=30" > "$RUNNER_TEMP/worker-ci.json"
+          python3 - <<'PY'
+          import json, os
+          runs = json.load(open(os.environ["RUNNER_TEMP"] + "/worker-ci.json"))["workflow_runs"]
+          runs = [r for r in runs if r["head_sha"] == os.environ["GITHUB_SHA"] and r["head_branch"] == "main"]
+          assert runs, "CANONICAL_CI_MISSING"
+          latest = max(runs, key=lambda r: r["id"])
+          assert latest["status"] == "completed" and latest["conclusion"] == "success", "CANONICAL_CI_NOT_SUCCESSFUL"
+          PY
+      - name: Validate reviewed clearance before requesting the protected environment
+        if: inputs.operation == 'deploy'
+        env:
+          TARGET: ${{ inputs.target }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          LKC_MIGRATION_CLEARANCE: ${{ inputs.clearance_json }}
+        run: |
+          python3 - <<'PY'
+          import importlib.util, json, os
+          spec = importlib.util.spec_from_file_location("migration", "scripts/automation/migrate-staging-worker.py")
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          try:
+              module.validate_clearance(json.loads(os.environ["LKC_MIGRATION_CLEARANCE"]), os.environ["TARGET"], os.environ["SOURCE_SHA"])
+          except Exception:
+              raise SystemExit("MIGRATION_CLEARANCE_REJECTED") from None
+          PY
+
+  migrate:
+    needs: guard
+    environment: lkc-staging-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout verified source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+      - name: Set up Node
+        if: inputs.operation == 'deploy'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Build verified Functions source
+        if: inputs.operation == 'deploy'
+        run: |
+          npm ci
+          npm run build -w @lkc/functions
+      - name: Authenticate with the existing short-lived staging identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ inputs.operation == 'inspect' && vars.GCP_STAGING_OBSERVER_SERVICE_ACCOUNT || vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Read configuration or migrate one cleared worker
+        env:
+          OPERATION: ${{ inputs.operation }}
+          TARGET: ${{ inputs.target }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+          LKC_MIGRATION_CLEARANCE: ${{ inputs.clearance_json }}
+        run: |
+          args=(--target "$TARGET" --source-sha "$SOURCE_SHA" --evidence "$RUNNER_TEMP/worker-migration")
+          if [[ "$OPERATION" == "inspect" ]]; then
+            args+=(--inspect)
+          else
+            [[ "$OPERATION" == "deploy" ]]
+          fi
+          python3 scripts/automation/migrate-staging-worker.py "${args[@]}"
+      - name: Publish sanitized result only
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/worker-migration/summary.json" ]]; then
+            cat "$RUNNER_TEMP/worker-migration/summary.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # before-private.json contains environment/IAM metadata and must never be published.

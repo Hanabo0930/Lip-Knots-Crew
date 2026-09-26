@@ -269,3 +269,24 @@ for (const change of [
 ]) { assert.throws(() => validatePlan({...retryPlan, ...change})); retryCases++; }
 assert.throws(() => validatePlan({...retryPlan, functions: "bootstrapSession"}), /FUNCTIONS_CONFIRMATION_REJECTED/); retryCases++;
 console.log(JSON.stringify({retryScopeTests: retryCases, retryOnly: true, dedicatedConfirmation: true, cloudOperations: false}));
+
+// 六つのworkerは専用経路に限定し、通常配備の許可を広げない。
+const migrationWorkers = ["processSafeSheetWrite", "updateExpenseReviewFromQueue", "dispatchDueNotifications",
+  "scheduleOperationalReminders", "processSheetRowCreation", "retrySheetRowCreation"];
+const migrationPlan = {...base, sourceRef: "main", mode: "worker-migration",
+  functions: migrationWorkers[0], confirmation: "MIGRATE_LKC_STAGING_WORKER_PAUSED"};
+let migrationCases = 0;
+for (const worker of migrationWorkers) {
+  assert.deepEqual(validatePlan({...migrationPlan, functions: worker}).functions, [worker]);
+  assert.throws(() => validatePlan({...migrationPlan, mode: "functions-deploy", functions: worker,
+    confirmation: safetyConfig.confirmations.functionsDeploy}));
+  migrationCases += 2;
+}
+for (const change of [{sourceRef: "automation/other"}, {functions: "bootstrapSession"},
+  {functions: "retrySafeSheetWrites"}, {functions: migrationWorkers.join(",")},
+  {functions: `${migrationWorkers[0]},${migrationWorkers[0]}`}, {functions: ""},
+  {confirmation: ""}, {confirmation: undefined}, {confirmation: safetyConfig.confirmations.functionsDeploy},
+  {project: "other"}, {region: "us-central1"}]) {
+  assert.throws(() => validatePlan({...migrationPlan, ...change})); migrationCases++;
+}
+console.log(JSON.stringify({workerMigrationScopeTests: migrationCases, ordinaryAllowlistUnchanged: true}));

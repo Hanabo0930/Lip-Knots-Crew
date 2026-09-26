@@ -336,3 +336,10 @@ Standing completion authorization includes the ten admin core callables listed a
 - 専用runner、停止ソースpin、`LKC_SHEET_WRITE_MODE=paused`、`LKC_NOTIFICATION_DELIVERY_MODE=paused`、既存の転送停止を維持する。HTTP向けInvoker公開化を適用しない。
 - 対象はFAILED retry Functionの更新、対応するRunサービスと固定名Schedulerの作成、正規ビルドに伴う成果物だけ。Schedulerが定期起動しても関数先頭で停止し、業務キュー・原本・通知へ進まない。手動起動・再試行・停止解除は対象外。
 - この許可リストはIAM追加の包括承認ではない。IAM変更は具体的に承認されたロール/対象/期限だけ。拒否・構成変化・別資源・削除再作成・想定外の権限不足があれば停止し、保護を迂回しない。失敗時は読み取りで状態を保存し、旧コードへ自動復帰しない。
+
+## 既存6workerの停止状態での移行（2026-09-26）
+
+- processSafeSheetWrite / updateExpenseReviewFromQueue / dispatchDueNotifications / scheduleOperationalReminders / processSheetRowCreation / retrySheetRowCreation の既存6件のSTAGING限定更新を追加範囲とする。scheduleOperationalReminders / retrySheetRowCreation の既存Scheduler2件の一時停止も含む。
+- 専用workflow staging-worker-migration.yml、CI成功済みの現在main、1件ずつ、既存の保護環境を使用する。通常のfunctions-deploy allowlistへ追加しない。ソースと停止環境値のみ更新し、既存Trigger/Scheduler/PubSub/IAMは書き換えない。
+- 到着保持・旧実行と外部書込の終了・保留依頼の復旧・固定ソース退避の実証を独立にレビューしてから配備する。clearanceの入力や検査成功だけで実証済みとしない。
+- 本承認にはPub/Sub/Eventarcの停止・保持期間変更・再配送、IAM/Rules、原本書戻し・実送信・業務文書操作・本番/Live・停止解除を含めない。既存retrySafeSheetWritesの復旧を再実行しない。

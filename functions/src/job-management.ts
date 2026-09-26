@@ -15,6 +15,7 @@ import {
   buildJobCsv,
   clientInputKeys,
   normalizeJobInput,
+  isValidPublicationDateTime,
   normalizeMoneyRecord,
   resolvePublication,
   staffInputKeys,
@@ -288,6 +289,10 @@ export const updateJobPublication = onCall(async (request) => {
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
   const input = PublicationSchema.parse(request.data ?? {});
+  if (input.action === "schedule" &&
+      (!input.publishAt || !isValidPublicationDateTime(input.publishAt))) {
+    throw new HttpsError("invalid-argument", "公開予約日時が正しくありません。");
+  }
   const refs = input.jobIds.map((id) => db.collection("jobs").doc(id));
   const { updated, blocked } = await db.runTransaction(async (tx) => {
     const snapshots = await tx.getAll(...refs);

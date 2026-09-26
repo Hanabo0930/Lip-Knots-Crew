@@ -83,6 +83,16 @@ try{
   });
  }
  await test('複製元の会社不一致では案件・受領とも保存しない',async()=>{const h=await setup('duplicate');await db.doc('jobs/'+h.command.input.sourceJobId).update({companyId:'foreign'});const before=await h.state();await assert.rejects(h.invoke(),e=>e.code==='not-found');assert.deepEqual(await h.state(),before);});
+ for(const format of ['native','legacy'])for(const kind of ['create','duplicate'])for(const [field,value] of [['workDate','2026-02-30'],['workDate','2026-13-01'],['workDate','2026-00-10'],['publishAt','2026-02-30T09:00:00Z'],['publishAt','2026-01-01T24:00:00Z']])await test(format+'/'+kind+'/不正日時を保存しない/'+field+'/'+value,async()=>{
+  const h=await setup(kind),input={...h.command.input,[field]:value,...(field==='publishAt'?{publicationMode:'scheduled'}:{})},before=await h.state();
+  const invoke=()=>format==='native'?h.invoke({input}):(kind==='create'?management.createAdminJobGroup:management.duplicateAdminJob).run({auth:h.auth,data:input});
+  await assert.rejects(invoke,e=>e.code==='invalid-argument');assert.deepEqual(await h.state(),before);
+ });
+ for(const kind of ['create','duplicate'])for(const value of ['2028-02-29','2026-10-01'])await test(kind+'/有効な実施日の対照/'+value,async()=>{const h=await setup(kind);const out=await h.invoke({input:{...h.command.input,workDate:value}});assert.equal(out.jobIds.length,2);});
+ for(const publishAt of [undefined,null,'','invalid','2026-02-30T09:00:00Z','2026-01-01T24:00:00Z'])await test('公開予約/不正日時は案件と監査を変更しない/'+publishAt,async()=>{
+  const h=await setup('create'),created=await h.invoke(),before=await h.state();
+  await assert.rejects(management.updateJobPublication.run({auth:h.auth,data:{jobIds:created.jobIds,action:'schedule',...(publishAt===undefined?{}:{publishAt})}}),e=>e.code==='invalid-argument');assert.deepEqual(await h.state(),before);
+ });
 }finally{
  await db.terminate();const stats=network.stats();network.restore();const result={project:environment.project,passed:results.filter(r=>r.passed).length,failed:results.filter(r=>!r.passed).length+(stats.blocked?1:0),network:stats,realCloud:false,realSheetWrites:0,realMessages:0,results};fs.writeFileSync(process.argv[2],JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify({passed:result.passed,failed:result.failed,network:stats}));if(result.failed)process.exitCode=1;
 }

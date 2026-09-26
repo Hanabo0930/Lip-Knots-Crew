@@ -54,6 +54,23 @@ export const staffInputKeys = [
   "staffOther",
 ] as const;
 
+function isValidCalendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  return day <= ([31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0);
+}
+
+export function isValidPublicationDateTime(value: string): boolean {
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|([+-])(\d{2}):(\d{2}))?$/.exec(value);
+  if (!match || !isValidCalendarDate(match[1] ?? "")) return false;
+  return Number(match[2]) < 24 && Number(match[3]) < 60 &&
+    Number(match[4] ?? 0) < 60 && Number(match[6] ?? 0) < 24 &&
+    Number(match[7] ?? 0) < 60 && Number.isFinite(Date.parse(value));
+}
+
 export function normalizeJobInput(
   raw: Partial<AdminJobInput>
 ): { value: AdminJobInput; errors: string[] } {
@@ -75,7 +92,7 @@ export function normalizeJobInput(
     ? null
     : Number(raw.basePay);
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(workDate)) errors.push("実施日が正しくありません。");
+  if (!isValidCalendarDate(workDate)) errors.push("実施日が正しくありません。");
   if (!clientName) errors.push("クライアント名は必須です。");
   if (!storeName) errors.push("店舗名は必須です。");
   if (storeAddress.length > 300) errors.push("店舗住所は300文字以内で入力してください。");
@@ -93,7 +110,7 @@ export function normalizeJobInput(
     errors.push("公開方法が正しくありません。");
   }
   if (publicationMode === "scheduled") {
-    if (!publishAt || Number.isNaN(Date.parse(publishAt))) {
+    if (!publishAt || !isValidPublicationDateTime(publishAt)) {
       errors.push("公開予約日時を入力してください。");
     }
   }

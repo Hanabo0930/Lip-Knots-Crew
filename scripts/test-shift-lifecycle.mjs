@@ -45,7 +45,7 @@ function harness(rows,clock){
     await h.beforeCommit?.(pending);apply(pending);h.commits.push(pending);await h.afterCommit?.(pending);return result;
   }};
   const sheets={spreadsheets:{get:async input=>{assert.equal(input.spreadsheetId,sheetId);return {data:{sheets:[{properties:{sheetId:1,title:'2099.9',gridProperties:{rowCount:100,columnCount:55}}},{properties:{sheetId:2,title:'2099.10',hidden:!h.secondTab}}]}};},values:{get:async input=>{
-    assert.equal(input.spreadsheetId,sheetId);assert.match(input.range,/^'2099\.(9|10)'!/);h.reads++;
+    assert.equal(input.spreadsheetId,sheetId);assert.match(input.range,/^'2099\.(9|10)'!/);h.reads++;h.lastReadRange=input.range;
     if(h.failRead || (h.secondTab && input.range.startsWith("'2099.10'")))throw new Error('synthetic sheet read failure');const captured=clone(h.rows);await h.afterSheetRead?.();return {data:{values:[Array(55).fill('header'),...captured]}};
   }}}};
   const boundaries={'./firebase':{db},'firebase-admin/firestore':{Timestamp,FieldValue:{delete:()=>deletion,serverTimestamp:()=>Timestamp.now()}},'firebase-functions/v2/https':{HttpsError,onCall:(...args)=>args.at(-1)},'firebase-functions/v2/scheduler':{onSchedule:(options,callback)=>callback},zod:dependency('zod'),'node:crypto':crypto,googleapis:{google:{auth:{GoogleAuth:class{constructor(options){assert.deepEqual(Array.from(options.scopes),['https://www.googleapis.com/auth/spreadsheets.readonly']);}}},sheets:()=>sheets}}};
@@ -66,6 +66,18 @@ function harness(rows,clock){
 }
 const results=[];
 async function test(name,callback){try{await callback();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.message});}}
+
+await test('monthly fixed case id import reads past configured end and preserves source column',async()=>{
+ const r=row('Monthly ID');r[54]='legacy-id';r[55]='12345678-1234-4123-8123-123456789abc';
+ const h=harness([r]);const config=h.records.get(`sheetImportConfigs/${companyId}`);
+ config.columns.caseId='BC';delete config.columns.cancelled;config.caseIdColumnsBySheet={'2099.9':'BD'};
+ await h.sync();const actual=h.list('jobs')[0];assert.equal(actual.caseId,r[55]);assert.equal(actual.sheetRef.caseIdColumn,'BD');assert.match(h.lastReadRange,/!A1:BD100$/);
+ const savedId=actual.id;h.rows[0][54]='different-old-id';await h.sync();assert.equal(h.list('jobs').length,1);assert.equal(h.list('jobs')[0].id,savedId);
+});
+await test('monthly fixed case id config rejects invalid column before sheet or job writes',async()=>{
+ const h=harness([row('Invalid mapping')]);h.records.get(`sheetImportConfigs/${companyId}`).caseIdColumnsBySheet={'2099.9':'BD2'};
+ await assert.rejects(h.sync());assert.equal(h.reads,0);assert.equal(h.list('jobs').length,0);
+});
 await test('B/F mapping, incomplete rows, cancellation priority, hidden tabs',async()=>{
   const h=harness([row('Open'),row('Assigned','Synthetic Staff'),row(''),row('','',true)]);h.rows[1][5]='';await h.sync();assert.equal(h.reads,1);assert.deepEqual(h.list('jobs').map(j=>j.status),['open','assigned','draft','cancelled']);assert.equal(h.list('staffDayLocks').length,1);
 });

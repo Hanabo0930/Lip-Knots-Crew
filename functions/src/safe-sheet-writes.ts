@@ -1,3 +1,4 @@
+import { resolveSheetCaseIdMapping, assertSheetCaseIdColumn, SheetCaseIdColumnError } from "./sheet-write-core";
 import { sheetWriteExecutionPaused } from "./sheet-write-control";
 import { caseMailSubmissionContext } from "./submission-integrity";
 import { caseMailPreparationHeld } from "./case-mail-preparation-core";
@@ -24,6 +25,7 @@ type Queue = {
 };
 type Mapping = {
   enabled?: boolean; spreadsheetId: string; idColumn?: string; allowVerifiedFallbackRow?: boolean;
+  caseIdColumnsBySheet?: Record<string, string>;
   columns: Record<string, string>; identityColumns?: { workDate: string; clientName: string; storeName: string; workTime: string };
   operations: Record<string, { values: string[]; styles?: string[] }>;
   valueInputOption?: "RAW" | "USER_ENTERED"; maxAttempts?: number;
@@ -357,7 +359,10 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
     };
     const [jobSnap, mapSnap] = await Promise.all([jobRef.get(), mapRef.get()]);
     if (!jobSnap.exists || !mapSnap.exists) throw new BlockedError("案件または列マッピングが見つかりません。");
-    const job = jobSnap.data()!, mapping = mapSnap.data() as Mapping;
+    const job = jobSnap.data()!;
+    const savedMapping = mapSnap.data() as Mapping;
+    const mapping = resolveSheetCaseIdMapping(savedMapping, String(job.sheetRef?.sheetName ?? ""));
+    assertSheetCaseIdColumn(job.sheetRef?.caseIdColumn, mapping.idColumn);
     if (mapping.enabled !== true) throw new BlockedError("安全書込がまだ有効化されていません。");
     if (job.companyId !== queue.companyId) throw new BlockedError("会社情報が一致しません。");
     if (job.sheetRef?.spreadsheetId && job.sheetRef.spreadsheetId !== mapping.spreadsheetId) throw new BlockedError("元のシフト表が一致しません。");
@@ -436,7 +441,7 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
     assertNetPrint(ref, queue, latestJob.data()!);
     assertSubmissionState(ref, queue, latestJob.data()!, mapping);
     if (reviewRef) assertExpenseReview(ref, queue, latestJob.data()!, (await reviewRef.get()).data());
-    if (jobReference(latestJob.data()) !== jobReference(job) || stableJson(latestMapping.data()) !== stableJson(mapping)) throw new ConflictError("案件の参照先・担当・書込設定が変更されています。");
+    if (jobReference(latestJob.data()) !== jobReference(job) || stableJson(latestMapping.data()) !== stableJson(savedMapping)) throw new ConflictError("案件の参照先・担当・書込設定が変更されています。");
     if (!(await getProductionOperationalState(queue.companyId)).operational) throw new BlockedError("書込前に運用が停止されました。");
     };
     await ensureCurrent();
@@ -500,7 +505,7 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
       assertNetPrint(ref, queue, currentJob.data()!);
       assertSubmissionState(ref, queue, currentJob.data()!, mapping);
       if (reviewRef) assertExpenseReview(ref, queue, currentJob.data()!, (await tx.get(reviewRef)).data());
-      if (jobReference(currentJob.data()) !== jobReference(job) || stableJson(currentMapping.data()) !== stableJson(mapping)) throw new ConflictError("書込後の案件・設定が変更されています。");
+      if (jobReference(currentJob.data()) !== jobReference(job) || stableJson(currentMapping.data()) !== stableJson(savedMapping)) throw new ConflictError("書込後の案件・設定が変更されています。");
       const editSource = await verifyEditSource(currentJob.data()!, tx);
       if (editSourceRef && (!editSource || editSource.companyId !== queue.companyId || editSource.jobId !== queue.jobId || editSource.identity !== editSourceIdentity(currentJob.data()!))) throw new ConflictError("原本確認値の保存先が変更されています。");
       tx.set(ref, { status: "completed", resolvedRow: row, beforeValues: before, afterValues, completedAt: now, updatedAt: now, retryAt: null }, { merge: true });
@@ -610,7 +615,7 @@ async function verifyPreContactRow(sheets: ReturnType<typeof google.sheets>, map
 async function fail(ref: FirebaseFirestore.DocumentReference, queue: Queue, error: unknown) {
   const attempts = Number(queue.attempts ?? 1);
   const verification = error instanceof VerificationRequiredError;
-  const blocked = error instanceof BlockedError || error instanceof ConflictError;
+  const blocked = error instanceof BlockedError || error instanceof ConflictError || error instanceof SheetCaseIdColumnError;
   const retryable = !verification && !blocked && attempts < 5;
   await finishOwned(ref, queue, {
     status: verification || blocked ? "blocked" : retryable ? "retry_wait" : "dead_letter",

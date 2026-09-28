@@ -28,7 +28,7 @@ function harness(mode,compiled){
  const cache=new Map();
  function load(name){
   if(Object.hasOwn(boundaries,name))return boundaries[name];
-  assert.ok(["./sheet-row-creation","./sheet-row-creation-core","./sheet-write-control","./utils"].includes(name),"Unexpected import "+name);
+  assert.ok(["./sheet-write-core","./sheet-row-creation","./sheet-row-creation-core","./sheet-write-control","./utils"].includes(name),"Unexpected import "+name);
   if(cache.has(name))return cache.get(name);
   const exports={};cache.set(name,exports);
   const file="../functions/"+(compiled?"lib/":"src/")+name.slice(2)+(compiled?".js":".ts");

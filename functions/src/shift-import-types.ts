@@ -46,6 +46,7 @@ export type ShiftImportConfig = {
   scheduleEnabled: boolean;
   markMissingAsArchived: boolean;
   columns: ShiftColumnConfig;
+  caseIdColumnsBySheet?: Record<string, string>;
   configVersion: string;
 };
 
@@ -107,6 +108,7 @@ export type ParsedShiftJob = {
     sheetId: number | null;
     sheetName: string;
     currentRow: number;
+    caseIdColumn?: string;
     headerRow: number;
   };
   importWarnings: string[];

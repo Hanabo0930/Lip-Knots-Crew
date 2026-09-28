@@ -24,3 +24,38 @@ export function cancellationSheetWriteIdentity(job: Record<string, unknown>): st
     job.dateKey ?? null, job.workDate ?? null, sheet.spreadsheetId ?? null, sheet.sheetId ?? null, sheet.sheetName ?? null,
     ...(job.mailIntake ? [job.mailIntakeHold ?? null] : []), ...(job.mailTargetHold != null ? [job.mailTargetHold] : [])]);
 }
+
+export class SheetCaseIdColumnError extends Error {}
+
+/** 月別の明示設定だけを適用し、他月の設定や行番号から推測しない。 */
+export function resolveSheetCaseIdColumn(defaultColumn: string | undefined, overrides: Record<string, string> | undefined, sheetName: string): string | undefined {
+  if (overrides === undefined) return defaultColumn;
+  if (!overrides || typeof overrides !== "object" || Array.isArray(overrides) ||
+      Object.entries(overrides).some(([name, column]) => !name.trim() || typeof column !== "string" || !/^[A-Z]{1,3}$/.test(column))) {
+    throw new SheetCaseIdColumnError("月別の固定案件ID列設定が不正です。");
+  }
+  const column = Object.hasOwn(overrides, sheetName) ? overrides[sheetName] : defaultColumn;
+  if (!column || !/^[A-Z]{1,3}$/.test(column)) throw new SheetCaseIdColumnError("対象月の固定案件ID列を確認できません。");
+  return column;
+}
+
+export function extendSheetReadColumn(endColumn: string, caseIdColumn: string | undefined): string {
+  return caseIdColumn && columnToNumber(caseIdColumn) > columnToNumber(endColumn) ? caseIdColumn : endColumn;
+}
+
+export function resolveSheetCaseIdMapping<T extends { idColumn?: string; caseIdColumnsBySheet?: Record<string, string>; columns: Record<string, string>; rowCreation?: { rowEndColumn?: string } }>(mapping: T, sheetName: string): T {
+  if (mapping.caseIdColumnsBySheet === undefined) return mapping;
+  const column = resolveSheetCaseIdColumn(mapping.idColumn, mapping.caseIdColumnsBySheet, sheetName)!;
+  if (Object.entries(mapping.columns).some(([key, value]) => key !== "caseId" && value.toUpperCase() === column)) {
+    throw new SheetCaseIdColumnError("固定案件ID列が業務入力列と重複しています。");
+  }
+  return { ...mapping, idColumn: column, columns: { ...mapping.columns, caseId: column },
+    ...(mapping.rowCreation ? { rowCreation: { ...mapping.rowCreation,
+      rowEndColumn: extendSheetReadColumn(mapping.rowCreation.rowEndColumn ?? column, column) } } : {}) };
+}
+
+export function assertSheetCaseIdColumn(savedColumn: unknown, currentColumn: string | undefined): void {
+  if (savedColumn !== undefined && savedColumn !== currentColumn) {
+    throw new SheetCaseIdColumnError("取込時と書戻しの固定案件ID列が一致しません。列設定を確認して再取込してください。");
+  }
+}

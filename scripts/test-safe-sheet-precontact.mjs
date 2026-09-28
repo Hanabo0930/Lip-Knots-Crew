@@ -35,7 +35,7 @@ function harness(environment={LKC_SHEET_WRITE_MODE:"active"},compiled=false){
  },batch:()=>{const writes=[];return {set:(ref,data,options)=>writes.push({ref,data,merge:options?.merge}),commit:async()=>{await h.onCommit?.(writes);if(h.failCompletion&&writes.some(w=>w.data.status==="completed"))throw Error("synthetic completion store failure");apply(writes);}};}};
  const rangeCell=range=>{assert.ok(range.startsWith("'"+sheetName+"'!"));return range.split("!")[1];};
  const sheets={spreadsheets:{values:{
-  get:async input=>{assert.equal(input.spreadsheetId,sheetId);h.reads++;return {data:{values:h.idRows}};},
+  get:async input=>{assert.equal(input.spreadsheetId,sheetId);h.reads++;h.lastIdReadRange=input.range;return {data:{values:h.idRows}};},
   batchGet:async input=>{assert.equal(input.spreadsheetId,sheetId);h.reads++;await h.beforeCellRead?.(input);if(h.failRead)throw Error("synthetic read failure");const out={data:{valueRanges:input.ranges.map(range=>({values:[[h.cells.get(rangeCell(range))??""]]}))}};await h.afterCellRead?.(input);return out;},
   batchUpdate:async input=>{assert.equal(input.spreadsheetId,sheetId);h.writes.push(clone(input));for(const update of input.requestBody.data){h.cells.set(rangeCell(update.range),update.values[0][0]);}await h.onWrite?.();if(h.failAfterWrite)throw Error("synthetic connection lost after applied write");return {data:{}};}
  },batchUpdate:async input=>{h.writes.push(clone(input));await h.onStyleWrite?.();if(h.failAfterStyle)throw Error("synthetic style reply lost");return {data:{}};}}};
@@ -564,5 +564,25 @@ await test('expense recovery actual admin screen stale result stays blocked unti
  await ctx.completeExpense();assert.equal(calls.filter(call=>call.name==='completeExpenseReview').length,1);await ctx.loadExpenseReview(jobId);assert.equal(ctx.expenseStatus,'error');await ctx.completeExpense();assert.equal(calls.filter(call=>call.name==='completeExpenseReview').length,2);await h.runQueue(h.review().queueId);await h.queueResult(h.review().queueId);assert.equal(h.review().status,'completed');assert.equal(h.writes.length,1);
 });
 
+
+await test('monthly case id worker uses the target month column and leaves default config unchanged',async()=>{
+ const h=harness();h.mapping().caseIdColumnsBySheet={[sheetName]:'BD'};h.job().sheetRef.caseIdColumn='BD';h.cells.set('BD2','synthetic-case');
+ await h.run();assert.equal(h.queue().status,'completed',h.queue().errorMessage);assert.equal(h.lastIdReadRange,"'"+sheetName+"'!BD:BD");assert.equal(h.mapping().idColumn,'Q');assert.equal(h.writes.length,1);
+});
+await test('monthly case id worker still detects saved configuration changed during write',async()=>{
+ const h=harness();h.mapping().caseIdColumnsBySheet={[sheetName]:'BD'};h.job().sheetRef.caseIdColumn='BD';h.cells.set('BD2','synthetic-case');h.onWrite=()=>{h.mapping().caseIdColumnsBySheet[sheetName]='BE';};
+ await h.run();assert.equal(h.queue().status,'blocked');assert.equal(h.writes.length,1,h.queue().errorMessage);assert.equal(h.job().preContactSyncPending,true);
+});
+for(const mode of ['mismatch','collision','invalid'])await test('monthly case id worker blocks '+mode+' before sheet access',async()=>{
+ const h=harness();h.mapping().caseIdColumnsBySheet={[sheetName]:mode==='collision'?'B':mode==='invalid'?'BD2':'BD'};
+ if(mode==='mismatch')h.job().sheetRef.caseIdColumn='BC';
+ await h.run();assert.equal(h.queue().status,'blocked');assert.equal(h.authCalls,0);assert.equal(h.reads,0);assert.equal(h.writes.length,0);
+});
+await test('monthly case id row mapping widens verification range without mutating another month',async()=>{
+ const h=harness();const source={idColumn:'BC',columns:{caseId:'BC',staffName:'B'},caseIdColumnsBySheet:{[sheetName]:'BD'},rowCreation:{rowEndColumn:'BC'}};
+ const selected=h.core('./sheet-write-core','resolveSheetCaseIdMapping',source,sheetName);
+ assert.equal(selected.idColumn,'BD');assert.equal(selected.columns.caseId,'BD');assert.equal(selected.rowCreation.rowEndColumn,'BD');assert.equal(source.rowCreation.rowEndColumn,'BC');
+ const other=h.core('./sheet-write-core','resolveSheetCaseIdMapping',source,'2099.12');assert.equal(other.idColumn,'BC');
+});
 console.log(JSON.stringify({passed:results.filter(r=>r.passed).length,total:results.length,results,scope:"Actual worker and core with synthetic DB/Sheets; no network, real data or messages."},null,2));
 if(results.some(r=>!r.passed))process.exitCode=1;

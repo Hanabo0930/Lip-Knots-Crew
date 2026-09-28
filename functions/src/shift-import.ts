@@ -12,6 +12,7 @@ import {
   selectImportSheets,
 } from "./sheet-reader";
 import { parseShiftSheet } from "./shift-parser";
+import { resolveSheetCaseIdColumn, extendSheetReadColumn } from "./sheet-write-core";
 import { assignmentPreparationPatch } from "./assignment-preparation-core";
 import { netPrintAssignmentPatch } from "./netprint-state-core";
 import { mailPublicationContext } from "./case-mail-publication-core";
@@ -73,6 +74,7 @@ const ConfigSchema = z.object({
   scheduleEnabled: z.boolean().default(false),
   markMissingAsArchived: z.boolean().default(false),
   columns: ColumnSchema,
+  caseIdColumnsBySheet: z.record(z.string().min(1), z.string().regex(/^[A-Z]{1,3}$/)).optional(),
   configVersion: z.string().default("0.2"),
 });
 
@@ -230,11 +232,13 @@ async function executeShiftImport(
     for (const target of targets) {
       try {
         const readStartedAtMs = Date.now();
+        const caseIdColumn = resolveSheetCaseIdColumn(config.columns.caseId, config.caseIdColumnsBySheet, target.title);
+        const readEndColumn = config.caseIdColumnsBySheet === undefined ? config.readRangeEndColumn : extendSheetReadColumn(config.readRangeEndColumn, caseIdColumn);
         const values = await readShiftSheet(
           sheets,
           config.spreadsheetId,
           target,
-          config.readRangeEndColumn,
+          readEndColumn,
           config.maxRowsPerSheet
         );
         const parsed = parseShiftSheet(

@@ -803,8 +803,11 @@ for(const scope of ['file','submission'])await test('staff-admin journey '+scope
  await assert.rejects(h.start(),e=>e.code==='failed-precondition'&&e.details.reason==='assignment_sheet_confirmation_pending');
  const assignment=h.list('sheetSyncQueue').find(q=>q.operation==='job.assign');await h.runSheet(assignment.id);
  assert.equal(h.records.get('sheetSyncQueue/'+assignment.id).status,'completed');assert.equal(h.row[1],'Synthetic Staff');
- assert.equal(h.current().applicationUnconfirmed,true);await h.sync();assert.equal(h.current().applicationUnconfirmed,false);assert.equal(h.current().applicationAdminConfirmed,true);
- const first=await h.start(2);await h.finish(first.files[0]);await h.finish(first.files[1]);
+ assert.equal(h.current().applicationUnconfirmed,false);assert.equal(h.current().assignmentSheetWrite.awaitingImportConfirmation,true);
+ assert.equal(h.current().applicationAdminConfirmed,true);
+ // 原本反映を確認した応募は、再取込を待たず次のスタッフ操作へ進める。
+ const first=await h.start(2);await h.sync();assert.equal(h.current().assignmentSheetWrite.awaitingImportConfirmation,false);
+ await h.finish(first.files[0]);await h.finish(first.files[1]);
  const originalIds=first.files.map(f=>h.records.get('submissions/'+first.submissionId+'/files/'+f.fileId).driveFileId);
  const timeline=await h.views.getSubmissionTimeline({auth:h.admin,data:{jobId:h.jobId,type:'report'}});assert.equal(timeline.submissions.length,1);assert.equal(timeline.submissions[0].files.length,2);
  const report=h.list('sheetSyncQueue').find(q=>q.operation==='submission.report');await h.runSheet(report.id);assert.equal(h.records.get('sheetSyncQueue/'+report.id).status,'completed');assert.equal(h.current().submissionStatus.report.sheetWrite.pending,false);

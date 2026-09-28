@@ -372,15 +372,40 @@ await test("number update after mutation preserves newer pending proof",async()=
 await test("reconfirmed printed item clears completed ownership review",async()=>{const h=await printedHarness();h.job().netPrint.needsPrintReview=true;h.job().netPrint.items[0].printed=false;const previous=h.job().netPrint.items[0].printOperationId;await h.call("./netprint","markNetPrintPrinted",{jobId,itemId:"printed-item",dateKey},{uid:"synthetic-user",token:{companyId,role:"staff",staffId}});assert.equal(h.job().netPrint.needsPrintReview,false);assert.notEqual(h.job().netPrint.items[0].printOperationId,previous);});
 await test("partial print reconfirmation retains ownership review",async()=>{const h=await printedHarness();h.job().netPrint.needsPrintReview=true;h.job().netPrint.items[0].printed=false;h.job().netPrint.items.push({id:"next-print",number:"ABCDEFGH",position:2,printed:false});await h.call("./netprint","markNetPrintPrinted",{jobId,itemId:"printed-item",dateKey},{uid:"synthetic-user",token:{companyId,role:"staff",staffId}});assert.equal(h.job().netPrint.needsPrintReview,true);await h.call("./netprint","markNetPrintPrinted",{jobId,itemId:"next-print",dateKey},{uid:"synthetic-user",token:{companyId,role:"staff",staffId}});assert.equal(h.job().netPrint.needsPrintReview,false);});
 await test("failed reconfirmation retains old pending review atomically",async()=>{const h=await printedHarness();h.job().netPrint.needsPrintReview=true;h.job().netPrint.items[0].printed=false;h.onCommit=writes=>{if(writes.some(write=>Object.hasOwn(write.data,"netPrint.items")))throw Error("synthetic print save failure");};await assert.rejects(h.call("./netprint","markNetPrintPrinted",{jobId,itemId:"printed-item",dateKey},{uid:"synthetic-user",token:{companyId,role:"staff",staffId}}));assert.equal(h.job().netPrint.needsPrintReview,true);assert.equal(h.job().netPrint.items[0].printed,false);});
-async function assignmentHarness(profile={}){
- const h=harness();h.records.delete(`sheetSyncQueue/${queueId}`);Object.assign(h.job(),{status:'open',assignedStaffId:null,assignedStaffName:null,publishable:true,preContact:null});
+async function assignmentHarness(profile={},compiled=false){
+ const h=harness({LKC_SHEET_WRITE_MODE:"active"},compiled);h.records.delete(`sheetSyncQueue/${queueId}`);Object.assign(h.job(),{status:'open',assignedStaffId:null,assignedStaffName:null,publishable:true,preContact:null});
  h.records.set(`staffProfiles/${staffId}`,{companyId,active:true,displayName:'Synthetic Staff',...profile});
  h.mapping().operations['job.assign']={values:['staffName']};h.cells.set('B2','');
  h.apply=(requestId='synthetic-request-0001')=>h.call('./jobs','applyToJob',{jobId,requestId},{uid:'synthetic-user',token:{companyId,role:'staff',staffId}});
  return h;
 }
-async function appliedHarness(){const h=await assignmentHarness();await h.apply();h.assignmentId=[...h.records].find(([path,value])=>path.startsWith('sheetSyncQueue/')&&value.operation==='job.assign')[0].split('/').at(-1);h.assignment=()=>h.records.get(`sheetSyncQueue/${h.assignmentId}`);h.assignmentLock=()=>h.records.get(`staffDayLocks/${companyId}_${staffId}_${dateKey}`);h.runAssignment=()=>h.runQueue(h.assignmentId);return h;}
-await test('actual application writes blank staff cell once and preserves source confirmation pending',async()=>{const h=await appliedHarness();await h.runAssignment();assert.equal(h.assignment().status,'completed');assert.equal(h.cells.get('B2'),'Synthetic Staff');assert.equal(h.job().applicationUnconfirmed,true);assert.equal(h.writes.length,1);await h.runAssignment();assert.equal(h.writes.length,1);});
+async function appliedHarness(compiled=false){const h=await assignmentHarness({},compiled);await h.apply();h.assignmentId=[...h.records].find(([path,value])=>path.startsWith('sheetSyncQueue/')&&value.operation==='job.assign')[0].split('/').at(-1);h.assignment=()=>h.records.get(`sheetSyncQueue/${h.assignmentId}`);h.assignmentLock=()=>h.records.get(`staffDayLocks/${companyId}_${staffId}_${dateKey}`);h.runAssignment=()=>h.runQueue(h.assignmentId);return h;}
+for(const compiled of [false,true]) {
+ await test('application confirmation completes verified assignment '+(compiled?'compiled':'source'),async()=>{
+  const h=await appliedHarness(compiled);h.job().applicationAdminConfirmed=false;
+  assert.equal(h.job().applicationUnconfirmed,true);await h.runAssignment();
+  assert.equal(h.assignment().status,'completed');assert.equal(h.cells.get('B2'),'Synthetic Staff');
+  assert.equal(h.job().applicationUnconfirmed,false);assert.equal(h.job().assignmentSheetWrite.awaitingImportConfirmation,true);
+  assert.equal(h.job().applicationAdminConfirmed,false);assert.equal(h.assignmentLock().active,true);assert.equal(h.job().status,'assigned');
+  assert.equal(h.writes.length,1);await h.runAssignment();assert.equal(h.writes.length,1);
+ });
+ for(const [name,change]of [
+  ['lost reply',h=>h.failAfterWrite=true],['readback unavailable',h=>h.onWrite=()=>h.failRead=true],
+  ['changed day',h=>h.onWrite=()=>h.cells.set('A2','2099-09-21')],['changed staff',h=>h.onWrite=()=>h.cells.set('B2','Other Staff')],
+  ['new assignment',h=>h.onWrite=()=>h.job().assignmentSheetWrite={queueId:'newer',identity:'newer'}],
+  ['completion failure',h=>h.failCompletion=true],
+  ['completion race',h=>{let changed=false;h.onCommit=writes=>{if(!changed&&writes.some(w=>w.data.status==='completed')){changed=true;h.assignmentLock().jobId='other-job';}};}],
+ ])await test('application confirmation stays pending on '+name+' '+(compiled?'compiled':'source'),async()=>{
+  const h=await appliedHarness(compiled);change(h);await h.runAssignment();
+  assert.equal(h.assignment().errorType,'verification_required');assert.equal(h.job().applicationUnconfirmed,true);
+  assert.notEqual(h.job().assignmentSheetWrite.awaitingImportConfirmation,true);assert.equal(h.writes.length,1);
+ });
+ await test('application confirmation accepts already matching row '+(compiled?'compiled':'source'),async()=>{
+  const h=await appliedHarness(compiled);h.cells.set('B2','Synthetic Staff');await h.runAssignment();
+  assert.equal(h.assignment().status,'completed');assert.equal(h.job().applicationUnconfirmed,false);
+  assert.equal(h.job().assignmentSheetWrite.awaitingImportConfirmation,true);assert.equal(h.writes.length,0);
+ });
+}
 await test('application creates saved queue proof with displayed day',async()=>{const h=await appliedHarness();assert.equal(h.job().assignmentSheetWrite.queueId,h.assignmentId);assert.equal(h.assignment().dateKey,dateKey);assert.equal(h.assignment().idempotencyKey,`job.assign:${jobId}:${h.assignmentId}`);});
 for(const [name,change]of [
  ['new owner',h=>h.job().assignedStaffId='new-person'],['new date',h=>h.job().dateKey='2099-09-21'],['new case',h=>h.job().caseId='different-case'],

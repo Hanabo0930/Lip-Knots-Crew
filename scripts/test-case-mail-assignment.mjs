@@ -11,6 +11,7 @@ await test("受信→募集→応募→担当確認→B列反映→再取込の�
  await h.confirm();assert.equal(h.job().applicationAdminConfirmed,true);assert.equal(h.job().applicationUnconfirmed,true);
  await assert.rejects(h.importRow(),{code:"failed-precondition"});assert.equal(h.job().assignedStaffId,"staff-1");assert.equal(h.job().applicationUnconfirmed,true);
  await h.run();assert.equal(h.queue().status,"completed");assert.equal(h.row[1],"合成スタッフ");assert.equal(h.writes.length,1);
+ assert.equal(h.job().applicationUnconfirmed,false);assert.equal(h.job().assignmentSheetWrite.awaitingImportConfirmation,true);
  assert.equal(h.writes[0].requestBody.valueInputOption,"RAW");assert.deepEqual(plain(h.writes[0].requestBody.data),[{range:"'2099.10'!B2",values:[["合成スタッフ"]]}]);
  assert.equal(h.row[25],"=SUM(X2:Y2)");assert.equal(h.row[26],"protected");
  await h.importRow();assert.equal(h.job().applicationUnconfirmed,false);assert.equal(h.job().applicationAdminConfirmed,true);

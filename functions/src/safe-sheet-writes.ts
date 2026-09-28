@@ -509,6 +509,12 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
       const editSource = await verifyEditSource(currentJob.data()!, tx);
       if (editSourceRef && (!editSource || editSource.companyId !== queue.companyId || editSource.jobId !== queue.jobId || editSource.identity !== editSourceIdentity(currentJob.data()!))) throw new ConflictError("原本確認値の保存先が変更されています。");
       tx.set(ref, { status: "completed", resolvedRow: row, beforeValues: before, afterValues, completedAt: now, updatedAt: now, retryAt: null }, { merge: true });
+      // 氏名・案件・勤務日と現在の応募を照合した完了保存だけで、スタッフの未確認状態を解除する。
+      // 先に読み込まれた空欄行による巻戻しは、次の一致取込まで別の印で防ぐ。
+      if (queue.operation === "job.assign") tx.update(jobRef, {
+        applicationUnconfirmed: false,
+        assignmentSheetWrite: { ...currentJob.data()!.assignmentSheetWrite, awaitingImportConfirmation: true },
+      });
       if (queue.operation === "precontact.submit") tx.update(jobRef, { preContactSyncPending: false });
       if (["submission.report", "submission.sales_floor"].includes(queue.operation)) tx.update(jobRef, { ["submissionStatus." + (queue.operation === "submission.report" ? "report" : "salesFloor") + ".sheetWrite.pending"]: false });
       if (queue.operation === "netprint.update") tx.update(jobRef, { "netPrint.syncPending": false });

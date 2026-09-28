@@ -161,6 +161,31 @@ for (const patch of [{ assignedStaffName: '', status: 'open' }, { assignedStaffN
     await assert.rejects(h.run([incoming(patch)]), { code: 'failed-precondition' }); assert.equal(h.commits.length, 0);
   });
 }
+for (const patch of [{ assignedStaffName: '', status: 'open' }, { assignedStaffName: 'Staff B' }, { dateKey: '2026-09-21' }]) {
+  await test(`write-confirmed application survives older import ${JSON.stringify(patch)}`, async () => {
+    const h = harness([['jobs/job-a', oldJob({ applicationUnconfirmed: false, assignmentSheetWrite: { awaitingImportConfirmation: true } })], [lockPath(), ownLock()]]);
+    await assert.rejects(h.run([incoming(patch)]), { code: 'failed-precondition' }); assert.equal(h.commits.length, 0);
+    assert.equal(h.records.get(lockPath()).active, true); assert.equal(h.records.get('jobs/job-a').applicationUnconfirmed, false);
+  });
+}
+await test('matching import releases only write-confirmed import protection', async () => {
+  const previous = oldJob({ ...incoming(), assignedStaffId: staffId, applicationUnconfirmed: false, applicationAdminConfirmed: false,
+    assignmentSheetWrite: { queueId: 'current-write', awaitingImportConfirmation: true } });
+  const h = harness([['jobs/job-a', previous], [lockPath(), ownLock()]]);
+  await h.run([incoming()]);
+  assert.equal(h.records.get('jobs/job-a').applicationUnconfirmed, false);
+  assert.equal(h.records.get('jobs/job-a').applicationAdminConfirmed, false);
+  assert.equal(h.records.get('jobs/job-a').assignmentSheetWrite.awaitingImportConfirmation, false);
+  assert.equal(h.records.get('jobs/job-a').assignmentSheetWrite.queueId, 'current-write');
+  assert.equal(h.records.get(lockPath()).active, true);
+});
+await test('retry preserves application confirmed while old import was pending', async () => {
+  const h = harness([['jobs/job-a', oldJob({ status: 'open', assignedStaffId: null })]], { beforeRetry: records => {
+    records.set('jobs/job-a', oldJob({ applicationUnconfirmed: false, assignmentSheetWrite: { awaitingImportConfirmation: true } })); records.set(lockPath(), ownLock());
+  } });
+  await assert.rejects(h.run([incoming({ assignedStaffName: '', status: 'open' })]), { code: 'failed-precondition' });
+  assert.equal(h.attempts.length, 2); assert.equal(h.commits.length, 0); assert.equal(h.records.get(lockPath()).active, true);
+});
 await test('matching sheet acknowledges application without freeing its lock', async () => {
   const h = harness([['jobs/job-a', oldJob({ applicationUnconfirmed: true })], [lockPath(), ownLock()]]);
   await h.run([incoming()]); assert.equal(h.records.get('jobs/job-a').applicationUnconfirmed, false); assert.equal(h.records.get(lockPath()).active, true);

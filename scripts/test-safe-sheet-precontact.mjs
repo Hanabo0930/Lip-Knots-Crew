@@ -406,6 +406,23 @@ for(const compiled of [false,true]) {
   assert.equal(h.job().assignmentSheetWrite.awaitingImportConfirmation,true);assert.equal(h.writes.length,0);
  });
 }
+// 曜日付きの原本表示でも同じ勤務日だけを照合し、氏名以外を書き換えない。
+for (const compiled of [false, true]) {
+ for (const matching of [true, false]) {
+  await test('weekday assignment ' + (matching ? 'matches' : 'rejects changed date') + ' ' + (compiled ? 'compiled' : 'source'), async () => {
+   const h = await appliedHarness(compiled);
+   const displayedDate = matching ? '9/20(日)' : '9/21(月)';
+   h.cells.set('A2', displayedDate);
+   await h.runAssignment();
+   assert.equal(h.assignment().status, matching ? 'completed' : 'blocked');
+   assert.equal(h.writes.length, matching ? 1 : 0);
+   assert.equal(h.cells.get('A2'), displayedDate);
+   assert.equal(h.cells.get('B2'), matching ? 'Synthetic Staff' : '');
+   assert.equal(h.job().applicationUnconfirmed, !matching);
+   assert.equal(h.assignmentLock().active, true);
+  });
+ }
+}
 await test('application creates saved queue proof with displayed day',async()=>{const h=await appliedHarness();assert.equal(h.job().assignmentSheetWrite.queueId,h.assignmentId);assert.equal(h.assignment().dateKey,dateKey);assert.equal(h.assignment().idempotencyKey,`job.assign:${jobId}:${h.assignmentId}`);});
 for(const [name,change]of [
  ['new owner',h=>h.job().assignedStaffId='new-person'],['new date',h=>h.job().dateKey='2099-09-21'],['new case',h=>h.job().caseId='different-case'],

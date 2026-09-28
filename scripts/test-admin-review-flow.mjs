@@ -104,3 +104,5 @@ await import('./test-admin-push-sdk-guard.mjs');
 await import('./test-admin-preview-refresh.mjs');
 
 await import('./test-admin-dashboard-order.mjs');
+
+await import('./test-admin-shift-preview.mjs');

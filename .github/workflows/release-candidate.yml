@@ -62,6 +62,7 @@ jobs:
           node scripts/test-native-creation-retry-browser.mjs release-evidence/ci-native-creation-browser
           node scripts/test-admin-comparison-pages.mjs
           node scripts/test-case-mail-review-browser.mjs release-evidence/ci-mail-review --resolve-only
+          node scripts/test-case-mail-receive-browser.mjs
       - name: Run release orchestration regressions
         run: |
           npm run test:preview-demo
@@ -137,6 +138,7 @@ jobs:
           node scripts/test-automation-registry.mjs
           node scripts/test-automation-intake.mjs
           node scripts/test-case-mail-intake-roundtrip.mjs
+          node scripts/test-case-mail-receive.mjs --compiled
           node scripts/test-case-mail-job-creation.mjs
           node scripts/automation/test-admin-core-auth-guard.mjs
           node scripts/automation/test-staff-journey-auth-guard.mjs

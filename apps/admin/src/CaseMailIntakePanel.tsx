@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { mailOwner, mailList, mailDetail, mailCreationResult, loadMailAttempt, reserveMailAttempt, clearMailAttempt,
+import { mailOwner, mailList, mailDetail, mailReceiveResult, mailCreationResult, loadMailAttempt, reserveMailAttempt, clearMailAttempt,
   definiteMailRejection, mailStorageKey, type MailApi, type MailReceipt, type MailDetail, type MailCommand } from "./case-mail-review";
 import "./case-mail-review.css";
 import CaseMailTargetBinding from "./CaseMailTargetBinding";
@@ -14,6 +14,7 @@ export default function CaseMailIntakePanel({ companyId, uid, api, onClose, onCr
   const owner = mailOwner(companyId, uid), ownerRef = useRef(owner); ownerRef.current = owner;
   const apiRef = useRef(api); apiRef.current = api;
   const mounted = useRef(false), version = useRef(0), busyRef = useRef(false), heading = useRef<HTMLHeadingElement>(null);
+  const [receiveCursor,setReceiveCursor]=useState<string|null>(null);
   const [initialized, setInitialized] = useState(false), [attempt, setAttempt] = useState<MailCommand | null>(null);
   const [items, setItems] = useState<MailReceipt[]>([]), [nextCursor, setNextCursor] = useState<string | null>(null), [pageCursor, setPageCursor] = useState<string>();
   const [loading, setLoading] = useState(true), [error, setError] = useState(""), [message, setMessage] = useState("");
@@ -47,6 +48,18 @@ export default function CaseMailIntakePanel({ companyId, uid, api, onClose, onCr
     if (attempt) { version.current++; setDetail(null); setConfirmed(false); setLoading(false); }
     else void loadList();
   }, [initialized, attempt]);
+  async function receiveMail() {
+    if(busyRef.current||loading||attempt||!apiRef.current.receive||demo)return;
+    busyRef.current=true;setBusy(true);setError("");setMessage("");version.current++;
+    try {
+      const result=mailReceiveResult(await apiRef.current.receive(receiveCursor??undefined));
+      if(!isCurrent())return;
+      setReceiveCursor(result.nextCursor);
+      setMessage(`${result.received+result.skipped}通を確認しました。${result.received}通の案件候補を一覧で確認できます。${result.nextCursor?"続きのメールがあります。":"受信箱の確認が終わりました。"}`);
+      await loadList();
+    } catch(failure) {if(isCurrent())setError(errorText(failure));}
+    finally {busyRef.current=false;if(isCurrent())setBusy(false);}
+  }
   async function read(receiptId: string) {
     if (busyRef.current || attempt) return;
     const ticket = ++version.current; setLoading(true); setDetail(null); setConfirmed(false); setError("");
@@ -117,9 +130,10 @@ export default function CaseMailIntakePanel({ companyId, uid, api, onClose, onCr
       {rejected && <button className="ghost" disabled={busy} onClick={() => void backToLatest()}>最新内容に戻る</button>}
     </div> : initialized && <>
       <div className="sync-actions">
+        {api.receive && !demo && <button className="primary" disabled={loading||busy} onClick={()=>void receiveMail()}>{busy ? "処理中…" : receiveCursor ? "続きのメールを確認" : "受信箱のメールを確認"}</button>}
         <button className="ghost" disabled={loading || busy} onClick={() => void loadList()}>受信一覧を更新</button>
-        {pageCursor && <button className="ghost" disabled={loading} onClick={() => void loadList()}>先頭へ戻る</button>}
-        {nextCursor && <button className="ghost" disabled={loading} onClick={() => void loadList(nextCursor)}>次の25件</button>}
+        {pageCursor && <button className="ghost" disabled={loading||busy} onClick={() => void loadList()}>先頭へ戻る</button>}
+        {nextCursor && <button className="ghost" disabled={loading||busy} onClick={() => void loadList(nextCursor)}>次の25件</button>}
       </div>
       {loading && <p role="status">候補を確認しています…</p>}
       {!loading && !items.length && !error && <p>受信した案件候補はありません。</p>}

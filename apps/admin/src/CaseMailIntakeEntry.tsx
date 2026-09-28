@@ -33,6 +33,7 @@ export default function CaseMailIntakeEntry({ onCreated, onReviewJob }: { onCrea
     return result;
   };
   const api: MailApi = firebaseConfigured ? {
+    receive: cursor => call("receiveCaseMailMessages", cursor ? { cursor } : {}),
     list: cursor => call("listCaseMailReceipts", cursor ? { cursor } : {}),
     read: receiptId => call("getCaseMailReceipt", { receiptId }),
     create: command => call("createAdminJobGroup", command),

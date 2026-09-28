@@ -1,3 +1,4 @@
+import { resolveSheetCaseIdColumn } from "./sheet-write-core";
 import {
   createCaseIdentity,
   createJobIdFromPersistedCaseId,
@@ -19,6 +20,7 @@ export function parseShiftSheet(
   config: ShiftImportConfig,
   sheetId: number | null = null
 ): SheetParseResult {
+  const caseIdColumn = resolveSheetCaseIdColumn(config.columns.caseId, config.caseIdColumnsBySheet, sheetName);
   const headerRow = resolveHeaderRow(values, config);
   const dataStartRow = config.dataStartRow ?? (headerRow + 1);
   const jobs: ParsedShiftJob[] = [];
@@ -99,7 +101,7 @@ export function parseShiftSheet(
     const occurrence = (occurrenceMap.get(identityKey) ?? 0) + 1;
     occurrenceMap.set(identityKey, occurrence);
 
-    const persistedCaseId = cellText(row, config.columns.caseId);
+    const persistedCaseId = cellText(row, caseIdColumn);
     const identity = persistedCaseId && isValidPersistedCaseId(persistedCaseId)
       ? {
           jobId: createJobIdFromPersistedCaseId(config.companyId, persistedCaseId),
@@ -170,6 +172,7 @@ export function parseShiftSheet(
         sheetId,
         sheetName,
         currentRow: sheetRow,
+        ...(config.caseIdColumnsBySheet !== undefined ? { caseIdColumn } : {}),
         headerRow,
       },
       importWarnings: rowWarnings,

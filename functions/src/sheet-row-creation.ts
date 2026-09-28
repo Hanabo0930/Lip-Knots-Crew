@@ -1,3 +1,4 @@
+import { resolveSheetCaseIdMapping, SheetCaseIdColumnError } from "./sheet-write-core";
 import { sheetWriteExecutionPaused } from "./sheet-write-control";
 import { createHash } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
@@ -39,6 +40,7 @@ type RowCreationConfig = {
   enabled?: boolean;
   spreadsheetId: string;
   idColumn: string;
+  caseIdColumnsBySheet?: Record<string, string>;
   columns: Record<string, string>;
   identityColumns: {
     workDate: string;
@@ -136,10 +138,11 @@ export const previewSheetRowCreation = onCall(
     const session = requireAdmin(request);
     const companyId = companyFromClaims(session.token);
     const input = PreviewSchema.parse(request.data ?? {});
-    const mapping = await loadMapping(companyId);
+    const savedMapping = await loadMapping(companyId);
     const dateKey = input.groupId
       ? await dateKeyFromGroup(companyId, input.groupId)
       : String(input.dateKey);
+    const mapping = resolveSheetCaseIdMapping(savedMapping, monthSheetName(dateKey));
     return preflight(companyId, mapping, dateKey, input.rows, undefined, false);
   }
 );
@@ -298,7 +301,8 @@ async function executeRowCreation(
     if (finished) return;
   }
 
-  const mapping = await loadMapping(queue.companyId);
+  const savedMapping = await loadMapping(queue.companyId);
+  let mapping = savedMapping;
   ensureRowCreationEnabled(mapping);
   const jobs = await loadJobs(queue.companyId, queue.jobIds);
   if (!jobs.length || jobs.length !== queue.jobIds.length) {
@@ -338,6 +342,7 @@ async function executeRowCreation(
     throw new BlockedError("同じキュー内の実施日が一致しません。");
   }
 
+  mapping = resolveSheetCaseIdMapping(mapping, monthSheetName(dates[0]));
   const lock = await acquireLock(queue.companyId, dates[0]);
   let inserted: {
     spreadsheetId: string;
@@ -420,7 +425,7 @@ async function executeRowCreation(
         throw new ManualInterventionError("別の処理でグループの原本準備が完了しました。古い追加結果を反映せず確認してください。");
       }
       if (!group.exists || group.data()?.companyId !== queue.companyId ||
-          !currentMapping.exists || JSON.stringify(currentMapping.data()) !== JSON.stringify(mapping)) {
+          !currentMapping.exists || JSON.stringify(currentMapping.data()) !== JSON.stringify(savedMapping)) {
         throw new BlockedError("行追加中にグループまたは書込設定が変わりました。");
       }
       const currentJobs = jobs.map((original) => {
@@ -452,6 +457,7 @@ async function executeRowCreation(
             spreadsheetId: mapping.spreadsheetId,
             sheetId: completedRows.sheetId,
             sheetName: completedRows.sheetName,
+            ...(mapping.caseIdColumnsBySheet !== undefined ? { caseIdColumn: mapping.idColumn } : {}),
             currentRow: row,
             headerRow: mapping.rowCreation?.headerRow ?? 1,
           },
@@ -1324,7 +1330,7 @@ async function failQueue(
     const related = targets.length ? await tx.getAll(...targets) : [];
     const blocked =
       error instanceof BlockedError ||
-      error instanceof ManualInterventionError;
+      error instanceof ManualInterventionError || error instanceof SheetCaseIdColumnError;
     const retryable = !blocked && attempts < 5;
     const status = error instanceof ManualInterventionError
       ? "manual_intervention"

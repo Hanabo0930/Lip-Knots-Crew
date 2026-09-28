@@ -24,9 +24,9 @@ db.runTransaction=async function(...args){
 google.sheets=()=>{
  if(!sheetState){sheetsCalls++;throw Error('UNEXPECTED_SHEETS_ACCESS');}
  return {spreadsheets:{
-  get:async request=>{syntheticSheetCalls++;assert.equal(request.spreadsheetId,'synthetic-only');return {data:{sheets:[{properties:{sheetId:1,title:'2026.9',gridProperties:{rowCount:100,columnCount:11}},conditionalFormats:[]}]}};},
+  get:async request=>{syntheticSheetCalls++;assert.equal(request.spreadsheetId,'synthetic-only');return {data:{sheets:[{properties:{sheetId:1,title:'2026.9',gridProperties:{rowCount:100,columnCount:12}},conditionalFormats:[]}]}};},
   batchUpdate:async request=>{
-   syntheticSheetCalls++;assert.equal(request.spreadsheetId,'synthetic-only');
+   syntheticSheetCalls++;assert.equal(request.spreadsheetId,'synthetic-only');sheetState.insertRequests=request.requestBody.requests;
    if(request.requestBody.requests.some(r=>r.insertDimension)){if(sheetState.beforeSendError)throw Error('synthetic-request-failed');sheetState.inserted=true;sheetState.insertCount=(sheetState.insertCount??0)+1;await sheetState.afterInsert();if(sheetState.responseLoss)throw Error('synthetic-insert-response-lost');}
    else {assert.ok(request.requestBody.requests.every(r=>r.deleteDimension));sheetState.deletes++;}
    return {data:{}};
@@ -82,11 +82,12 @@ try{
   }
   await h.event();const result=(await h.queue.get()).data();assert.equal(result.status,entry==='foreign-receipt'?'blocked':'completed');if(entry==='idempotency')assert.equal(result.duplicateOf,'synthetic-prior-queue');
  });
- const fullModes=['newer-job-only','newer-success','newer-failure','initial-cancel','initial-assigned','initial-stopped','mail-marker-removed','native-cancel','received-cancel','assigned','stopped','publication-change','deleted-job','foreign-job','moved-job','case-change','input-change','deleted-group','foreign-group','mapping-change','deleted-queue','queue-attempt','lock-lost','lock-expired','rollback-mismatch','rollback-error','verification-mismatch','rollback-disabled','commit-response-lost','valid'];
+ const fullModes=['newer-job-only','newer-success','newer-failure','initial-cancel','initial-assigned','initial-stopped','mail-marker-removed','native-cancel','received-cancel','assigned','stopped','publication-change','deleted-job','foreign-job','moved-job','case-change','input-change','deleted-group','foreign-group','mapping-change','deleted-queue','queue-attempt','lock-lost','lock-expired','rollback-mismatch','rollback-error','verification-mismatch','rollback-disabled','commit-response-lost','monthly-id','valid'];
  for(const mode of fullModes)await test('行追加・完了・取消の往復 '+mode,async()=>{
   const h=await fixture(true);
   if(['received-cancel','mail-marker-removed'].includes(mode))await h.job.update({mailIntake:{synthetic:true}});
   if(mode.startsWith('initial-'))await h.job.update({status:mode==='initial-cancel'?'cancelled':mode==='initial-assigned'?'assigned':'stopped',publishable:false,cancelled:mode==='initial-cancel'});
+  if(mode==='monthly-id')await h.mapping.update({caseIdColumnsBySheet:{'2026.9':'L'}});
   if(mode==='rollback-disabled')await h.mapping.update({'rowCreation.rollbackOnVerificationFailure':false});
   let preserved,target,newerGroup;
   sheetState={queue:h.queue,caseId:h.id,inserted:false,deletes:0,rollbackReads:0,commitLoss:mode==='commit-response-lost',rollbackMismatch:mode==='rollback-mismatch',rollbackError:mode==='rollback-error',verifyMismatch:['verification-mismatch','rollback-disabled'].includes(mode),afterInsert:async()=>{
@@ -132,6 +133,7 @@ try{
   if(rollback)assert.equal(queue.status,'blocked');
   if(mode==='lock-lost')assert.equal((await h.lock.get()).data().token,'synthetic-new-owner');
   if(mode==='commit-response-lost'){assert.equal(sheetState.commitLossInjected,true);assert.equal(queue.status,'completed');assert.equal(job.sourceReady,true);}
+  if(mode==='monthly-id'){assert.equal(queue.status,'completed');assert.equal(job.sheetRef.caseIdColumn,'L');assert.equal(job.sourceReady,true);const idWrite=sheetState.insertRequests.find(r=>r.updateCells?.range?.startColumnIndex===11);assert.equal(idWrite?.updateCells.rows[0].values[0].userEnteredValue.stringValue,h.id);assert.equal((await h.mapping.get()).data().idColumn,'A');}
   if(mode==='valid'){assert.equal(queue.status,'completed');assert.equal(job.sourceReady,true);assert.equal(job.status,'open');}
  });
  for(const mode of ['response-lost','request-failed','invalid-mapping'])await test('挿入APIの成否不明と送信前検証 '+mode,async()=>{

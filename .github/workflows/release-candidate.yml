@@ -137,6 +137,7 @@ jobs:
           node scripts/test-automation-registry.mjs
           node scripts/test-automation-intake.mjs
           node scripts/test-case-mail-intake-roundtrip.mjs
+          node scripts/test-case-mail-receive.mjs --compiled
           node scripts/test-case-mail-job-creation.mjs
           node scripts/automation/test-admin-core-auth-guard.mjs
           node scripts/automation/test-staff-journey-auth-guard.mjs

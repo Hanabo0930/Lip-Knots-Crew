@@ -138,11 +138,12 @@ export const previewSheetRowCreation = onCall(
     const session = requireAdmin(request);
     const companyId = companyFromClaims(session.token);
     const input = PreviewSchema.parse(request.data ?? {});
-    const mapping = await loadMapping(companyId);
+    const savedMapping = await loadMapping(companyId);
     const dateKey = input.groupId
       ? await dateKeyFromGroup(companyId, input.groupId)
       : String(input.dateKey);
-    return preflight(companyId, resolveSheetCaseIdMapping(mapping, monthSheetName(dateKey)), dateKey, input.rows, undefined, false);
+    const mapping = resolveSheetCaseIdMapping(savedMapping, monthSheetName(dateKey));
+    return preflight(companyId, mapping, dateKey, input.rows, undefined, false);
   }
 );
 

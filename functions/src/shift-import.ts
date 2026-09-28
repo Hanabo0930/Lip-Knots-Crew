@@ -468,8 +468,8 @@ async function writeJobsAndLocks(
         const isActiveAssignment = effectiveStatus === "assigned" && !effectiveCancelled && resolvedStaffId !== null;
         const oldStaffId = typeof old?.assignedStaffId === "string" ? old.assignedStaffId : null;
         const oldDateKey = typeof old?.dateKey === "string" ? old.dateKey : "";
-        const pendingApplication = old?.applicationUnconfirmed === true &&
-          old.status === "assigned" && old.cancelled !== true && Boolean(oldStaffId);
+        const pendingApplication = (old?.applicationUnconfirmed === true || old?.assignmentSheetWrite?.awaitingImportConfirmation === true) &&
+          old?.status === "assigned" && old.cancelled !== true && Boolean(oldStaffId);
         const sourceConfirmsApplication = isActiveAssignment &&
           oldStaffId === resolvedStaffId && oldDateKey === job.dateKey;
         if (pendingApplication && !effectiveCancelled && !sourceConfirmsApplication) {
@@ -576,7 +576,12 @@ async function writeJobsAndLocks(
         }
         if (!old) data.createdAt = now;
 
-        if (pendingApplication && sourceConfirmsApplication) data.applicationUnconfirmed = false;
+        if (pendingApplication && sourceConfirmsApplication) {
+          data.applicationUnconfirmed = false;
+          if (old?.assignmentSheetWrite?.awaitingImportConfirmation === true && data.assignmentSheetWrite !== null) {
+            data.assignmentSheetWrite = { ...old.assignmentSheetWrite, awaitingImportConfirmation: false };
+          }
+        }
         return { job, oldStaffId, oldDateKey, oldLockId, newLockId, data, ref };
       });
       const lockIds = [...new Set(plans.flatMap((plan) => [plan.oldLockId, plan.newLockId]).filter((id): id is string => id !== null))];

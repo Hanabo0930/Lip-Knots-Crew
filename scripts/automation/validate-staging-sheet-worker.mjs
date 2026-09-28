@@ -9,7 +9,7 @@ const OLD_WORKER = "processSafeSheetWrite";
 // 停止判定だけを模倣した別処理を通さない。変更時は全ソースをレビューして更新する。
 // onSchedule・キュー・先頭return・停止値・リージョン・exportを含む承認候補の固定版。
 export const retryWorkerSourcePins = Object.freeze({
-  "functions/src/safe-sheet-writes.ts": "6d9eccedfbb3290bfb446f113022a55cadb482629477a06702288a6d631d3c25",
+  "functions/src/safe-sheet-writes.ts": "74e821e123834de5db7e8650f95d16be88d96e4e26c527f1fb3711133df2ed1a",
   "functions/src/sheet-write-control.ts": "a57db6a895c42ed58655a42ae67d84754fb679c2f0751d11b5b65edff0387f08",
   "functions/src/index.ts": "db18f0954b0e80ec6aefa9de223b510346f0c776334eb1c045c75f6cdaa99c43"
 });

@@ -1,3 +1,4 @@
+import { parseShiftImportPreview, previewSheetNames, type ShiftImportPreview } from "./shift-import-preview";
 import { submitNativeCreation } from "./native-creation-client";
 import { expenseReadinessMessage } from "./expense-readiness";
 import type { SheetWriteIssue } from "./AdminSheetIssuePanel";
@@ -30,6 +31,7 @@ function canApplyAuthResult(guard?:AuthRunGuard):boolean {
 }
 
 const loadDemoPreview=()=>import("./demo-preview");
+const AdminShiftImportPreview=lazy(()=>import("./AdminShiftImportPreview"));
 const AdminJobNotification=lazy(()=>import("./AdminJobNotification"));
 const AdminJobPagingControls=lazy(()=>import("./AdminJobPagingControls"));
 const AdminJobSearchControls=lazy(()=>import("./AdminJobSearchControls"));
@@ -843,6 +845,9 @@ export default function App() {
   }
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncSummary, setSyncSummary] = useState<string>("未実行");
+  const [shiftPreviewMonth,setShiftPreviewMonth]=useState("");
+  const [shiftPreview,setShiftPreview]=useState<ShiftImportPreview|null>(null);
+  const shiftPreviewVersionRef=useRef(0);
   const [staff, setStaff] = useState<StaffProfile[]>(
     firebaseConfigured ? [] : demoStaff
   );
@@ -1053,6 +1058,7 @@ const [monthBusy, setMonthBusy] = useState(false);
     let cancelDeferredLoads:(()=>void)|null=null;
     const unsubscribe=onAuthStateChanged(activeAuth, (current) => {
       const currentRun=++authRun;
+      shiftPreviewVersionRef.current++;setShiftPreview(null);setSyncBusy(false);setSyncSummary("未実行");
       resubmissionNeedsReviewRef.current=false;setResubmissionNeedsReview(false);
       closeComparison();expenseVersionRef.current++;
       setStaffDirectoryMessage("");closeStaffPerformance();closeStaffDevices();resubmissionListVersionRef.current++;issuesVersionRef.current++;operationEpochRef.current++;operationLocksRef.current.clear();setOperationKeys([]);setIssuesBusy(false);dashboardVersionRef.current++;setDashboardBusy(false);setDashboardError("");
@@ -2527,54 +2533,63 @@ async function previewRowCreation() {
   }
 
   async function previewSheetSync() {
-    if (!firebaseConfigured) {
-      setSyncSummary("デモ：12タブ、486案件、未照合スタッフ0件");
-      setMessage("読取専用プレビューが完了しました。元スプシは変更していません。");
-      return;
-    }
-    if (!functions) return;
+    if(syncBusy)return;
+    const version=++shiftPreviewVersionRef.current;
+    const activeUser=auth?.currentUser;
+    const current=()=>version===shiftPreviewVersionRef.current&&(!firebaseConfigured||auth?.currentUser===activeUser);
+    setShiftPreview(null);setSyncSummary("読取中…");
     setSyncBusy(true);
     try {
-      const callable = httpsCallable(functions, "previewShiftImport");
-      const response = await callable({});
-      const data = response.data as {
-        totals?: { sheets?: number; jobs?: number; unresolvedStaff?: number };
-      };
-      setSyncSummary(
-        `${data.totals?.sheets ?? 0}タブ / ${data.totals?.jobs ?? 0}案件 / 未照合${data.totals?.unresolvedStaff ?? 0}件`
-      );
-      setMessage("読取専用プレビューが完了しました。");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      const sheetNames=previewSheetNames(shiftPreviewMonth);
+      if(firebaseConfigured&&(!functions||!activeUser))throw new Error("管理者でログインしてから読み取ってください。");
+      const response=firebaseConfigured
+        ? await httpsCallable(functions!,"previewShiftImport")({...(sheetNames?{sheetNames}:{})})
+        : {data:{totals:{sheets:1,jobs:1,unresolvedStaff:0},warnings:[],samples:[{caseId:"demo-preview",sheetName:sheetNames?.[0]??"サンプル月",row:2,workDate:"サンプル日",storeName:"サンプル店舗",assignedStaffName:"",status:"open"}]}};
+      const preview=parseShiftImportPreview(response.data);
+      if(!current())return;
+      setShiftPreview(preview);
+      setSyncSummary(`${firebaseConfigured?"":"デモ："}${preview.totalSheets}タブ / ${preview.totalJobs}案件`);
+      setMessage(firebaseConfigured?"原本を変更せず読み取りました。案件一覧を確認できます。":"デモの一覧表示です。実際のシフト表は読み取っていません。");
+    } catch(error) {
+      if(!current())return;
+      setSyncSummary("読取に失敗しました");
+      setMessage(error instanceof Error?error.message:String(error));
     } finally {
-      setSyncBusy(false);
+      if(current())setSyncBusy(false);
     }
   }
 
   async function runSheetSync() {
-    if (!window.confirm("元スプシは変更せず、Firestoreへ案件を同期します。実行しますか？")) return;
+    if(syncBusy)return;
+    let sheetNames:string[]|undefined;
+    try{sheetNames=previewSheetNames(shiftPreviewMonth);}catch(error){setMessage(error instanceof Error?error.message:String(error));return;}
+    if (!window.confirm(`${shiftPreviewMonth?shiftPreviewMonth+"の月別タブ":"設定範囲の月別タブ"}を、元スプシは変更せずアプリへ取り込みます。実行しますか？`)) return;
     if (!firebaseConfigured) {
-      setSyncSummary("デモ同期完了：486案件");
-      setMessage("デモ：Firestoreへ同期しました。");
+      setSyncSummary("デモ同期完了");
+      setMessage("デモ：実際の原本・アプリデータは変更していません。");
       return;
     }
-    if (!functions) return;
+    if (!functions||!auth?.currentUser) return;
+    const activeUser=auth.currentUser,version=++shiftPreviewVersionRef.current;
+    const current=()=>version===shiftPreviewVersionRef.current&&auth?.currentUser===activeUser;
     setSyncBusy(true);
     try {
       const callable = httpsCallable(functions, "syncShiftSheetsReadOnly");
-      const response = await callable({});
+      const response = await callable({...(sheetNames?{sheetNames}:{})});
+      if(!current())return;
       const data = response.data as {
         totals?: { sheets?: number; jobs?: number; unresolvedStaff?: number; writes?: number };
       };
       setSyncSummary(
-        `${data.totals?.sheets ?? 0}タブ / ${data.totals?.jobs ?? 0}案件 / ${data.totals?.writes ?? 0}書込`
+        `${data.totals?.sheets ?? 0}タブ / ${data.totals?.jobs ?? 0}案件 / ${data.totals?.writes ?? 0}件を反映`
       );
-      setMessage("Firestoreへの同期が完了しました。元スプシは変更していません。");
-      await loadJobs();
+      setMessage("アプリへの取込が完了しました。元スプシは変更していません。");
+      setShiftPreview(null);
+      await loadJobs(current);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      if(current())setMessage(error instanceof Error ? error.message : String(error));
     } finally {
-      setSyncBusy(false);
+      if(current())setSyncBusy(false);
     }
   }
 
@@ -3791,14 +3806,16 @@ function downloadCsv(filename:string,content:string) {
           </div>
           <strong>{syncSummary}</strong>
         </div>
+        <label>対象月（空欄は取込設定の範囲）<input type="month" value={shiftPreviewMonth} disabled={syncBusy} onChange={event=>{setShiftPreviewMonth(event.target.value);setShiftPreview(null);setSyncSummary("未実行");}}/></label>
         <div className="sync-actions">
           <button className="ghost" onClick={previewSheetSync} disabled={syncBusy}>
-            {syncBusy ? "処理中…" : "プレビュー"}
+            {syncBusy ? "処理中…" : "原本を読取プレビュー"}
           </button>
           <button onClick={runSheetSync} disabled={syncBusy}>
-            Firestoreへ同期
+            アプリへ取込確定
           </button>
         </div>
+        {shiftPreview&&<Suspense fallback={<p role="status">読取結果を表示中…</p>}><AdminShiftImportPreview preview={shiftPreview} demo={!firebaseConfigured}/></Suspense>}
       </section></WorkspacePanel>
 
       <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel sync-panel">

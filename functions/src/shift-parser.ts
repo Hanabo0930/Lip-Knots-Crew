@@ -292,7 +292,7 @@ export function parseMoney(raw: string): number | null {
 }
 
 export function parseDateKey(raw: string, sheetName: string): string | null {
-  const text = raw.normalize("NFKC").trim();
+  let text = raw.normalize("NFKC").trim();
   if (!text) return null;
 
   if (/^\d+(?:\.\d+)?$/.test(text)) {
@@ -303,6 +303,9 @@ export function parseDateKey(raw: string, sheetName: string): string | null {
       return formatIso(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
     }
   }
+
+  // 表示用の曜日だけを除き、年月日そのものは従来どおり厳密に検証する。
+  text = text.replace(/\s*\([日月火水木金土](?:曜(?:日)?)?\)$/u, "").trim();
 
   let match = /^(\d{4})[\/.-](\d{1,2})[\/.-](\d{1,2})$/.exec(text);
   if (match) {

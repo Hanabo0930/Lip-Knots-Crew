@@ -104,3 +104,51 @@ assert.equal(parseShiftSheet(config.spreadsheetId,"2026.7",[rows[0],incomplete],
 incomplete[54]=true;
 assert.equal(parseShiftSheet(config.spreadsheetId,"2026.7",[rows[0],incomplete],checkboxConfig).jobs[0]?.status,"cancelled");
 console.log("Live-sheet synthetic mapping passed: B/F distinction, whitespace, TRUE/FALSE checkbox, unrelated AS checkbox and cancellation priority.");
+// 原本で使う曜日付き表示。実データは使わず、解析と案件分類をまとめて確認する。
+const weekdayDateCases: Array<[string, string, string | null]> = [
+  ["10/1(木)", "2026.10", "2026-10-01"],
+  ["10/2(金)", "2026.10", "2026-10-02"],
+  ["10/3(土)", "2026.10", "2026-10-03"],
+  ["10/4(日)", "2026.10", "2026-10-04"],
+  ["10/5(月)", "2026.10", "2026-10-05"],
+  ["10/6(火)", "2026.10", "2026-10-06"],
+  ["10/7(水)", "2026.10", "2026-10-07"],
+  ["10/10(土)", "2026.10", "2026-10-10"],
+  ["10/12(月)", "2026.10", "2026-10-12"],
+  [" １０／１（木） ", "2026.10", "2026-10-01"],
+  ["2026/10/1 (木曜日)", "2026.10", "2026-10-01"],
+  ["10月1日（木曜）", "2026.10", "2026-10-01"],
+  ["2/29(火)", "2028.2", "2028-02-29"],
+  ["2/29(日)", "2026.2", null],
+  ["10/32(木)", "2026.10", null],
+  ["13/1(木)", "2026.10", null],
+  ["10/1(木)", "年不明", null],
+  ["10/1(未定)", "2026.10", null],
+  ["10/1(木)追記", "2026.10", null],
+  ["10/1(木", "2026.10", null],
+  ["(木)", "2026.10", null],
+  ["46218", "2026.7", "2026-07-15"],
+];
+for (const [value, sheet, expected] of weekdayDateCases) {
+  assert.equal(parseDateKey(value, sheet), expected, `${sheet}: ${value}`);
+}
+const weekdayRows = [rows[0], ...[
+  ["10/1(木)", "合成担当者"],
+  ["10/10(土)", ""],
+  ["10/32(木)", ""],
+].map(([date, staff]) => {
+  const row = [...rows[1]];
+  row[0] = date;
+  row[1] = staff;
+  return row;
+})];
+const weekdayParsed = parseShiftSheet(config.spreadsheetId, "2026.10", weekdayRows, config, 123);
+assert.equal(weekdayParsed.summary.jobsFound, 2);
+assert.equal(weekdayParsed.summary.counts.assigned, 1);
+assert.equal(weekdayParsed.summary.counts.open, 1);
+assert.equal(weekdayParsed.summary.skippedRows, 1);
+assert.equal(weekdayParsed.summary.warnings.length, 1);
+assert.deepEqual(weekdayParsed.jobs.map(job => [job.dateKey, job.sheetRef.currentRow, job.publishable]), [
+  ["2026-10-01", 2, false], ["2026-10-10", 3, true],
+]);
+console.log(`Weekday date regression: ${weekdayDateCases.length} date cases and source-row/status preservation passed.`);

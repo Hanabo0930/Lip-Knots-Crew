@@ -8,7 +8,7 @@ export type MailCandidate = { candidateId: string; revision: number; status: "re
   input: { workDate: string; clientName: string; storeName: string; makerName: string; menuName: string; entryTime: string; workTime: string };
   source: { partId: string; rowKey: string; unitIndex: number }; changeReview?: MailChangeReview; targetCandidates?: MailTargetCandidates; targetBinding?: {jobId:string} };
 export type MailDetail = MailReceipt & { creationEnabled: boolean; producerReady: boolean; candidates: MailCandidate[] };
-export type MailApi = { list(cursor?: string): Promise<unknown>; read(receiptId: string): Promise<unknown>; create(command: MailCommand): Promise<unknown>; previewTarget?(command: MailTargetRequest): Promise<unknown>; confirmTarget?(command: MailTargetConfirm): Promise<unknown>; holdTarget?(command: MailTargetRequest & {reviewVersion:string;kind:"change"|"cancel";confirmed:true}): Promise<unknown>; resolveTarget?(command: MailTargetConfirm): Promise<unknown>; confirm?(command: MailReviewCommand): Promise<unknown> };
+export type MailApi = { receive?(cursor?: string): Promise<unknown>; list(cursor?: string): Promise<unknown>; read(receiptId: string): Promise<unknown>; create(command: MailCommand): Promise<unknown>; previewTarget?(command: MailTargetRequest): Promise<unknown>; confirmTarget?(command: MailTargetConfirm): Promise<unknown>; holdTarget?(command: MailTargetRequest & {reviewVersion:string;kind:"change"|"cancel";confirmed:true}): Promise<unknown>; resolveTarget?(command: MailTargetConfirm): Promise<unknown>; confirm?(command: MailReviewCommand): Promise<unknown> };
 const fail = () => new Error("受信候補の確認情報が不完全です。最新の内容を読み直してください。");
 const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(value);
 const revision = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value < Number.MAX_SAFE_INTEGER;
@@ -139,4 +139,12 @@ export function mailTargetPreview(value:unknown,request:MailTargetRequest):MailT
   }
   if(row.state==="resolved"&&(row.resolution===undefined||!object(row.resolution).resolved))throw fail();
   return row as unknown as MailTargetPreview;
+}
+
+export function mailReceiveResult(value: unknown) {
+  const row = object(value);
+  if (row.ok !== true || !Number.isSafeInteger(row.received) || !Number.isSafeInteger(row.skipped) ||
+      Number(row.received) < 0 || Number(row.skipped) < 0 || Number(row.received) + Number(row.skipped) > 5 ||
+      (row.nextCursor !== null && (typeof row.nextCursor !== "string" || !/^[^\s\x00-\x1f]{1,2048}$/.test(row.nextCursor)))) throw fail();
+  return {received:Number(row.received),skipped:Number(row.skipped),nextCursor:row.nextCursor as string|null};
 }

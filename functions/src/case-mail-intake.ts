@@ -46,6 +46,10 @@ async function checkReceiver(tx: FirebaseFirestore.Transaction, config: Config) 
       current.producerId !== config.producerId || current.revision !== config.principalRevision) fail("受信実行者の会社・登録・確認版が一致しません。");
   if (feature.data()?.caseMailIntakeEnabled !== true) fail("メール受信保存は未有効です。");
 }
+export async function assertCaseMailReceiverEnabled(config: Config) {
+  await assertProductionOperational(config.companyId);
+  await db.runTransaction(tx => checkReceiver(tx, config));
+}
 export function createCaseMailReceiver(serverConfig: Config, provider: CaseMailProvider) {
   const config = ConfigSchema.parse(serverConfig);
   // 設定は認証済みサーバー実行環境から渡す。公開受付・スケジューラーはまだ配線しない。

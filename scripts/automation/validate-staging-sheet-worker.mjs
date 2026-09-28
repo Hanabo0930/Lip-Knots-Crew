@@ -11,7 +11,7 @@ const OLD_WORKER = "processSafeSheetWrite";
 export const retryWorkerSourcePins = Object.freeze({
   "functions/src/safe-sheet-writes.ts": "74e821e123834de5db7e8650f95d16be88d96e4e26c527f1fb3711133df2ed1a",
   "functions/src/sheet-write-control.ts": "a57db6a895c42ed58655a42ae67d84754fb679c2f0751d11b5b65edff0387f08",
-  "functions/src/index.ts": "0539c3d0432bbc65335bfe24f4b08e3a97eec272ee18c5eb2020d1097d28382c"
+  "functions/src/index.ts": "ec6285957b6cd92b63df05078a2ac5bb76648ffca2f26ebe3a4839a257b3ece0"
 });
 
 export function assertRetryWorkerSource(readSource) {

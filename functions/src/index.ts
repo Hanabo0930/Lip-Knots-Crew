@@ -189,4 +189,4 @@ export { getAutomationNoticeHandoff } from "./automation-notice-handoff";
 export { listCaseMailReceipts, getCaseMailReceipt, getCaseMailTargetPreview, confirmCaseMailTarget, holdCaseMailTarget, resolveCaseMailTargetHold } from "./case-mail-review";
 export { confirmCaseMailReview } from "./case-mail-resolution";
 
-export { receiveCaseMailMessage } from "./case-mail-receive";
+export { receiveCaseMailMessage, receiveCaseMailMessages } from "./case-mail-receive";

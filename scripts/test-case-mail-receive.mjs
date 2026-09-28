@@ -29,14 +29,15 @@ function setup() {
       { name: "To", value: "info@lipknots.com" }, { name: "Subject", value: "新規手配依頼" }],
       body: { size: bytes.length, data: bytes.toString("base64url") } } };
   const env = { APP_ENVIRONMENT: "staging", EXPECTED_FIREBASE_PROJECT_ID: "lip-knots-crew-staging" };
-  const state = { failCredentials: false, afterFetch: null };
+  const state = { failCredentials: false, afterFetch: null, page: {messages:[{id:"synthetic-mail"}],nextPageToken:null}, profile:"info@lipknots.com" };
   const deps = {
     obtainGmailAccessToken: async context => { calls.push("token"); assert.equal(context.mailbox,"info@lipknots.com");
       if(state.failCredentials)throw Error("synthetic-secret-never-expose"); return "synthetic-token"; },
     obtainExtractorCredentials: async () => { throw Error("unexpected extractor"); },
     fetchImpl: async (url, options) => {
       url = String(url); calls.push(url); assert.equal(options.method, "GET");
-      if (url.endsWith("/profile")) return new Response(JSON.stringify({ emailAddress: "info@lipknots.com" }));
+      if (url.endsWith("/profile")) return new Response(JSON.stringify({ emailAddress: state.profile }));
+      if(new URL(url).pathname.endsWith("/messages")){assert.equal(new URL(url).searchParams.get("maxResults"),"5");return new Response(JSON.stringify(state.page));}
       assert.match(url, /messages\/synthetic-mail/); await state.afterFetch?.(); return new Response(JSON.stringify(raw));
     },
   };
@@ -44,11 +45,12 @@ function setup() {
     "firebase-functions/v2/https": h.load("firebase-functions/v2/https"),
     "firebase-functions/params": { defineSecret: name => { assert.equal(name,"CASE_MAIL_EXTRACTOR_SECRET"); return { value: () => "s".repeat(43) }; } },
     zod: require("zod"), "./firebase": h.load("./firebase"), "./utils": h.load("./utils"),
-    "./case-mail-gmail": h.load("./case-mail-gmail"),
+    "./case-mail-gmail": h.load("./case-mail-gmail"), "./case-mail-intake": h.load("./case-mail-intake"),
+    "../case-mail-runtime/read-mail.cjs": require("../functions/case-mail-runtime/read-mail.cjs"),
     "./case-mail-cloud-auth": { createCaseMailCloudAuth: account => { assert.equal(account,serviceAccountEmail); return deps; } },
   }, { process: { env } });
   const data = { messageId: raw.id, expectedCompanyId: companyId, expectedActorUid: h.auth.uid };
-  return { h, calls, config, env, state, data, receive: (input = data, auth = h.auth) => api.receiveCaseMailMessage({ data: input, auth }) };
+  return { h, calls, config, env, state, data, batch: (cursor) => api.receiveCaseMailMessages({auth:h.auth,data:{expectedCompanyId:companyId,expectedActorUid:h.auth.uid,...(cursor?{cursor}:{})}}), receive: (input = data, auth = h.auth) => api.receiveCaseMailMessage({ data: input, auth }) };
 }
 let cases = 0;
 async function check(name, fn) { await fn(); cases++; console.log("成功: " + name); }
@@ -77,6 +79,25 @@ await check("取得中の停止で保存しない",async()=>{
 });
 await check("認証例外の秘密を応答へ出さない",async()=>{
   const f=setup();f.state.failCredentials=true;await assert.rejects(f.receive(),e=>e.code==="failed-precondition"&&!e.message.includes("synthetic-secret"));
+});
+await check("受信箱の確認→候補一覧→Crew下書き、続きの範囲を返す",async()=>{
+  const f=setup();f.state.page.nextPageToken="page-2";const out=await f.batch();assert.equal(out.received,1);assert.equal(out.nextCursor,"page-2");
+  const api=f.h.load("./case-mail-review"),scope={expectedCompanyId:companyId,expectedActorUid:f.h.auth.uid};
+  const list=await api.listCaseMailReceipts({auth:f.h.auth,data:scope});assert.equal(list.items.length,1);
+  const detail=await api.getCaseMailReceipt({auth:f.h.auth,data:{...scope,receiptId:list.items[0].receiptId}});assert.equal(detail.candidates[0].creatable,true);
+  await f.h.create({mailIntake:{receiptId:detail.receiptId,candidateId:detail.candidates[0].candidateId,expectedReceiptRevision:detail.revision,expectedRevision:detail.candidates[0].revision,operationId:"batch-create-1"}});
+  f.state.page={messages:[],nextPageToken:null};const end=await f.batch("page-2");assert.equal(end.received,0);assert.equal(end.nextCursor,null);assert.equal(f.h.list("jobs").length,1);
+});
+await check("途中失敗は続きを返さず同じ範囲で受信を回収",async()=>{
+  const f=setup();f.state.page={messages:[{id:"synthetic-mail"},{id:"synthetic-failure"}],nextPageToken:"page-2"};
+  await assert.rejects(f.batch());assert.equal(f.h.list("caseMailIntakeReceipts").length,1);
+  f.state.page.messages.pop();const out=await f.batch();assert.equal(out.nextCursor,"page-2");assert.equal(f.h.list("caseMailIntakeReceipts").length,1);
+});
+for(const [name,mutate]of[["重複ID",f=>f.state.page.messages.push({id:"synthetic-mail"})],["上限超え",f=>f.state.page.messages=Array.from({length:6},(_,i)=>({id:"mail-"+i}))],["受信箱相違",f=>f.state.profile="other@example.invalid"],["不正cursor",f=>f.state.page.nextPageToken="bad token"]])await check(name+"は本文取得前に拒否",async()=>{
+  const f=setup();mutate(f);await assert.rejects(f.batch());assert.equal(f.h.list("caseMailIntakeReceipts").length,0);assert.ok(f.calls.every(x=>!x.includes("/messages/synthetic-mail")));
+});
+await check("受信停止中は一覧の認証も取得しない",async()=>{
+  const f=setup();f.h.records.get(f.h.paths.feature).caseMailIntakeEnabled=false;await assert.rejects(f.batch());assert.equal(f.calls.length,0);
 });
 function authSetup() {
   const events=[], state={ status:200, body:{access_token:"synthetic-token",token_type:"Bearer"},secret:"s".repeat(43) };

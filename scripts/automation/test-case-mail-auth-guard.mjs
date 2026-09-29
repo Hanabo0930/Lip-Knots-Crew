@@ -140,12 +140,16 @@ for (const [before, after] of [
 ]) reject('receiveCaseMailMessages', before, after, 'receive');
 names.push(...receiverNames);
 
-// 認証ガードへの登録だけで配備許可を拡張しない。許可拡張時は別工程でこの期待値も審査する。
+// 2026-09-29の9 API限定承認。対象外・誤環境・確認語の省略は拒否を維持する。
 for (const name of names) {
-  assert.equal(safetyConfig.allowedFunctions.includes(name), false);
-  assert.throws(() => validatePlan({ mode: "functions-deploy", functions: name,
-    confirmation: safetyConfig.confirmations.functionsDeploy }), /FUNCTIONS_NOT_ALLOWED/);
-  cases++;
+  assert.equal(safetyConfig.allowedFunctions.includes(name), true);
+  const plan = { mode: "functions-deploy", functions: name,
+    confirmation: safetyConfig.confirmations.functionsDeploy };
+  assert.deepEqual(validatePlan(plan).functions, [name]); cases++;
+  for (const change of [{project:"production"}, {region:"us-central1"},
+    {confirmation:""}, {functions:name+",processSafeSheetWrite"}]) {
+    assert.throws(() => validatePlan({...plan,...change})); cases++;
+  }
 }
 const integrity = read("scripts/automation/check-deploy-source-integrity.mjs")
   .replace(/^import .*;\n/gm, "").replace(/^export /gm, "").replace(/\nmain\(\);\s*$/, "");
@@ -159,4 +163,4 @@ for (const [path, expected] of [
   ["config/automation/staging-safety.json", "protected"],
 ]) { assert.equal(classify(path), expected); cases++; }
 console.log(JSON.stringify({ caseMailAuthGuardTests: cases, functions: names, cloudOperations: false,
-  deploymentAllowed: false, source: "working-tree fixtures through the formal git-show guard" }));
+  deploymentAllowed: true, source: "working-tree fixtures through the formal git-show guard" }));

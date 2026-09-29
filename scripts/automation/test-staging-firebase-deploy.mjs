@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {createRequire} from "node:module";
 import {validatePlan,safetyConfig} from "./validate-staging-scope.mjs";
-const require=createRequire(import.meta.url),{installInvokerAdapter,resolveCli,VERSION}=require("./run-staging-firebase-deploy.cjs");
+const require=createRequire(import.meta.url),{installInvokerAdapter,installCaseMailSecretGuard,resolveCli,VERSION}=require("./run-staging-firebase-deploy.cjs");
 let cases=0,iamWrites=0;
 const plan=validatePlan({mode:"functions-deploy",project:safetyConfig.projectId,region:safetyConfig.region,sourceRef:"main",functions:"getSheetWriteIssues,previewStaffImport",confirmation:safetyConfig.confirmations.functionsDeploy});
 const run={setInvokerCreate:async()=>{iamWrites++;}},messages=[];
@@ -61,5 +61,36 @@ const shell=fs.readFileSync(new URL("./deploy-staging-functions.sh",import.meta.
 assert.match(shell,/set -euo pipefail/);assert.match(shell,/--package=firebase-tools@15\.24\.0/);
 assert.ok(shell.indexOf('node "$lkc_trusted_runner"')<shell.indexOf("--no-invoker-iam-check"));
 assert.ok(shell.includes("FORBIDDEN_PUBLIC_IAM_BINDING_FOUND"));assert.doesNotMatch(shell,/add-iam-policy-binding|set-iam-policy/);cases++;
+// 秘密設定が揃っている時だけ進み、権限不足・CLI契約変更・全書込を拒否する。
+let secretWrites=0,secretReads=0;
+const writeNames=["createSecret","patchSecret","deleteSecret","addVersion","destroySecretVersion","setIamPolicy"];
+function manager(missing=[]) { return Object.assign({
+  ensureServiceAgentRole:async()=>{secretWrites++;},
+  checkServiceAgentRole:async()=>{secretReads++; return missing;},
+},Object.fromEntries(writeNames.map(name=>[name,async()=>{secretWrites++;}]))); }
+const receiverPlan={...plan,functions:["receiveCaseMailMessage","receiveCaseMailMessages"]};
+const secret={projectId:plan.project,name:"CASE_MAIL_EXTRACTOR_SECRET"}, accounts=["synthetic@example.invalid"], role="roles/secretmanager.secretAccessor";
+const allowedManager=manager(); installCaseMailSecretGuard(allowedManager,receiverPlan);
+await allowedManager.ensureServiceAgentRole(secret,accounts,role); cases++;
+for(const name of writeNames) { await assert.rejects(allowedManager[name](),/MUTATION_NOT_AUTHORIZED/); cases++; }
+for(const missing of [["synthetic@example.invalid"],null]) {
+  const denied=manager(missing); installCaseMailSecretGuard(denied,receiverPlan);
+  await assert.rejects(denied.ensureServiceAgentRole(secret,accounts,role),/EXISTING_ACCESS_REQUIRED/); cases++;
+}
+for(const args of [[{...secret,projectId:"other"},accounts,role],[{...secret,name:"OTHER"},accounts,role],
+  [secret,accounts,"roles/owner"],[secret,[],role]]) {
+  await assert.rejects(allowedManager.ensureServiceAgentRole(...args),/SCOPE_REJECTED/); cases++;
+}
+const failedRead=manager(); failedRead.checkServiceAgentRole=async()=>{throw Error("READ_DENIED");};
+installCaseMailSecretGuard(failedRead,receiverPlan);
+await assert.rejects(failedRead.ensureServiceAgentRole(secret,accounts,role),/READ_DENIED/); cases++;
+for(const name of [...writeNames,"checkServiceAgentRole","ensureServiceAgentRole"]) {
+  const changed=manager(); delete changed[name];
+  assert.throws(()=>installCaseMailSecretGuard(changed,receiverPlan),/CONTRACT_CHANGED/); cases++;
+}
+const unrelated=manager(), original=unrelated.ensureServiceAgentRole;
+installCaseMailSecretGuard(unrelated,plan); assert.equal(unrelated.ensureServiceAgentRole,original); cases++;
+assert.equal(secretWrites,0); assert.equal(secretReads,3); cases++;
+assert.ok(source.indexOf('installCaseMailSecretGuard(require(')<source.indexOf('require(cli.binary)')); cases++;
 assert.equal(iamWrites,0);
 console.log(JSON.stringify({initialCallableDeploymentTests:cases,iamWrites,cloudOperations:false}));

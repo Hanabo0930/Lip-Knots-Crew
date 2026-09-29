@@ -110,6 +110,15 @@ for function_name in "${function_names[@]}"; do
     getCaseMailImportSnapshot) service_name="getcasemailimportsnapshot" ;;
     listAutomationNoticeReceipts) service_name="listautomationnoticereceipts" ;;
     getAutomationNoticeHandoff) service_name="getautomationnoticehandoff" ;;
+    receiveCaseMailMessage) service_name="receivecasemailmessage" ;;
+    receiveCaseMailMessages) service_name="receivecasemailmessages" ;;
+    listCaseMailReceipts) service_name="listcasemailreceipts" ;;
+    getCaseMailReceipt) service_name="getcasemailreceipt" ;;
+    getCaseMailTargetPreview) service_name="getcasemailtargetpreview" ;;
+    confirmCaseMailTarget) service_name="confirmcasemailtarget" ;;
+    holdCaseMailTarget) service_name="holdcasemailtarget" ;;
+    resolveCaseMailTargetHold) service_name="resolvecasemailtargethold" ;;
+    confirmCaseMailReview) service_name="confirmcasemailreview" ;;
     receiveCaseMailApplication) service_name="receivecasemailapplication" ;;
     receiveAutomationNoticeReceipt) service_name="receiveautomationnoticereceipt" ;;
     previewStaffImport) service_name="previewstaffimport" ;;

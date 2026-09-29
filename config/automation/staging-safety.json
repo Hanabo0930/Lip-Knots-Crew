@@ -97,7 +97,16 @@
     "submitPilotOutcome",
     "decidePilotExpansion",
     "loginGateway",
-    "retrySafeSheetWrites"
+    "retrySafeSheetWrites",
+    "receiveCaseMailMessage",
+    "receiveCaseMailMessages",
+    "listCaseMailReceipts",
+    "getCaseMailReceipt",
+    "getCaseMailTargetPreview",
+    "confirmCaseMailTarget",
+    "holdCaseMailTarget",
+    "resolveCaseMailTargetHold",
+    "confirmCaseMailReview"
   ],
   "allowedHostingTargets": [
     "staff",

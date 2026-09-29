@@ -29,6 +29,25 @@ function installInvokerAdapter(run, plan, log = console.log) {
   };
 }
 
+// 受信APIの配備承認には秘密設定/IAM変更を含めない。読取照合が通る場合だけ進む。
+function installCaseMailSecretGuard(manager, plan) {
+  if (!plan.functions.some(name => ["receiveCaseMailMessage", "receiveCaseMailMessages"].includes(name))) return;
+  const writes = ["createSecret", "patchSecret", "deleteSecret", "addVersion", "destroySecretVersion", "setIamPolicy"];
+  if (plan.project !== "lip-knots-crew-staging" || plan.region !== "asia-northeast1"
+    || typeof manager.checkServiceAgentRole !== "function"
+    || typeof manager.ensureServiceAgentRole !== "function"
+    || writes.some(name => typeof manager[name] !== "function")) throw Error("CLI_SECRET_CONTRACT_CHANGED");
+  const check = manager.checkServiceAgentRole.bind(manager);
+  manager.ensureServiceAgentRole = async (secret, accounts, role) => {
+    if (secret?.projectId !== plan.project || secret?.name !== "CASE_MAIL_EXTRACTOR_SECRET"
+      || role !== "roles/secretmanager.secretAccessor" || !Array.isArray(accounts) || !accounts.length)
+      throw Error("CASE_MAIL_SECRET_SCOPE_REJECTED");
+    const missing = await check(secret, accounts, role);
+    if (!Array.isArray(missing) || missing.length) throw Error("CASE_MAIL_SECRET_EXISTING_ACCESS_REQUIRED");
+  };
+  for (const name of writes) manager[name] = async () => { throw Error("CASE_MAIL_SECRET_MUTATION_NOT_AUTHORIZED"); };
+}
+
 function resolveCli(searchPath = process.env.PATH ?? "", io = fs) {
   for (const directory of searchPath.split(path.delimiter)) {
     if (!directory) continue;
@@ -66,10 +85,11 @@ async function main() {
   }
   const run = require(path.join(cli.root, "lib/gcp/run.js"));
   installInvokerAdapter(run, plan);
+  installCaseMailSecretGuard(require(path.join(cli.root, "lib/gcp/secretManager.js")), plan);
   process.chdir(source);
   process.argv = [process.execPath, cli.binary, "deploy", "--only", plan.functions.map(name => "functions:" + name).join(","),
     "--project", plan.project, "--non-interactive"];
   require(cli.binary);
 }
-module.exports = {installInvokerAdapter, resolveCli, VERSION};
+module.exports = {installInvokerAdapter, installCaseMailSecretGuard, resolveCli, VERSION};
 if (require.main === module) main().catch(error => {console.error(error.message);process.exitCode = 1;});

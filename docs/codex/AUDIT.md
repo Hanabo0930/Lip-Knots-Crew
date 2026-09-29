@@ -354,3 +354,7 @@ processSafeSheetWrite / updateExpenseReviewFromQueue の切替時は、実Trigge
 - CHECKS_RUN / RESULT: 既存候補確認7 APIを含む正常系/条件破壊検出と、Functions automation safety関連回帰成功。配備許可リストは維持し、9 APIの未承認配備は引き続き拒否。実Gmail・業務DB・原本を使用しない。
 - DEPLOY_PERFORMED / CLOUD_RESOURCES_CHANGED: なし。
 - BLOCKERS / NEXT_SAFE_ACTION: 新規9 APIのSTAGING配備範囲をユーザーへ一度質問済み。IAM/Secret追加・実メール取得/保存・停止解除・原本変更・Liveは今回質問の対象外。回答待ちでも通常PR/CIを進める。
+
+## 2026-09-29 案件メール9 APIのSTAGING配備範囲
+
+社長の明示承認に基づき、受信2件・候補確認7件のみを配備許可リストとRunサービス対応へ追加。正式CI・通常マージ・保護環境・停止状態を維持。受信APIでは既存の秘密設定権限を読取照合し、不足時の自動IAM付与と秘密設定変更を拒否する。実メール読取・業務保存・通知・原本変更・本番操作は未実施。認証/範囲265条件、配備アダプター64条件（書込0件）、既存Functions自動化回帰が成功。

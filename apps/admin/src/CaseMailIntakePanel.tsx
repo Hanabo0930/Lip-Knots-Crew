@@ -35,13 +35,13 @@ export default function CaseMailIntakePanel({ companyId, uid, api, onClose, onCr
     window.addEventListener("storage", storage); window.addEventListener("focus", syncAttempt);
     return () => { mounted.current = false; version.current++; window.removeEventListener("storage", storage); window.removeEventListener("focus", syncAttempt); };
   }, [owner]);
-  async function loadList(cursor?: string) {
-    const ticket = ++version.current; setLoading(true); setDetail(null); setConfirmed(false); setError(""); setSelected("");
+  async function loadList(cursor?: string, receiveError = "") {
+    const ticket = ++version.current; setLoading(true); setDetail(null); setConfirmed(false); setError(receiveError); setSelected("");
     try {
       const value = mailList(await apiRef.current.list(cursor));
       if (!isCurrent() || ticket !== version.current) return;
       setItems(value.items); setNextCursor(value.nextCursor); setPageCursor(cursor); setLoading(false);
-    } catch (failure) { if (isCurrent() && ticket === version.current) { setError(errorText(failure)); setLoading(false); setItems([]); } }
+    } catch (failure) { if (isCurrent() && ticket === version.current) { setError([receiveError, errorText(failure)].filter(Boolean).join(" ")); setLoading(false); setItems([]); } }
   }
   useEffect(() => {
     if (!initialized) return;
@@ -57,7 +57,7 @@ export default function CaseMailIntakePanel({ companyId, uid, api, onClose, onCr
       setReceiveCursor(result.nextCursor);
       setMessage(`${result.received+result.skipped}通を確認しました。${result.received}通の案件候補を一覧で確認できます。${result.nextCursor?"続きのメールがあります。":"受信箱の確認が終わりました。"}`);
       await loadList();
-    } catch(failure) {if(isCurrent())setError(errorText(failure));}
+    } catch(failure) {if(isCurrent())await loadList(undefined, errorText(failure));}
     finally {busyRef.current=false;if(isCurrent())setBusy(false);}
   }
   async function read(receiptId: string) {

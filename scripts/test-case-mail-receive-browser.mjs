@@ -19,9 +19,9 @@ const server=await createServer({root:path.resolve("apps/admin"),configFile:path
  try {let data;const scope={expectedCompanyId:owner.companyId,expectedActorUid:owner.uid},auth={uid:owner.uid,token:{role:"admin",companyId:owner.companyId}};
   if(action==="receive"){state.calls.push(input.cursor??null);state.visible=true;
    if(state.mode==="owner"||state.mode==="busy")await new Promise(resolve=>state.release=resolve);
-   if(state.mode==="loss"&&state.calls.length===1)throw Error("途中まで保存された候補は一覧で確認できます。同じ範囲を再試行してください。");
+   if((state.mode==="loss"||state.mode==="loss-list")&&state.calls.length===1)throw Error("途中まで保存された候補は一覧で確認できます。同じ範囲を再試行してください。");
    data=state.mode==="invalid"?{ok:true,received:6,skipped:0,nextCursor:"p2"}:{ok:true,received:input.cursor?0:1,skipped:0,nextCursor:input.cursor?null:"p2"};
-  }else if(action==="list")data=state.visible?await state.review.listCaseMailReceipts({auth,data:{...scope,...input}}):{ok:true,items:[],nextCursor:null};
+  }else if(action==="list"){if(state.mode==="loss-list"&&state.visible)throw Error("合成：候補一覧を読み込めません。");data=state.visible?await state.review.listCaseMailReceipts({auth,data:{...scope,...input}}):{ok:true,items:[],nextCursor:null};}
   else if(action==="read")data=await state.review.getCaseMailReceipt({auth,data:{...scope,...input}});
   else if(action==="create")data=await state.h.create(input,auth);
   else throw Error("unknown action");res.end(JSON.stringify({ok:true,data}));
@@ -29,7 +29,7 @@ const server=await createServer({root:path.resolve("apps/admin"),configFile:path
  });}}]});
 let browser;const results=[];
 try{await server.listen();browser=await chromium.launch({headless:true});
- for(const [mode,width]of [["success",320],["success",390],["success",1280],["loss",390],["invalid",390],["owner",390],["busy",390]]){
+ for(const [mode,width]of [["success",320],["success",390],["success",1280],["loss",390],["loss-list",390],["invalid",390],["owner",390],["busy",390]]){
   const run=mode+width,h=harness(),state={mode,h,review:h.load("./case-mail-review"),visible:false,calls:[],release:null};states.set(run,state);
   const page=await browser.newPage({viewport:{width,height:1000}});const errors=[];page.on("pageerror",e=>errors.push(e.message));await page.goto(server.resolvedUrls.local[0]+"__receive.html?run="+run);
   const start=page.getByRole("button",{name:"受信箱のメールを確認",exact:true});await start.click();
@@ -39,9 +39,10 @@ try{await server.listen();browser=await chromium.launch({headless:true});
    while(!state.release)await new Promise(r=>setTimeout(r,10));state.release();
   }
   if(mode==="owner"){await start.waitFor();assert.equal(await page.getByText(/1通を確認しました/).count(),0);}
+  else if(mode==="loss-list"){await page.getByRole("alert").filter({hasText:"途中まで保存された候補"}).waitFor();await page.getByRole("alert").filter({hasText:"候補一覧を読み込めません"}).waitFor();assert.deepEqual(state.calls,[null]);assert.equal(await page.getByRole("button",{name:"内容を確認",exact:true}).count(),0);}
   else if(mode==="invalid"){await page.getByRole("alert").waitFor();assert.equal(await page.getByRole("button",{name:"続きのメールを確認",exact:true}).count(),0);}
   else {
-   if(mode==="loss"){await page.getByRole("alert").waitFor();await start.click();assert.deepEqual(state.calls,[null,null]);}
+   if(mode==="loss"){await page.getByRole("alert").waitFor();await page.getByRole("button",{name:"内容を確認",exact:true}).waitFor();assert.deepEqual(state.calls,[null]);await start.click();assert.deepEqual(state.calls,[null,null]);}
    await page.getByText(/1通を確認しました/).waitFor();await page.getByRole("button",{name:"内容を確認",exact:true}).click();
    await page.getByLabel("内容を確認しました。1名分の下書きを作成します。",{exact:true}).check();await page.getByRole("button",{name:"確認した候補を下書き作成",exact:true}).click();await page.getByText(/下書きを作成しました/).waitFor();
    assert.equal(h.list("jobs").length,1);assert.equal(await page.evaluate(()=>window.created),1);

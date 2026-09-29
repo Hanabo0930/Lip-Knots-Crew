@@ -56,16 +56,24 @@ function harness(rows,clock){
     const source=fs.readFileSync(new URL(`../functions/src/${name.slice(2)}.ts`,import.meta.url),'utf8');
     const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
     const exports={};modules.set(name,exports);loaded.add(name);
-    runInNewContext(code,{exports,require:load,...(clock?{Date:class extends Date{constructor(...args){super(...(args.length?args:[clock.now]));}static now(){return new Date(clock.now).getTime();}}}:{}),process:{env:{get APP_ENVIRONMENT(){return h.environment;}}},console:{warn:()=>{},error:()=>{}},setTimeout:callback=>{callback();return 0;}},{timeout:5000});return exports;
+    runInNewContext(code,{exports,require:load,Buffer,...(clock?{Date:class extends Date{constructor(...args){super(...(args.length?args:[clock.now]));}static now(){return new Date(clock.now).getTime();}}}:{}),process:{env:{get APP_ENVIRONMENT(){return h.environment;}}},console:{warn:()=>{},error:()=>{}},setTimeout:callback=>{callback();return 0;}},{timeout:5000});return exports;
   }
   const importer=load('./shift-import'),jobs=load('./jobs'),precontact=load('./precontact');
   records.set(`sheetImportConfigs/${companyId}`,{companyId,enabled:true,spreadsheetId:sheetId,headerRow:1,dataStartRow:2,readRangeEndColumn:'BC',columns:{workDate:'A',staffName:'B',temperature:'G',arrivalTime:'H',clientName:'J',storeName:'K',makerName:'L',menuName:'M',workTime:'O',cancelled:'BC'}});
   records.set(`staffProfiles/${staffId}`,{companyId,active:true,displayName:'Synthetic Staff'});
   const admin={uid:'synthetic-admin',token:{companyId,role:'admin'}},staff={uid:'synthetic-user',token:{companyId,role:'staff',staffId}};
-  return Object.assign(h,{edit:(jobId,fields,revision=records.get("jobs/"+jobId).revision??0)=>load("./job-management").adminEditJobInputs({auth:admin,data:{jobId,fields,revision}}),tasks:()=>load("./task-core").deriveStaffTasks({jobs:[...records].filter(([key])=>key.startsWith("jobs/")).map(([key,value])=>({id:key.split("/")[1],...value})),resubmissions:[],nowMs:Date.parse("2099-09-19T00:00:00Z")}),precontact:(jobId,values={temperature:36.5,arrivalTime:'09:30'},auth=staff)=>precontact.submitPreContact({auth,data:{jobId,...values}}),scheduled:()=>importer.syncShiftSheetsScheduled(),sync:()=>importer.syncShiftSheetsReadOnly({auth:admin,data:{}}),preview:()=>importer.previewShiftImport({auth:admin,data:{}}),apply:(jobId,requestId='request-0001',auth=staff)=>jobs.applyToJob({auth,data:{jobId,requestId}}),cancel:jobId=>jobs.adminCancelJob({auth:admin,data:{jobId,reason:'Synthetic cancellation'}}),list:name=>[...records].filter(([k])=>k.startsWith(name+'/')).map(([k,v])=>({id:k.slice(name.length+1),...v}))});
+  return Object.assign(h,{edit:(jobId,fields,revision=records.get("jobs/"+jobId).revision??0)=>load("./job-management").adminEditJobInputs({auth:admin,data:{jobId,fields,revision}}),tasks:()=>load("./task-core").deriveStaffTasks({jobs:[...records].filter(([key])=>key.startsWith("jobs/")).map(([key,value])=>({id:key.split("/")[1],...value})),resubmissions:[],nowMs:Date.parse("2099-09-19T00:00:00Z")}),precontact:(jobId,values={temperature:36.5,arrivalTime:'09:30'},auth=staff)=>precontact.submitPreContact({auth,data:{jobId,...values}}),scheduled:()=>importer.syncShiftSheetsScheduled(),sync:()=>importer.syncShiftSheetsReadOnly({auth:admin,data:{}}),preview:(data={})=>importer.previewShiftImport({auth:admin,data}),apply:(jobId,requestId='request-0001',auth=staff)=>jobs.applyToJob({auth,data:{jobId,requestId}}),cancel:jobId=>jobs.adminCancelJob({auth:admin,data:{jobId,reason:'Synthetic cancellation'}}),list:name=>[...records].filter(([k])=>k.startsWith(name+'/')).map(([k,v])=>({id:k.slice(name.length+1),...v}))});
 }
 const results=[];
 async function test(name,callback){try{await callback();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.message});}}
+
+await test('full preview uses real admin scope and returns every row without business writes; legacy response stays bounded',async()=>{
+ const h=harness(Array.from({length:26},(_,i)=>row('Preview '+i,i%2?'Synthetic Staff':'')));
+ const full=await h.preview({includePreviewRows:true});assert.equal(full.totals.jobs,26);assert.equal(full.samples.length,20);assert.equal(full.previewRows.rows.length,26);assert.equal(full.previewRows.complete,true);assert.equal(new Set(full.previewRows.rows.map(item=>item.row)).size,26);
+ assert.equal(full.previewRows.rows[25].storeName,'Preview 25');assert.equal(full.previewRows.rows[25].status,'assigned');assert.ok(full.previewRows.rows.every(item=>Object.keys(item).length===7));
+ const legacy=await h.preview();assert.equal(Object.hasOwn(legacy,'previewRows'),false);assert.equal(legacy.samples.length,20);
+ assert.equal(h.commits.length,0);assert.equal(h.list('jobs').length,0);assert.equal(h.list('sheetSyncQueue').length,0);assert.equal(h.list('sheetImportRuns').length,0);
+});
 
 await test('monthly fixed case id import reads past configured end and preserves source column',async()=>{
  const r=row('Monthly ID');r[54]='legacy-id';r[55]='12345678-1234-4123-8123-123456789abc';

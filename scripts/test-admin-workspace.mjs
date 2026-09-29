@@ -165,6 +165,13 @@ try{
   }
   await page.locator('[data-layout-fixture]').evaluate(node=>node.remove());
   console.log('Signed-in header layout passed at 320/390/1280px with synthetic controls.');
+  const luminance=rgb=>rgb.map(value=>value/255).map(value=>value<=.04045?value/12.92:((value+.055)/1.055)**2.4).reduce((sum,value,index)=>sum+value*[.2126,.7152,.0722][index],0);
+  const contrast=(a,b)=>{const x=luminance(a),y=luminance(b);return(Math.max(x,y)+.05)/(Math.min(x,y)+.05);};
+  for(const control of [page.getByRole('button',{name:'案件を確認',exact:true}),page.getByRole('navigation',{name:'管理業務'}).getByRole('button',{name:'概要',exact:true})]){
+   const colors=await control.evaluate(node=>{const style=getComputedStyle(node);return{ink:style.color,background:style.backgroundImage};});
+   const ink=colors.ink.match(/[\d.]+/g).slice(0,3).map(Number),stops=[...colors.background.matchAll(/rgba?\(([^)]+)\)/g)].map(match=>match[1].split(',').slice(0,3).map(Number));
+   assert.ok(stops.length>=2);for(const stop of stops)assert.ok(contrast(ink,stop)>=4.5,`Action text contrast below 4.5: ${contrast(ink,stop)}`);
+  }
   const nav=page.getByRole('navigation',{name:'管理業務'});
   const sub=async label=>{if(await page.locator('.mobile-view-select').isVisible())await page.getByLabel('表示する画面',{exact:true}).selectOption({label});else await page.locator('.workspace-subnav').getByRole('button',{name:label,exact:true}).click();};
   const expected={'概要':'今すぐ確認','案件':'案件一覧','報告書・再提出':'案件の資料・再提出','スタッフ':'スタッフ一覧','通知・運用':'管理者プッシュ通知'};
@@ -175,6 +182,8 @@ try{
     await page.getByRole('heading',{name:heading,exact:true,level:2}).waitFor();
     assert.equal(await nav.getByRole('button',{name:label,exact:true}).getAttribute('aria-pressed'),'true');
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${label} overflows at ${width}px`);
+    if(width===390){const undersized=await page.locator('.admin-shell button:visible').evaluateAll(nodes=>nodes.map(node=>({label:node.textContent.trim(),box:node.getBoundingClientRect()})).filter(({box})=>box.width<43.5||box.height<43.5).map(({label,box})=>({label,width:box.width,height:box.height})));assert.deepEqual(undersized,[],`${label}: mobile actions require 44px targets`);}
+
     if(output)await page.screenshot({path:resolve(output,`admin-${label}-${width}.png`)});
    }
   }

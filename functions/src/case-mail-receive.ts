@@ -1,5 +1,4 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { defineSecret } from "firebase-functions/params";
 import { z } from "zod";
 import { db } from "./firebase";
 import { requireAdmin, companyFromClaims } from "./utils";
@@ -7,7 +6,8 @@ import { createGmailCaseMailReceiver } from "./case-mail-gmail";
 import { assertCaseMailReceiverEnabled } from "./case-mail-intake";
 import { createCaseMailCloudAuth } from "./case-mail-cloud-auth";
 
-const extractorSecret = defineSecret("CASE_MAIL_EXTRACTOR_SECRET");
+// 関数単位の秘密バインドに限定し、無関係な関数の配備時に解決させない。
+const extractorSecretName = "CASE_MAIL_EXTRACTOR_SECRET";
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/);
 const requestSchema = z.object({ messageId: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
   expectedCompanyId: id, expectedActorUid: id }).strict();
@@ -18,7 +18,7 @@ const configSchema = z.object({ companyId: id, uid: id, producerId: id,
 
 const pageSchema = z.object({ expectedCompanyId: id, expectedActorUid: id,
   cursor: z.string().min(1).max(2048).regex(/^[^\s\x00-\x1f]+$/).optional() }).strict();
-const options = { secrets: [extractorSecret], timeoutSeconds: 540, memory: "512MiB" as const };
+const options = { secrets: [extractorSecretName], timeoutSeconds: 540, memory: "512MiB" as const };
 async function receiverFor(request: Parameters<typeof requireAdmin>[0], input: {expectedCompanyId:string;expectedActorUid:string}) {
   const session = requireAdmin(request), companyId = id.parse(companyFromClaims(session.token));
   if (input.expectedCompanyId !== companyId || input.expectedActorUid !== session.uid) {
@@ -33,7 +33,7 @@ async function receiverFor(request: Parameters<typeof requireAdmin>[0], input: {
   }
   const { gmailServiceAccountEmail, ...config } = parsed.data;
   await assertCaseMailReceiverEnabled(config);
-  const dependencies = createCaseMailCloudAuth(gmailServiceAccountEmail, () => extractorSecret.value());
+  const dependencies = createCaseMailCloudAuth(gmailServiceAccountEmail, () => process.env[extractorSecretName] ?? "");
   return { config, dependencies, receive: createGmailCaseMailReceiver(config, dependencies) };
 }
 function receiveError(error: unknown): never {

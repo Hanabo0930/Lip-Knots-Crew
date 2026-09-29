@@ -15,7 +15,7 @@ try {
   for (const name of fs.readdirSync(sourceRuntime)) {
     const destination = path.join(runtime, name); fs.copyFileSync(path.join(sourceRuntime, name), destination); copied.push(destination);
   }
-  for (const name of ["case-mail-gmail.js", "job-management-core.js", "case-id.js"]) {
+  for (const name of ["case-mail-gmail.js", "case-mail-diagnostics.js", "job-management-core.js", "case-id.js"]) {
     const destination = path.join(lib, name); fs.copyFileSync(new URL("../functions/lib/" + name, import.meta.url), destination); copied.push(destination);
   }
   const compiled = path.join(lib, "case-mail-gmail.js"), localRequire = createRequire(compiled), exports = {};
@@ -43,6 +43,18 @@ try {
   const out = await receive({ messageId: "synthetic-mail" });
   assert.equal(savedConfig.companyId, config.companyId); assert.equal(out.state, "ready"); assert.equal(out.candidates.length, 1);
   assert.equal(out.candidates[0].input.publicationMode, "draft");
+  const diagnostics = localRequire("./case-mail-diagnostics");
+  for (const reason of ["gmail_signing_failed", "gmail_delegation_denied", "gmail_token_exchange_failed", "gmail_token_invalid"]) {
+    const failed = exports.createGmailCaseMailReceiver(config, {
+      obtainGmailAccessToken: async () => { const error = new diagnostics.CaseMailAuthFailure(reason); error.message = "SYNTHETIC_PRIVATE_DETAIL"; throw error; },
+      obtainExtractorCredentials: async () => { throw Error("unexpected extractor"); },
+      fetchImpl: async () => { throw Error("認証失敗後に通信しない"); },
+    });
+    await assert.rejects(failed({ messageId: "synthetic-mail" }), error => {
+      assert.equal(diagnostics.caseMailFailureReason(error), reason);
+      assert.ok(!error.message.includes("SYNTHETIC_PRIVATE_DETAIL")); return true;
+    });
+  }
   assert.equal(fs.existsSync(path.join(temporary, "scripts")), false);
   console.log("Functions配布範囲の隔離検査: 成功（コンパイル済み入口＋共用解析、通信・保存は模擬）");
 } finally {

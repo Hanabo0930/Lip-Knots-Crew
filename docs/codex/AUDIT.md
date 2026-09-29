@@ -330,3 +330,5 @@ processSafeSheetWrite / updateExpenseReviewFromQueue の切替時は、実Trigge
 - CLOUD_RESOURCES_CHANGED: None.
 - BLOCKERS: 既存の書戻し切替・実業務受入は別工程。原本への検証行・取込確定は不要。
 - NEXT_SAFE_ACTION: exact HEAD正式CI→通常merge→main CI・期限付きPreview→previewShiftImport限定反映。
+
+- 社長の追加依頼により、管理画面全体の主要ボタンとスマホ操作領域を44px以上へ統一。見出し・補足文字・選択状態・disabled/hover/focusを調整。主要ボタンと選択メニューの文字コントラスト4.5以上、5画面のスマホボタン寸法、320/390/1280ヘッダー、既存業務導線・入力保持・動き軽減・容量制限成功。Adminビルド成功。重い演出依存の追加なし。

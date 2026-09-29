@@ -16,8 +16,11 @@ try{
   await page.goto(base);await page.getByText("LIVE DEMO v5.6",{exact:true}).waitFor();
   const nav=page.getByRole("navigation",{name:"管理業務"});
   await nav.getByRole("button",{name:"案件",exact:true}).click();
+  await page.getByRole("heading",{name:"案件一覧",exact:true,level:2}).waitFor();
+  assert.equal(await page.locator('.workspace-panel:not([hidden])').count(),1);
+  await page.getByRole("button",{name:"原本を確認する",exact:false}).click();
   const panel=page.getByRole("region",{name:"原本の確認と取込"});await panel.waitFor();
-  assert.equal(await page.locator(".workspace-panel:not([hidden]) h2").first().textContent(),"スプシ同期");
+  assert.equal(await page.locator(".workspace-panel:not([hidden]) h2").first().textContent(),"シフト表の確認");
   await panel.locator('input[type="month"]').fill("2099-10");
   await panel.getByRole("button",{name:"原本を読取プレビュー",exact:true}).click();
   await panel.getByRole("region",{name:"シフト表の読取結果"}).waitFor();
@@ -27,7 +30,16 @@ try{
   await page.getByRole("button",{name:"原本の読取結果を見る",exact:true}).click();
   assert.equal(await nav.getByRole("button",{name:"案件",exact:true}).getAttribute("aria-pressed"),"true");
   await panel.waitFor();assert.equal(await panel.locator('input[type="month"]').inputValue(),"2099-10");
-  await page.getByRole("heading",{name:"案件一覧",exact:true}).waitFor();
+  await nav.getByRole("button",{name:"案件",exact:true}).click();
+  await page.getByRole("heading",{name:"案件一覧",exact:true,level:2}).waitFor();
+  assert.equal(await panel.isVisible(),false);
+  const views=width<761?page.getByLabel("表示する画面",{exact:true}):page.locator('.workspace-subnav');
+  for(const [id,label] of [["create","案件を追加"],["export","資料・CSV出力"],["cancel","キャンセル管理"],["import","原本の確認・取込"]]){
+    if(width<761)await views.selectOption(id);else await views.getByRole("button",{name:label,exact:true}).click();
+    assert.equal(await page.locator('.workspace-panel:not([hidden])').count(),1);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  }
+  assert.equal(await panel.locator('input[type="month"]').inputValue(),"2099-10");
   assert.equal(await page.getByText("この部分を表示できませんでした。",{exact:false}).count(),0);
   assert.equal(await page.locator("header img").evaluate(i=>i.complete&&i.naturalWidth>0),true);
   assert.deepEqual(errors,[]);

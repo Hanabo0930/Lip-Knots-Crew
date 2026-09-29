@@ -92,7 +92,7 @@ try{
  }
  {
   const page=await browser.newPage({viewport:{width:390,height:950}}),errors=[];page.on("pageerror",error=>errors.push(error.message));await blockExternal(page);await page.goto(base+"/");
-  await page.getByRole("navigation",{name:"管理業務",exact:true}).getByRole("button",{name:"案件",exact:true}).click();await page.getByRole("button",{name:"アプリの照合データを取得",exact:true}).click();const panel=panelFor(page);
+  await page.getByRole("navigation",{name:"管理業務",exact:true}).getByRole("button",{name:"案件",exact:true}).click();await page.getByLabel("表示する画面",{exact:true}).selectOption("edit");await page.getByRole("button",{name:"アプリの照合データを取得",exact:true}).click();const panel=panelFor(page);
   await panel.getByRole("button",{name:"デモの募集対象を使う",exact:true}).click();await panel.getByRole("button",{name:"現在の照合データを取得",exact:true}).click();await panel.getByRole("heading",{name:"取得した案件対応",exact:true}).waitFor();
   const pending=page.waitForEvent("download");await panel.getByRole("button",{name:"アプリの照合データを保存",exact:true}).click();const download=await pending;assert.equal(JSON.parse(fs.readFileSync(await download.path(),"utf8")).companyId,"demo-company");
   await panel.getByRole("button",{name:"照合データを閉じる",exact:true}).click();await page.waitForFunction(()=>document.activeElement?.textContent==="アプリの照合データを取得");assert.deepEqual(errors,[]);

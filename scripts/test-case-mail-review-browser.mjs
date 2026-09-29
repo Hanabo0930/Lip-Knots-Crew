@@ -129,6 +129,7 @@ try {
     const page = await browser.newPage({ viewport: { width: 390, height: 1000 } }); await blockExternal(page);
     await page.goto(base + "/");
     await page.getByRole("navigation", { name: "管理業務" }).getByRole("button", { name: "案件", exact: true }).click();
+    await page.getByLabel("表示する画面", { exact: true }).selectOption("receive");
     await page.getByRole("button", { name: "受信候補を確認", exact: true }).click();
     await panel(page).getByText("受信した案件候補はありません。", { exact: true }).waitFor();
     await panel(page).getByRole("button", { name: "受信候補を閉じる" }).click();

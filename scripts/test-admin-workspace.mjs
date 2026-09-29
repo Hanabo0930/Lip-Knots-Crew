@@ -132,6 +132,22 @@ try{
  await page.route('**/*',route=>{const url=new URL(route.request().url());return url.hostname==='127.0.0.1'||['data:','blob:'].includes(url.protocol)?route.continue():route.abort();});
  await page.addInitScript(()=>{const original=Element.prototype.scrollIntoView;window.__performanceScrolls=0;Element.prototype.scrollIntoView=function(...args){if(this.id==="staff-performance")window.__performanceScrolls++;return original.apply(this,args);};});
  await page.goto(base);await page.waitForLoadState('networkidle');
+ const animated=page.locator('.aurora,.water-ribbons,.orb-liquid');
+ assert.equal(await animated.count(),4);
+ assert.ok((await animated.evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationName))).every(name=>name!=='none'));
+ await page.getByRole('button',{name:'背景の動きを止める',exact:true}).click();
+ assert.ok((await animated.evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationPlayState))).every(state=>state==='paused'));
+ await page.reload();await page.waitForLoadState('networkidle');
+ assert.equal(await page.locator('main').getAttribute('data-motion'),'paused','Motion preference must survive reload');
+ await page.getByRole('button',{name:'背景の動きを再開',exact:true}).click();
+ assert.ok((await animated.evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationPlayState))).every(state=>state==='running'));
+ await page.emulateMedia({reducedMotion:'reduce'});
+ assert.ok((await animated.evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationName))).every(name=>name==='none'));
+ assert.equal(await page.locator('.motion-toggle').isVisible(),false);
+ await page.emulateMedia({reducedMotion:'no-preference'});
+ assert.equal(await page.locator('.crew-atmosphere').getAttribute('aria-hidden'),'true');
+ assert.equal(await page.locator('.crew-atmosphere').evaluate(node=>getComputedStyle(node).pointerEvents),'none');
+ console.log('Liquid glass: motion pause/resume, persisted preference, reduced-motion and noninteractive decoration passed.');
  const initial={domNodes:await page.locator('*').count(),scripts:[...scripts],visibleHeadings:await page.locator('h2').evaluateAll(nodes=>nodes.filter(node=>node.getClientRects().length).map(node=>node.textContent))};
  const output=process.env.LKC_VISUAL_EVIDENCE_DIR;
  if(output){mkdirSync(output,{recursive:true});writeFileSync(resolve(output,process.argv.includes('--baseline')?'admin-baseline.json':'admin-current.json'),JSON.stringify(initial,null,2));await page.screenshot({path:resolve(output,process.argv.includes('--baseline')?'admin-baseline.png':'admin-overview.png')});}
@@ -140,19 +156,30 @@ try{
   assert.ok(!initial.scripts.some(path=>path.includes('AdminJobNotification')),'Notification panel must not load without a matching URL');
   assert.ok(!initial.scripts.some(path=>path.includes('ProductionAcceptanceRollbackConsole')),'Operational console must not load at startup');
   assert.equal(initial.visibleHeadings[0],'今すぐ確認');
+  // 認証APIに接続せず、ログイン時に追加される同じヘッダー操作の幅だけ検証する。
+  await page.locator('main>header').evaluate(header=>{const actions=document.createElement('div');actions.className='header-actions';actions.dataset.layoutFixture='true';for(const text of ['通知ON','ログアウト']){const button=document.createElement('button');button.className='ghost';button.textContent=text;actions.append(button);}header.append(actions);});
+  for(const width of [320,390,1280]){
+   await page.setViewportSize({width,height:900});
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`Signed-in header layout overflows at ${width}px`);
+   for(const button of await page.locator('main>header button').all()){const box=await button.boundingBox();assert.ok(box&&box.x>=0&&box.x+box.width<=width,'Header action must remain visible');}
+  }
+  await page.locator('[data-layout-fixture]').evaluate(node=>node.remove());
+  console.log('Signed-in header layout passed at 320/390/1280px with synthetic controls.');
   const nav=page.getByRole('navigation',{name:'管理業務'});
-  const expected={'概要':'今すぐ確認','案件':'案件一覧','報告書・再提出':'報告書確認・経費入力','スタッフ':'スタッフ一覧','通知・運用':'本番公開承認・全体停止'};
+  const sub=async label=>{if(await page.locator('.mobile-view-select').isVisible())await page.getByLabel('表示する画面',{exact:true}).selectOption({label});else await page.locator('.workspace-subnav').getByRole('button',{name:label,exact:true}).click();};
+  const expected={'概要':'今すぐ確認','案件':'案件一覧','報告書・再提出':'案件の資料・再提出','スタッフ':'スタッフ一覧','通知・運用':'管理者プッシュ通知'};
   for(const width of [390,1280]){
    await page.setViewportSize({width,height:900});
    for(const [label,heading] of Object.entries(expected)){
     await nav.getByRole('button',{name:label,exact:true}).click();
-    await page.getByRole('heading',{name:heading,exact:true}).waitFor();
+    await page.getByRole('heading',{name:heading,exact:true,level:2}).waitFor();
     assert.equal(await nav.getByRole('button',{name:label,exact:true}).getAttribute('aria-pressed'),'true');
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`${label} overflows at ${width}px`);
     if(output)await page.screenshot({path:resolve(output,`admin-${label}-${width}.png`)});
    }
   }
   await nav.getByRole('button',{name:'概要',exact:true}).click();
+  await sub('月次集計');
   const analytics=page.locator('.analytics-panel'),month=analytics.getByLabel('集計する年月');
   await analytics.getByText('集計対象：2026-07',{exact:true}).waitFor();
   assert.equal(await analytics.locator('.analytics-counts article').first().locator('strong').textContent(),'4件');
@@ -170,8 +197,12 @@ try{
   await page.getByText('デモ：管理者通知テストを送信しました。',{exact:true}).waitFor();
   await pushPanel.getByRole('button',{name:'この端末の通知をOFF',exact:true}).click();
   await pushPanel.getByRole('button',{name:'通知を有効にする',exact:true}).waitFor();
+  const consoleLoaded=page.waitForRequest(request=>request.url().includes('ProductionAcceptanceRollbackConsole'));
+  await sub('公開・停止設定');
+  await consoleLoaded;
   assert.ok([...scripts].some(path=>path.includes('ProductionAcceptanceRollbackConsole')),'Operational console must become available on demand');
   await nav.getByRole('button',{name:'概要',exact:true}).click();
+  await sub('書戻しの確認');
   const issuePanel=page.locator('.issue-panel');
   await issuePanel.getByRole('heading',{name:'シフト表の反映確認',exact:true}).waitFor();
   await issuePanel.getByRole('button',{name:'再読込',exact:true}).click();
@@ -225,9 +256,10 @@ try{
   await search.fill('船橋');
   if(output)await list.screenshot({path:resolve(output,'admin-job-review-list.png')});
   await list.getByRole('button',{name:'報告書を確認',exact:true}).click();
-  assert.equal(await page.getByLabel('資料・再提出の対象案件',{exact:true}).inputValue(),'2');
+  assert.equal(await page.locator('[aria-label="資料・再提出の対象案件"]').inputValue(),'2');
   assert.equal(await page.locator('[aria-labelledby="submission-materials-heading"]').evaluate(el=>el===document.activeElement),true);
   await nav.getByRole('button',{name:'案件',exact:true}).click();
+  await list.locator('summary').filter({hasText:'その他の操作'}).click();
   await page.getByRole('button',{name:'経費',exact:true}).click();
   await page.getByRole('heading',{name:'報告書確認・経費入力',exact:true}).waitFor();
   assert.equal(await nav.getByRole('button',{name:'報告書・再提出',exact:true}).getAttribute('aria-pressed'),'true');
@@ -236,30 +268,33 @@ try{
   assert.equal(await expense.getByLabel('交通費',{exact:true}).getAttribute('inputmode'),'decimal');
   await expense.getByLabel('交通費',{exact:true}).fill('250.5');
   await expense.locator('textarea').fill('合成の確認メモ');
-  const reviewPanel=page.locator('section.panel').filter({has:page.getByRole('heading',{name:'案件の資料・再提出',exact:true})});
+  const reviewPanel=page.locator('[aria-labelledby="submission-materials-heading"]');
+  await sub('資料・報告書・再提出');
   await page.getByLabel('資料・再提出の対象案件',{exact:true}).selectOption('1');
   await reviewPanel.locator('textarea').fill('保持する再提出メモ');
+  await sub('経費確認');
   const reportLink=expense.getByRole('button',{name:'この案件の報告書を確認',exact:true});
   page.once('dialog',dialog=>dialog.dismiss());
   await reportLink.focus();await page.keyboard.press('Enter');
-  assert.equal(await page.getByLabel('資料・再提出の対象案件',{exact:true}).inputValue(),'1');
+  assert.equal(await page.locator('[aria-label="資料・再提出の対象案件"]').inputValue(),'1');
   assert.equal(await reviewPanel.locator('textarea').inputValue(),'保持する再提出メモ');
   page.once('dialog',dialog=>dialog.accept());
   await reportLink.focus();await page.keyboard.press('Enter');
-  assert.equal(await page.getByLabel('資料・再提出の対象案件',{exact:true}).inputValue(),'2');
+  assert.equal(await page.locator('[aria-label="資料・再提出の対象案件"]').inputValue(),'2');
   assert.equal(await reviewPanel.locator('.resubmit-options select').inputValue(),'report');
   assert.equal(await reviewPanel.locator('textarea').inputValue(),'');
   assert.equal(await page.locator('[aria-labelledby="submission-materials-heading"]').evaluate(el=>el===document.activeElement),true);
-  assert.equal(await expense.getByLabel('交通費',{exact:true}).inputValue(),'250.5');
+  assert.equal(await expense.locator('input').first().inputValue(),'250.5');
   assert.equal(await expense.locator('textarea').inputValue(),'合成の確認メモ');
   const expenseExitDialog=page.waitForEvent('dialog');
   await page.evaluate(()=>{setTimeout(()=>location.reload(),0);});
   const expenseLeaving=await expenseExitDialog;assert.equal(expenseLeaving.type(),'beforeunload');await expenseLeaving.dismiss();
-  assert.equal(await expense.getByLabel('交通費',{exact:true}).inputValue(),'250.5');
+  assert.equal(await expense.locator('input').first().inputValue(),'250.5');
   assert.equal(await expense.locator('textarea').inputValue(),'合成の確認メモ');
+  await sub('経費確認');
   page.once('dialog',dialog=>dialog.dismiss());
   await expense.getByRole('button',{name:'読込',exact:true}).click();
-  assert.equal(await expense.getByLabel('交通費',{exact:true}).inputValue(),'250.5');
+  assert.equal(await expense.locator('input').first().inputValue(),'250.5');
   assert.equal(await expense.locator('textarea').inputValue(),'合成の確認メモ');
   await expense.getByRole('button',{name:'一時保存',exact:true}).click();
   assert.equal(await expense.locator('.mini-tag').innerText(),'一時保存');
@@ -269,12 +304,13 @@ try{
   page.once('dialog',dialog=>dialog.accept());
   await expense.getByRole('button',{name:'確認完了・書込待ちへ',exact:true}).click();
   assert.equal(await expense.locator('.mini-tag').innerText(),'書込待ち');
-  assert.equal(await expense.getByLabel('交通費',{exact:true}).inputValue(),'250.5');
+  assert.equal(await expense.locator('input').first().inputValue(),'250.5');
   assert.equal(await expense.getByRole('button',{name:'確認完了・書込待ちへ',exact:true}).isDisabled(),true);
   await expense.getByRole('button',{name:'読込',exact:true}).click();
   assert.equal(await expense.getByLabel('交通費',{exact:true}).isEnabled(),true);
   if(output)await expense.screenshot({path:resolve(output,'admin-expense-recovery.png')});
-  const materials=page.locator('section.panel').filter({has:page.getByRole('heading',{name:'案件の資料・再提出',exact:true})});
+  await sub('資料・報告書・再提出');
+  const materials=page.locator('[aria-labelledby="submission-materials-heading"]');
   assert.match(await materials.getByLabel('提出ごとの処理状態').innerText(),/処理完了/);
   await materials.getByRole('button',{name:'再送対象に選ぶ',exact:true}).first().click();
   assert.equal(await materials.locator('.selected-file-note').count(),1);
@@ -291,7 +327,7 @@ try{
   await materials.locator('textarea').fill('未送信の補足');
   page.once('dialog',dialog=>dialog.dismiss());
   await page.getByLabel('資料・再提出の対象案件',{exact:true}).selectOption('1');
-  assert.equal(await page.getByLabel('資料・再提出の対象案件',{exact:true}).inputValue(),'2');
+  assert.equal(await page.locator('[aria-label="資料・再提出の対象案件"]').inputValue(),'2');
   assert.equal(await materials.locator('textarea').inputValue(),'未送信の補足');
   page.once('dialog',dialog=>dialog.accept());
   await page.getByLabel('資料・再提出の対象案件',{exact:true}).selectOption('1');
@@ -303,8 +339,10 @@ try{
   await devices.getByRole('heading').waitFor();assert.equal(await devices.locator('.device-grid article').count(),2);
   await devices.getByRole('button',{name:'再読込',exact:true}).click();
   assert.equal(await devices.locator('.device-grid article').count(),2);
+  await nav.getByRole('button',{name:'スタッフ',exact:true}).click();
   page.once('dialog',dialog=>dialog.accept());
   await page.getByRole('button',{name:'全ログアウト',exact:true}).first().click();
+  await sub('ログイン端末');
   await devices.getByText('ログアウト済み',{exact:true}).first().waitFor();
   assert.equal(await devices.getByText('ログアウト済み',{exact:true}).count(),2);
   if(output)await devices.screenshot({path:resolve(output,'admin-staff-devices.png')});
@@ -333,7 +371,9 @@ try{
   assert.equal(await page.locator('#job-safe-edit').getByLabel('編集対象案件',{exact:true}).inputValue(),'2');
   assert.equal(new URL(page.url()).pathname,'/');
   const jobList=page.locator('section.panel').filter({has:page.getByRole('heading',{name:'案件一覧',exact:true})});
+  await sub('案件一覧');
   assert.match(await jobList.locator('tbody tr').first().textContent(),/イオン船橋/);
+  await sub('案件の編集');
   const editPanel=page.locator('#job-safe-edit');
   assert.equal(await editPanel.getByRole('button',{name:'変更はありません',exact:true}).isDisabled(),true);
   await editPanel.getByText('表示中の内容に変更はありません。',{exact:true}).waitFor();
@@ -369,6 +409,7 @@ try{
   await editPanel.getByLabel('編集対象案件',{exact:true}).selectOption('2');
   await editPanel.getByLabel('編集対象案件',{exact:true}).selectOption('1');
   assert.equal(await editPanel.getByLabel('請求 基本単価',{exact:true}).inputValue(),'12000');
+  await sub('資料・CSV出力');
   const exportsPanel=page.locator('section.panel').filter({has:page.getByRole('heading',{name:'メーカー・クライアント別資料',exact:true})});
   await exportsPanel.getByLabel('開始',{exact:true}).fill('2026-01-01');await exportsPanel.getByLabel('終了',{exact:true}).fill('2026-12-31');
   const downloadReady=page.waitForEvent('download');await exportsPanel.getByRole('button',{name:'CSVを出力',exact:true}).click();

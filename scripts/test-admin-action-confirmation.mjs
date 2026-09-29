@@ -12,7 +12,7 @@ const code=ts.transpileModule(source.slice(start>=0?start:fallback,end),{compile
 function setup({apiFailure=false,refreshFailure=false,data={},demo=false,apiWait=async()=>{},refreshWait=async()=>{}}={}){
  const state={messages:[],calls:[],refreshes:0,revision:2,busy:false,jobs:[{id:'j',workDate:'2026-09-20'}],form:{workDate:'2026-09-20',slots:'1',basePay:'',publishAt:''}};
  const form={...state.form};
- const deps={jobEditBaselineRef:{current:{}},jobEditContextRef:{current:0},blankJobEdit:{},setTimeout:()=>{},setJobEditId:id=>state.editId=id,setJobEdit:value=>state.edit=typeof value==="function"?value(state.edit??deps.jobEdit):value,auth:{currentUser:{}},adminJobActionRef:{current:null},firebaseConfigured:!demo,functions:{},window:{confirm:()=>true,prompt:(_label,value)=>value},
+ const deps={openWorkspace:(group,view)=>{state.navigation={group,view};},jobEditBaselineRef:{current:{}},jobEditContextRef:{current:0},blankJobEdit:{},setTimeout:()=>{},setJobEditId:id=>state.editId=id,setJobEdit:value=>state.edit=typeof value==="function"?value(state.edit??deps.jobEdit):value,auth:{currentUser:{}},adminJobActionRef:{current:null},firebaseConfigured:!demo,functions:{},window:{confirm:()=>true,prompt:(_label,value)=>value},
   jobForm:form,blankJobForm:{slots:'1'},jobEditId:'j',jobEditRevision:2,jobEdit:{assignedStaffId:'',clientName:'Synthetic'},invoiceLabels:[],staffPayLabels:[],staff:[],
   setMessage:m=>state.messages.push(m),setJobCreateBusy:b=>state.busy=b,setJobEditBusy:b=>state.busy=b,
   setJobForm:f=>state.form=f(state.form),setJobs:f=>state.jobs=f(state.jobs),setJobEditRevision:r=>state.revision=typeof r==='function'?r(state.revision):r,
@@ -104,8 +104,8 @@ console.log(`Admin action confirmation: ${cases} cases passed (synthetic API; no
 
 for(const id of ['j','other']){
  const test=setup();const before=test.deps.jobEditBaselineRef.current;test.deps.window.confirm=()=>false;
- assert.equal(test.handlers.loadJobEdit({id,revision:9}),false);assert.equal(test.deps.jobEditContextRef.current,0);assert.equal(test.state.revision,2);assert.equal(test.state.edit,undefined);assert.equal(test.deps.jobEditBaselineRef.current,before);
- test.deps.window.confirm=()=>true;assert.equal(test.handlers.loadJobEdit({id,revision:9,clientName:'New'}),true);assert.equal(test.state.edit.clientName,'New');assert.equal(test.deps.jobEditBaselineRef.current,test.state.edit);
+ assert.equal(test.handlers.loadJobEdit({id,revision:9}),false);assert.equal(test.deps.jobEditContextRef.current,0);assert.equal(test.state.navigation,undefined);assert.equal(test.state.revision,2);assert.equal(test.state.edit,undefined);assert.equal(test.deps.jobEditBaselineRef.current,before);
+ test.deps.window.confirm=()=>true;assert.equal(test.handlers.loadJobEdit({id,revision:9,clientName:'New'}),true);assert.equal(test.state.edit.clientName,'New');assert.deepEqual(test.state.navigation,{group:'jobs',view:'edit'});assert.equal(test.deps.jobEditBaselineRef.current,test.state.edit);
 }
 for(const options of [{},{demo:true},{refreshFailure:true},{apiFailure:true}]){
  const test=setup(options);await test.handlers.saveJobEdit();

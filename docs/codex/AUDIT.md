@@ -296,3 +296,26 @@ PR124の残窓を固定Drive ID予約・同じIDの内容照合で補強。30合
 processSafeSheetWrite / updateExpenseReviewFromQueue の切替時は、実Triggerの4フィルターを厳密に照合した場合のみ、別のsheetRowCreateQueue配送の保留を前提から外す。同一キュー2配送の保留・保持期間、終了/復旧証拠、全資源の不変照合、専用保護経路は維持。他4workerの前提は変更なし。関連27テスト成功（キューの混同・共同監視片側未保留・対象外配送変更の拒否を含む）。実クラウド変更なし。
 
 構成検査は必要な両配送の保留・保持期間の判定を一度に返す。公開結果へ送信先や生のIAM/環境値は出さず、終了証拠の成立とも扱わない。
+
+
+## 2026-09-29: Focused admin workspaces
+- SCOPE: Replace vertically stacked admin panels with a desktop sidebar and mobile view selector; route job, report, expense and staff actions to their relevant view.
+- FILES_CHANGED: AdminNavigation.tsx, App.tsx, AdminJobSearchControls.tsx, styles.css; related browser navigation tests.
+- CHECKS_RUN: Admin build; 390/1280 browser business journeys, input retention and preview navigation; import snapshot browser tests; startup guards and bundle budgets.
+- CHECKS_RESULT: Passed. Each selected task shows only its relevant panel, with draft state retained after navigation. Job rows group secondary actions and keep store/staff readable.
+- DEPLOY_PERFORMED: Local loopback preview refreshed with existing public client configuration; no cloud deployment in this change.
+- CLOUD_RESOURCES_CHANGED: None. No authenticated business calls, original-sheet writes, imports or real messages.
+- BLOCKERS: Existing worker migration and real-business acceptance remain separate and unresolved. Original preview still returns the existing first-20 sample contract; paging is pending.
+- NEXT_SAFE_ACTION: Exact-head required CI, ordinary merge, then the approved expiring Hosting Preview; no Live promotion.
+
+### Liquid glass visual finish
+- SCOPE: Aqua/lavender/pink glass surfaces, restrained CSS water-light/orb motion, persisted pause control and reduced-motion support. Decorative layers do not intercept business controls.
+- FILES_CHANGED: AdminAtmosphere.tsx, App.tsx, styles.css; motion/browser regression and action-confirmation fixture.
+- CHECKS_RUN: Admin build; 390/1280 browser workflows and visual inspection; pause/resume/reload/reduced-motion; action confirmation; configured bundle budget; 103 local HTTP assets matched to build.
+- CHECKS_RESULT: Passed. Configured entry 187.6 KiB raw / 53.3 KiB gzip; no animation dependencies or remote media. Existing confirmation cancellation prevents navigation.
+- DEPLOY_PERFORMED: Localhost:4184 refreshed; cloud release pending exact-head CI.
+- CLOUD_RESOURCES_CHANGED: None.
+- BLOCKERS: Previous worker migration and real-business acceptance remain pending.
+- NEXT_SAFE_ACTION: Push final PR head, required CI, normal merge, main CI and expiring preview.
+
+- Narrow authenticated-header follow-up: notification/logout controls fit at 320/390/1280px; verified with synthetic controls and no authenticated API calls.

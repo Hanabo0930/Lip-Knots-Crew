@@ -346,3 +346,11 @@ processSafeSheetWrite / updateExpenseReviewFromQueue の切替時は、実Trigge
 - 根拠: Firebase公式環境設定 https://firebase.google.com/docs/functions/config-env#secret_parameters 。固定CLI15.24.0 prepare.tsのmatchingBackendに対するsecret検証、params.tsのグローバルSecretParam解決を照合。
 - DEPLOY_PERFORMED: 修正の配備前。CLOUD_RESOURCES_CHANGED: 本修正では0。IAM/Secret Manager/配備保護/allowlistの変更なし。
 - BLOCKERS / NEXT_SAFE_ACTION: exact HEAD正式CI→通常merge→main CI→既存保護経路からpreviewShiftImportのみ反映。実業務呼出・原本書込・通知・Liveなし。
+
+
+## 2026-09-29: 案件受信APIの正式配備前ガード接続
+- SCOPE: receiveCaseMailMessage / receiveCaseMailMessagesの既存実装を正式source guardへ登録。管理者・会社/本人・固定STAGING・固定受信箱・機能停止・実行者失効・5件上限・受信後の再確認・秘密バインドを照合。
+- FILES_CHANGED: scripts/automation/check-function-auth-guards.mjs、test-case-mail-auth-guard.mjs、本記録。
+- CHECKS_RUN / RESULT: 既存候補確認7 APIを含む正常系/条件破壊検出と、Functions automation safety関連回帰成功。配備許可リストは維持し、9 APIの未承認配備は引き続き拒否。実Gmail・業務DB・原本を使用しない。
+- DEPLOY_PERFORMED / CLOUD_RESOURCES_CHANGED: なし。
+- BLOCKERS / NEXT_SAFE_ACTION: 新規9 APIのSTAGING配備範囲をユーザーへ一度質問済み。IAM/Secret追加・実メール取得/保存・停止解除・原本変更・Liveは今回質問の対象外。回答待ちでも通常PR/CIを進める。

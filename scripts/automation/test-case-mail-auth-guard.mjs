@@ -6,7 +6,7 @@ const read = path => fs.readFileSync(new URL("../../" + path, import.meta.url), 
 const guard = read("scripts/automation/check-function-auth-guards.mjs").replace(/^import .*;\n/gm, "");
 const names = ["listCaseMailReceipts", "getCaseMailReceipt", "getCaseMailTargetPreview",
   "confirmCaseMailTarget", "holdCaseMailTarget", "resolveCaseMailTargetHold", "confirmCaseMailReview"];
-const sources = Object.fromEntries(["review", "resolution", "collision", "target-hold"].map(module =>
+const sources = Object.fromEntries(["review", "resolution", "collision", "target-hold", "receive", "intake", "cloud-auth"].map(module =>
   ["functions/src/case-mail-" + module + ".ts", read("functions/src/case-mail-" + module + ".ts")]));
 let cases = 0;
 function run(name, change) {
@@ -102,6 +102,44 @@ reject("confirmCaseMailReview", "view.reviewVersion!==input.reviewVersion", "fal
 reject("holdCaseMailTarget", "publishable:false,recruitmentStopped:true", "publishable:true,recruitmentStopped:false", "target-hold", null);
 reject("resolveCaseMailTargetHold", "publishable:false,recruitmentStopped:true", "publishable:true,recruitmentStopped:false");
 reject("confirmCaseMailReview", "publishable:false,recruitmentStopped:true", "publishable:true,recruitmentStopped:false");
+const receiverNames = ["receiveCaseMailMessage", "receiveCaseMailMessages"];
+for (const name of receiverNames) {
+  assert.deepEqual(run(name), { passed: true, exitCode: 0 }, name); cases++;
+  reject(name, 'requireAdmin(request);', 'unverified(request);', 'receive');
+  reject(name, 'requireAdmin(request);', '/* requireAdmin(request); */ unverified(request);', 'receive');
+  reject(name, 'requireAdmin(request);', 'await db.collection("unscoped").get(); requireAdmin(request);', 'receive');
+  reject(name, 'receiverFor(request, input.data)', 'receiverFor(request, request.data)', 'receive');
+  reject(name, 'return receiveError(error)', 'throw error', 'receive');
+  for (const [before, after] of [
+    ['from "./utils"', 'from "./unverified-utils"'],
+    ['secrets: [extractorSecretName]', 'secrets: []'],
+    ['companyFromClaims(session.token)', 'request.data.companyId'],
+    ['input.expectedCompanyId !== companyId', 'false'],
+    ['input.expectedActorUid !== session.uid', 'false'],
+    ['process.env.APP_ENVIRONMENT !== "staging"', 'false'],
+    ['process.env.EXPECTED_FIREBASE_PROJECT_ID !== "lip-knots-crew-staging"', 'false'],
+    ['parsed.data.companyId !== companyId', 'false'],
+    ['mailbox: z.literal("info@lipknots.com")', 'mailbox: z.string()'],
+    ['await assertCaseMailReceiverEnabled(config);', '/* await assertCaseMailReceiverEnabled(config); */'],
+  ]) reject(name, before, after, 'receive', null);
+  for (const [before, after] of [
+    ['current.active !== true', 'false'], ['current.revision !== config.principalRevision', 'false'],
+    ['feature.data()?.caseMailIntakeEnabled !== true', 'false'],
+    ['await assertProductionOperational(config.companyId);', ''],
+    ['return db.runTransaction(async tx => { await checkReceiver(tx, config); const previous', 'return db.runTransaction(async tx => { const previous'],
+  ]) reject(name, before, after, 'intake', null);
+  reject(name, 'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.send', 'cloud-auth', null);
+  reject(name, 'const secret = extractorSecret(); if (!/^[A-Za-z0-9_-]{43,128}$/.test(secret))', 'const secret = extractorSecret(); if (false)', 'cloud-auth', null);
+}
+for (const [before, after] of [
+  ['profile.emailAddress.toLowerCase() !== receiver.config.mailbox', 'false'],
+  ['maxResults:5', 'maxResults:100'],
+  ['.max(5)', '.max(100)'],
+  ['new Set(page.messages.map(item=>item.id)).size !== page.messages.length', 'false'],
+  ['await assertCaseMailReceiverEnabled(receiver.config);', ''],
+]) reject('receiveCaseMailMessages', before, after, 'receive');
+names.push(...receiverNames);
+
 // 認証ガードへの登録だけで配備許可を拡張しない。許可拡張時は別工程でこの期待値も審査する。
 for (const name of names) {
   assert.equal(safetyConfig.allowedFunctions.includes(name), false);

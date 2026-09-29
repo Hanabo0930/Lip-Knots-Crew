@@ -22,22 +22,22 @@ assert.equal(createShiftPreviewRows([{...makeJob(0),storeName:"あ".repeat(PREVI
 const source=fs.readFileSync("functions/src/shift-import.ts","utf8");
 const schema=source.slice(source.indexOf("const ImportRequestSchema"),source.indexOf("const ColumnSchema"));
 const handler=source.slice(source.indexOf("export const previewShiftImport"),source.indexOf("export const syncShiftSheetsReadOnly"));
-const calls=[];const entry={exports:{},z:require("zod").z,onCall:(_options,fn)=>fn,requireAdmin:request=>{if(!request.auth)throw Error("unauthenticated");return {token:{company:"fixture-company"}};},companyFromClaims:token=>token.company,executeShiftImport:(...args)=>calls.push(args)};
+const calls=[];const entry={exports:{},z:require("zod").z,onCall:(_options,fn)=>fn,requireAdmin:request=>{if(!request.auth)throw Error("unauthenticated");return {token:{company:"fixture-company"}};},companyFromClaims:token=>token.company,executeShiftImport:(...args)=>{calls.push(args);return {previewRows:{rows:[{caseId:"fixture"}],complete:true}};}};
 runInNewContext(compile(schema+handler),entry);
 await assert.rejects(entry.exports.previewShiftImport({data:{includePreviewRows:true}}));assert.equal(calls.length,0);
-await entry.exports.previewShiftImport({auth:true,data:{sheetNames:["2099.10"],includePreviewRows:true}});assert.equal(JSON.stringify(calls.pop()),JSON.stringify(["fixture-company","preview",["2099.10"],true]));
-await entry.exports.previewShiftImport({auth:true,data:{}});assert.equal(calls.pop()[3],false);
+const detailed=await entry.exports.previewShiftImport({auth:true,data:{sheetNames:["2099.10"],includePreviewRows:true}});assert.equal(detailed.previewRows.rows.length,1);assert.equal(JSON.stringify(calls.pop()),JSON.stringify(["fixture-company","preview",["2099.10"]]));
+const legacy=await entry.exports.previewShiftImport({auth:true,data:{}});assert.equal(Object.hasOwn(legacy,"previewRows"),false);assert.equal(calls.pop().length,3);
 await assert.rejects(entry.exports.previewShiftImport({auth:true,data:{includePreviewRows:"true"}}));assert.equal(calls.length,0);
 const a=source.indexOf("async function executeShiftImport("),b=source.indexOf("async function loadConfig(",a);assert.ok(a>=0&&b>a);
 const jobs=Array.from({length:169},(_,i)=>makeJob(i));
-for(const include of [false,true]){
+{
  let reads=0;const deny=()=>{throw Error("Unexpected write or commit dependency");};
  class HttpsError extends Error{constructor(code,message){super(message);this.code=code;}}
  const context={exports:{},HttpsError,Date,createShiftPreviewRows,loadConfig:async()=>({enabled:false,spreadsheetId:"fixture-sheet",columns:{caseId:"BC"},readRangeEndColumn:"BC",maxRowsPerSheet:10000}),assertProductionOperational:deny,db:{collection:deny},acquireSyncLock:deny,releaseSyncLock:deny,writeJobsAndLocks:deny,buildStaffNameIndex:deny,createReadOnlySheetsClient:async()=>({}),listSpreadsheetSheets:async()=>[{title:"2099.10",sheetId:1}],selectImportSheets:rows=>rows,resolveSheetCaseIdColumn:()=>"BC",readShiftSheet:async()=>{reads++;return[];},parseShiftSheet:()=>({jobs:structuredClone(jobs),summary:{warnings:[]}}),captureEditSource:()=>({}),summarize:()=>({jobs:169,sheets:1,unresolvedStaff:0,writes:0})};
  runInNewContext(compile(source.slice(a,b)+"\nexports.executeShiftImport=executeShiftImport;"),context);
- const result=await context.exports.executeShiftImport("fixture-company","preview",["2099.10"],include);
- assert.equal(reads,1);assert.equal(result.samples.length,20);assert.equal(result.previewRows?.rows.length,include?169:undefined);assert.equal(result.runId,null);assert.equal(result.totals.writes,0);
- await assert.rejects(context.exports.executeShiftImport("fixture-company","commit",["2099.10"],true),/Unexpected write or commit dependency/);
+ const result=await context.exports.executeShiftImport("fixture-company","preview",["2099.10"]);
+ assert.equal(reads,1);assert.equal(result.samples.length,20);assert.equal(result.previewRows?.rows.length,169);assert.equal(result.runId,null);assert.equal(result.totals.writes,0);
+ await assert.rejects(context.exports.executeShiftImport("fixture-company","commit",["2099.10"]),/Unexpected write or commit dependency/);
 }
 const parser={exports:{}};runInNewContext(compile(fs.readFileSync("apps/admin/src/shift-import-preview.ts","utf8")),parser);
 const full={spreadsheetId:"synthetic-spreadsheet",totals:{sheets:1,jobs:169,unresolvedStaff:0},warnings:[],samples:createShiftPreviewRows(jobs.slice(0,20)).rows,previewRows:createShiftPreviewRows(jobs)};

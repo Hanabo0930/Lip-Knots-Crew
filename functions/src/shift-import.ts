@@ -120,7 +120,9 @@ export const previewShiftImport = onCall(
     const session = requireAdmin(request);
     const companyId = companyFromClaims(session.token);
     const input = PreviewRequestSchema.parse(request.data ?? {});
-    return executeShiftImport(companyId, "preview", input.sheetNames, input.includePreviewRows === true);
+    const result = await executeShiftImport(companyId, "preview", input.sheetNames);
+    if (input.includePreviewRows !== true) delete result.previewRows;
+    return result;
   }
 );
 
@@ -190,8 +192,7 @@ export const getShiftSyncStatus = onCall(async (request) => {
 async function executeShiftImport(
   companyId: string,
   mode: ImportMode,
-  requestedSheets?: string[],
-  includePreviewRows = false
+  requestedSheets?: string[]
 ): Promise<ImportExecutionResult> {
   if (mode === "commit") await assertProductionOperational(companyId);
   const config = await loadConfig(companyId);
@@ -317,7 +318,7 @@ async function executeShiftImport(
       sheets: summaries,
       totals,
       warnings: warnings.slice(0, 200),
-      ...(mode === "preview" && includePreviewRows ? { previewRows:createShiftPreviewRows(allJobs) } : {}),
+      ...(mode === "preview" ? { previewRows:createShiftPreviewRows(allJobs) } : {}),
       samples: allJobs.slice(0, 20).map((job) => ({
         caseId: job.caseId,
         sheetName: job.sheetRef.sheetName,

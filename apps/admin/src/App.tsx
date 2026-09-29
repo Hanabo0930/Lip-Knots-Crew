@@ -1,3 +1,4 @@
+import AdminNavigation, { adminWorkspaces, workspaceViews, viewKey, type AdminWorkspace } from "./AdminNavigation";
 import { parseShiftImportPreview, previewSheetNames, type ShiftImportPreview } from "./shift-import-preview";
 import { submitNativeCreation } from "./native-creation-client";
 import { expenseReadinessMessage } from "./expense-readiness";
@@ -790,23 +791,15 @@ const demoJobs: Job[] = [
   { id:"4", workDate:"2026-07-08", clientName:"〇〇デモ", storeName:"イオン幕張", makerName:"〇〇食品", assignedStaffName:"Aさん", assignedStaffId:"s1", status:"cancelled", cancelled:true, cancellationReason:"メーカー都合", cancellationReasonCategory:"maker", cancellationFinancialTreatment:"invoice_only", financials:{clientChargeTotal:15000,clientChargeAdditionsTotal:0,staffPaymentTotal:10000,subcontractorTotal:0} },
  ];
 
-type AdminWorkspace = "overview" | "jobs" | "submissions" | "staff" | "operations";
-const adminWorkspaces: {id:AdminWorkspace;label:string;description:string}[] = [
-  {id:"overview",label:"概要",description:"未対応の業務と今月の状況を確認します。"},
-  {id:"jobs",label:"案件",description:"原本の読取結果を確認し、取込済み案件の募集・編集・資料出力を行います。"},
-  {id:"submissions",label:"報告書・再提出",description:"提出画像の確認、経費入力、再提出依頼を行います。"},
-  {id:"staff",label:"スタッフ",description:"登録情報・稼働実績・ログイン端末を確認します。"},
-  {id:"operations",label:"通知・運用",description:"通知・同期・導入・公開の設定を確認します。"},
-];
 class PanelBoundary extends Component<{children:ReactNode},{failed:boolean}> {
   state={failed:false};
   static getDerivedStateFromError(){return {failed:true};}
   render(){return this.state.failed?<p role="alert">この部分を表示できませんでした。他の画面へは移動できます。必要な入力内容を控えてから、ページを再読み込みしてください。</p>:this.props.children;}
 }
-function WorkspacePanel({group,active,visited,ready,children}:{group:AdminWorkspace;active:AdminWorkspace;visited:AdminWorkspace[];ready:boolean;children:ReactNode}) {
+function WorkspacePanel({group,view,activeView,visitedViews,active,visited,ready,children}:{group:AdminWorkspace;view:string;activeView:string;visitedViews:string[];active:AdminWorkspace;visited:AdminWorkspace[];ready:boolean;children:ReactNode}) {
   // 初回表示までマウントせず、切替後は入力内容と選択状態を保持する。
-  if(!visited.includes(group)||!ready)return null;
-  return <div className="workspace-panel" hidden={active!==group}><PanelBoundary>{children}</PanelBoundary></div>;
+  if(!visited.includes(group)||!visitedViews.includes(viewKey(group,view))||!ready)return null;
+  return <div className="workspace-panel" data-view={viewKey(group,view)} hidden={active!==group||activeView!==view}><PanelBoundary>{children}</PanelBoundary></div>;
 }
 
 export default function App() {
@@ -817,10 +810,23 @@ export default function App() {
   const [operationsLoadState,setOperationsLoadState]=useState<"idle"|"loading"|"ready"|"error">("idle");
   const [operationsRetry,setOperationsRetry]=useState(0);
   const operationsRequested=visitedWorkspaces.includes("operations");
-  function openWorkspace(next:AdminWorkspace){
+  const [workspaceView,setWorkspaceView]=useState("home");
+  const [visitedViews,setVisitedViews]=useState<string[]>(["overview:home"]);
+  function openWorkspace(next:AdminWorkspace,view=workspaceViews[next][0].id){
+    if(!workspaceViews[next].some(item=>item.id===view))return;
+    setWorkspaceView(view);
+    setVisitedViews(current=>current.includes(viewKey(next,view))?current:[...current,viewKey(next,view)]);
     setVisitedWorkspaces(current=>current.includes(next)?current:[...current,next]);
     setWorkspace(next);
   }
+  useEffect(()=>{
+    const frame=requestAnimationFrame(()=>{
+      if(document.activeElement?.closest(".workspace-panel:not([hidden])"))return;
+      document.getElementById("workspace-heading")?.focus({preventScroll:true});
+      window.scrollTo({top:0,behavior:"instant"});
+    });
+    return()=>cancelAnimationFrame(frame);
+  },[workspace,workspaceView]);
   const [jobs, setJobs] = useState<Job[]>(firebaseConfigured ? [] : demoJobs);
   const [message, setMessage] = useState("");
   const [queryText, setQueryText] = useState("");
@@ -954,10 +960,10 @@ export default function App() {
   const reviewPanelRef=useRef<HTMLElement|null>(null);
   const [reviewFocusRequest,setReviewFocusRequest]=useState(0);
   useEffect(()=>{
-    if(!reviewFocusRequest||workspace!=="submissions")return;
+    if(!reviewFocusRequest||workspace!=="submissions"||workspaceView!=="review")return;
     reviewPanelRef.current?.focus({preventScroll:true});
     reviewPanelRef.current?.scrollIntoView({block:"start"});
-  },[reviewFocusRequest,workspace]);
+  },[reviewFocusRequest,workspace,workspaceView]);
   const [timelineStatus,setTimelineStatus]=useState<"idle"|"loading"|"ready"|"error">("idle");
   const [timelineLoadedKey,setTimelineLoadedKey]=useState("");
   const timelineKey=JSON.stringify([user?.uid??"",selectedAdminJobId,resubmitType]);
@@ -2457,6 +2463,7 @@ async function previewRowCreation() {
     if(firebaseConfigured&&(!functions||!auth?.currentUser||!adminSessionReady))return;
     const version=++staffDeviceVersionRef.current,user=auth?.currentUser;
     const isCurrent=()=>version===staffDeviceVersionRef.current&&auth?.currentUser===user;
+    openWorkspace("staff","devices");
     staffDeviceProfileRef.current=profile;setDeviceStaffName(profile.displayName);setStaffDevices([]);setStaffDeviceStatus("loading");
     try{
       const devices=!firebaseConfigured?[{id:"demo1",label:"iPhone",platform:"iOS",active:true},{id:"demo2",label:"自宅PC",platform:"Windows",active:true}]:((await httpsCallable(functions!,"getStaffDevices")({staffId:profile.id})).data as {devices?:StaffDevice[]}|null)?.devices;
@@ -2465,7 +2472,7 @@ async function previewRowCreation() {
       setStaffDevices(devices);setStaffDeviceStatus("ready");
     }catch(error){if(isCurrent()){setStaffDeviceStatus("error");if(propagateError)throw error;}}
   }
-  function closeStaffDevices(){staffDeviceVersionRef.current++;staffDeviceProfileRef.current=null;setDeviceStaffName("");setStaffDevices([]);setStaffDeviceStatus("idle");}
+  function closeStaffDevices(){openWorkspace("staff");staffDeviceVersionRef.current++;staffDeviceProfileRef.current=null;setDeviceStaffName("");setStaffDevices([]);setStaffDeviceStatus("idle");}
   function reloadStaffDevices(){if(staffDeviceProfileRef.current)void openStaffDevices(staffDeviceProfileRef.current);}
 
   async function revokeStaffDevices(profile: StaffProfile) {
@@ -2557,7 +2564,7 @@ async function previewRowCreation() {
       const preview=parseShiftImportPreview(response.data);
       if(!current())return;
       setShiftPreview(preview);
-      openWorkspace("jobs");
+      openWorkspace("jobs","import");
       setSyncSummary(`${firebaseConfigured?"":"デモ："}${preview.totalSheets}タブ / ${preview.totalJobs}案件`);
       setMessage(firebaseConfigured?"原本の読取結果を下に表示しました。アプリへの取込はまだ行っていません。":"デモの一覧表示です。実際のシフト表は読み取っていません。");
     } catch(error) {
@@ -2843,7 +2850,7 @@ async function previewRowCreation() {
   async function loadExpenseReview(jobId:string,focusPanel=false) {
     const previous=expenseReadyRef.current;
     if(previous?.snapshot&&previous.user===(auth?.currentUser??null)&&previous.snapshot!==JSON.stringify([expenseValues,expenseNote])&&!window.confirm("未保存の経費入力があります。破棄して読み込みますか？"))return;
-    openWorkspace("submissions");
+    openWorkspace("submissions","expenses");
     if(focusPanel)setExpenseFocusRequest(value=>value+1);
     const version=++expenseVersionRef.current;
     const user=auth?.currentUser??null;
@@ -2958,6 +2965,7 @@ async function previewRowCreation() {
   }
 
   function prepareCancellation(job: Job) {
+    openWorkspace("jobs","cancel");
     setCancellationJobId(job.id);
     setCancellationReasonCategory(job.cancellationReasonCategory || "maker");
     setCancellationTreatment(job.cancellationFinancialTreatment || "invoice_and_pay");
@@ -3010,6 +3018,7 @@ async function previewRowCreation() {
 
   async function loadStaffPerformance(profile: StaffProfile,range={from:"2025-10-01",through:"2099-12-31"}) {
     if(firebaseConfigured&&(!functions||!auth?.currentUser||!adminSessionReady))return;
+    openWorkspace("staff","performance");
     const version=++performanceVersionRef.current,user=auth?.currentUser;
     const isCurrent=()=>version===performanceVersionRef.current&&auth?.currentUser===user;
     setPerformance(null);
@@ -3044,7 +3053,7 @@ async function previewRowCreation() {
   }
 
 
-  function closeStaffPerformance(){performanceVersionRef.current++;setPerformance(null);setPerformanceBusy(false);}
+  function closeStaffPerformance(){openWorkspace("staff");performanceVersionRef.current++;setPerformance(null);setPerformanceBusy(false);}
 
 function updateJobForm<K extends keyof JobForm>(key:K,value:JobForm[K]) {
   setJobForm((current)=>({...current,[key]:value}));
@@ -3215,6 +3224,7 @@ async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"
 
 function loadJobEdit(job:Job) {
   if(Object.keys(jobEdit).some(key=>jobEdit[key as keyof JobEditForm]!==jobEditBaselineRef.current[key as keyof JobEditForm])&&!window.confirm("未保存の案件編集を破棄して案件を切り替えますか？"))return false;
+  openWorkspace("jobs","edit");
   jobEditContextRef.current++;
   setMessage("");
   setJobEditId(job.id);
@@ -3387,7 +3397,7 @@ function downloadCsv(filename:string,content:string) {
   );
 
   return (
-    <main className={`shell ${productionBlocked ? "production-blocked" : ""}`}>
+    <main className={`shell admin-shell ${productionBlocked ? "production-blocked" : ""}`}>
       <header>
         <img src="/logo.png" alt="Lip Knots" />
         <div><strong>Lip Knots Crew 管理画面</strong><small>{user?.email ?? "デモ管理者"}</small></div>
@@ -3398,25 +3408,29 @@ function downloadCsv(filename:string,content:string) {
           </div>
         )}
       </header>
+      <AdminNavigation workspace={workspace} view={workspaceView} onSelect={openWorkspace}/>
+      <div className="workspace-content">
       {!firebaseConfigured&&<div className="demo-mode-banner"><strong>LIVE DEMO v5.6</strong><span>実データ送信なし。案件・報告書・スタッフの業務画面を確認できます。</span></div>}
-      {message && <div className="message">{message}{shiftPreview&&workspace!=="jobs"&&<button className="ghost" onClick={()=>{openWorkspace("jobs");requestAnimationFrame(()=>{const panel=document.getElementById("shift-import");panel?.focus({preventScroll:true});panel?.scrollIntoView({block:"start"});});}}>原本の読取結果を見る</button>}</div>}
+      {message && <div className="message">{message}{shiftPreview&&(workspace!=="jobs"||workspaceView!=="import")&&<button className="ghost" onClick={()=>{openWorkspace("jobs","import");requestAnimationFrame(()=>{const panel=document.getElementById("shift-import");panel?.focus({preventScroll:true});panel?.scrollIntoView({block:"start"});});}}>原本の読取結果を見る</button>}</div>}
       {productionBlocked && (
         <div className={`production-stop-banner ${productionControl?.control.emergencyLock ? "locked" : "waiting"}`}>
           <strong>{productionControl?.control.emergencyLock ? "全体停止ロック作動中" : "本番公開ロック中"}</strong>
           <span>{productionControl?.control.emergencyLock ? "アプリから解除できません。復旧リリースが必要です。" : "社長承認と別管理者による有効化が完了するまで業務処理は停止します。"}</span>
         </div>
       )}
-      <nav className="workspace-nav" aria-label="管理業務">
-        {adminWorkspaces.map(item=><button type="button" key={item.id} aria-pressed={workspace===item.id} onClick={()=>openWorkspace(item.id)}>{item.label}</button>)}
-      </nav>
-      <p className="workspace-description" role="status">{adminWorkspaces.find(item=>item.id===workspace)?.description}</p>
+      <div className="workspace-heading">
+        <div><div className="workspace-breadcrumb">管理画面 <span>/</span> {adminWorkspaces.find(item=>item.id===workspace)?.label}</div>
+        <h1 id="workspace-heading" tabIndex={-1}>{workspaceViews[workspace].find(item=>item.id===workspaceView)?.label}</h1>
+        <p className="workspace-description">{workspaceViews[workspace].find(item=>item.id===workspaceView)?.description}</p></div>
+        {workspace==="jobs"&&workspaceView==="list"&&<button className="ghost" onClick={()=>openWorkspace("jobs","import")}>原本を確認する <span aria-hidden="true">↗</span></button>}
+      </div>
       {workspace==="operations"&&firebaseConfigured&&operationsLoadState!=="ready"&&<section className="panel" role="status">
         {operationsLoadState==="error"?<><p>一部の運用情報を読み込めませんでした。取得できた情報だけ表示しています。通信状態を確認して、もう一度お試しください。</p><button onClick={()=>setOperationsRetry(value=>value+1)}>もう一度読み込む</button></>:<p>運用情報を読み込んでいます…</p>}
       </section>}
-      <WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel sync-panel" id="shift-import" tabIndex={-1} aria-label="原本の確認と取込">
+      <WorkspacePanel view="import" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel sync-panel" id="shift-import" tabIndex={-1} aria-label="原本の確認と取込">
         <div className="sync-head">
           <div>
-            <h2>スプシ同期</h2>
+            <h2>シフト表の確認</h2>
             <p>月別タブを読取専用で確認し、元スプシを変更せずアプリ用データへ同期します。</p>
           </div>
           <strong>{syncSummary}</strong>
@@ -3432,7 +3446,7 @@ function downloadCsv(filename:string,content:string) {
         </div>
         {shiftPreview&&<Suspense fallback={<p role="status">読取結果を表示中…</p>}><AdminShiftImportPreview preview={shiftPreview} demo={!firebaseConfigured}/></Suspense>}
       </section></WorkspacePanel>
-<WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="two">
+<WorkspacePanel view="home" activeView={workspaceView} visitedViews={visitedViews} group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="two">
         <article className="panel">
           <h2>今すぐ確認</h2>
           <p>事前連絡 未確認 <strong>{unresolved}件</strong></p>
@@ -3447,7 +3461,7 @@ function downloadCsv(filename:string,content:string) {
           <p>粗利予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedGrossProfit):"集計待ち"}</strong></p>
         </article>
       </section></WorkspacePanel>
-      <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel production-control-panel">
+      <WorkspacePanel view="release" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel production-control-panel">
         <div className="production-control-head">
           <div>
             <h2>本番公開承認・全体停止</h2>
@@ -3692,7 +3706,7 @@ function downloadCsv(filename:string,content:string) {
         </div>
         <div className="production-actions"><button className="ghost" onClick={()=>loadProductionControlStatus()} disabled={productionBusy}>状態を再読込</button><small>環境：{productionControl?.environment??"demo"} / generation {productionControl?.control.generation??0}</small></div>
       </section></WorkspacePanel>
-      <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel push-panel">
+      <WorkspacePanel view="notifications" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel push-panel">
         <div className="sync-head">
           <div>
             <h2>管理者プッシュ通知</h2>
@@ -3714,7 +3728,7 @@ function downloadCsv(filename:string,content:string) {
         </div>
       </section></WorkspacePanel>
 
-<WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel pilot-panel">
+<WorkspacePanel view="readiness" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel pilot-panel">
   <div className="sync-head">
     <div>
       <h2>本番導入チェック</h2>
@@ -3770,8 +3784,8 @@ function downloadCsv(filename:string,content:string) {
   )}
 </section></WorkspacePanel>
 
-      {window.location.pathname.startsWith("/admin/jobs/")&&<PanelBoundary><Suspense fallback={null}><AdminJobNotification ready={adminSessionReady} active={workspace==="overview"} user={user} jobs={jobs} onOpen={job=>{if(!loadJobEdit(job))return false;setJobs(current=>[job,...current.filter(item=>item.id!==job.id)]);setQueryText("");setJobListFilter("all");setJobPage(0);openWorkspace("jobs");}}/></Suspense></PanelBoundary>}
-      <WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel analytics-panel">
+      {window.location.pathname.startsWith("/admin/jobs/")&&<PanelBoundary><Suspense fallback={null}><AdminJobNotification ready={adminSessionReady} active={workspace==="overview"} user={user} jobs={jobs} onOpen={job=>{if(!loadJobEdit(job))return false;setJobs(current=>[job,...current.filter(item=>item.id!==job.id)]);setQueryText("");setJobListFilter("all");setJobPage(0);openWorkspace("jobs","edit");}}/></Suspense></PanelBoundary>}
+      <WorkspacePanel view="analytics" activeView={workspaceView} visitedViews={visitedViews} group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel analytics-panel">
         <div className="section-heading">
           <div>
             <h2>経営ダッシュボード</h2>
@@ -3816,8 +3830,8 @@ function downloadCsv(filename:string,content:string) {
         <p className="analytics-note">概算です。S～Z合計、AK～AN、AW～AYを請求側、ARまたはBBを支払側として集計し、税・源泉等は含みません。</p>
       </section></WorkspacePanel>
 
-      <WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="kpis">
-        <article><small>今日の案件</small><strong>{jobs.length}件</strong></article>
+      <WorkspacePanel view="home" activeView={workspaceView} visitedViews={visitedViews} group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="kpis">
+        <article><small>読込済みの案件</small><strong>{jobs.length}件</strong></article>
         <article><small>事前連絡 未送信</small><strong>{unresolved}件</strong></article>
         <article><small>{dashboardMonth}売上（概算）</small><strong>{monthly?yen(monthly.finance.bookedInvoice):"集計待ち"}</strong></article>
         <article><small>粗利率（概算）</small><strong>{monthly?percent(monthly.finance.bookedGrossMargin):"集計待ち"}</strong></article>
@@ -3825,11 +3839,11 @@ function downloadCsv(filename:string,content:string) {
         <article><small>書込エラー</small><strong>{sheetIssues.length}件</strong></article>
       </section></WorkspacePanel>
 
-      <WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">書込エラーを読込中…</p>}><AdminSheetIssuePanel sheetIssues={sheetIssues} issuesBusy={issuesBusy} operationKeys={operationKeys} loadSheetIssues={loadSheetIssues} retrySheetIssue={retrySheetIssue} acknowledgeSheetIssue={acknowledgeSheetIssue}/></Suspense></WorkspacePanel>
+      <WorkspacePanel view="issues" activeView={workspaceView} visitedViews={visitedViews} group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">書込エラーを読込中…</p>}><AdminSheetIssuePanel sheetIssues={sheetIssues} issuesBusy={issuesBusy} operationKeys={operationKeys} loadSheetIssues={loadSheetIssues} retrySheetIssue={retrySheetIssue} acknowledgeSheetIssue={acknowledgeSheetIssue}/></Suspense></WorkspacePanel>
 
 
 
-      <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel sync-panel">
+      <WorkspacePanel view="staff-sync" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel sync-panel">
         <div className="sync-head">
           <div>
             <h2>スタッフ名簿同期</h2>
@@ -3848,9 +3862,9 @@ function downloadCsv(filename:string,content:string) {
       </section></WorkspacePanel>
 
 
-<WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p>受信候補を準備中…</p>}><CaseMailIntakeEntry onCreated={()=>void refreshAdminJobs()} onReviewJob={(id,action)=>{const job=jobs.find(item=>item.id===id);if(!job){setMessage("案件一覧を更新して対象案件を確認してください。");return;}if(action==="edit")loadJobEdit(job);else {openWorkspace("jobs");prepareCancellation(job);}}}/></Suspense></WorkspacePanel>
+<WorkspacePanel view="receive" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p>受信候補を準備中…</p>}><CaseMailIntakeEntry onCreated={()=>void refreshAdminJobs()} onReviewJob={(id,action)=>{const job=jobs.find(item=>item.id===id);if(!job){setMessage("案件一覧を更新して対象案件を確認してください。");return;}if(action==="edit")loadJobEdit(job);else {openWorkspace("jobs");prepareCancellation(job);}}}/></Suspense></WorkspacePanel>
 
-<WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={null}><NativeCreationRecovery/></Suspense><section className="panel job-create-panel">
+<WorkspacePanel view="create" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={null}><NativeCreationRecovery/></Suspense><section className="panel job-create-panel">
   <div className="section-heading">
     <div>
       <h2>案件を追加</h2>
@@ -3883,7 +3897,7 @@ function downloadCsv(filename:string,content:string) {
   <div className="sync-actions"><button onClick={createJobGroup} disabled={jobCreateBusy}>{jobCreateBusy?"作成中…":"案件を作成"}</button></div>
 </section></WorkspacePanel>
 
-<WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel export-panel">
+<WorkspacePanel view="export" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel export-panel">
   <div className="section-heading">
     <div><h2>メーカー・クライアント別資料</h2><p>期間と対象を選び、案件・請求・支払・粗利のCSVを出力します。</p></div>
   </div>
@@ -3897,24 +3911,25 @@ function downloadCsv(filename:string,content:string) {
   </div>
 </section></WorkspacePanel>
 
-      <WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel">
+      <WorkspacePanel view="list" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel job-directory">
         <h2>案件一覧</h2>
         <Suspense fallback={<p>検索を準備中…</p>}><AdminJobSearchControls queryText={queryText} jobListFilter={jobListFilter} total={jobs.length} count={filtered.length} page={jobPageView.page} onQuery={value=>{setQueryText(value);setJobPage(0);}} onFilter={value=>{setJobListFilter(value);setJobPage(0);}} onClear={()=>{setQueryText("");setJobListFilter("all");setJobPage(0);}}/></Suspense>
         <div className="table-wrap">
-          <table>
-            <thead><tr><th>日付</th><th>スタッフ</th><th>店舗</th><th>メーカー</th><th>状態</th><th>報告書</th><th>公開</th><th>操作</th></tr></thead>
+          <table className="job-directory-table">
+            <thead><tr><th>日付</th><th>スタッフ</th><th>店舗・メーカー</th><th>状態</th><th>報告書</th><th>公開</th><th>操作</th></tr></thead>
             <tbody>
               {jobPageView.rows.map((job) => (
                 <tr key={job.id} className={job.status === "cancelled" ? "cancelled" : ""}>
                   <td>{job.workDate}</td>
                   <td>{job.assignedStaffName ?? "募集中"}</td>
-                  <td>{job.storeName}</td>
-                  <td>{job.makerName}</td>
+                  <td><strong className="job-store-name">{job.storeName}</strong><small className="job-maker-name">{job.makerName}</small></td>
                   <td>{jobReadinessLabel(job)}</td>
                   <td>{reportCompletionLabel(job)}</td>
                   <td>{job.status==="assigned" ? <span className="mini-tag muted-tag">応募受付終了</span> : job.publishable&&job.status==="open"&&!job.cancelled ? <span className="mini-tag">募集中</span> : <span className="mini-tag muted-tag">非公開</span>}</td>
-                  <td className="row-actions">
+                  <td><div className="job-row-actions">
                     <button className="ghost compact" onClick={()=>loadJobEdit(job)}>編集</button>
+                    <button className="ghost compact" disabled={resubmissionBusy} onClick={()=>openReportReview(job)}>報告書を確認</button>
+                    <details className="job-more-actions"><summary>その他の操作</summary><div>
                     <button className="ghost compact" onClick={()=>duplicateJob(job)}>複製</button>
                     {job.status!=="cancelled" && !job.assignedStaffId && (
                       job.publishable
@@ -3923,7 +3938,6 @@ function downloadCsv(filename:string,content:string) {
                     )}
                     {job.status==="assigned" && !job.applicationAdminConfirmed && <button className="ghost compact" disabled={operationKeys.includes("job:"+job.id)||job.cancelled||job.sourceMissing||job.assignmentUnresolved||job.mailIntakeReviewRequired||(Boolean(job.mailIntake)&&job.pendingSourceWrite)||!job.assignedStaffId} onClick={()=>confirmJobApplication(job)}>応募確認</button>}
                     {job.applicationAdminConfirmed && !job.cancelled && job.status==="assigned" && <span className="mini-tag">管理者確認済み</span>}
-                    <button className="ghost compact" disabled={resubmissionBusy} onClick={()=>openReportReview(job)}>報告書を確認</button>
                     <button className="ghost compact" onClick={()=>loadExpenseReview(job.id,true)}>経費</button>
                     <button className="ghost compact" onClick={()=>openJobSheet(job)}>スプシ</button>
                     {job.status === "cancelled" ? (
@@ -3931,7 +3945,8 @@ function downloadCsv(filename:string,content:string) {
                     ) : (
                       <button className="danger compact" onClick={() => prepareCancellation(job)}>取消</button>
                     )}
-                  </td>
+                    </div></details>
+                  </div></td>
                 </tr>
               ))}
             </tbody>
@@ -3941,7 +3956,7 @@ function downloadCsv(filename:string,content:string) {
       </section></WorkspacePanel>
 
 
-<WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={null}><JobSafeEditPanel
+<WorkspacePanel view="edit" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={null}><JobSafeEditPanel
   jobs={jobs}
   staff={staff}
   jobEditId={jobEditId}
@@ -3956,7 +3971,7 @@ function downloadCsv(filename:string,content:string) {
   onSave={saveJobEdit}
 /></Suspense></WorkspacePanel>
 
-      <WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel cancellation-panel" id="cancellation-management">
+      <WorkspacePanel view="cancel" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel cancellation-panel" id="cancellation-management">
         <div className="section-heading">
           <div>
             <h2>案件キャンセル管理</h2>
@@ -4006,9 +4021,9 @@ function downloadCsv(filename:string,content:string) {
         )}
       </section></WorkspacePanel>
 
-      <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">経費画面を読み込んでいます…</p>}><AdminExpensePanel openReport={id=>{const job=jobs.find(job=>job.id===id);if(job)openReportReview(job);}} focusRequest={expenseFocusRequest} active={workspace==="submissions"} jobs={jobs} expenseJobId={expenseJobId} expenseValues={expenseValues} expenseNote={expenseNote} expenseStatus={expenseStatus} expenseBusy={expenseBusy} expenseReady={expenseReady} expenseHoldReason={expenseReadyRef.current?.holdReason} loadExpenseReview={loadExpenseReview} saveExpenseDraft={saveExpenseDraft} completeExpense={completeExpense} setExpenseValues={setExpenseValues} setExpenseNote={setExpenseNote} openSheet={()=>{const job=jobs.find(item=>item.id===expenseJobId);if(job)void openJobSheet(job);}}/></Suspense></WorkspacePanel>
+      <WorkspacePanel view="expenses" activeView={workspaceView} visitedViews={visitedViews} group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">経費画面を読み込んでいます…</p>}><AdminExpensePanel openReport={id=>{const job=jobs.find(job=>job.id===id);if(job)openReportReview(job);}} focusRequest={expenseFocusRequest} active={workspace==="submissions"&&workspaceView==="expenses"} jobs={jobs} expenseJobId={expenseJobId} expenseValues={expenseValues} expenseNote={expenseNote} expenseStatus={expenseStatus} expenseBusy={expenseBusy} expenseReady={expenseReady} expenseHoldReason={expenseReadyRef.current?.holdReason} loadExpenseReview={loadExpenseReview} saveExpenseDraft={saveExpenseDraft} completeExpense={completeExpense} setExpenseValues={setExpenseValues} setExpenseNote={setExpenseNote} openSheet={()=>{const job=jobs.find(item=>item.id===expenseJobId);if(job)void openJobSheet(job);}}/></Suspense></WorkspacePanel>
 
-      <WorkspacePanel group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel" ref={reviewPanelRef} tabIndex={-1} aria-labelledby="submission-materials-heading">
+      <WorkspacePanel view="review" activeView={workspaceView} visitedViews={visitedViews} group="submissions" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel" ref={reviewPanelRef} tabIndex={-1} aria-labelledby="submission-materials-heading">
         <div className="section-heading">
           <div>
             <h2 id="submission-materials-heading">案件の資料・再提出</h2>
@@ -4059,7 +4074,7 @@ function downloadCsv(filename:string,content:string) {
         )}
       </section></WorkspacePanel>
 
-      <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel">
+      <WorkspacePanel view="invites" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel">
         <div className="sync-head">
           <div>
             <h2>未ログイン者への案内</h2>
@@ -4233,19 +4248,20 @@ function downloadCsv(filename:string,content:string) {
         )}
       </section></WorkspacePanel>
 
-      <WorkspacePanel group="staff" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel">
+      <WorkspacePanel view="directory" activeView={workspaceView} visitedViews={visitedViews} group="staff" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel">
         <Suspense fallback={null}><AdminStaffToolbar hasMore={hasMoreStaff} onMore={loadMoreAdminStaff} query={staffQuery} onQuery={setStaffQuery} total={filteredStaff.length} busy={jobDirectoryBusy} configured={firebaseConfigured} message={staffDirectoryMessage} onReload={refreshAdminStaff} onSearch={()=>setMessage(`${filteredStaff.length}名見つかりました。`)}/></Suspense>
         <Suspense fallback={<p role="status">スタッフ一覧を準備中…</p>}><AdminStaffTable query={staffQuery} profiles={filteredStaff} performanceBusy={performanceBusy} operationKeys={operationKeys} onPerformance={loadStaffPerformance} onDevices={openStaffDevices} onRevoke={revokeStaffDevices}/></Suspense>
       </section></WorkspacePanel>
 
 
-      <WorkspacePanel group="staff" active={workspace} visited={visitedWorkspaces} ready={true}>{performance && (
+      <WorkspacePanel view="performance" activeView={workspaceView} visitedViews={visitedViews} group="staff" active={workspace} visited={visitedWorkspaces} ready={true}>{!performance&&<section className="panel empty-workspace"><h2>{performanceBusy?"稼働実績を読み込んでいます…":"スタッフを選んでください"}</h2><p>スタッフ一覧の「実績」から対象者を選ぶと、ここに表示します。</p><button onClick={()=>openWorkspace("staff")}>スタッフ一覧へ</button></section>}{performance && (
         <Suspense fallback={<p role="status">稼働実績を準備中…</p>}><AdminStaffPerformancePanel performance={performance} onClose={closeStaffPerformance}/></Suspense>
       )}</WorkspacePanel>
 
-      <WorkspacePanel group="staff" active={workspace} visited={visitedWorkspaces} ready={true}>{!!deviceStaffName && <Suspense fallback={<p role="status">端末画面を準備中…</p>}><AdminStaffDevicePanel name={deviceStaffName} devices={staffDevices} status={staffDeviceStatus} onClose={closeStaffDevices} onReload={reloadStaffDevices}/></Suspense>}</WorkspacePanel>
+      <WorkspacePanel view="devices" activeView={workspaceView} visitedViews={visitedViews} group="staff" active={workspace} visited={visitedWorkspaces} ready={true}>{!deviceStaffName&&<section className="panel empty-workspace"><h2>スタッフを選んでください</h2><p>スタッフ一覧から端末を確認する対象者を選びます。</p><button onClick={()=>openWorkspace("staff")}>スタッフ一覧へ</button></section>}{!!deviceStaffName && <Suspense fallback={<p role="status">端末画面を準備中…</p>}><AdminStaffDevicePanel name={deviceStaffName} devices={staffDevices} status={staffDeviceStatus} onClose={closeStaffDevices} onReload={reloadStaffDevices}/></Suspense>}</WorkspacePanel>
 
 
+      </div>
     </main>
   );
 }

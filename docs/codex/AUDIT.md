@@ -317,3 +317,5 @@ processSafeSheetWrite / updateExpenseReviewFromQueue の切替時は、実Trigge
 - CLOUD_RESOURCES_CHANGED: None.
 - BLOCKERS: Previous worker migration and real-business acceptance remain pending.
 - NEXT_SAFE_ACTION: Push final PR head, required CI, normal merge, main CI and expiring preview.
+
+- Narrow authenticated-header follow-up: notification/logout controls fit at 320/390/1280px; verified with synthetic controls and no authenticated API calls.

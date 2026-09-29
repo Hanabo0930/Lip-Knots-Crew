@@ -1310,3 +1310,13 @@ body:has(.admin-shell) { background:#edf1ff; }
  .workspace-heading { padding:19px 16px; min-height:125px; border-radius:20px; gap:6px; }.workspace-heading h1 { font-size:23px; }.liquid-orb-scene { position:absolute; right:0; top:0; opacity:.4; transform:scale(.65); }.workspace-heading>div:first-child { max-width:calc(100% - 14px); }.workspace-heading>button { align-self:flex-start; }.workspace-heading[data-workspace="jobs"] .liquid-orb-scene { display:none; }
  .admin-shell .workspace-panel .panel { border-radius:20px; }.admin-shell .workspace-panel .table-wrap td { font-size:12px; }.water-ribbons { height:35vh; opacity:.4; }
 }
+
+/* ログイン中の通知・ログアウトも狭い画面内に収める。 */
+.admin-shell>header>div:not(.header-actions) { min-width:0; }
+.admin-shell>header small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.admin-shell>header .header-actions { flex:0 0 auto; }
+@media(max-width:760px) {
+ .admin-shell>header { display:grid; grid-template-columns:38px minmax(0,1fr) auto; }
+ .admin-shell>header .header-actions { grid-column:2 / -1; justify-content:flex-end; }
+ .admin-shell>header .header-actions button { min-height:40px; }
+}

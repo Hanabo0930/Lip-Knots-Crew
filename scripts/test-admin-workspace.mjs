@@ -156,6 +156,15 @@ try{
   assert.ok(!initial.scripts.some(path=>path.includes('AdminJobNotification')),'Notification panel must not load without a matching URL');
   assert.ok(!initial.scripts.some(path=>path.includes('ProductionAcceptanceRollbackConsole')),'Operational console must not load at startup');
   assert.equal(initial.visibleHeadings[0],'今すぐ確認');
+  // 認証APIに接続せず、ログイン時に追加される同じヘッダー操作の幅だけ検証する。
+  await page.locator('main>header').evaluate(header=>{const actions=document.createElement('div');actions.className='header-actions';actions.dataset.layoutFixture='true';for(const text of ['通知ON','ログアウト']){const button=document.createElement('button');button.className='ghost';button.textContent=text;actions.append(button);}header.append(actions);});
+  for(const width of [320,390,1280]){
+   await page.setViewportSize({width,height:900});
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`Signed-in header layout overflows at ${width}px`);
+   for(const button of await page.locator('main>header button').all()){const box=await button.boundingBox();assert.ok(box&&box.x>=0&&box.x+box.width<=width,'Header action must remain visible');}
+  }
+  await page.locator('[data-layout-fixture]').evaluate(node=>node.remove());
+  console.log('Signed-in header layout passed at 320/390/1280px with synthetic controls.');
   const nav=page.getByRole('navigation',{name:'管理業務'});
   const sub=async label=>{if(await page.locator('.mobile-view-select').isVisible())await page.getByLabel('表示する画面',{exact:true}).selectOption({label});else await page.locator('.workspace-subnav').getByRole('button',{name:label,exact:true}).click();};
   const expected={'概要':'今すぐ確認','案件':'案件一覧','報告書・再提出':'案件の資料・再提出','スタッフ':'スタッフ一覧','通知・運用':'管理者プッシュ通知'};

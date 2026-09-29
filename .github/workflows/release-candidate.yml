@@ -56,6 +56,8 @@ jobs:
           node scripts/test-staff-submission-flow.mjs --browser
           node scripts/test-staff-shift-rendering.mjs
           node scripts/test-admin-workspace.mjs --browser
+          node scripts/test-admin-local-server.mjs
+          node scripts/test-admin-shift-navigation.mjs
           node scripts/test-case-mail-entry-readiness.mjs
           node scripts/test-admin-import-snapshot.mjs
           node scripts/test-submission-attempt-browser.mjs

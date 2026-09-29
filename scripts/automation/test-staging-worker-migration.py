@@ -60,6 +60,13 @@ def fixture():
         data["functions"][name]["eventTrigger"] = {"trigger": trigger, "retryPolicy": "RETRY_POLICY_DO_NOT_RETRY"}
         data["triggers"][name] = {"name": trigger, "uid": "synthetic", "destination": {
             "cloudFunction": f"{m.PREFIX}/functions/{name}"}, "transport": {"pubsub": {"subscription": sub, "topic": topic}}}
+        collection = "sheetSyncQueue" if name in m.WRITEBACK_EVENTS else "sheetRowCreateQueue"
+        data["triggers"][name]["eventFilters"] = [
+            {"attribute": "type", "value": "google.cloud.firestore.document.v1.written"},
+            {"attribute": "database", "value": "(default)"},
+            {"attribute": "namespace", "value": "(default)"},
+            {"attribute": "document", "value": collection + "/{queueId}", "operator": "match-path-pattern"},
+        ]
         data["subscriptions"][name] = {"name": sub, "topic": topic, "state": "ACTIVE",
                                         "pushConfig": {}, "messageRetentionDuration": "172800s"}
     return data
@@ -160,6 +167,76 @@ class MigrationTests(unittest.TestCase):
             altered["subscriptions"][TARGET].update(change)
             with self.subTest(change=change), self.assertRaises(ValueError):
                 m.validate_snapshot(altered, TARGET)
+
+    def test_writeback_pair_does_not_require_unrelated_row_delivery_hold(self):
+        for target in m.WRITEBACK_EVENTS:
+            before = fixture()
+            before["subscriptions"]["processSheetRowCreation"].update({
+                "pushConfig": {"pushEndpoint": "https://synthetic.invalid/unchanged"},
+                "messageRetentionDuration": "86400s"})
+            with self.subTest(target=target):
+                m.validate_snapshot(before, target)
+        self.before = before
+        self.clearance = clearance(before)
+        api = FakeApi()
+        self.run_migration(api, [before, after_snapshot(before)])
+        self.assertEqual(sum(method == "PATCH" for method, _, _ in api.calls), 1)
+
+    def test_both_consumers_of_the_writeback_queue_must_be_held(self):
+        for target in m.WRITEBACK_EVENTS:
+            for consumer in m.WRITEBACK_EVENTS:
+                for change in ({"pushConfig": {"pushEndpoint": "https://synthetic.invalid"}},
+                               {"messageRetentionDuration": "86400s"}):
+                    before = fixture()
+                    before["subscriptions"][consumer].update(change)
+                    with self.subTest(target=target, consumer=consumer, change=change), self.assertRaises(ValueError):
+                        m.validate_snapshot(before, target)
+
+    def test_queue_scope_cannot_be_inferred_from_worker_names(self):
+        for consumer in m.EVENT_TARGETS:
+            for variant in ("missing", "overlap", "wildcard", "database", "duplicate", "operator", "type"):
+                before = fixture()
+                filters = before["triggers"][consumer]["eventFilters"]
+                if variant == "missing": filters.pop()
+                elif variant == "overlap": filters[-1]["value"] = "sheetSyncQueue/{queueId}" if consumer not in m.WRITEBACK_EVENTS else "sheetRowCreateQueue/{queueId}"
+                elif variant == "wildcard": filters[-1]["value"] = "{collection}/{queueId}"
+                elif variant == "database": filters[1]["value"] = "other"
+                elif variant == "duplicate": filters[2] = copy.deepcopy(filters[1])
+                elif variant == "operator": filters[-1].pop("operator")
+                elif variant == "type": filters[0]["value"] = "other"
+                with self.subTest(consumer=consumer, variant=variant), self.assertRaisesRegex(ValueError, "EVENT_QUEUE_SCOPE_UNPROVEN"):
+                    m.validate_snapshot(before, TARGET)
+
+    def test_unrelated_row_delivery_must_remain_unchanged_after_deploy(self):
+        self.before["subscriptions"]["processSheetRowCreation"].update({
+            "pushConfig": {"pushEndpoint": "https://synthetic.invalid"}, "messageRetentionDuration": "86400s"})
+        after = after_snapshot(self.before)
+        after["subscriptions"]["processSheetRowCreation"]["pushConfig"] = {}
+        with self.assertRaisesRegex(ValueError, "PROTECTED_RESOURCE_CHANGED"):
+            m.verify_after(self.before, after, TARGET)
+
+    def test_other_workers_keep_the_existing_delivery_requirements(self):
+        for target in set(m.TARGETS) - set(m.WRITEBACK_EVENTS):
+            before = fixture()
+            before["subscriptions"]["processSheetRowCreation"]["pushConfig"] = {"pushEndpoint": "https://synthetic.invalid"}
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, "EVENT_DELIVERY_NOT_HELD"):
+                m.validate_snapshot(before, target)
+
+    def test_inspection_reports_both_missing_conditions_without_private_metadata(self):
+        self.before["subscriptions"][TARGET].update({"pushConfig": {"pushEndpoint": "https://private.invalid"},
+                                                       "messageRetentionDuration": "86400s"})
+        self.before["subscriptions"][m.WRITEBACK_EVENTS[1]]["messageRetentionDuration"] = "invalid"
+        summary = m.delivery_readiness(self.before, TARGET)
+        self.assertTrue(summary["deliveryScopeVerified"])
+        self.assertEqual(summary["requiredHeldEvents"], list(m.WRITEBACK_EVENTS))
+        self.assertEqual(summary["deliveryReadiness"], [
+            {"worker": TARGET, "deliveryHeld": False, "retentionReady": False},
+            {"worker": m.WRITEBACK_EVENTS[1], "deliveryHeld": True, "retentionReady": False}])
+        self.assertNotIn("private.invalid", json.dumps(summary))
+        self.assertNotIn("executionDrainProven", summary)
+        self.before["triggers"][TARGET].pop("eventFilters")
+        self.assertEqual(m.delivery_readiness(self.before, TARGET), {
+            "deliveryScopeVerified": False, "requiredHeldEvents": None, "deliveryReadiness": []})
 
     def test_enabled_scheduler_and_wrong_destination_reject(self):
         key = next(iter(self.before["jobs"]))

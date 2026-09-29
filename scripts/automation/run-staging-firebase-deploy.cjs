@@ -39,7 +39,7 @@ function installCaseMailSecretGuard(manager, plan) {
     || writes.some(name => typeof manager[name] !== "function")) throw Error("CLI_SECRET_CONTRACT_CHANGED");
   const check = manager.checkServiceAgentRole.bind(manager);
   manager.ensureServiceAgentRole = async (secret, accounts, role) => {
-    if (secret?.projectId !== plan.project || secret?.name !== "CASE_MAIL_EXTRACTOR_SECRET"
+    if (secret?.projectId !== plan.project || secret?.name !== "lkcm-extractor-bearer"
       || role !== "roles/secretmanager.secretAccessor" || !Array.isArray(accounts) || !accounts.length)
       throw Error("CASE_MAIL_SECRET_SCOPE_REJECTED");
     const missing = await check(secret, accounts, role);

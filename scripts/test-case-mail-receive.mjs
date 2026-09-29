@@ -130,10 +130,10 @@ await check("実SDKの秘密バインドは受信2関数だけ、全体パラメ
   const params = require("firebase-functions/params"), before = [...params.declaredParams];
   const f = setup({ realSdk: true });
   assert.deepEqual(params.declaredParams, before);
-  assert.ok(!params.declaredParams.some(param => param.name === "CASE_MAIL_EXTRACTOR_SECRET"));
+  assert.ok(!params.declaredParams.some(param => param.name === "lkcm-extractor-bearer"));
   for (const name of ["receiveCaseMailMessage", "receiveCaseMailMessages"]) {
     const endpoint = f.api[name].__endpoint;
-    assert.deepEqual(JSON.parse(JSON.stringify(endpoint.secretEnvironmentVariables)), [{ key: "CASE_MAIL_EXTRACTOR_SECRET" }]);
+    assert.deepEqual(JSON.parse(JSON.stringify(endpoint.secretEnvironmentVariables)), [{ key: "lkcm-extractor-bearer" }]);
     assert.equal(endpoint.timeoutSeconds, 540);
     assert.equal(endpoint.availableMemoryMb, 512);
     assert.ok(endpoint.callableTrigger);
@@ -147,9 +147,9 @@ await check("秘密は実行時に取得し、未設定時は既存の必須検�
   assert.equal(f.state.readSecret, undefined);
   await f.receive();
   assert.equal(f.state.readSecret(), "");
-  f.env.CASE_MAIL_EXTRACTOR_SECRET = "s".repeat(43);
+  f.env["lkcm-extractor-bearer"] = "s".repeat(43);
   assert.equal(f.state.readSecret(), "s".repeat(43));
-  delete f.env.CASE_MAIL_EXTRACTOR_SECRET;
+  delete f.env["lkcm-extractor-bearer"];
   assert.equal(f.state.readSecret(), "");
 });
 console.log(JSON.stringify({caseMailReceiveTests:cases,compiled,cloudOperations:false}));

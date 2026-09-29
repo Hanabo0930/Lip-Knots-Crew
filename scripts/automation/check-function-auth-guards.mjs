@@ -1397,7 +1397,7 @@ function checkCaseMailReceiver(name) {
     'import{requireAdmin,companyFromClaims}from"./utils";', 'import{onCall,HttpsError}from"firebase-functions/v2/https";',
     'import{db}from"./firebase";', 'import{createGmailCaseMailReceiver}from"./case-mail-gmail";',
     'import{assertCaseMailReceiverEnabled}from"./case-mail-intake";', 'import{createCaseMailCloudAuth}from"./case-mail-cloud-auth";',
-    'constextractorSecretName="CASE_MAIL_EXTRACTOR_SECRET";', 'constoptions={secrets:[extractorSecretName],timeoutSeconds:540,memory:"512MiB"asconst};',
+    'constextractorSecretName="lkcm-extractor-bearer";', 'constoptions={secrets:[extractorSecretName],timeoutSeconds:540,memory:"512MiB"asconst};',
     'expectedCompanyId:id,expectedActorUid:id}).strict();', 'mailbox:z.literal("info@lipknots.com")',
     'gmailServiceAccountEmail:z.string().max(160),}).strict();',
     'cursor:z.string().min(1).max(2048).regex(/^[^\\s\\x00-\\x1f]+$/).optional()}).strict();',

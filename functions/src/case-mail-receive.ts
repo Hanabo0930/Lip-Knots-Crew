@@ -7,7 +7,7 @@ import { assertCaseMailReceiverEnabled } from "./case-mail-intake";
 import { createCaseMailCloudAuth } from "./case-mail-cloud-auth";
 
 // 関数単位の秘密バインドに限定し、無関係な関数の配備時に解決させない。
-const extractorSecretName = "CASE_MAIL_EXTRACTOR_SECRET";
+const extractorSecretName = "lkcm-extractor-bearer";
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/);
 const requestSchema = z.object({ messageId: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
   expectedCompanyId: id, expectedActorUid: id }).strict();

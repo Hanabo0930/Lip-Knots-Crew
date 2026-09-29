@@ -69,7 +69,7 @@ function manager(missing=[]) { return Object.assign({
   checkServiceAgentRole:async()=>{secretReads++; return missing;},
 },Object.fromEntries(writeNames.map(name=>[name,async()=>{secretWrites++;}]))); }
 const receiverPlan={...plan,functions:["receiveCaseMailMessage","receiveCaseMailMessages"]};
-const secret={projectId:plan.project,name:"CASE_MAIL_EXTRACTOR_SECRET"}, accounts=["synthetic@example.invalid"], role="roles/secretmanager.secretAccessor";
+const secret={projectId:plan.project,name:"lkcm-extractor-bearer"}, accounts=["synthetic@example.invalid"], role="roles/secretmanager.secretAccessor";
 const allowedManager=manager(); installCaseMailSecretGuard(allowedManager,receiverPlan);
 await allowedManager.ensureServiceAgentRole(secret,accounts,role); cases++;
 for(const name of writeNames) { await assert.rejects(allowedManager[name](),/MUTATION_NOT_AUTHORIZED/); cases++; }

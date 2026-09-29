@@ -222,6 +222,22 @@ class MigrationTests(unittest.TestCase):
             with self.subTest(target=target), self.assertRaisesRegex(ValueError, "EVENT_DELIVERY_NOT_HELD"):
                 m.validate_snapshot(before, target)
 
+    def test_inspection_reports_both_missing_conditions_without_private_metadata(self):
+        self.before["subscriptions"][TARGET].update({"pushConfig": {"pushEndpoint": "https://private.invalid"},
+                                                       "messageRetentionDuration": "86400s"})
+        self.before["subscriptions"][m.WRITEBACK_EVENTS[1]]["messageRetentionDuration"] = "invalid"
+        summary = m.delivery_readiness(self.before, TARGET)
+        self.assertTrue(summary["deliveryScopeVerified"])
+        self.assertEqual(summary["requiredHeldEvents"], list(m.WRITEBACK_EVENTS))
+        self.assertEqual(summary["deliveryReadiness"], [
+            {"worker": TARGET, "deliveryHeld": False, "retentionReady": False},
+            {"worker": m.WRITEBACK_EVENTS[1], "deliveryHeld": True, "retentionReady": False}])
+        self.assertNotIn("private.invalid", json.dumps(summary))
+        self.assertNotIn("executionDrainProven", summary)
+        self.before["triggers"][TARGET].pop("eventFilters")
+        self.assertEqual(m.delivery_readiness(self.before, TARGET), {
+            "deliveryScopeVerified": False, "requiredHeldEvents": None, "deliveryReadiness": []})
+
     def test_enabled_scheduler_and_wrong_destination_reject(self):
         key = next(iter(self.before["jobs"]))
         for change in ({"state": "ENABLED"}, {"httpTarget": {"uri": "https://synthetic.invalid"}}):

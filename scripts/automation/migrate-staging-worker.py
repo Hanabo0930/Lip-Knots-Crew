@@ -147,6 +147,24 @@ def required_held_events(snapshot, target):
     return WRITEBACK_EVENTS
 
 
+def delivery_readiness(snapshot, target):
+    """公開可能な判定だけを返し、最初の未達項目ごとの再検査を避ける。"""
+    try:
+        names = required_held_events(snapshot, target)
+    except (ValueError, KeyError, TypeError):
+        return {"deliveryScopeVerified": False, "requiredHeldEvents": None, "deliveryReadiness": []}
+    checks = []
+    for name in names:
+        sub = snapshot.get("subscriptions", {}).get(name, {})
+        retention = sub.get("messageRetentionDuration", "")
+        checks.append({"worker": name,
+                       "deliveryHeld": sub.get("state") == "ACTIVE" and sub.get("pushConfig") == {},
+                       "retentionReady": isinstance(retention, str) and
+                       bool(re.fullmatch(r"[0-9]+s", retention)) and int(retention[:-1]) >= 172800})
+    return {"deliveryScopeVerified": target in WRITEBACK_EVENTS,
+            "requiredHeldEvents": list(names), "deliveryReadiness": checks}
+
+
 def validate_snapshot(snapshot, target):
     require(target in TARGETS, "TARGET_REJECTED")
     functions = snapshot["functions"]
@@ -427,7 +445,8 @@ def main():
         except ValueError as error:
             status = str(error)
         report = {"status": status, "beforeSha256": snapshot_digest(before), "target": args.target,
-                  "sourceSha": head, "cloudMutation": False, "executionDrainProven": False}
+                  "sourceSha": head, "cloudMutation": False, "executionDrainProven": False,
+                  **delivery_readiness(before, args.target)}
         (evidence / "summary.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(report))
         return

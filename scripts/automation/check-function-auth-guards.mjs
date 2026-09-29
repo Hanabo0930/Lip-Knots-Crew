@@ -22,6 +22,8 @@ const requestedFunctions = parseCsv(
 );
 const supportedFunctions = new Set([
   "retrySafeSheetWrites",
+  "receiveCaseMailMessage",
+  "receiveCaseMailMessages",
   "listCaseMailReceipts",
   "getCaseMailReceipt",
   "getCaseMailTargetPreview",
@@ -1379,7 +1381,69 @@ function checkCaseMail(name) {
   return true;
 }
 
+// 受信処理の配備前照合。認証済み会社・停止・固定受信箱を維持し、配備許可は増やさない。
+function checkCaseMailReceiver(name) {
+  // URL等の文字列を保持し、コメントに安全条件を書くだけの偽装は拒否する。
+  const clean = text => text.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g,
+    token => token.startsWith("/*") || token.startsWith("//") ? "" : token);
+  const compact = text => clean(text).replace(/\s+/g, "");
+  const source = clean(sourceFile("functions/src/case-mail-receive.ts"));
+  const whole = compact(source), block = compact(functionBlock(source, name));
+  const has = (text, parts) => parts.every(part => text.includes(part));
+  const schema = name === "receiveCaseMailMessage" ? "requestSchema" : "pageSchema";
+  if (!block.startsWith("exportconst" + name + "=onCall(options,asyncrequest=>{requireAdmin(request);constinput=" + schema + ".safeParse(request.data);if(!input.success)thrownewHttpsError(")) return false;
+  if (!has(block, ['constreceiver=awaitreceiverFor(request,input.data);', 'catch(error){returnreceiveError(error);}'])) return false;
+  if (!has(whole, [
+    'import{requireAdmin,companyFromClaims}from"./utils";', 'import{onCall,HttpsError}from"firebase-functions/v2/https";',
+    'import{db}from"./firebase";', 'import{createGmailCaseMailReceiver}from"./case-mail-gmail";',
+    'import{assertCaseMailReceiverEnabled}from"./case-mail-intake";', 'import{createCaseMailCloudAuth}from"./case-mail-cloud-auth";',
+    'constextractorSecretName="lkcm-extractor-bearer";', 'constoptions={secrets:[extractorSecretName],timeoutSeconds:540,memory:"512MiB"asconst};',
+    'expectedCompanyId:id,expectedActorUid:id}).strict();', 'mailbox:z.literal("info@lipknots.com")',
+    'gmailServiceAccountEmail:z.string().max(160),}).strict();',
+    'cursor:z.string().min(1).max(2048).regex(/^[^\\s\\x00-\\x1f]+$/).optional()}).strict();',
+  ])) return false;
+  const helper = whole.slice(whole.indexOf('asyncfunctionreceiverFor('), whole.indexOf('functionreceiveError('));
+  if (!helper.startsWith('asyncfunctionreceiverFor(request:Parameters<typeofrequireAdmin>[0],input:{expectedCompanyId:string;expectedActorUid:string}){constsession=requireAdmin(request),companyId=id.parse(companyFromClaims(session.token));')) return false;
+  if (!has(helper, [
+    'if(input.expectedCompanyId!==companyId||input.expectedActorUid!==session.uid){thrownewHttpsError(',
+    'if(process.env.APP_ENVIRONMENT!=="staging"||process.env.EXPECTED_FIREBASE_PROJECT_ID!=="lip-knots-crew-staging"){thrownewHttpsError(',
+    'constparsed=configSchema.safeParse((awaitdb.collection("caseMailReceiverConfigs").doc(companyId).get()).data());',
+    'if(!parsed.success||parsed.data.companyId!==companyId){thrownewHttpsError(',
+    'awaitassertCaseMailReceiverEnabled(config);constdependencies=createCaseMailCloudAuth(gmailServiceAccountEmail,()=>process.env[extractorSecretName]??"");',
+    'return{config,dependencies,receive:createGmailCaseMailReceiver(config,dependencies)};',
+  ])) return false;
+  const intake = compact(sourceFile('functions/src/case-mail-intake.ts'));
+  if (!has(intake, [
+    'import{assertProductionOperational}from"./system-safety";',
+    'current.companyId!==config.companyId||current.uid!==config.uid||current.active!==true||current.producerId!==config.producerId||current.revision!==config.principalRevision',
+    'if(feature.data()?.caseMailIntakeEnabled!==true)fail(',
+    'exportasyncfunctionassertCaseMailReceiverEnabled(config:Config){awaitassertProductionOperational(config.companyId);awaitdb.runTransaction(tx=>checkReceiver(tx,config));}',
+    'awaitassertProductionOperational(config.companyId);awaitdb.runTransaction(tx=>checkReceiver(tx,config));constfetched=awaitprovider.fetch(',
+    'returndb.runTransaction(asynctx=>{awaitcheckReceiver(tx,config);constprevious=',
+  ])) return false;
+  const auth = compact(sourceFile('functions/src/case-mail-cloud-auth.ts'));
+  if (!has(auth, ['context.mailbox!=="info@lipknots.com"||context.scope!=="https://www.googleapis.com/auth/gmail.readonly"',
+    'exp:now+300', 'redirect:"error",signal:AbortSignal.timeout(30000)',
+    'if(context.mailbox!=="info@lipknots.com"||context.audience!==extractorOrigin)throwError(',
+    'constsecret=extractorSecret();if(!/^[A-Za-z0-9_-]{43,128}$/.test(secret))throwError(',
+    'constextractorOrigin="https://lkcm-attachment-extractor-740154137290.asia-northeast1.run.app";',
+  ])) return false;
+  if (name === "receiveCaseMailMessage") return block.includes('return{ok:true,...awaitreceiver.receive({messageId:input.data.messageId})};');
+  return has(block, [
+    'scope:"https://www.googleapis.com/auth/gmail.readonly"',
+    'typeofprofile.emailAddress!=="string"||profile.emailAddress.toLowerCase()!==receiver.config.mailbox',
+    'client.list({startedAt:receiver.config.startedAt,pageToken:input.data.cursor,maxResults:5})',
+    'messages:z.array(z.object({id:z.string().regex(/^[A-Za-z0-9_-]{1,160}$/)})).max(5),',
+    'nextPageToken:pageSchema.shape.cursor.unwrap().nullable()}).parse(raw)',
+    'if(newSet(page.messages.map(item=>item.id)).size!==page.messages.length)throwError(',
+    'constresult=awaitreceiver.receive({messageId:item.id});',
+    'awaitassertCaseMailReceiverEnabled(receiver.config);return{ok:true,received,skipped,nextCursor:page.nextPageToken};',
+  ]);
+}
+
 const checkers = {
+  receiveCaseMailMessage: () => checkCaseMailReceiver("receiveCaseMailMessage"),
+  receiveCaseMailMessages: () => checkCaseMailReceiver("receiveCaseMailMessages"),
   listCaseMailReceipts: () => checkCaseMail("listCaseMailReceipts"),
   getCaseMailReceipt: () => checkCaseMail("getCaseMailReceipt"),
   getCaseMailTargetPreview: () => checkCaseMail("getCaseMailTargetPreview"),

@@ -78,6 +78,15 @@ The only Functions allowed in the first unattended staging deployment phase are:
 - `getCaseMailImportSnapshot`
 - `listAutomationNoticeReceipts`
 - `getAutomationNoticeHandoff`
+- `receiveCaseMailMessage`
+- `receiveCaseMailMessages`
+- `listCaseMailReceipts`
+- `getCaseMailReceipt`
+- `getCaseMailTargetPreview`
+- `confirmCaseMailTarget`
+- `holdCaseMailTarget`
+- `resolveCaseMailTargetHold`
+- `confirmCaseMailReview`
 - `receiveCaseMailApplication`
 - `receiveAutomationNoticeReceipt`
 - `previewStaffImport`
@@ -170,6 +179,15 @@ The only Cloud Run services whose Invoker IAM check may be changed are:
 - `getcasemailimportsnapshot`
 - `listautomationnoticereceipts`
 - `getautomationnoticehandoff`
+- `receivecasemailmessage`
+- `receivecasemailmessages`
+- `listcasemailreceipts`
+- `getcasemailreceipt`
+- `getcasemailtargetpreview`
+- `confirmcasemailtarget`
+- `holdcasemailtarget`
+- `resolvecasemailtargethold`
+- `confirmcasemailreview`
 - `receivecasemailapplication`
 - `receiveautomationnoticereceipt`
 - `previewstaffimport`
@@ -343,3 +361,10 @@ Standing completion authorization includes the ten admin core callables listed a
 - 専用workflow staging-worker-migration.yml、CI成功済みの現在main、1件ずつ、既存の保護環境を使用する。通常のfunctions-deploy allowlistへ追加しない。ソースと停止環境値のみ更新し、既存Trigger/Scheduler/PubSub/IAMは書き換えない。
 - 到着保持・旧実行と外部書込の終了・保留依頼の復旧・固定ソース退避の実証を独立にレビューしてから配備する。clearanceの入力や検査成功だけで実証済みとしない。
 - 本承認にはPub/Sub/Eventarcの停止・保持期間変更・再配送、IAM/Rules、原本書戻し・実送信・業務文書操作・本番/Live・停止解除を含めない。既存retrySafeSheetWritesの復旧を再実行しない。
+
+## 案件メール9 APIの限定配備（2026-09-29の明示承認）
+
+- 受信2 APIと候補確認7 APIを、必須CI成功・通常マージ・既存保護環境経由のSTAGING配備対象へ追加する。
+- 実メール読取、業務データ保存、通知、原本変更、本番公開、停止解除は含めない。
+- IAM・秘密設定の追加変更は含めない。CLIが秘密設定の権限付与を要求した場合、既存権限を読取照合し、不足時は変更せず停止する。
+- 受信2件と確認7件を分け、既存設定で配備できる範囲だけ実施する。

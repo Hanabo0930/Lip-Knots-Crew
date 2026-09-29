@@ -18,14 +18,14 @@ const app=fs.readFileSync("apps/admin/src/App.tsx","utf8"),a=app.indexOf("  asyn
 const results=[];
 for(const mode of ["success","failure","auth-change","newer","logged-out","invalid-response","demo"]){
  const state={preview:{old:true},busy:false,summary:"old",message:""},user={uid:"synthetic-admin"};let resolve,reject,calls=[];
- const context={syncBusy:false,shiftPreviewMonth:"2099-10",shiftPreviewVersionRef:{current:0},firebaseConfigured:mode!=="demo",functions:{},auth:{currentUser:mode==="logged-out"?null:user},parseShiftImportPreview,previewSheetNames,setShiftPreview:v=>state.preview=v,setSyncBusy:v=>state.busy=v,setSyncSummary:v=>state.summary=v,setMessage:v=>state.message=v,httpsCallable:(_f,name)=>input=>{calls.push({name,input});return new Promise((ok,no)=>{resolve=ok;reject=no;});}};
+ const context={openWorkspace:v=>state.workspace=v,syncBusy:false,shiftPreviewMonth:"2099-10",shiftPreviewVersionRef:{current:0},firebaseConfigured:mode!=="demo",functions:{},auth:{currentUser:mode==="logged-out"?null:user},parseShiftImportPreview,previewSheetNames,setShiftPreview:v=>state.preview=v,setSyncBusy:v=>state.busy=v,setSyncSummary:v=>state.summary=v,setMessage:v=>state.message=v,httpsCallable:(_f,name)=>input=>{calls.push({name,input});return new Promise((ok,no)=>{resolve=ok;reject=no;});}};
  runInNewContext(handler,context);const pending=context.previewSheetSync();
  if(mode==="logged-out"||mode==="demo"){await pending;assert.equal(calls.length,0);assert.equal(state.busy,false);if(mode==="demo")assert.ok(state.message.includes("実際のシフト表は読み取っていません"));else assert.equal(state.preview,null);}
  else{
   assert.equal(state.preview,null);assert.equal(calls.length,1);assert.equal(calls[0].name,"previewShiftImport");assert.equal(JSON.stringify(calls[0].input),JSON.stringify({sheetNames:["2099.10"]}));
   if(mode==="auth-change")context.auth.currentUser={uid:"other"};if(mode==="newer")context.shiftPreviewVersionRef.current++;
   if(mode==="failure")reject(Error("synthetic failure"));else resolve({data:mode==="invalid-response"?{}:payload});await pending;
-  if(mode==="success"){assert.equal(state.preview.totalJobs,24);assert.equal(state.busy,false);}else assert.equal(state.preview,null);
+  if(mode==="success"){assert.equal(state.workspace,"jobs");assert.ok(state.message.includes("取込はまだ"));assert.equal(state.preview.totalJobs,24);assert.equal(state.busy,false);}else assert.equal(state.preview,null);
   if(["failure","invalid-response"].includes(mode)){assert.equal(state.busy,false);assert.equal(state.summary,"読取に失敗しました");}
  }
  results.push({mode,passed:true});

@@ -793,7 +793,7 @@ const demoJobs: Job[] = [
 type AdminWorkspace = "overview" | "jobs" | "submissions" | "staff" | "operations";
 const adminWorkspaces: {id:AdminWorkspace;label:string;description:string}[] = [
   {id:"overview",label:"概要",description:"未対応の業務と今月の状況を確認します。"},
-  {id:"jobs",label:"案件",description:"募集・編集・キャンセルと資料の出力を行います。"},
+  {id:"jobs",label:"案件",description:"原本の読取結果を確認し、取込済み案件の募集・編集・資料出力を行います。"},
   {id:"submissions",label:"報告書・再提出",description:"提出画像の確認、経費入力、再提出依頼を行います。"},
   {id:"staff",label:"スタッフ",description:"登録情報・稼働実績・ログイン端末を確認します。"},
   {id:"operations",label:"通知・運用",description:"通知・同期・導入・公開の設定を確認します。"},
@@ -847,6 +847,15 @@ export default function App() {
   const [syncSummary, setSyncSummary] = useState<string>("未実行");
   const [shiftPreviewMonth,setShiftPreviewMonth]=useState("");
   const [shiftPreview,setShiftPreview]=useState<ShiftImportPreview|null>(null);
+  useEffect(()=>{
+    if(!shiftPreview)return;
+    const frame=requestAnimationFrame(()=>{
+      const panel=document.getElementById("shift-import");
+      panel?.focus({preventScroll:true});
+      panel?.scrollIntoView({block:"start"});
+    });
+    return()=>cancelAnimationFrame(frame);
+  },[shiftPreview]);
   const shiftPreviewVersionRef=useRef(0);
   const [staff, setStaff] = useState<StaffProfile[]>(
     firebaseConfigured ? [] : demoStaff
@@ -2548,8 +2557,9 @@ async function previewRowCreation() {
       const preview=parseShiftImportPreview(response.data);
       if(!current())return;
       setShiftPreview(preview);
+      openWorkspace("jobs");
       setSyncSummary(`${firebaseConfigured?"":"デモ："}${preview.totalSheets}タブ / ${preview.totalJobs}案件`);
-      setMessage(firebaseConfigured?"原本を変更せず読み取りました。案件一覧を確認できます。":"デモの一覧表示です。実際のシフト表は読み取っていません。");
+      setMessage(firebaseConfigured?"原本の読取結果を下に表示しました。アプリへの取込はまだ行っていません。":"デモの一覧表示です。実際のシフト表は読み取っていません。");
     } catch(error) {
       if(!current())return;
       setSyncSummary("読取に失敗しました");
@@ -3389,7 +3399,7 @@ function downloadCsv(filename:string,content:string) {
         )}
       </header>
       {!firebaseConfigured&&<div className="demo-mode-banner"><strong>LIVE DEMO v5.6</strong><span>実データ送信なし。案件・報告書・スタッフの業務画面を確認できます。</span></div>}
-      {message && <div className="message">{message}</div>}
+      {message && <div className="message">{message}{shiftPreview&&workspace!=="jobs"&&<button className="ghost" onClick={()=>{openWorkspace("jobs");requestAnimationFrame(()=>{const panel=document.getElementById("shift-import");panel?.focus({preventScroll:true});panel?.scrollIntoView({block:"start"});});}}>原本の読取結果を見る</button>}</div>}
       {productionBlocked && (
         <div className={`production-stop-banner ${productionControl?.control.emergencyLock ? "locked" : "waiting"}`}>
           <strong>{productionControl?.control.emergencyLock ? "全体停止ロック作動中" : "本番公開ロック中"}</strong>
@@ -3403,6 +3413,25 @@ function downloadCsv(filename:string,content:string) {
       {workspace==="operations"&&firebaseConfigured&&operationsLoadState!=="ready"&&<section className="panel" role="status">
         {operationsLoadState==="error"?<><p>一部の運用情報を読み込めませんでした。取得できた情報だけ表示しています。通信状態を確認して、もう一度お試しください。</p><button onClick={()=>setOperationsRetry(value=>value+1)}>もう一度読み込む</button></>:<p>運用情報を読み込んでいます…</p>}
       </section>}
+      <WorkspacePanel group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel sync-panel" id="shift-import" tabIndex={-1} aria-label="原本の確認と取込">
+        <div className="sync-head">
+          <div>
+            <h2>スプシ同期</h2>
+            <p>月別タブを読取専用で確認し、元スプシを変更せずアプリ用データへ同期します。</p>
+          </div>
+          <strong>{syncSummary}</strong>
+        </div>
+        <label>対象月（空欄は取込設定の範囲）<input type="month" value={shiftPreviewMonth} disabled={syncBusy} onChange={event=>{setShiftPreviewMonth(event.target.value);setShiftPreview(null);setSyncSummary("未実行");}}/></label>
+        <div className="sync-actions">
+          <button className="ghost" onClick={previewSheetSync} disabled={syncBusy}>
+            {syncBusy ? "処理中…" : "原本を読取プレビュー"}
+          </button>
+          <button onClick={runSheetSync} disabled={syncBusy}>
+            アプリへ取込確定
+          </button>
+        </div>
+        {shiftPreview&&<Suspense fallback={<p role="status">読取結果を表示中…</p>}><AdminShiftImportPreview preview={shiftPreview} demo={!firebaseConfigured}/></Suspense>}
+      </section></WorkspacePanel>
 <WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="two">
         <article className="panel">
           <h2>今すぐ確認</h2>
@@ -3798,25 +3827,7 @@ function downloadCsv(filename:string,content:string) {
 
       <WorkspacePanel group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">書込エラーを読込中…</p>}><AdminSheetIssuePanel sheetIssues={sheetIssues} issuesBusy={issuesBusy} operationKeys={operationKeys} loadSheetIssues={loadSheetIssues} retrySheetIssue={retrySheetIssue} acknowledgeSheetIssue={acknowledgeSheetIssue}/></Suspense></WorkspacePanel>
 
-      <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel sync-panel">
-        <div className="sync-head">
-          <div>
-            <h2>スプシ同期</h2>
-            <p>月別タブを読取専用で確認し、元スプシを変更せずアプリ用データへ同期します。</p>
-          </div>
-          <strong>{syncSummary}</strong>
-        </div>
-        <label>対象月（空欄は取込設定の範囲）<input type="month" value={shiftPreviewMonth} disabled={syncBusy} onChange={event=>{setShiftPreviewMonth(event.target.value);setShiftPreview(null);setSyncSummary("未実行");}}/></label>
-        <div className="sync-actions">
-          <button className="ghost" onClick={previewSheetSync} disabled={syncBusy}>
-            {syncBusy ? "処理中…" : "原本を読取プレビュー"}
-          </button>
-          <button onClick={runSheetSync} disabled={syncBusy}>
-            アプリへ取込確定
-          </button>
-        </div>
-        {shiftPreview&&<Suspense fallback={<p role="status">読取結果を表示中…</p>}><AdminShiftImportPreview preview={shiftPreview} demo={!firebaseConfigured}/></Suspense>}
-      </section></WorkspacePanel>
+
 
       <WorkspacePanel group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel sync-panel">
         <div className="sync-head">

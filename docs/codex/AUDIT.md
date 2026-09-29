@@ -336,3 +336,13 @@ processSafeSheetWrite / updateExpenseReviewFromQueue の切替時は、実Trigge
 - 正式CIで既存の認証ガードが共通読取処理の追加引数を拒否。ガードを変更せず、従来の3引数・preview固定呼出を維持し、追加一覧の返却可否を入口で制御する構成へ修正。保護条件の変異73テスト、旧/新応答・読取経路、Functionsビルド再検証成功。
 
 - 統合試験用VMへNode標準のBufferを追加（外部SDK・通信の拒否は維持）。実モジュールで管理者認証→26件の読取結果→旧20件応答互換・業務書込ゼロを追加し、ライフサイクル91条件成功。
+
+
+## 2026-09-29: 関数単位のメール抽出Secret binding
+- SCOPE: previewShiftImport単独配備が、対象外メール受信のグローバルSecretParam解決により403で停止する不具合を修正。失敗run36521704924後のpreviewshiftimport-00006-lihはACTIVEのまま。
+- FILES_CHANGED: functions/src/case-mail-receive.ts、scripts/test-case-mail-receive.mjs、本記録。
+- CHECKS_RUN / RESULT: Functionsビルド、受信→Crew下書き/認証/停止/秘密不足の27条件と実SDK manifest・遅延読取2条件に成功。TypeScriptと生成JavaScript双方で29条件。
+- 秘密名を受信2関数のsecretsへ直接指定し、実行時にのみprocess.envから取得。既存の秘密形式検証・認証・所属・停止条件は維持。秘密を通常dotenvへ移さない。未配備の受信2関数を有効化しない。
+- 根拠: Firebase公式環境設定 https://firebase.google.com/docs/functions/config-env#secret_parameters 。固定CLI15.24.0 prepare.tsのmatchingBackendに対するsecret検証、params.tsのグローバルSecretParam解決を照合。
+- DEPLOY_PERFORMED: 修正の配備前。CLOUD_RESOURCES_CHANGED: 本修正では0。IAM/Secret Manager/配備保護/allowlistの変更なし。
+- BLOCKERS / NEXT_SAFE_ACTION: exact HEAD正式CI→通常merge→main CI→既存保護経路からpreviewShiftImportのみ反映。実業務呼出・原本書込・通知・Liveなし。

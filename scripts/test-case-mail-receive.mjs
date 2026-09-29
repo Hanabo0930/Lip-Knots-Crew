@@ -15,7 +15,7 @@ function load(name, dependencies, globals = {}) {
 }
 const serviceAccountEmail = "synthetic-receiver@lip-knots-crew-staging.iam.gserviceaccount.com";
 const origin = "https://lkcm-attachment-extractor-740154137290.asia-northeast1.run.app";
-function setup() {
+function setup({ realSdk = false } = {}) {
   const h = harness(), calls = [];
   h.records.delete(h.paths.receipt); h.records.delete(h.paths.candidate);
   h.records.get(h.paths.feature).caseMailIntakeEnabled = true;
@@ -42,15 +42,15 @@ function setup() {
     },
   };
   const api = load("case-mail-receive", {
-    "firebase-functions/v2/https": h.load("firebase-functions/v2/https"),
-    "firebase-functions/params": { defineSecret: name => { assert.equal(name,"CASE_MAIL_EXTRACTOR_SECRET"); return { value: () => "s".repeat(43) }; } },
+    "firebase-functions/v2/https": realSdk ? require("firebase-functions/v2/https") : h.load("firebase-functions/v2/https"),
+    "firebase-functions/params": require("firebase-functions/params"),
     zod: require("zod"), "./firebase": h.load("./firebase"), "./utils": h.load("./utils"),
     "./case-mail-gmail": h.load("./case-mail-gmail"), "./case-mail-intake": h.load("./case-mail-intake"),
     "../case-mail-runtime/read-mail.cjs": require("../functions/case-mail-runtime/read-mail.cjs"),
-    "./case-mail-cloud-auth": { createCaseMailCloudAuth: account => { assert.equal(account,serviceAccountEmail); return deps; } },
+    "./case-mail-cloud-auth": { createCaseMailCloudAuth: (account, readSecret) => { assert.equal(account,serviceAccountEmail); state.readSecret = readSecret; return deps; } },
   }, { process: { env } });
   const data = { messageId: raw.id, expectedCompanyId: companyId, expectedActorUid: h.auth.uid };
-  return { h, calls, config, env, state, data, batch: (cursor) => api.receiveCaseMailMessages({auth:h.auth,data:{expectedCompanyId:companyId,expectedActorUid:h.auth.uid,...(cursor?{cursor}:{})}}), receive: (input = data, auth = h.auth) => api.receiveCaseMailMessage({ data: input, auth }) };
+  return { h, calls, config, env, state, data, api, batch: (cursor) => api.receiveCaseMailMessages({auth:h.auth,data:{expectedCompanyId:companyId,expectedActorUid:h.auth.uid,...(cursor?{cursor}:{})}}), receive: (input = data, auth = h.auth) => api.receiveCaseMailMessage({ data: input, auth }) };
 }
 let cases = 0;
 async function check(name, fn) { await fn(); cases++; console.log("成功: " + name); }
@@ -125,5 +125,31 @@ await check("抽出認証の宛先を固定し、秘密不足時は通信しな�
 await check("認証サーバーの失敗詳細を隠す",async()=>{
   const f=authSetup();f.state.status=400;f.state.body={error_description:"synthetic-secret-never-expose"};
   await assert.rejects(f.auth.obtainGmailAccessToken({mailbox:"info@lipknots.com",scope:"https://www.googleapis.com/auth/gmail.readonly"}),e=>!e.message.includes("synthetic-secret"));
+});
+await check("実SDKの秘密バインドは受信2関数だけ、全体パラメータを追加しない", async () => {
+  const params = require("firebase-functions/params"), before = [...params.declaredParams];
+  const f = setup({ realSdk: true });
+  assert.deepEqual(params.declaredParams, before);
+  assert.ok(!params.declaredParams.some(param => param.name === "CASE_MAIL_EXTRACTOR_SECRET"));
+  for (const name of ["receiveCaseMailMessage", "receiveCaseMailMessages"]) {
+    const endpoint = f.api[name].__endpoint;
+    assert.deepEqual(JSON.parse(JSON.stringify(endpoint.secretEnvironmentVariables)), [{ key: "CASE_MAIL_EXTRACTOR_SECRET" }]);
+    assert.equal(endpoint.timeoutSeconds, 540);
+    assert.equal(endpoint.availableMemoryMb, 512);
+    assert.ok(endpoint.callableTrigger);
+  }
+  const unrelated = require("firebase-functions/v2/https").onCall(async () => ({}));
+  assert.equal(unrelated.__endpoint.secretEnvironmentVariables, undefined);
+  assert.equal(f.calls.length, 0);
+});
+await check("秘密は実行時に取得し、未設定時は既存の必須検証へ空値を渡す", async () => {
+  const f = setup();
+  assert.equal(f.state.readSecret, undefined);
+  await f.receive();
+  assert.equal(f.state.readSecret(), "");
+  f.env.CASE_MAIL_EXTRACTOR_SECRET = "s".repeat(43);
+  assert.equal(f.state.readSecret(), "s".repeat(43));
+  delete f.env.CASE_MAIL_EXTRACTOR_SECRET;
+  assert.equal(f.state.readSecret(), "");
 });
 console.log(JSON.stringify({caseMailReceiveTests:cases,compiled,cloudOperations:false}));

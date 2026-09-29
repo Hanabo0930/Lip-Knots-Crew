@@ -23,6 +23,7 @@ PREFIX = f"projects/{PROJECT}/locations/{REGION}"
 TARGETS = ("processSafeSheetWrite", "updateExpenseReviewFromQueue", "dispatchDueNotifications",
            "scheduleOperationalReminders", "processSheetRowCreation", "retrySheetRowCreation")
 EVENT_TARGETS = ("processSafeSheetWrite", "updateExpenseReviewFromQueue", "processSheetRowCreation")
+WRITEBACK_EVENTS = ("processSafeSheetWrite", "updateExpenseReviewFromQueue")
 SENTINELS = ("retrySafeSheetWrites", "finalizeStagedUpload", "processNotificationQueue")
 PAUSED_JOBS = ("scheduleOperationalReminders", "retrySheetRowCreation")
 MASK = "buildConfig.source,serviceConfig.environmentVariables"
@@ -122,6 +123,30 @@ def archive_manifest(data):
     return {name: value for name, value in manifest.items() if value is not None}
 
 
+def required_held_events(snapshot, target):
+    """書戻し2処理の共同切替だけ、別キューの配送保留を前提から外す。"""
+    require(target in TARGETS, "TARGET_REJECTED")
+    if target not in WRITEBACK_EVENTS:
+        return EVENT_TARGETS
+    # 名前だけで別系統と判断しない。実Triggerの監視範囲を完全照合する。
+    for name in EVENT_TARGETS:
+        collection = "sheetSyncQueue" if name in WRITEBACK_EVENTS else "sheetRowCreateQueue"
+        filters = snapshot["triggers"][name].get("eventFilters")
+        require(isinstance(filters, list) and len(filters) == 4, "EVENT_QUEUE_SCOPE_UNPROVEN")
+        expected = {
+            "type": ("google.cloud.firestore.document.v1.written", ""),
+            "database": ("(default)", ""), "namespace": ("(default)", ""),
+            "document": (collection + "/{queueId}", "match-path-pattern"),
+        }
+        actual = {}
+        for item in filters:
+            require(isinstance(item, dict) and isinstance(item.get("attribute"), str)
+                    and item["attribute"] not in actual, "EVENT_QUEUE_SCOPE_UNPROVEN")
+            actual[item["attribute"]] = (item.get("value"), item.get("operator", ""))
+        require(actual == expected, "EVENT_QUEUE_SCOPE_UNPROVEN")
+    return WRITEBACK_EVENTS
+
+
 def validate_snapshot(snapshot, target):
     require(target in TARGETS, "TARGET_REJECTED")
     functions = snapshot["functions"]
@@ -157,6 +182,7 @@ def validate_snapshot(snapshot, target):
                 f"https://{REGION}-{PROJECT}.cloudfunctions.net/{name}", "SCHEDULER_TARGET_CHANGED")
     require(f"{PREFIX}/jobs/firebase-schedule-dispatchDueNotifications-{REGION}" not in jobs,
             "UNEXPECTED_NOTIFICATION_SCHEDULER")
+    held_events = required_held_events(snapshot, target)
     for name in EVENT_TARGETS:
         trigger = snapshot["triggers"][name]
         expected = functions[name]["eventTrigger"]["trigger"]
@@ -168,8 +194,10 @@ def validate_snapshot(snapshot, target):
         require(sub.get("name") == trigger["transport"]["pubsub"]["subscription"]
                 and sub.get("topic") == trigger["transport"]["pubsub"]["topic"]
                 and sub["name"].startswith(f"projects/{PROJECT}/subscriptions/"), "SUBSCRIPTION_MISMATCH")
-        require(sub.get("state") == "ACTIVE" and sub.get("pushConfig", {}) == {},
-                "EVENT_DELIVERY_NOT_HELD")
+        require(sub.get("state") == "ACTIVE", "SUBSCRIPTION_NOT_READY")
+        if name not in held_events:
+            continue
+        require(sub.get("pushConfig", {}) == {}, "EVENT_DELIVERY_NOT_HELD")
         # 既存の24時間保持ではこの経路を開かない。延長・停止操作はここでは実施しない。
         retention = sub.get("messageRetentionDuration", "")
         require(re.fullmatch(r"[0-9]+s", retention) and int(retention[:-1]) >= 172800,

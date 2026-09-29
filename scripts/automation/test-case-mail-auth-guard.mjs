@@ -109,7 +109,7 @@ for (const name of receiverNames) {
   reject(name, 'requireAdmin(request);', '/* requireAdmin(request); */ unverified(request);', 'receive');
   reject(name, 'requireAdmin(request);', 'await db.collection("unscoped").get(); requireAdmin(request);', 'receive');
   reject(name, 'receiverFor(request, input.data)', 'receiverFor(request, request.data)', 'receive');
-  reject(name, 'return receiveError(error)', 'throw error', 'receive');
+  reject(name, 'return receiveError(error, stage)', 'throw error', 'receive');
   for (const [before, after] of [
     ['from "./utils"', 'from "./unverified-utils"'],
     ['secrets: [extractorSecretName]', 'secrets: []'],

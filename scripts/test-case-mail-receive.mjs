@@ -13,10 +13,11 @@ function load(name, dependencies, globals = {}) {
     Date, URLSearchParams, AbortSignal, ...globals });
   return exports;
 }
+const diagnosticModule = load("case-mail-diagnostics", {});
 const serviceAccountEmail = "synthetic-receiver@lip-knots-crew-staging.iam.gserviceaccount.com";
 const origin = "https://lkcm-attachment-extractor-740154137290.asia-northeast1.run.app";
 function setup({ realSdk = false } = {}) {
-  const h = harness(), calls = [];
+  const h = harness(), calls = [], diagnostics = [];
   h.records.delete(h.paths.receipt); h.records.delete(h.paths.candidate);
   h.records.get(h.paths.feature).caseMailIntakeEnabled = true;
   const config = { companyId, uid: "synthetic-ingester", producerId: "synthetic-producer",
@@ -43,6 +44,8 @@ function setup({ realSdk = false } = {}) {
   };
   const api = load("case-mail-receive", {
     "firebase-functions/v2/https": realSdk ? require("firebase-functions/v2/https") : h.load("firebase-functions/v2/https"),
+    "firebase-functions/logger": { warn: (...args) => diagnostics.push(args) },
+    "./case-mail-diagnostics": diagnosticModule,
     "firebase-functions/params": require("firebase-functions/params"),
     zod: require("zod"), "./firebase": h.load("./firebase"), "./utils": h.load("./utils"),
     "./case-mail-gmail": h.load("./case-mail-gmail"), "./case-mail-intake": h.load("./case-mail-intake"),
@@ -50,7 +53,7 @@ function setup({ realSdk = false } = {}) {
     "./case-mail-cloud-auth": { createCaseMailCloudAuth: (account, readSecret) => { assert.equal(account,serviceAccountEmail); state.readSecret = readSecret; return deps; } },
   }, { process: { env } });
   const data = { messageId: raw.id, expectedCompanyId: companyId, expectedActorUid: h.auth.uid };
-  return { h, calls, config, env, state, data, api, batch: (cursor) => api.receiveCaseMailMessages({auth:h.auth,data:{expectedCompanyId:companyId,expectedActorUid:h.auth.uid,...(cursor?{cursor}:{})}}), receive: (input = data, auth = h.auth) => api.receiveCaseMailMessage({ data: input, auth }) };
+  return { h, calls, diagnostics, config, env, state, data, api, batch: (cursor) => api.receiveCaseMailMessages({auth:h.auth,data:{expectedCompanyId:companyId,expectedActorUid:h.auth.uid,...(cursor?{cursor}:{})}}), receive: (input = data, auth = h.auth) => api.receiveCaseMailMessage({ data: input, auth }) };
 }
 let cases = 0;
 async function check(name, fn) { await fn(); cases++; console.log("成功: " + name); }
@@ -100,9 +103,9 @@ await check("受信停止中は一覧の認証も取得しない",async()=>{
   const f=setup();f.h.records.get(f.h.paths.feature).caseMailIntakeEnabled=false;await assert.rejects(f.batch());assert.equal(f.calls.length,0);
 });
 function authSetup() {
-  const events=[], state={ status:200, body:{access_token:"synthetic-token",token_type:"Bearer"},secret:"s".repeat(43) };
+  const events=[], state={ status:200, body:{access_token:"synthetic-token",token_type:"Bearer"},secret:"s".repeat(43), signingFailure: false };
   class GoogleAuth { async getIdTokenClient(audience) { events.push(["audience",audience]);return {idTokenProvider:{fetchIdToken:async a=>{events.push(["idtoken",a]);return "a.b.c";}}}; } }
-  const api=load("case-mail-cloud-auth",{googleapis:{google:{auth:{GoogleAuth},iamcredentials:()=>({projects:{serviceAccounts:{signJwt:async(request,options)=>{events.push(["sign",request,options]);return {data:{signedJwt:"synthetic-assertion"}};}}}})}}},
+  const api=load("case-mail-cloud-auth",{"./case-mail-diagnostics":diagnosticModule,googleapis:{google:{auth:{GoogleAuth},iamcredentials:()=>({projects:{serviceAccounts:{signJwt:async(request,options)=>{if(state.signingFailure)throw Error("synthetic-secret-never-expose");events.push(["sign",request,options]);return {data:{signedJwt:"synthetic-assertion"}};}}}})}}},
     {fetch:async(url,options)=>{events.push(["exchange",url,options]);return new Response(JSON.stringify(state.body),{status:state.status});}});
   return {api,events,state,auth:api.createCaseMailCloudAuth(serviceAccountEmail,()=>state.secret)};
 }
@@ -151,5 +154,38 @@ await check("秘密は実行時に取得し、未設定時は既存の必須検�
   assert.equal(f.state.readSecret(), "s".repeat(43));
   delete f.env["lkcm-extractor-bearer"];
   assert.equal(f.state.readSecret(), "");
+});
+await check("失敗工程だけをログと応答に残し、外部例外を公開しない", async()=>{
+  const f=setup();f.state.failCredentials=true;
+  await assert.rejects(f.batch(),e=>e.details.stage==="gmail_auth"&&e.details.reason==="receive_failed"&&!JSON.stringify(e).includes("synthetic-secret"));
+  assert.equal(JSON.stringify(f.diagnostics),JSON.stringify([["case_mail_receive_failed",{stage:"gmail_auth",reason:"receive_failed"}]]));
+  assert.equal(f.h.list("caseMailIntakeReceipts").length,0);
+});
+for(const [name,mutate,stage] of [
+  ["設定不足",f=>f.h.records.delete("caseMailReceiverConfigs/"+companyId),"configuration"],
+  ["受信箱相違",f=>f.state.profile="other@example.invalid","mailbox"],
+  ["不正な一覧",f=>f.state.page.nextPageToken="bad token","list"],
+  ["候補保存失敗",f=>f.state.afterFetch=()=>{f.h.failCommit=true;},"save"],
+  ["途中の本文取得失敗",f=>f.state.page.messages=[{id:"synthetic-failure"}],"save"],
+]) await check(name+"の診断工程",async()=>{
+  const f=setup();mutate(f);await assert.rejects(f.batch(),e=>e.details.stage===stage);
+  assert.equal(f.diagnostics.length,1);
+});
+for(const [name,mutate,reason] of [
+  ["署名権限不足",f=>f.state.signingFailure=true,"gmail_signing_failed"],
+  ["委任拒否",f=>{f.state.status=400;f.state.body={error:"unauthorized_client",error_description:"synthetic-secret-never-expose"};},"gmail_delegation_denied"],
+  ["未分類OAuth失敗",f=>{f.state.status=400;f.state.body={error:"synthetic-secret-never-expose"};},"gmail_token_exchange_failed"],
+  ["認証形式不正",f=>f.state.body={access_token:"bad token",token_type:"Bearer"},"gmail_token_invalid"],
+]) await check(name+"は固定診断だけ保持",async()=>{
+  const f=authSetup();mutate(f);
+  await assert.rejects(f.auth.obtainGmailAccessToken({mailbox:"info@lipknots.com",scope:"https://www.googleapis.com/auth/gmail.readonly"}),e=>{
+    assert.equal(diagnosticModule.caseMailFailureReason(e),reason);
+    assert.ok(!JSON.stringify(e).includes("synthetic-secret"));assert.ok(!e.message.includes("synthetic-secret"));return true;
+  });
+});
+await check("偽装された診断情報も外部文字列をログへ出さない",async()=>{
+  assert.equal(diagnosticModule.caseMailFailureReason({reason:"gmail_delegation_denied"}),"receive_failed");
+  const e=new diagnosticModule.CaseMailAuthFailure("gmail_signing_failed");e.reason="synthetic-secret-never-expose";
+  assert.equal(diagnosticModule.caseMailFailureReason(e),"receive_failed");
 });
 console.log(JSON.stringify({caseMailReceiveTests:cases,compiled,cloudOperations:false}));

@@ -1392,7 +1392,7 @@ function checkCaseMailReceiver(name) {
   const has = (text, parts) => parts.every(part => text.includes(part));
   const schema = name === "receiveCaseMailMessage" ? "requestSchema" : "pageSchema";
   if (!block.startsWith("exportconst" + name + "=onCall(options,asyncrequest=>{requireAdmin(request);constinput=" + schema + ".safeParse(request.data);if(!input.success)thrownewHttpsError(")) return false;
-  if (!has(block, ['constreceiver=awaitreceiverFor(request,input.data);', 'catch(error){returnreceiveError(error);}'])) return false;
+  if (!has(block, ['constreceiver=awaitreceiverFor(request,input.data);', 'catch(error){returnreceiveError(error,stage);}'])) return false;
   if (!has(whole, [
     'import{requireAdmin,companyFromClaims}from"./utils";', 'import{onCall,HttpsError}from"firebase-functions/v2/https";',
     'import{db}from"./firebase";', 'import{createGmailCaseMailReceiver}from"./case-mail-gmail";',

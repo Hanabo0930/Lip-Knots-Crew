@@ -1,4 +1,5 @@
 import { google } from "googleapis";
+import { CaseMailAuthFailure } from "./case-mail-diagnostics";
 import type { CaseMailGmailDependencies } from "./case-mail-gmail";
 
 const tokenUrl = "https://oauth2.googleapis.com/token";
@@ -14,6 +15,7 @@ export function createCaseMailCloudAuth(serviceAccountEmail: string, extractorSe
       if (context.mailbox !== "info@lipknots.com" || context.scope !== "https://www.googleapis.com/auth/gmail.readonly") {
         throw new Error("案件受信の読取範囲が一致しません。");
       }
+      let phase: "signing" | "exchange" = "signing";
       try {
         const auth = new google.auth.GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
         const iam = google.iamcredentials({ version: "v1", auth });
@@ -24,14 +26,24 @@ export function createCaseMailCloudAuth(serviceAccountEmail: string, extractorSe
             scope: context.scope, aud: tokenUrl, iat: now, exp: now + 300 }) },
         }, { timeout: 30000 });
         if (!signed.data.signedJwt) throw Error("署名なし");
+        phase = "exchange";
         const response = await fetch(tokenUrl, { method: "POST", redirect: "error", signal: AbortSignal.timeout(30000),
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: signed.data.signedJwt }) });
-        if (!response.ok) throw Error("認証失敗");
+        if (!response.ok) {
+          // error_description等は保持せず、固定のOAuth区分だけを見る。
+          const body: unknown = await response.json().catch(() => null);
+          const code = body && typeof body === "object" && "error" in body ? body.error : null;
+          throw new CaseMailAuthFailure(code === "unauthorized_client" || code === "access_denied"
+            ? "gmail_delegation_denied" : "gmail_token_exchange_failed");
+        }
         const token = await response.json() as { access_token?: unknown; token_type?: unknown };
-        if (typeof token.access_token !== "string" || !token.access_token || /\s/.test(token.access_token) || token.token_type !== "Bearer") throw Error("認証形式不正");
+        if (typeof token.access_token !== "string" || !token.access_token || /\s/.test(token.access_token) || token.token_type !== "Bearer") throw new CaseMailAuthFailure("gmail_token_invalid");
         return token.access_token;
-      } catch { throw new Error("Gmail読取認証を取得できません。受信用IDの委任設定を確認してください。"); }
+      } catch (error) {
+        if (error instanceof CaseMailAuthFailure) throw error;
+        throw new CaseMailAuthFailure(phase === "signing" ? "gmail_signing_failed" : "gmail_token_exchange_failed");
+      }
     },
     async obtainExtractorCredentials(context) {
       if (context.mailbox !== "info@lipknots.com" || context.audience !== extractorOrigin) throw Error("添付抽出先が一致しません。");
@@ -42,7 +54,7 @@ export function createCaseMailCloudAuth(serviceAccountEmail: string, extractorSe
         const client = await auth.getIdTokenClient(extractorOrigin);
         const idToken = await client.idTokenProvider.fetchIdToken(extractorOrigin);
         return { idToken, secret };
-      } catch { throw new Error("添付抽出の認証設定を確認してください。"); }
+      } catch { throw new CaseMailAuthFailure("extractor_auth_failed"); }
     },
   };
 }

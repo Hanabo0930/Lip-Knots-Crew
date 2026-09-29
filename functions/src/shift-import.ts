@@ -1,3 +1,4 @@
+import { createShiftPreviewRows, type ShiftPreviewList } from "./shift-preview-core";
 import { assertProductionOperational } from "./system-safety";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
@@ -26,6 +27,8 @@ import {
 const ImportRequestSchema = z.object({
   sheetNames: z.array(z.string().min(1)).max(36).optional(),
 });
+
+const PreviewRequestSchema = ImportRequestSchema.extend({ includePreviewRows:z.boolean().optional() });
 
 const ColumnSchema = z.object({
   workDate: z.string().min(1),
@@ -99,6 +102,7 @@ type ImportExecutionResult = {
     writes: number;
   };
   warnings: string[];
+  previewRows?: ShiftPreviewList;
   samples: Array<{
     caseId: string;
     sheetName: string;
@@ -115,8 +119,8 @@ export const previewShiftImport = onCall(
   async (request) => {
     const session = requireAdmin(request);
     const companyId = companyFromClaims(session.token);
-    const input = ImportRequestSchema.parse(request.data ?? {});
-    return executeShiftImport(companyId, "preview", input.sheetNames);
+    const input = PreviewRequestSchema.parse(request.data ?? {});
+    return executeShiftImport(companyId, "preview", input.sheetNames, input.includePreviewRows === true);
   }
 );
 
@@ -186,7 +190,8 @@ export const getShiftSyncStatus = onCall(async (request) => {
 async function executeShiftImport(
   companyId: string,
   mode: ImportMode,
-  requestedSheets?: string[]
+  requestedSheets?: string[],
+  includePreviewRows = false
 ): Promise<ImportExecutionResult> {
   if (mode === "commit") await assertProductionOperational(companyId);
   const config = await loadConfig(companyId);
@@ -312,6 +317,7 @@ async function executeShiftImport(
       sheets: summaries,
       totals,
       warnings: warnings.slice(0, 200),
+      ...(mode === "preview" && includePreviewRows ? { previewRows:createShiftPreviewRows(allJobs) } : {}),
       samples: allJobs.slice(0, 20).map((job) => ({
         caseId: job.caseId,
         sheetName: job.sheetRef.sheetName,

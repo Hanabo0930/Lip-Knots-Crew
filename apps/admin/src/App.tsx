@@ -2562,7 +2562,7 @@ async function previewRowCreation() {
       const sheetNames=previewSheetNames(shiftPreviewMonth);
       if(firebaseConfigured&&(!functions||!activeUser))throw new Error("管理者でログインしてから読み取ってください。");
       const response=firebaseConfigured
-        ? await httpsCallable(functions!,"previewShiftImport")({...(sheetNames?{sheetNames}:{})})
+        ? await httpsCallable(functions!,"previewShiftImport")({...(sheetNames?{sheetNames}:{}),includePreviewRows:true})
         : {data:{totals:{sheets:1,jobs:1,unresolvedStaff:0},warnings:[],samples:[{caseId:"demo-preview",sheetName:sheetNames?.[0]??"サンプル月",row:2,workDate:"サンプル日",storeName:"サンプル店舗",assignedStaffName:"",status:"open"}]}};
       const preview=parseShiftImportPreview(response.data);
       if(!current())return;

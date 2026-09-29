@@ -319,3 +319,14 @@ processSafeSheetWrite / updateExpenseReviewFromQueue の切替時は、実Trigge
 - NEXT_SAFE_ACTION: Push final PR head, required CI, normal merge, main CI and expiring preview.
 
 - Narrow authenticated-header follow-up: notification/logout controls fit at 320/390/1280px; verified with synthetic controls and no authenticated API calls.
+
+
+## 2026-09-29 原本プレビューの全件確認
+- SCOPE: opt-inの読取専用一覧（最大5000件/UTF-8 JSON 2MiB）と、20件ずつのページ切替・検索・状態絞込。旧samples20件契約、取込確定、認証境界は維持。切替の追加通信なし。
+- FILES_CHANGED: shift-preview-core.ts / shift-import.ts、AdminShiftImportPreview.tsx / shift-import-preview.ts / App.tsx / styles.css、関連テスト。
+- CHECKS_RUN: 169件/9ページの抜け・重複、日付・NFKC検索、状態絞込、結果差替、スクロール復帰、390/1280画面、追加通信なし、旧応答互換・不正応答、件数/UTF-8容量上限、認証境界、読取経路に書込なし、取込transaction62条件、Admin/Functionsビルド。
+- CHECKS_RESULT: Passed. 合成データのみ。返却する項目を既存一覧の7項目へ限定。
+- DEPLOY_PERFORMED: まだなし。正式CI後に既存の保護付きpreviewShiftImport配備のみを使う。
+- CLOUD_RESOURCES_CHANGED: None.
+- BLOCKERS: 既存の書戻し切替・実業務受入は別工程。原本への検証行・取込確定は不要。
+- NEXT_SAFE_ACTION: exact HEAD正式CI→通常merge→main CI・期限付きPreview→previewShiftImport限定反映。

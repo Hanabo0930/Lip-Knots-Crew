@@ -1320,3 +1320,12 @@ body:has(.admin-shell) { background:#edf1ff; }
  .admin-shell>header .header-actions { grid-column:2 / -1; justify-content:flex-end; }
  .admin-shell>header .header-actions button { min-height:40px; }
 }
+
+.shift-preview-results .preview-counts { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:18px 0; }
+.preview-counts>span { display:flex; align-items:center; gap:12px; padding:10px 14px; border:1px solid #fff; border-radius:14px; background:#ece8fb; color:#62517f; font-size:12px; }
+.preview-counts>span:nth-child(2) { background:#dcf3ee; color:#346e65; }.preview-counts strong { font-size:18px; }.preview-counts>span:last-child { margin-left:auto; background:#ffffffa8; color:#53677d; }
+.preview-filters { display:grid; grid-template-columns:minmax(0,1fr) minmax(130px,.35fr); gap:12px; margin:18px 0 10px; }
+.preview-filters label { display:grid; gap:7px; color:#59647f; font-size:12px; }.preview-filters :is(input,select) { width:100%; min-width:0; border:1px solid #d5dcec; border-radius:12px; padding:11px 12px; background:#ffffffd9; color:#4d5974; font:inherit; font-size:14px; }
+.preview-range { color:#59647f; font-size:12px; }.preview-pagination { display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap; margin:12px 0 0; }.preview-pagination span { color:#59647f; font-size:12px; padding:0 6px; }.admin-shell .preview-pagination button { padding:8px 12px; }
+.preview-warnings { margin:14px 0; color:#795020; background:#fff4da; border:1px solid #f2deb4; border-radius:12px; padding:10px 14px; font-size:12px; }.preview-warnings summary { cursor:pointer; font-weight:650; }.preview-warnings ul { max-height:220px; overflow:auto; padding-left:20px; }.admin-shell .workspace-panel .panel .preview-partial { color:#795020; }
+@media(max-width:760px) { .preview-filters { grid-template-columns:minmax(0,1fr); }.preview-counts>span:last-child { margin-left:0; }.preview-counts>span { padding:8px 10px; }.preview-pagination { gap:5px; }.admin-shell .preview-pagination button { padding:8px 9px; } }

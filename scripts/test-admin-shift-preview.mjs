@@ -13,7 +13,7 @@ for(const invalid of [{...payload,samples:null},{...payload,samples:Array(21).fi
 const componentContext={exports:{},require};runInNewContext(compile(fs.readFileSync("apps/admin/src/AdminShiftImportPreview.tsx","utf8")),componentContext);
 const React=require("react"),{renderToStaticMarkup}=require("react-dom/server");
 const markup=renderToStaticMarkup(React.createElement(componentContext.exports.default,{preview:parseShiftImportPreview(payload),demo:false}));
-assert.ok(markup.includes("24件中1件"));assert.ok(markup.includes("先頭20件まで"));assert.ok(markup.includes("&lt;script&gt;"));assert.ok(!markup.includes("<script>"));assert.ok(markup.includes("未手配"));assert.ok(!markup.includes("<button"));
+assert.ok(markup.includes("原本24件のうち、取得できた1件"));assert.ok(markup.includes("&lt;script&gt;"));assert.ok(!markup.includes("<script>"));assert.ok(markup.includes("未手配"));assert.ok(!markup.includes("<button"));
 const app=fs.readFileSync("apps/admin/src/App.tsx","utf8"),a=app.indexOf("  async function previewSheetSync() {"),b=app.indexOf("  async function runSheetSync()",a);assert.ok(a>=0&&b>a);const handler=compile(app.slice(a,b));
 const results=[];
 for(const mode of ["success","failure","auth-change","newer","logged-out","invalid-response","demo"]){
@@ -22,7 +22,7 @@ for(const mode of ["success","failure","auth-change","newer","logged-out","inval
  runInNewContext(handler,context);const pending=context.previewSheetSync();
  if(mode==="logged-out"||mode==="demo"){await pending;assert.equal(calls.length,0);assert.equal(state.busy,false);if(mode==="demo")assert.ok(state.message.includes("実際のシフト表は読み取っていません"));else assert.equal(state.preview,null);}
  else{
-  assert.equal(state.preview,null);assert.equal(calls.length,1);assert.equal(calls[0].name,"previewShiftImport");assert.equal(JSON.stringify(calls[0].input),JSON.stringify({sheetNames:["2099.10"]}));
+  assert.equal(state.preview,null);assert.equal(calls.length,1);assert.equal(calls[0].name,"previewShiftImport");assert.equal(JSON.stringify(calls[0].input),JSON.stringify({sheetNames:["2099.10"],includePreviewRows:true}));
   if(mode==="auth-change")context.auth.currentUser={uid:"other"};if(mode==="newer")context.shiftPreviewVersionRef.current++;
   if(mode==="failure")reject(Error("synthetic failure"));else resolve({data:mode==="invalid-response"?{}:payload});await pending;
   if(mode==="success"){assert.equal(state.workspace,"jobs");assert.ok(state.message.includes("取込はまだ"));assert.equal(state.preview.totalJobs,24);assert.equal(state.busy,false);}else assert.equal(state.preview,null);
@@ -41,3 +41,5 @@ for(const mode of ["success","auth-change","cancel"]){
  runInNewContext(syncHandler,context);const pending=context.runSheetSync();if(mode!=="cancel"){if(mode==="auth-change")context.auth.currentUser=null;finish({data:{totals:{sheets:1,jobs:1,writes:1}}});}await pending;assert.equal(calls,mode==="cancel"?0:1);assert.equal(loaded,mode==="success"?1:0);if(mode==="auth-change")assert.equal(state.summary,"");
 }
 console.log("Selected month stays consistent between preview/import; stale auth does not load jobs; cancellation does not invoke import.");
+
+await import("./test-shift-preview-pages.mjs");

@@ -307,3 +307,13 @@ processSafeSheetWrite / updateExpenseReviewFromQueue の切替時は、実Trigge
 - CLOUD_RESOURCES_CHANGED: None. No authenticated business calls, original-sheet writes, imports or real messages.
 - BLOCKERS: Existing worker migration and real-business acceptance remain separate and unresolved. Original preview still returns the existing first-20 sample contract; paging is pending.
 - NEXT_SAFE_ACTION: Exact-head required CI, ordinary merge, then the approved expiring Hosting Preview; no Live promotion.
+
+### Liquid glass visual finish
+- SCOPE: Aqua/lavender/pink glass surfaces, restrained CSS water-light/orb motion, persisted pause control and reduced-motion support. Decorative layers do not intercept business controls.
+- FILES_CHANGED: AdminAtmosphere.tsx, App.tsx, styles.css; motion/browser regression and action-confirmation fixture.
+- CHECKS_RUN: Admin build; 390/1280 browser workflows and visual inspection; pause/resume/reload/reduced-motion; action confirmation; configured bundle budget; 103 local HTTP assets matched to build.
+- CHECKS_RESULT: Passed. Configured entry 187.6 KiB raw / 53.3 KiB gzip; no animation dependencies or remote media. Existing confirmation cancellation prevents navigation.
+- DEPLOY_PERFORMED: Localhost:4184 refreshed; cloud release pending exact-head CI.
+- CLOUD_RESOURCES_CHANGED: None.
+- BLOCKERS: Previous worker migration and real-business acceptance remain pending.
+- NEXT_SAFE_ACTION: Push final PR head, required CI, normal merge, main CI and expiring preview.

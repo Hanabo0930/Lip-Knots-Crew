@@ -132,6 +132,22 @@ try{
  await page.route('**/*',route=>{const url=new URL(route.request().url());return url.hostname==='127.0.0.1'||['data:','blob:'].includes(url.protocol)?route.continue():route.abort();});
  await page.addInitScript(()=>{const original=Element.prototype.scrollIntoView;window.__performanceScrolls=0;Element.prototype.scrollIntoView=function(...args){if(this.id==="staff-performance")window.__performanceScrolls++;return original.apply(this,args);};});
  await page.goto(base);await page.waitForLoadState('networkidle');
+ const animated=page.locator('.aurora,.water-ribbons,.orb-liquid');
+ assert.equal(await animated.count(),4);
+ assert.ok((await animated.evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationName))).every(name=>name!=='none'));
+ await page.getByRole('button',{name:'背景の動きを止める',exact:true}).click();
+ assert.ok((await animated.evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationPlayState))).every(state=>state==='paused'));
+ await page.reload();await page.waitForLoadState('networkidle');
+ assert.equal(await page.locator('main').getAttribute('data-motion'),'paused','Motion preference must survive reload');
+ await page.getByRole('button',{name:'背景の動きを再開',exact:true}).click();
+ assert.ok((await animated.evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationPlayState))).every(state=>state==='running'));
+ await page.emulateMedia({reducedMotion:'reduce'});
+ assert.ok((await animated.evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationName))).every(name=>name==='none'));
+ assert.equal(await page.locator('.motion-toggle').isVisible(),false);
+ await page.emulateMedia({reducedMotion:'no-preference'});
+ assert.equal(await page.locator('.crew-atmosphere').getAttribute('aria-hidden'),'true');
+ assert.equal(await page.locator('.crew-atmosphere').evaluate(node=>getComputedStyle(node).pointerEvents),'none');
+ console.log('Liquid glass: motion pause/resume, persisted preference, reduced-motion and noninteractive decoration passed.');
  const initial={domNodes:await page.locator('*').count(),scripts:[...scripts],visibleHeadings:await page.locator('h2').evaluateAll(nodes=>nodes.filter(node=>node.getClientRects().length).map(node=>node.textContent))};
  const output=process.env.LKC_VISUAL_EVIDENCE_DIR;
  if(output){mkdirSync(output,{recursive:true});writeFileSync(resolve(output,process.argv.includes('--baseline')?'admin-baseline.json':'admin-current.json'),JSON.stringify(initial,null,2));await page.screenshot({path:resolve(output,process.argv.includes('--baseline')?'admin-baseline.png':'admin-overview.png')});}

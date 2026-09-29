@@ -1,3 +1,4 @@
+import AdminAtmosphere, { LiquidOrb } from "./AdminAtmosphere";
 import AdminNavigation, { adminWorkspaces, workspaceViews, viewKey, type AdminWorkspace } from "./AdminNavigation";
 import { parseShiftImportPreview, previewSheetNames, type ShiftImportPreview } from "./shift-import-preview";
 import { submitNativeCreation } from "./native-creation-client";
@@ -804,6 +805,8 @@ function WorkspacePanel({group,view,activeView,visitedViews,active,visited,ready
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
+  const [motionPaused,setMotionPaused]=useState(()=>{try{return localStorage.getItem("lkc.admin.motionPaused")==="true";}catch{return false;}});
+  function toggleMotion(){setMotionPaused(current=>{const next=!current;try{localStorage.setItem("lkc.admin.motionPaused",String(next));}catch{/* 設定を保存できなくても画面内の切替は利用できる。 */}return next;});}
   const [workspace,setWorkspace]=useState<AdminWorkspace>("overview");
   const [visitedWorkspaces,setVisitedWorkspaces]=useState<AdminWorkspace[]>(["overview"]);
   const [adminSessionReady,setAdminSessionReady]=useState(!firebaseConfigured);
@@ -3397,10 +3400,12 @@ function downloadCsv(filename:string,content:string) {
   );
 
   return (
-    <main className={`shell admin-shell ${productionBlocked ? "production-blocked" : ""}`}>
+    <main data-motion={motionPaused?"paused":"active"} className={`shell admin-shell ${productionBlocked ? "production-blocked" : ""}`}>
+      <AdminAtmosphere/>
       <header>
         <img src="/logo.png" alt="Lip Knots" />
         <div><strong>Lip Knots Crew 管理画面</strong><small>{user?.email ?? "デモ管理者"}</small></div>
+        <button className="ghost motion-toggle" onClick={toggleMotion} aria-pressed={motionPaused} aria-label={motionPaused?"背景の動きを再開":"背景の動きを止める"}><span aria-hidden="true">{motionPaused?"▷":"Ⅱ"}</span><span>{motionPaused?"背景を動かす":"動きを止める"}</span></button>
         {user && (
           <div className="header-actions">
             <button className="ghost" onClick={enablePush} disabled={pushBusy || pushEnabled}>通知ON</button>
@@ -3418,11 +3423,12 @@ function downloadCsv(filename:string,content:string) {
           <span>{productionControl?.control.emergencyLock ? "アプリから解除できません。復旧リリースが必要です。" : "社長承認と別管理者による有効化が完了するまで業務処理は停止します。"}</span>
         </div>
       )}
-      <div className="workspace-heading">
+      <div className="workspace-heading" data-workspace={workspace}>
         <div><div className="workspace-breadcrumb">管理画面 <span>/</span> {adminWorkspaces.find(item=>item.id===workspace)?.label}</div>
         <h1 id="workspace-heading" tabIndex={-1}>{workspaceViews[workspace].find(item=>item.id===workspaceView)?.label}</h1>
         <p className="workspace-description">{workspaceViews[workspace].find(item=>item.id===workspaceView)?.description}</p></div>
         {workspace==="jobs"&&workspaceView==="list"&&<button className="ghost" onClick={()=>openWorkspace("jobs","import")}>原本を確認する <span aria-hidden="true">↗</span></button>}
+        <LiquidOrb/>
       </div>
       {workspace==="operations"&&firebaseConfigured&&operationsLoadState!=="ready"&&<section className="panel" role="status">
         {operationsLoadState==="error"?<><p>一部の運用情報を読み込めませんでした。取得できた情報だけ表示しています。通信状態を確認して、もう一度お試しください。</p><button onClick={()=>setOperationsRetry(value=>value+1)}>もう一度読み込む</button></>:<p>運用情報を読み込んでいます…</p>}

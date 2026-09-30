@@ -138,7 +138,7 @@ export default function CaseMailIntakePanel({ companyId, uid, api, onClose, onCr
       {loading && <p role="status">候補を確認しています…</p>}
       {!loading && !items.length && !error && <p>受信した案件候補はありません。</p>}
       <ul className="mail-receipts">{items.map(item => <li key={item.receiptId}>
-        <span>{item.receivedAt ? new Date(item.receivedAt).toLocaleString("ja-JP") : "受信日時未記録"} ／ {item.candidateCount}名分 ／ {statusText(item.status)}</span>
+        <span>{item.receivedAt ? new Date(item.receivedAt).toLocaleString("ja-JP") : "受信日時未記録"} ／ 候補{item.candidateCount}件 ／ {statusText(item.status)}</span>
         <button className="ghost" disabled={loading || busy} onClick={() => void read(item.receiptId)}>内容を確認</button>
       </li>)}</ul>
       {detail && <div className="mail-detail">
@@ -155,7 +155,7 @@ export default function CaseMailIntakePanel({ companyId, uid, api, onClose, onCr
           <dl className="mail-values">{[
             ["実施日", candidate.input.workDate], ["クライアント", candidate.input.clientName], ["店舗", candidate.input.storeName],
             ["メーカー", candidate.input.makerName], ["メニュー", candidate.input.menuName], ["入店時間", candidate.input.entryTime],
-            ["実施時間", candidate.input.workTime], ["人数", "1名"], ["依頼元資料", candidate.source.partId.startsWith("body:") || candidate.source.partId === "body" ? "メール本文" : "添付資料"],
+            ["実施時間", candidate.input.workTime], ["人数", detail.status === "review" || candidate.status === "review" ? "未確定（原文で確認）" : "1名"], ["依頼元資料", candidate.source.partId.startsWith("body:") || candidate.source.partId === "body" ? "メール本文" : "添付資料"],
           ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || "未記載"}</dd></div>)}</dl>
           {candidate.targetCandidates && <section aria-label="対応先の案件候補" className="locked-note">
             <h4>対応先の案件候補（未確定）</h4>

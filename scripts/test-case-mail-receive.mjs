@@ -53,10 +53,37 @@ function setup({ realSdk = false } = {}) {
     "./case-mail-cloud-auth": { createCaseMailCloudAuth: (account, readSecret) => { assert.equal(account,serviceAccountEmail); state.readSecret = readSecret; return deps; } },
   }, { process: { env } });
   const data = { messageId: raw.id, expectedCompanyId: companyId, expectedActorUid: h.auth.uid };
-  return { h, calls, diagnostics, config, env, state, data, api, deps, batch: (cursor) => api.receiveCaseMailMessages({auth:h.auth,data:{expectedCompanyId:companyId,expectedActorUid:h.auth.uid,...(cursor?{cursor}:{})}}), receive: (input = data, auth = h.auth) => api.receiveCaseMailMessage({ data: input, auth }) };
+  return { h, calls, diagnostics, config, env, state, data, raw, api, deps, batch: (cursor) => api.receiveCaseMailMessages({auth:h.auth,data:{expectedCompanyId:companyId,expectedActorUid:h.auth.uid,...(cursor?{cursor}:{})}}), receive: (input = data, auth = h.auth) => api.receiveCaseMailMessage({ data: input, auth }) };
 }
 let cases = 0;
 async function check(name, fn) { await fn(); cases++; console.log("成功: " + name); }
+for (const [source, expected] of [
+  ["2026-09-18T00:00:00.123456Z", "2026-09-18T00:00:00.124Z"],
+  ["2026-09-18T09:00:00.123456+09:00", "2026-09-18T00:00:00.124Z"],
+  ["2026-09-17T15:00:00.123456-09:00", "2026-09-18T00:00:00.124Z"],
+  ["2026-09-18T00:00:00.123000Z", "2026-09-18T00:00:00.123Z"],
+  ["2026-09-17T23:59:59.999999Z", "2026-09-18T00:00:00.000Z"],
+]) for (const mode of ["batch", "receive"]) await check(`高精度の開始日時を安全に扱う ${mode} ${source}`, async () => {
+  const f = setup(), seen = [], obtain = f.deps.obtainGmailAccessToken;
+  f.config.startedAt = source;
+  f.deps.obtainGmailAccessToken = async context => { seen.push(context.startedAt); return obtain(context); };
+  const out = await f[mode]();
+  assert.equal(out.ok, true);
+  assert.equal(f.h.list("caseMailIntakeReceipts").length, 1);
+  assert.ok(seen.length > 0); assert.ok(seen.every(value => value === expected));
+  assert.equal(f.config.startedAt, source); // 保存設定は書き換えない。
+  assert.equal(f.diagnostics.length, 0);
+});
+for (const [source, receivedAt, expectedCount] of [
+  ["2026-09-18T00:00:00.123456Z", "2026-09-18T00:00:00.123Z", 0],
+  ["2026-09-18T00:00:00.123456Z", "2026-09-18T00:00:00.124Z", 1],
+  ["2026-09-18T00:00:00.123000Z", "2026-09-18T00:00:00.123Z", 1],
+  ["2026-09-18T00:00:00.123Z", "2026-09-18T00:00:00.123Z", 1],
+]) await check(`開始日時の境界で過去メールを含めない ${source} ${receivedAt}`, async () => {
+  const f = setup(); f.config.startedAt = source; f.raw.internalDate = String(Date.parse(receivedAt));
+  const out = await f.batch(); assert.equal(out.ok, true); assert.equal(out.received, expectedCount);
+  assert.equal(f.h.list("caseMailIntakeReceipts").length, expectedCount);
+});
 await check("管理者受信→Gmail本文→保存→Crew下書き、同じ依頼の再送でも1件", async () => {
   const f = setup(), out = await f.receive(); assert.equal(out.ok,true); assert.equal(out.status,"ready");
   const command = { mailIntake: { receiptId: out.receiptId, candidateId: out.candidateIds[0], expectedReceiptRevision:out.revision, expectedRevision:1, operationId:"receive-create-1" } };

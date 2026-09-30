@@ -9,3 +9,7 @@
 .mail-intake p,.mail-intake li,.mail-values dd{overflow-wrap:anywhere}
 .mail-intake .locked-note button{margin:4px}
 @media(max-width:480px){.mail-values{grid-template-columns:1fr}.mail-intake .section-heading{display:block}.mail-intake button{max-width:100%;white-space:normal}}
+
+.mail-draft-review label:not(.check-line){display:grid;gap:6px;margin:12px 0;min-width:0}
+.mail-draft-review input:not([type=checkbox]),.mail-draft-review textarea{box-sizing:border-box;width:100%;min-width:0;max-width:100%;min-height:44px;padding:10px 12px;border:1px solid #d6cfe7;border-radius:10px;background:#fff;color:inherit;font:inherit}
+.mail-draft-review textarea{min-height:90px;resize:vertical}

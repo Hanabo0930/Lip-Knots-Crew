@@ -17,7 +17,7 @@ export default function CaseMailDraftReview({receiptId,candidate,api,busy,onBusy
     }catch(error){if(mounted.current){setUncertain(true);setWhole(false);setSingle(false);setMessage((error instanceof Error?error.message:"通信結果を確認できません。")+" 受信内容を再読込し、保存結果を確認してください。");}}
     finally{sending.current=false;onBusy(false);}
   }
-  return <section className="locked-note" aria-label="原文との照合と補正"><h4>原文との照合と補正</h4>
+  return <section className="locked-note mail-draft-review" aria-label="原文との照合と補正"><h4>原文との照合と補正</h4>
     {review.confirmed?<p>原文との確認は記録済みです。下書き作成には、受信元・重複・登録状態をもう一度照合します。</p>:review.canConfirm&&api.confirmDraft?<>
       <p>元メールとすべての添付を確認し、不足や誤りを補正してください。1メールに新規1名の案件が1件だけある場合に使用できます。</p>
       {labels.map(([key,label])=><label key={key}>{label}（原文確認）<input aria-label={label+"（原文確認）"} type={key==="workDate"?"date":"text"}

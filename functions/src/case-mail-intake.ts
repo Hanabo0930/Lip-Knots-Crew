@@ -189,7 +189,12 @@ export function createCaseMailReceiver(serverConfig: Config, provider: CaseMailP
         const transactionIssues = [...issues];
         const checked = new Set<string>();
         for (const candidate of candidates) {
-          const pair = JSON.stringify([candidate.input.workDate, candidate.input.storeName]);
+          const { workDate, storeName } = candidate.input;
+          const day = new Date(workDate + "T00:00:00Z");
+          // 判別できない日付・店舗は上の内容確認で保留し、空欄同士を重複と断定しない。
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(workDate) || !Number.isFinite(day.valueOf()) ||
+              day.toISOString().slice(0, 10) !== workDate || !storeName.normalize("NFKC").replace(/\s+/g, "")) continue;
+          const pair = JSON.stringify([workDate, storeName]);
           if (checked.has(pair)) continue;
           checked.add(pair);
           if (await hasCaseMailCollision(tx, config.companyId, receiptId, candidate.input.workDate, candidate.input.storeName)) {

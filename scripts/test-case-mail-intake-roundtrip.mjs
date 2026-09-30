@@ -159,6 +159,26 @@ await test("別メールの同日同店は確認待ち", async () => {
   await h.createFrom(first); await assert.rejects(h.createFrom(second, 0, "second-operation"));
   assert.equal(h.list("jobs").length, 1);
 });
+for (const [name, body] of [
+  ["日付と店舗が空欄", "内容を確認してください。"],
+  ["日付が空欄", fields.replace("実施日：2026/10/10\n", "")],
+  ["店舗が空欄", fields.replace("店舗：合成店舗", "店舗：　 ")],
+  ["日付が存在しない", fields.replace("2026/10/10", "2026/02/30")],
+]) await test(name + "の別メールは内容確認に留め同日同店と断定しない", async () => {
+  const h = setup(fixture(body)), first = await h.receive();
+  h.source.rawMessage.id = "second-incomplete-mail";
+  const second = await h.receive();
+  for (const result of [first, second]) {
+    assert.equal(result.status, "review");
+    const receipt = h.records.get("caseMailIntakeReceipts/" + result.receiptId);
+    assert.ok(receipt.issues.includes("CANDIDATE_REVIEW"));
+    assert.ok(!receipt.issues.includes("SAME_DAY_STORE_REVIEW"));
+    assert.equal(result.candidateIds.length, 1);
+    await assert.rejects(h.createFrom(result));
+  }
+  assert.equal(h.list("jobs").length, 0);
+  assert.equal(h.list("sheetRowCreateQueue").length, 0);
+});
 await test("別メール同時受信でも両方をreadyにしない", async () => {
   const h = setup(), secondSource = fixture(fields, "second-mail");
   const second = h.load("./case-mail-intake").createCaseMailReceiver(h.config, { ...h.provider, fetch: async () => secondSource });

@@ -1279,6 +1279,7 @@ function checkCaseMailDraft() {
     'a.companyId!==companyId||b.companyId!==companyId', 'b.receiptId!==receiptId||a.messageId!==b.messageId',
     'a.sourceFingerprint!==b.sourceFingerprint', 'p.partId===b.source.partId&&p.sha256===b.source.sha256',
     'a.status!=="review"||r.heldAnalysisHash||r.heldSourceFingerprint||c.heldChange||c.targetBinding',
+    '/変更|取消|中止|キャンセル/.test(issue)', '[b.sourceValues.memo,b.parserSource.excerpt].some(value=>typeofvalue==="string"&&/変更|取消|中止|キャンセル/.test(value))',
     's.sourceContext!==sourceContext', 'b.revision!==s.confirmedCandidateRevision+(b.status==="linked"?1:0)',
     'audit.action!=="caseMail.draft.confirm"||canonical(audit.review)!==canonical(c.draftReview)',
     'feature?.caseMailJobCreationEnabled!==true', 'principal.companyId!==companyId||principal.uid!==a.ingestedBy||principal.active!==true',

@@ -48,7 +48,8 @@ export async function readCaseMailDraftReview(tx:FirebaseFirestore.Transaction,c
     a.sourceFingerprint!==b.sourceFingerprint||new Set(a.parts.map(p=>p.partId)).size!==a.parts.length||
     !a.parts.some(p=>p.partId===b.source.partId&&p.sha256===b.source.sha256))fail();
   if(a.status!=="review"||r.heldAnalysisHash||r.heldSourceFingerprint||c.heldChange||c.targetBinding||
-    a.issues.some(issue=>["SOURCE_CHANGED","SOURCE_STRUCTURE_CHANGED"].includes(issue)))return blocked("変更・取消や既存案件との対応がある候補は、新規作成できません。");
+    a.issues.some(issue=>["SOURCE_CHANGED","SOURCE_STRUCTURE_CHANGED"].includes(issue)||/変更|取消|中止|キャンセル/.test(issue))||
+    [b.sourceValues.memo,b.parserSource.excerpt].some(value=>typeof value==="string"&&/変更|取消|中止|キャンセル/.test(value)))return blocked("変更・取消や既存案件との対応がある候補は、新規作成できません。");
   if(b.sourceValues.headcount!==undefined&&b.sourceValues.headcount!==null&&b.sourceValues.headcount!==1)
     return blocked("複数名・条件付き人数の依頼は、人数と案件の分け方を先に確認してください。");
   if(!s&&(b.status!=="review"||c.linkedJobId))return blocked("登録済みの候補です。案件一覧で確認してください。");

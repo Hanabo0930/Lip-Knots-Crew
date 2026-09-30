@@ -166,7 +166,7 @@ for (const [path, expected] of [
   ["config/automation/staging-safety.json", "protected"],
 ]) { assert.equal(classify(path), expected); cases++; }
 assert.deepEqual(run("confirmCaseMailDraftReview"), {passed:true,exitCode:0});cases++;
-for(const needle of ["requireAdmin(request)","input.expectedCompanyId!==companyId","input.expectedActorUid!==session.uid","await assertProductionOperational(companyId)","current.view.reviewVersion!==input.reviewVersion","hasCaseMailCollision(tx,companyId,input.receiptId,reviewed.workDate,reviewed.storeName)","s.sourceContext!==sourceContext","principal.active!==true","canonical(audit.review)!==canonical(c.draftReview)","entireSourceConfirmed:z.literal(true)","newSingleCaseConfirmed:z.literal(true)"]) {
+for(const needle of ["requireAdmin(request)","input.expectedCompanyId!==companyId","input.expectedActorUid!==session.uid","await assertProductionOperational(companyId)","current.view.reviewVersion!==input.reviewVersion","hasCaseMailCollision(tx,companyId,input.receiptId,reviewed.workDate,reviewed.storeName)","s.sourceContext!==sourceContext","principal.active!==true","canonical(audit.review)!==canonical(c.draftReview)","entireSourceConfirmed:z.literal(true)","newSingleCaseConfirmed:z.literal(true)","/変更|取消|中止|キャンセル/.test(issue)"]) {
   reject("confirmCaseMailDraftReview",needle,"false","draft-review",null);
 }
 console.log(JSON.stringify({ caseMailAuthGuardTests: cases, functions: names, cloudOperations: false,

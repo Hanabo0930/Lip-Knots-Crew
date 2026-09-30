@@ -27,64 +27,82 @@ async function extractionJson(response) {
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 function createGmailCaseMailProvider({ mailbox, startedAt, obtainAccessToken, obtainExtractionCredentials,
-  analyze, fetchImpl = globalThis.fetch, sanitizeCredentialError = (_error, message) => new Error(message) }) {
+  analyze, fetchImpl = globalThis.fetch, sanitizeCredentialError = (_error, message) => new Error(message),
+  sanitizeProcessingError = (error, _phase) => error }) {
   ensure(mailbox === 'info@lipknots.com' && Number.isFinite(Date.parse(startedAt)), '受信箱・開始日時を確認してください。');
-  ensure([obtainAccessToken, obtainExtractionCredentials, analyze, fetchImpl, sanitizeCredentialError].every(fn => typeof fn === 'function'), 'サーバーの取得・抽出設定が不足しています。');
+  ensure([obtainAccessToken, obtainExtractionCredentials, analyze, fetchImpl, sanitizeCredentialError, sanitizeProcessingError].every(fn => typeof fn === 'function'), 'サーバーの取得・抽出設定が不足しています。');
   return {
     async fetch(request) {
       ensure(request && request.mailbox === mailbox && /^[A-Za-z0-9_-]+$/.test(request.messageId), '受信箱・メールIDが一致しません。');
-      let accessToken;
-      try { accessToken = await obtainAccessToken(); } catch (error) { throw sanitizeCredentialError(error, 'Gmail読取認証を取得できません。'); }
-      ensure(typeof accessToken === 'string' && accessToken.length > 0 && !/\s/.test(accessToken), 'Gmail読取認証が不正です。');
-      // profile/本文/全添付は同じ短期トークンを使用して取得アカウントの混在を防ぐ。
-      const client = new GmailReadClient({ obtainAccessToken: async () => accessToken, fetchImpl });
-      const profile = await client.get('profile');
-      ensure(typeof profile.emailAddress === 'string' && profile.emailAddress.toLowerCase() === mailbox,
-        'Gmailの認証先が指定受信箱と一致しません。');
-      let rawMessage;
-      const result = await readRequest({
-        getMessage: async id => {
-          rawMessage = await client.getMessage(id);
-          const rawSize = Buffer.byteLength(JSON.stringify(rawMessage));
-          ensure(rawSize <= MAX_INPUT_BYTES, "メール全体が解析入力の上限を超えています。");
-          const normalized = mail.normalize(rawMessage);
-          if (mail.gate(normalized, { startedAt }) === "ELIGIBLE") {
-            const encodedAttachmentSize = normalized.attachments.reduce((size, part) => size + Math.ceil(part.size / 3) * 4, 0);
-            ensure(rawSize + encodedAttachmentSize <= MAX_INPUT_BYTES, "添付合計が解析入力の上限を超えています。");
+      let phase = "gmail_auth";
+      try {
+        let accessToken;
+        try { accessToken = await obtainAccessToken(); } catch (error) { throw sanitizeCredentialError(error, 'Gmail読取認証を取得できません。'); }
+        ensure(typeof accessToken === 'string' && accessToken.length > 0 && !/\s/.test(accessToken), 'Gmail読取認証が不正です。');
+        // profile/本文/全添付は同じ短期トークンを使用して取得アカウントの混在を防ぐ。
+        const client = new GmailReadClient({ obtainAccessToken: async () => accessToken, fetchImpl });
+        phase = 'mailbox';
+        const profile = await client.get('profile');
+        ensure(typeof profile.emailAddress === 'string' && profile.emailAddress.toLowerCase() === mailbox,
+          'Gmailの認証先が指定受信箱と一致しません。');
+        let rawMessage;
+        const result = await readRequest({
+          getMessage: async id => {
+            phase = "message_read";
+            rawMessage = await client.getMessage(id);
+            phase = "message_validation";
+            ensure(rawMessage.id === id, "取得したメールIDが要求と違います");
+            const rawSize = Buffer.byteLength(JSON.stringify(rawMessage));
+            ensure(rawSize <= MAX_INPUT_BYTES, "メール全体が解析入力の上限を超えています。");
+            const normalized = mail.normalize(rawMessage);
+            if (mail.gate(normalized, { startedAt }) === "ELIGIBLE") {
+              const encodedAttachmentSize = normalized.attachments.reduce((size, part) => size + Math.ceil(part.size / 3) * 4, 0);
+              ensure(rawSize + encodedAttachmentSize <= MAX_INPUT_BYTES, "添付合計が解析入力の上限を超えています。");
+            }
+            phase = "attachment_validation";
+            return rawMessage;
+          },
+          getAttachment: async (id, attachmentId) => {
+            phase = "attachment_read";
+            const body = await client.getAttachment(id, attachmentId);
+            phase = "attachment_validation";
+            return body;
+          },
+        }, request.messageId, { startedAt });
+        if (result.eligibility !== 'ELIGIBLE') return { rawMessage, documents: [] };
+        const documents = [];
+        let credentials;
+        for (const item of result.attachments) {
+          phase = "attachment_validation";
+          const mime = item.detected === 'pdf' ? 'application/pdf' :
+            item.detected === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : null;
+          ensure(mime && item.descriptor.mimeType === mime, '添付の実体と申告形式が一致しません。');
+          if (!credentials) {
+            phase = "extractor_auth";
+            try { credentials = await obtainExtractionCredentials(EXTRACTOR_ORIGIN); }
+            catch (error) { throw sanitizeCredentialError(error, '添付抽出の認証を取得できません。'); }
+            ensure(credentials && typeof credentials.secret === 'string' && /^[A-Za-z0-9_-]{43,128}$/.test(credentials.secret) &&
+              typeof credentials.idToken === 'string' && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(credentials.idToken),
+            '添付抽出の認証が不正です。');
           }
-          return rawMessage;
-        },
-        getAttachment: (id, attachmentId) => client.getAttachment(id, attachmentId),
-      }, request.messageId, { startedAt });
-      if (result.eligibility !== 'ELIGIBLE') return { rawMessage, documents: [] };
-      const documents = [];
-      let credentials;
-      for (const item of result.attachments) {
-        const mime = item.detected === 'pdf' ? 'application/pdf' :
-          item.detected === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : null;
-        ensure(mime && item.descriptor.mimeType === mime, '添付の実体と申告形式が一致しません。');
-        if (!credentials) {
-          try { credentials = await obtainExtractionCredentials(EXTRACTOR_ORIGIN); }
-          catch (error) { throw sanitizeCredentialError(error, '添付抽出の認証を取得できません。'); }
-          ensure(credentials && typeof credentials.secret === 'string' && /^[A-Za-z0-9_-]{43,128}$/.test(credentials.secret) &&
-            typeof credentials.idToken === 'string' && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(credentials.idToken),
-          '添付抽出の認証が不正です。');
+          phase = "attachment_extraction";
+          let extraction;
+          try {
+            const response = await fetchImpl(EXTRACTOR_ORIGIN + '/v1/' + item.detected, {
+              method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60000),
+              headers: { 'Content-Type': mime, Authorization: 'Bearer ' + credentials.secret,
+                'X-Serverless-Authorization': 'Bearer ' + credentials.idToken },
+              body: item.bytes,
+            });
+            extraction = await extractionJson(response);
+          } catch { throw Error('添付抽出に失敗しました。原本と接続設定を確認してください。'); }
+          phase = "extraction_validation";
+          ensure(extraction && extraction.format === item.detected && extraction.sha256 === digest(item.bytes) &&
+            extraction.bytes === item.bytes.length && typeof extraction.complete === 'boolean', '添付抽出結果と取得した原本が一致しません。');
+          documents.push({ partId: item.partId, contentBase64: item.bytes.toString('base64'), extraction });
         }
-        let extraction;
-        try {
-          const response = await fetchImpl(EXTRACTOR_ORIGIN + '/v1/' + item.detected, {
-            method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60000),
-            headers: { 'Content-Type': mime, Authorization: 'Bearer ' + credentials.secret,
-              'X-Serverless-Authorization': 'Bearer ' + credentials.idToken },
-            body: item.bytes,
-          });
-          extraction = await extractionJson(response);
-        } catch { throw Error('添付抽出に失敗しました。原本と接続設定を確認してください。'); }
-        ensure(extraction && extraction.format === item.detected && extraction.sha256 === digest(item.bytes) &&
-          extraction.bytes === item.bytes.length && typeof extraction.complete === 'boolean', '添付抽出結果と取得した原本が一致しません。');
-        documents.push({ partId: item.partId, contentBase64: item.bytes.toString('base64'), extraction });
-      }
-      return { rawMessage, documents };
+        return { rawMessage, documents };
+      } catch (error) { throw sanitizeProcessingError(error, phase); }
     },
     parse: analyze,
   };

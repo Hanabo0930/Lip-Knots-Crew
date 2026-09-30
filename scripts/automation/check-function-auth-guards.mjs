@@ -1418,8 +1418,8 @@ function checkCaseMailReceiver(name) {
     'current.companyId!==config.companyId||current.uid!==config.uid||current.active!==true||current.producerId!==config.producerId||current.revision!==config.principalRevision',
     'if(feature.data()?.caseMailIntakeEnabled!==true)fail(',
     'exportasyncfunctionassertCaseMailReceiverEnabled(config:Config){awaitassertProductionOperational(config.companyId);awaitdb.runTransaction(tx=>checkReceiver(tx,config));}',
-    'awaitassertProductionOperational(config.companyId);awaitdb.runTransaction(tx=>checkReceiver(tx,config));constfetched=awaitprovider.fetch(',
-    'returndb.runTransaction(asynctx=>{awaitcheckReceiver(tx,config);constprevious=',
+    'awaitassertProductionOperational(config.companyId);awaitdb.runTransaction(tx=>checkReceiver(tx,config));phase="fetch";constfetched=awaitprovider.fetch(',
+    'returnawaitdb.runTransaction(asynctx=>{awaitcheckReceiver(tx,config);constprevious=',
   ])) return false;
   const auth = compact(sourceFile('functions/src/case-mail-cloud-auth.ts'));
   if (!has(auth, ['context.mailbox!=="info@lipknots.com"||context.scope!=="https://www.googleapis.com/auth/gmail.readonly"',

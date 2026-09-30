@@ -75,8 +75,40 @@ function setup({ format, bytes, extraction, inline = false } = {}) {
       expectedReceiptRevision: out.revision, expectedRevision: 1, operationId: "provider-operation-" + index } }),
   });
 }
+async function expectPhase(h, phase, receive = () => h.receive()) {
+  const diagnostics = h.load("./case-mail-diagnostics");
+  await assert.rejects(receive(), error => {
+    assert.equal(diagnostics.caseMailFailurePhase(error), phase);
+    assert.equal(diagnostics.caseMailFailureReason(error), "receive_failed");
+    assert.ok(!error.message.includes("SYNTHETIC_PRIVATE_DETAIL"));
+    assert.ok(!JSON.stringify(error).includes("SYNTHETIC_PRIVATE_DETAIL"));
+    assert.equal(error.cause, undefined); assert.equal(error.response, undefined); return true;
+  });
+  assert.equal(h.list("caseMailIntakeReceipts").length, 0);
+}
 let count = 0;
 async function test(name, run) { try { await run(); count++; console.log("成功: " + name); } catch (error) { error.message = name + ": " + error.message; throw error; } }
+for (const [label, phase, options, mutate] of [
+  ["profile HTTP失敗", "mailbox", {}, h => { h.server.status = 503; }],
+  ["本文通信失敗", "message_read", {}, h => { const fetch = h.dependencies.fetchImpl; h.dependencies.fetchImpl = (url, options) => String(url).includes("/messages/") ? Promise.reject(Error("SYNTHETIC_PRIVATE_DETAIL")) : fetch(url, options); }],
+  ["本文形式不正", "message_validation", {}, h => { h.server.raw.payload.headers = []; }],
+  ["添付通信失敗", "attachment_read", {format:"pdf"}, h => { const fetch = h.dependencies.fetchImpl; h.dependencies.fetchImpl = (url, options) => String(url).includes("/attachments/") ? Promise.reject(Error("SYNTHETIC_PRIVATE_DETAIL")) : fetch(url, options); }],
+  ["添付実体不正", "attachment_validation", {format:"pdf"}, h => { h.server.attachmentData = "not/base64"; }],
+  ["添付認証形式不正", "extractor_auth", {format:"pdf"}, h => { h.server.secret = "short"; }],
+  ["抽出サービス失敗", "attachment_extraction", {format:"pdf"}, h => { h.server.extractorError = true; }],
+  ["抽出結果不一致", "extraction_validation", {format:"pdf"}, h => { h.server.extraction.sha256 = "wrong"; }],
+  ["保存失敗", "persistence", {}, h => { h.beforeCommit = ({writes}) => { if(writes.length) throw Error("SYNTHETIC_PRIVATE_DETAIL"); }; }],
+]) await test(label + "は原文なしで内部工程を区別", async () => {
+  const h = setup(options); mutate(h); await expectPhase(h, phase);
+});
+for (const [phase, parse] of [
+  ["analysis", () => { throw Object.assign(Error("SYNTHETIC_PRIVATE_DETAIL"), { response:{secret:"SYNTHETIC_PRIVATE_DETAIL"} }); }],
+  ["analysis_validation", () => ({unknown:"SYNTHETIC_PRIVATE_DETAIL"})],
+]) await test(phase + "の例外と不正解析を秘匿", async () => {
+  const h = setup();
+  const receive = h.load("./case-mail-intake").createCaseMailReceiver(h.config, {fetch:async()=>({}), parse});
+  await expectPhase(h, phase, () => receive({messageId:h.server.raw.id}));
+});
 await test("Gmail profile/本文→既存解析→受信保存→Crew案件の一往復", async () => {
   const h = setup(), out = await h.receive(); assert.equal(out.status, "ready"); await h.createFrom(out);
   assert.equal(h.list("jobs").length, 1); assert.equal(h.list("jobs")[0].status, "draft");
@@ -97,7 +129,7 @@ await test("inline添付は再取得せず同じ原本を抽出", async () => {
 });
 await test("別の認証受信箱なら本文・添付・抽出へ進まない", async () => {
   const h = setup({ format: "pdf" }); h.server.profile = "other@example.invalid";
-  await assert.rejects(h.receive(), /受信箱/); assert.equal(h.calls.length, 1); assert.equal(h.extractorContexts.length, 0);
+  await assert.rejects(h.receive(), error => h.load("./case-mail-diagnostics").caseMailFailurePhase(error) === "mailbox"); assert.equal(h.calls.length, 1); assert.equal(h.extractorContexts.length, 0);
 });
 await test("実行者停止・機能無効は資格情報取得前に拒否", async () => {
   for (const mode of ["principal", "feature"]) {
@@ -122,7 +154,7 @@ await test("取得したメールIDが違えば保存しない", async () => {
     if (String(url).endsWith("/profile")) return response({ emailAddress: "info@lipknots.com" });
     return response({ ...h.server.raw, id: "other" });
   };
-  await assert.rejects(h.receive()); assert.equal(h.list("caseMailIntakeReceipts").length, 0);
+  await expectPhase(h, "message_validation");
 });
 for (const status of [302, 401, 403, 429, 500]) await test("Gmail HTTP " + status + "を成功扱いせず本文を漏らさない", async () => {
   const h = setup(); h.server.status = status;
@@ -164,7 +196,7 @@ await test("添付サイズ・base64破損を抽出前に拒否", async () => {
 });
 await test("MIMEと実体の食い違いを抽出前に拒否", async () => {
   const h = setup({ format: "pdf" }); h.server.raw.payload.parts[1].mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  await assert.rejects(h.receive(), /実体/); assert.equal(h.extractorContexts.length, 0);
+  await assert.rejects(h.receive(), error => h.load("./case-mail-diagnostics").caseMailFailurePhase(error) === "attachment_validation"); assert.equal(h.extractorContexts.length, 0);
 });
 for (const field of ["sha256", "bytes", "format"]) await test("抽出結果の" + field + "不一致で候補を保存しない", async () => {
   const h = setup({ format: "pdf" }); h.server.extraction[field] = field === "bytes" ? 0 : "wrong";
@@ -207,7 +239,7 @@ await test("添付合計超過は添付取得・抽出前に止める", async ()
   const h = setup({ format: "pdf" }), attachment = h.server.raw.payload.parts[1];
   attachment.body.size = 4 * 1024 * 1024;
   h.server.raw.payload.parts.push({ ...clone(attachment), partId: "2", body: { ...attachment.body, attachmentId: "second" } });
-  await assert.rejects(h.receive(), /添付合計/);
+  await assert.rejects(h.receive(), error => h.load("./case-mail-diagnostics").caseMailFailurePhase(error) === "message_validation");
   assert.equal(h.calls.length, 2); assert.equal(h.extractorContexts.length, 0); assert.equal(h.list("caseMailIntakeReceipts").length, 0);
 });
 const python = process.env.CASE_MAIL_TEST_PYTHON;

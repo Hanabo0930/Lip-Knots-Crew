@@ -229,4 +229,43 @@ await check("偽装された診断情報も外部文字列をログへ出さな�
   const e=new diagnosticModule.CaseMailAuthFailure("gmail_signing_failed");e.reason="synthetic-secret-never-expose";
   assert.equal(diagnosticModule.caseMailFailureReason(e),"receive_failed");
 });
+for (const [name, mutate, phase] of [
+  ["本文形式", f => { f.raw.payload.headers = f.raw.payload.headers.filter(h => h.name !== "From"); }, "message_validation"],
+  ["保存transaction", f => { f.state.afterFetch = () => { f.h.failCommit = true; }; }, "persistence"],
+]) await check(name + "の詳細工程を固定値で返す", async () => {
+  const f = setup(); mutate(f);
+  await assert.rejects(f.batch(), error => {
+    assert.equal(error.details.stage, "save"); assert.equal(error.details.phase, phase);
+    assert.equal(error.details.reason, "receive_failed");
+    assert.ok(!JSON.stringify(error).includes("synthetic-mail")); return true;
+  });
+  assert.equal(JSON.stringify(f.diagnostics), JSON.stringify([["case_mail_receive_failed", { stage: "save", reason: "receive_failed", phase }]]));
+});
+await check("後続メールの形式失敗でも保存済み候補を残し、続きや原文を返さない", async () => {
+  const f = setup(), original = f.deps.fetchImpl; let secondReads = 0;
+  f.state.page = { messages: [{id:"synthetic-mail"},{id:"synthetic-mail-2"}], nextPageToken:"synthetic-next" };
+  f.deps.fetchImpl = async (url, options) => {
+    if (new URL(url).pathname.endsWith("/messages/synthetic-mail-2")) {
+      secondReads++;
+      return new Response(JSON.stringify({...f.raw, id:"synthetic-mail-2", payload:{...f.raw.payload, headers:[]}}));
+    }
+    return original(url, options);
+  };
+  await assert.rejects(f.batch(), error => {
+    assert.equal(error.details.phase, "message_validation");
+    assert.equal(error.details.nextCursor, undefined); assert.ok(!JSON.stringify(error).includes("synthetic-mail")); return true;
+  });
+  assert.equal(f.h.list("caseMailIntakeReceipts").length, 1);
+  assert.equal(f.h.list("caseMailIntakeCandidates").length, 1);
+  assert.equal(secondReads, 1);
+});
+await check("詳細工程の偽装・改ざん・外部情報を採用しない", async () => {
+  assert.equal(diagnosticModule.caseMailFailurePhase({phase:"persistence"}), undefined);
+  const error = new diagnosticModule.CaseMailProcessingFailure("analysis");
+  error.phase = "synthetic-secret-never-expose";
+  assert.equal(diagnosticModule.caseMailFailurePhase(error), undefined);
+  const wrapped = diagnosticModule.sanitizeCaseMailProcessingError(Object.assign(Error("synthetic-secret-never-expose"), {phase:"persistence", token:"secret"}), "fetch");
+  assert.equal(diagnosticModule.caseMailFailurePhase(wrapped), "fetch");
+  assert.ok(!JSON.stringify(wrapped).includes("secret")); assert.ok(!wrapped.message.includes("secret"));
+});
 console.log(JSON.stringify({caseMailReceiveTests:cases,compiled,cloudOperations:false}));

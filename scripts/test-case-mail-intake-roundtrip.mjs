@@ -73,13 +73,13 @@ await test("同一受信の同時保存は一つに収束", async () => {
 });
 await test("保存応答の喪失後に受信結果を回収", async () => {
   const h = setup(); h.beforeCommit = ({ writes }) => { if (writes.length) h.loseResponse = true; };
-  await assert.rejects(h.receive(), /lost response/); h.beforeCommit = null;
+  await assert.rejects(h.receive(), error => h.load("./case-mail-diagnostics").caseMailFailurePhase(error) === "persistence"); h.beforeCommit = null;
   const before = state(h), result = await h.receive(); assert.equal(result.replayed, true); assert.equal(state(h), before);
 });
 await test("受信保存失敗は全候補と監査を残さない", async () => {
   const h = setup(), before = state(h);
   h.beforeCommit = ({ writes }) => { if (writes.length) h.failCommit = true; };
-  await assert.rejects(h.receive(), /before commit/); assert.equal(state(h), before);
+  await assert.rejects(h.receive(), error => h.load("./case-mail-diagnostics").caseMailFailurePhase(error) === "persistence"); assert.equal(state(h), before);
 });
 for (const [name, mutate] of [
   ["実行者停止", h => h.records.get(h.paths.principal).active = false],

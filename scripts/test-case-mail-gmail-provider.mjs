@@ -284,6 +284,19 @@ for (const declared of [true, false]) await test("抽出応答8MiB超過は保�
   else h.server.extraction.pages[0].text = "x".repeat(8 * 1024 * 1024);
   await expectPhase(h, "attachment_extraction"); assert.equal(h.list("caseMailIntakeReceipts").length, 0);
 });
+await test("引用の参考値は元本文全体の指紋付きで保留保存し確認画面へ返す", async () => {
+  const h=setup(),body="下記の案件は手配可能でしょうか。\n"+fields.split("\n").map(line=>"> "+line).join("\n");
+  h.server.raw=mail(body);const out=await h.receive();
+  assert.equal(out.status,"review");assert.equal(out.candidateIds.length,1);
+  const receipt=h.list("caseMailIntakeReceipts")[0],candidate=h.list("caseMailIntakeCandidates")[0];
+  assert.equal(receipt.structuralComplete,false);assert.equal(candidate.source.sha256,digest(Buffer.from(body)));
+  assert.equal(candidate.parserSource.ruleId,"quoted-body-review-v1");assert.equal(candidate.parserSource.quoteStartLine,2);
+  assert.equal(candidate.input.storeName,"合成店舗");
+  const view=await h.load("./case-mail-review").getCaseMailReceipt({auth:h.auth,data:{receiptId:out.receiptId,expectedCompanyId:companyId,expectedActorUid:h.auth.uid}});
+  assert.ok(view.issues.some(issue=>issue.includes("引用部分")));assert.equal(view.candidates[0].creatable,false);
+  await assert.rejects(h.createFrom(out));assert.equal(h.list("jobs").length,0);
+  assert.ok(h.calls.every(call=>call.method==="GET"));
+});
 const python = process.env.CASE_MAIL_TEST_PYTHON;
 assert.ok(python, "CASE_MAIL_TEST_PYTHONにローカル検証用Pythonを指定してください。");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "lkc-mail-provider-test-"));

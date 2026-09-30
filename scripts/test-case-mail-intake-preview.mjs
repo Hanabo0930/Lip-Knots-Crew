@@ -61,7 +61,8 @@ function aeonFixture() {
     { format: "xlsx", sheets: [{ name: "依頼表", rows: [aeonHeaders, row] }] });
 }
 let count = 0;
-function test(name, run) { run(); count++; console.log("成功: " + name); }
+const testFilter = process.argv.find(arg => arg.startsWith("--match="))?.slice(8);
+function test(name, run) { if (testFilter && !new RegExp(testFilter).test(name)) return; run(); count++; console.log("成功: " + name); }
 function review(input) {
   const result = preview(input);
   assert.equal(result.state, "REVIEW");
@@ -296,5 +297,54 @@ test("添付のある複合本文は本文だけで解釈を置き換えない",
   const input = attach(fixture(compositeBody), { format: "pdf", pageCount: 1, pages: [{ number: 1, text: fields }] });
   const out = review(input); assert.equal(out.rule.id, "generic-explicit-v1");
   assert.equal(out.candidates[0].source.part, "attachment:1");
+});
+const quotedBody = (content=fields, prefix="下記の案件は手配可能でしょうか。") => prefix+"\n"+content.split("\n").map(line=>"> "+line).join("\n");
+test("引用元を本文行番号付き参考値として保持し自動登録しない", () => {
+  const input=fixture(quotedBody()),before=clone(input),out=review(input),candidate=out.candidates[0];
+  assert.equal(out.rule.id,"quoted-body-review-v1");assert.equal(out.persisted,false);assert.equal(out.dispatch,"disabled");
+  assert.equal(candidate.input.workDate,"2026-10-10");assert.equal(candidate.input.storeName,"合成店舗");
+  assert.equal(candidate.source.quoteDepth,1);assert.equal(candidate.source.quoteStartLine,2);assert.equal(candidate.source.quoteEndLine,9);
+  assert.ok(out.issues.some(issue=>issue.includes("引用部分（本文2〜9行）")));assert.deepEqual(input,before);
+});
+test("返信件名の引用も現在の手配依頼が明示された場合だけ参考表示", () => {
+  const input=fixture(quotedBody());input.rawMessage.payload.headers[2].value="Re: 手配依頼";
+  assert.equal(review(input).rule.id,"quoted-body-review-v1");
+});
+for(const [name,body] of [
+  ["手配依頼なし",quotedBody(fields,"ありがとうございました。")],
+  ["現在の別日",quotedBody(fields,"10/11の案件は手配可能でしょうか。")],
+  ["現在の人数",quotedBody(fields,"下記2名の手配は可能でしょうか。")],
+  ["現在の全角別日",quotedBody(fields,"１０／１１の手配は可能でしょうか。")],
+  ["現在のISO別日",quotedBody(fields,"2026-10-11の手配は可能でしょうか。")],
+  ["現在のドット別日",quotedBody(fields,"2026.10.11の手配は可能でしょうか。")],
+  ["現在の否定",quotedBody(fields,"手配は不可能です。")],
+  ["現在の不要",quotedBody(fields,"下記は不要です。手配可能でしょうか。")],
+  ["現在の別店舗",quotedBody(fields,"店舗：別店舗\n手配可能でしょうか。")],
+  ["現在の取引先",quotedBody(fields,"取引先：別取引先\n手配可能でしょうか。")],
+  ["現在の注意事項",quotedBody(fields,"注意事項：別の条件があります\n手配可能でしょうか。")],
+  ["引用後の条件",quotedBody()+"\n入店時間：08:00"],
+  ["引用途中の条件",quotedBody().replace("> 店舗：","別条件があります\n> 店舗：")],
+  ["二重引用",quotedBody().replace("> 店舗：",">> 店舗：")],
+  ["変更",quotedBody()+"\n> 時間変更です"],
+  ["取消",quotedBody(fields,"取消済みの案件ですが手配可能でしょうか。")],
+  ["不要",quotedBody(fields,"手配不要です。前の依頼は手配可能でしょうか。")],
+  ["読取項目なし",quotedBody("過去の挨拶だけです")],
+]) test("引用の曖昧な範囲を置き換えない: "+name,()=>assert.equal(review(fixture(body)).rule.id,"generic-explicit-v1"));
+test("引用が複数案件なら分割した出典を保ち全件を保留",()=>{
+  const out=review(fixture(quotedBody(fields+"\n---\n"+fields.replace("合成店舗","合成別店舗"))));
+  assert.equal(out.candidates.length,2);assert.notEqual(out.candidates[0].provisionalKey,out.candidates[1].provisionalKey);
+  assert.equal(out.candidates[1].input.storeName,"合成別店舗");
+});
+test("引用の年不足・人数条件を補完しない",()=>{
+  const out=review(fixture(quotedBody(fields.replace("2026/10/10","10/10").replace("人数：1名","人数：販売1名 補助1名"))));
+  assert.equal(out.rule.id,"quoted-body-review-v1");assert.notEqual(out.candidates[0].input.workDate,"2026-10-10");
+  assert.equal(out.candidates[0].sourceValues.headcount,"販売1名 補助1名");
+});
+test("スタッフ向け送信メールを引用依頼へ置き換えない",()=>{
+  assert.equal(review(fixture(quotedBody(),"staff@lipknots.com")).rule.id,"generic-explicit-v1");
+});
+test("引用と添付が併存する場合は引用だけで置き換えない",()=>{
+  const input=attach(fixture(quotedBody()),{format:"pdf",pageCount:1,pages:[{number:1,text:fields}]});
+  assert.equal(review(input).rule.id,"generic-explicit-v1");
 });
 console.log("合成検査完了: " + count + "条件（実メール・DB・Sheets未使用）");

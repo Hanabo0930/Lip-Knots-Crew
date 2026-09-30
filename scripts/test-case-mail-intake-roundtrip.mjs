@@ -258,4 +258,14 @@ await test("候補出典の二重採番を保存前に拒否", async () => {
   const h = setup(); h.provider.parse = (source, context) => { const out = analyzeFetchedCaseMail(source, context); out.candidates.push(clone(out.candidates[0])); return out; };
   const before = state(h); await assert.rejects(h.receive()); assert.equal(state(h), before);
 });
+await test("複合本文の確認候補は原文SHAを保持しCrew作成・queueを拒否", async () => {
+  const body = "日付：10月10日(土)9:30入店 10:00-18:00\n店舗：合成店舗\n企画：合成商品の試食\n人数：1名";
+  const h = setup(fixture(body)), out = await h.receive(), candidate = h.list("caseMailIntakeCandidates")[0];
+  assert.equal(out.status, "review"); assert.equal(out.candidateIds.length, 1);
+  assert.equal(candidate.input.entryTime, "09:30"); assert.equal(candidate.input.menuName, "合成商品の試食");
+  assert.equal(candidate.source.sha256, createHash("sha256").update(body).digest("hex"));
+  assert.equal(candidate.parserSource.ruleId, "combined-body-review-v1");
+  const before = state(h); assert.equal((await h.receive()).replayed, true); assert.equal(state(h), before);
+  await assert.rejects(h.createFrom(out)); assert.equal(h.list("jobs").length, 0); assert.equal(h.list("sheetRowCreateQueue").length, 0);
+});
 console.log("メール受信一往復: " + count + "条件成功（合成provider・SDK境界、実メール/実DBなし）");

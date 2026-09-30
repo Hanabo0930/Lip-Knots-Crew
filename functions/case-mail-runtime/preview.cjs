@@ -1,7 +1,8 @@
 'use strict';
 const { createHash } = require('node:crypto');
-const mail = require('./mail-source.cjs'), generic = require('./generic-request.cjs');
+const mail = require('./mail-source.cjs');
 const progress = require('./progress-request.cjs'), core = require('./core.js');
+const bodyReview = require('./body-review.cjs');
 const { detectedFormat, resolveAttachmentFormat, REVIEW_ISSUE } = require('./attachment-format.cjs');
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -103,7 +104,7 @@ function prepareCaseMailIntakePreview(input) {
   output.source.contentFingerprint = fingerprint({ fingerprint: message.fingerprint, attachments: output.source.attachments });
   const useProgress = message.from.endsWith("@cs-progress.co.jp") && message.attachments.some(item => item.mimeType === "application/pdf");
   let analysis;
-  try { analysis = (useProgress ? progress : generic).analyze(message, extracted, { startedAt, processedIds }); }
+  try { analysis = (useProgress ? progress : bodyReview).analyze(message, extracted, { startedAt, processedIds }); }
   catch { output.issues.push("未対応または不完全な本文・添付構造です。原文を確認してください。"); return output; }
   output.rule = analysis.rule;
   output.issues.push(...analysis.issues);

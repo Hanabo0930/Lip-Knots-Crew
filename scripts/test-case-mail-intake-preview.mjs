@@ -243,4 +243,51 @@ test("CLIは新規ローカル成果物だけを作り、上書きと本文ロ�
     assert.deepEqual(fs.readFileSync(inputPath), before);
   } finally { assert.equal(path.dirname(path.resolve(dir)), path.resolve(os.tmpdir())); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+const compositeBody = "手配可能でしょうか。\n日付：10月10日(土)9:30入店 10:00-18:00\n店舗：合成店舗\n企画：合成商品を使う試食\n人数：販売1名 補助1名";
+test("本文の日時複合行は明記された時刻・企画だけを確認候補へ残す", () => {
+  const input = fixture(compositeBody), before = clone(input), out = review(input), candidate = out.candidates[0];
+  assert.equal(out.rule.id, "combined-body-review-v1");
+  assert.equal(candidate.input.entryTime, "09:30"); assert.equal(candidate.input.workTime, "10:00~18:00");
+  assert.equal(candidate.input.storeName, "合成店舗"); assert.equal(candidate.input.menuName, "合成商品を使う試食");
+  assert.equal(candidate.input.clientName, ""); assert.equal(candidate.input.makerName, "");
+  assert.equal(candidate.sourceValues.day, "10月10日"); assert.notEqual(candidate.input.workDate, "2026-10-10");
+  assert.equal(candidate.sourceValues.headcount, "販売1名 補助1名"); assert.equal(out.candidates.length, 1);
+  assert.deepEqual(input, before); assert.equal(candidate.source.part, "body"); assert.equal(candidate.source.index, 0);
+});
+test("複合行に年と必要項目が揃っていても登録を自動解禁しない", () => {
+  const body = fields.replace("実施日：2026/10/10", "日付：2026/10/10(土)9:30入店 10:00-18:00")
+    .replace("\n入店時間：09:30", "").replace("\n実施時間：10:00～18:00", "");
+  const out = review(fixture(body)); assert.equal(out.candidates[0].input.workDate, "2026-10-10");
+  assert.equal(out.rule.id, "combined-body-review-v1"); assert.equal(out.persisted, false);
+});
+for (const date of ["10/10(土)", "2026年10月10日(土)", "２０２６／１０／１０（土）"]) test("複合日付表記を年推定なしで扱う: " + date, () => {
+  const out = review(fixture(compositeBody.replace("10月10日(土)", date)));
+  assert.equal(out.rule.id, "combined-body-review-v1"); assert.equal(out.candidates[0].input.entryTime, "09:30");
+});
+for (const [name, change] of [
+  ["送信側", input => input.rawMessage.payload.headers[0].value = "staff@lipknots.com"],
+  ["返信", input => input.rawMessage.payload.headers[2].value = "Re: 手配依頼"],
+  ["転送", input => input.rawMessage.payload.headers[2].value = "Fwd: 手配依頼"],
+  ["変更", input => input.rawMessage.payload.headers[2].value = "時間変更のお願い"],
+  ["引用", input => { const text = compositeBody + "\n> 過去の依頼"; const bytes = Buffer.from(text); input.rawMessage.payload.body = { size: bytes.length, data: bytes.toString("base64url") }; }],
+]) test("曖昧な範囲は新しい複合本文解析を適用しない: " + name, () => {
+  const input = fixture(compositeBody); change(input); assert.equal(review(input).rule.id, "generic-explicit-v1");
+});
+for (const value of ["25:30入店 10:00-18:00", "9:30入店 10:00-18:00※変更予定", "9:30入店 10:00-18:00／別日あり"]) test("時刻・行末条件を読み飛ばさない: " + value, () => {
+  assert.equal(review(fixture(compositeBody.replace("9:30入店 10:00-18:00", value))).rule.id, "generic-explicit-v1");
+});
+test("二つの依頼ブロックを別の出典として保持し双方を保留", () => {
+  const out = review(fixture(compositeBody.replace("人数：販売1名 補助1名", "人数：1名") + "\n---\n" + compositeBody.replace("合成店舗", "合成別店舗")));
+  assert.equal(out.candidates.length, 2); assert.notEqual(out.candidates[0].provisionalKey, out.candidates[1].provisionalKey);
+  assert.equal(out.candidates[1].input.storeName, "合成別店舗");
+});
+test("重複する日付・入店項目を解決済みとしない", () => {
+  const out = review(fixture(compositeBody + "\n入店時間：08:00\n日付：2027/10/10"));
+  assert.ok(out.candidates[0].issues.some(issue => issue.includes("同じ項目")));
+});
+test("添付のある複合本文は本文だけで解釈を置き換えない", () => {
+  const input = attach(fixture(compositeBody), { format: "pdf", pageCount: 1, pages: [{ number: 1, text: fields }] });
+  const out = review(input); assert.equal(out.rule.id, "generic-explicit-v1");
+  assert.equal(out.candidates[0].source.part, "attachment:1");
+});
 console.log("合成検査完了: " + count + "条件（実メール・DB・Sheets未使用）");

@@ -7,11 +7,12 @@ const require=createRequire(import.meta.url),ts=require("typescript");
 const importSource=fs.readFileSync(new URL("../functions/src/shift-import.ts",import.meta.url),"utf8");
 const importCode=ts.transpileModule(importSource.slice(importSource.indexOf("async function writeJobsAndLocks("),importSource.indexOf("async function acquireSyncLock("))+"\nexports.write=writeJobsAndLocks;",{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
 const columns={workDate:"A",staffName:"B",temperature:"G",arrivalTime:"H",clientName:"J",storeName:"K",makerName:"L",menuName:"M",entryTime:"N",workTime:"O",caseId:"BC",basePayColumns:[]};
-export async function setup(imported=true){
+export async function setup(imported=true,beforeCreate=null){
   const h=harness(),receiptId=h.key("case-mail-receipt",companyId,"message-1");
   h.records.set("caseMailIntakeReceipts/"+receiptId,h.records.get(h.paths.receipt));h.records.delete(h.paths.receipt);h.paths.receipt="caseMailIntakeReceipts/"+receiptId;
   h.records.get(h.paths.candidate).receiptId=receiptId;h.command.mailIntake.receiptId=receiptId;
   h.records.get(h.paths.candidate).input.workDate="2099-10-10";
+  if(beforeCreate)await beforeCreate(h);
   const created=await h.create(),jobId=created.jobIds[0],path="jobs/"+jobId;
   const state=h.load("./admin-edit-state-core"),exports={};
   runInNewContext(importCode,{exports,db:h.load("./firebase").db,HttpsError:h.load("firebase-functions/v2/https").HttpsError,

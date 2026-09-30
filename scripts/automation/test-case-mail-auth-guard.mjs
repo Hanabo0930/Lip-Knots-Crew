@@ -6,7 +6,7 @@ const read = path => fs.readFileSync(new URL("../../" + path, import.meta.url), 
 const guard = read("scripts/automation/check-function-auth-guards.mjs").replace(/^import .*;\n/gm, "");
 const names = ["listCaseMailReceipts", "getCaseMailReceipt", "getCaseMailTargetPreview",
   "confirmCaseMailTarget", "holdCaseMailTarget", "resolveCaseMailTargetHold", "confirmCaseMailReview"];
-const sources = Object.fromEntries(["review", "resolution", "collision", "target-hold", "receive", "intake", "cloud-auth"].map(module =>
+const sources = Object.fromEntries(["review", "resolution", "collision", "target-hold", "receive", "intake", "cloud-auth", "draft-review"].map(module =>
   ["functions/src/case-mail-" + module + ".ts", read("functions/src/case-mail-" + module + ".ts")]));
 let cases = 0;
 function run(name, change) {
@@ -165,5 +165,9 @@ for (const [path, expected] of [
   [".github/workflows/release-candidate.yml", "protected"],
   ["config/automation/staging-safety.json", "protected"],
 ]) { assert.equal(classify(path), expected); cases++; }
+assert.deepEqual(run("confirmCaseMailDraftReview"), {passed:true,exitCode:0});cases++;
+for(const needle of ["requireAdmin(request)","input.expectedCompanyId!==companyId","input.expectedActorUid!==session.uid","await assertProductionOperational(companyId)","current.view.reviewVersion!==input.reviewVersion","hasCaseMailCollision(tx,companyId,input.receiptId,reviewed.workDate,reviewed.storeName)","s.sourceContext!==sourceContext","principal.active!==true","canonical(audit.review)!==canonical(c.draftReview)","entireSourceConfirmed:z.literal(true)","newSingleCaseConfirmed:z.literal(true)"]) {
+  reject("confirmCaseMailDraftReview",needle,"false","draft-review",null);
+}
 console.log(JSON.stringify({ caseMailAuthGuardTests: cases, functions: names, cloudOperations: false,
   deploymentAllowed: true, source: "working-tree fixtures through the formal git-show guard" }));

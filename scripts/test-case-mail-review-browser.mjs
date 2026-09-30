@@ -7,6 +7,7 @@ import { createServer } from "vite";
 import { chromium } from "@playwright/test";
 import { targetResolutionFixture } from "./case-mail-target-resolution-harness.mjs";
 import { targetHoldFixture } from "./case-mail-target-hold-harness.mjs";
+import {draftFixture} from "./case-mail-draft-review-harness.mjs";
 import { harness, clone, companyId } from "./case-mail-test-harness.mjs";
 const clientModule = { exports: {} };
 runInNewContext(ts.transpileModule(readFileSync("apps/admin/src/case-mail-review.ts", "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, clientModule);
@@ -39,7 +40,7 @@ function html(run) {
     'const [owner,setOwner]=React.useState({companyId:"synthetic-company",uid:"synthetic-admin"}),[open,setOpen]=React.useState(true);',
     'window.changeOwner=()=>setOwner({companyId:"other-company",uid:"other-admin"});',
     'const call=async(action,input={})=>{const result=await fetch("/__mail_rpc?run="+window.run,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action,input,owner,fault:window.fault[action]})});const out=await result.json();if(!out.ok)throw Object.assign(Error(out.message),{code:out.code});return out.data;};',
-    'return <main className="shell"><button id="open" onClick={()=>setOpen(true)}>受信を開く</button>{open&&<Panel key={owner.companyId+owner.uid} {...owner} api={{list:cursor=>call("list",cursor?{cursor}:{}),read:receiptId=>call("read",{receiptId}),create:command=>call("create",command),...(window.run.startsWith("binding-")||window.run.startsWith("open-")||window.run.startsWith("hold-")||window.run.startsWith("resolve-")?{previewTarget:command=>call("previewTarget",command),confirmTarget:command=>call("confirmTarget",command),holdTarget:command=>call("holdTarget",command),resolveTarget:command=>call("resolveTarget",command)}:{})}} onCreated={()=>{window.created=(window.created||0)+1;}} onReviewJob={(jobId,action)=>{window.opened=[...(window.opened||[]),{jobId,action}];}} onClose={()=>{setOpen(false);requestAnimationFrame(()=>document.getElementById("open").focus());}}/>}</main>;',
+    'return <main className="shell"><button id="open" onClick={()=>setOpen(true)}>受信を開く</button>{open&&<Panel key={owner.companyId+owner.uid} {...owner} api={{list:cursor=>call("list",cursor?{cursor}:{}),read:receiptId=>call("read",{receiptId}),create:command=>call("create",command),confirmDraft:command=>call("confirmDraft",command),...(window.run.startsWith("binding-")||window.run.startsWith("open-")||window.run.startsWith("hold-")||window.run.startsWith("resolve-")?{previewTarget:command=>call("previewTarget",command),confirmTarget:command=>call("confirmTarget",command),holdTarget:command=>call("holdTarget",command),resolveTarget:command=>call("resolveTarget",command)}:{})}} onCreated={()=>{window.created=(window.created||0)+1;}} onReviewJob={(jobId,action)=>{window.opened=[...(window.opened||[]),{jobId,action}];}} onClose={()=>{setOpen(false);requestAnimationFrame(()=>document.getElementById("open").focus());}}/>}</main>;',
     '}createRoot(document.getElementById("root")).render(<Fixture/>);',
   ].join("\n");
   return '<!doctype html><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><div id="root"></div><script type="module">' +
@@ -61,7 +62,7 @@ const server = await createServer({ root: resolve("apps/admin"), configFile: res
         const data = { ...input, expectedCompanyId: owner.companyId, expectedActorUid: owner.uid };
         const auth = { uid: owner.uid, token: { companyId: owner.companyId, role: "admin" } };
         const result = action === "list" ? await state.review.listCaseMailReceipts({ data, auth }) :
-          action === "read" ? await state.review.getCaseMailReceipt({ data, auth }) : action === "previewTarget" ? await state.review.getCaseMailTargetPreview({data,auth}) : action === "confirmTarget" ? await state.review.confirmCaseMailTarget({data,auth}) : action === "holdTarget" ? await state.review.holdCaseMailTarget({data,auth}) : action === "resolveTarget" ? await state.review.resolveCaseMailTargetHold({data,auth}) : await state.h.create(data, auth);
+          action === "confirmDraft" ? await state.h.confirm(data,auth) : action === "read" ? await state.review.getCaseMailReceipt({ data, auth }) : action === "previewTarget" ? await state.review.getCaseMailTargetPreview({data,auth}) : action === "confirmTarget" ? await state.review.confirmCaseMailTarget({data,auth}) : action === "holdTarget" ? await state.review.holdCaseMailTarget({data,auth}) : action === "resolveTarget" ? await state.review.resolveCaseMailTargetHold({data,auth}) : await state.h.create(data, auth);
         res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ ok: true, data: result }));
       } catch (error) { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify({ ok: false, message: error.message, code: error.code ?? "unavailable" })); }
     });
@@ -77,7 +78,7 @@ try {
   assert.ok(!Object.entries(server.config.env).some(([key, value]) => key.startsWith("VITE_FIREBASE_") && value));
   await server.listen(); browser = await chromium.launch({ headless: true });
   const base = "http://127.0.0.1:" + server.httpServer.address().port;
-  if (!process.argv.includes("--targets-only") && !process.argv.includes("--binding-only") && !process.argv.includes("--open-only") && !process.argv.includes("--hold-only") && !process.argv.includes("--resolve-only")) {
+  if (!process.argv.includes("--draft-only") && !process.argv.includes("--targets-only") && !process.argv.includes("--binding-only") && !process.argv.includes("--open-only") && !process.argv.includes("--hold-only") && !process.argv.includes("--resolve-only")) {
   for (const width of [320, 390, 1280]) {
     const run = String(width), state = seed(); states.set(run, state);
     const page = await browser.newPage({ viewport: { width, height: 1000 } }), errors = [];
@@ -155,7 +156,7 @@ try {
   }
   }
 
-  if (!process.argv.includes("--binding-only") && !process.argv.includes("--open-only") && !process.argv.includes("--hold-only") && !process.argv.includes("--resolve-only")) for (const [mode,width] of [["matches",320],["matches",390],["matches",1280],["empty",390],["limited",390],["insufficient",390]]) {
+  if (!process.argv.includes("--draft-only") && !process.argv.includes("--binding-only") && !process.argv.includes("--open-only") && !process.argv.includes("--hold-only") && !process.argv.includes("--resolve-only")) for (const [mode,width] of [["matches",320],["matches",390],["matches",1280],["empty",390],["limited",390],["insufficient",390]]) {
     const run="targets-"+mode+"-"+width,state=seed();states.set(run,state);
     state.h.records.get(state.h.paths.receipt).status="review";
     state.h.records.get(state.h.paths.candidate).status="review";
@@ -184,7 +185,7 @@ try {
   }
 
 
-  if (!process.argv.includes("--targets-only") && !process.argv.includes("--open-only") && !process.argv.includes("--hold-only") && !process.argv.includes("--resolve-only")) for (const [mode,width] of [["save",320],["save",390],["save",1280],["lost",390],["stale",390],["owner",390]]) {
+  if (!process.argv.includes("--draft-only") && !process.argv.includes("--targets-only") && !process.argv.includes("--open-only") && !process.argv.includes("--hold-only") && !process.argv.includes("--resolve-only")) for (const [mode,width] of [["save",320],["save",390],["save",1280],["lost",390],["stale",390],["owner",390]]) {
     const run="binding-"+mode+"-"+width,state=seed();states.set(run,state);
     state.h.records.get(state.h.paths.receipt).status="review";state.h.records.get(state.h.paths.candidate).status="review";
     state.h.records.get(state.h.paths.feature).caseMailIntakeEnabled=true;
@@ -230,7 +231,7 @@ try {
   }
 
 
-  if(!process.argv.includes("--hold-only") && !process.argv.includes("--resolve-only")) for(const [mode,width] of [["both",320],["both",390],["both",1280],["stale",390],["offline",390],["owner",390]]) {
+  if(!process.argv.includes("--draft-only") && !process.argv.includes("--hold-only") && !process.argv.includes("--resolve-only")) for(const [mode,width] of [["both",320],["both",390],["both",1280],["stale",390],["offline",390],["owner",390]]) {
     const run="open-"+mode+"-"+width,state=seed();states.set(run,state);
     state.h.records.get(state.h.paths.receipt).status="review";state.h.records.get(state.h.paths.candidate).status="review";
     state.h.records.get(state.h.paths.feature).caseMailIntakeEnabled=true;
@@ -365,8 +366,37 @@ try {
   }
   console.log("不足項目の画面表示: 3幅で明記項目を再要求せず、作成ボタンを出さないことを確認。");
 
+  if(process.argv.includes("--draft-only"))for(const [mode,width]of [["save",320],["save",390],["save",1280],["lost",390],["stale",390],["owner",390],["edited",390]]){
+    if(process.argv.includes("--draft-form-only")&&mode!=="save")continue;
+    const run="draft-"+mode+"-"+width,h=draftFixture(),state={h,review:h.load("./case-mail-review"),calls:[],release:null};states.set(run,state);
+    const page=await browser.newPage({viewport:{width,height:1100}});await blockExternal(page);
+    await page.goto(base+"/__mail_test.html?run="+run);const box=panel(page);await openDetail(box);
+    const form=box.getByRole("region",{name:"原文との照合と補正",exact:true}),button=form.getByRole("button",{name:"補正内容の確認を記録",exact:true});
+    assert.equal(await button.isDisabled(),true);await form.getByLabel("実施日（原文確認）",{exact:true}).fill("2026-10-10");
+    await form.getByLabel("クライアント（原文確認）",{exact:true}).fill("合成取引先");await form.getByLabel("原文確認メモ",{exact:true}).fill("合成本文と添付を照合");
+    await form.getByRole("checkbox").nth(0).check();await form.getByRole("checkbox").nth(1).check();assert.equal(await button.isEnabled(),true);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,"補正フォームの横幅");
+    if(mode==="save")await form.screenshot({path:resolve(output,"draft-form-"+width+".png")});
+    if(process.argv.includes("--draft-form-only")){await page.close();results.push({draftForm:true,width});continue;}
+    if(mode==="edited"){await form.getByLabel("店舗（原文確認）",{exact:true}).fill("合成別店舗");assert.equal(await button.isDisabled(),true);assert.equal(await form.getByRole("checkbox").nth(0).isChecked(),false);await page.close();results.push({draftReview:mode,width});continue;}
+    if(mode==="lost")await page.evaluate(()=>window.fault.confirmDraft="lost");
+    if(mode==="stale")h.records.get(h.paths.receipt).revision++;
+    if(mode==="owner")await page.evaluate(()=>window.fault.confirmDraft="hold");
+    await button.click();
+    if(mode==="owner"){await page.evaluate(()=>window.changeOwner());await release(state);await page.waitForTimeout(100);assert.equal(await save(panel(page)).count(),0);}
+    else{
+      const reload=form.getByRole("button",{name:"補正後の受信内容を再読込",exact:true});await reload.waitFor();assert.equal(await button.isDisabled(),true);
+      const storage=await page.evaluate(()=>JSON.stringify({...localStorage}));assert.ok(!storage.includes("合成本文")&&!storage.includes("合成取引先"));
+      await reload.click();await box.getByRole("heading",{name:"登録する内容の確認",exact:true}).waitFor();
+      if(mode==="stale"){assert.equal(await save(box).count(),0);assert.equal(h.list("jobs").length,0);}
+      else {await confirm(box).check();await save(box).click();await box.getByText("下書きを作成しました。シフト表との照合後、案件一覧から募集を開始できます。",{exact:true}).waitFor();assert.equal(h.list("jobs").length,1);assert.equal(h.list("jobs")[0].publishable,false);}
+    }
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await box.screenshot({path:resolve(output,run+".png")});await page.close();results.push({draftReview:mode,width});
+  }
+  if(process.argv.includes("--draft-only"))console.log(process.argv.includes("--draft-form-only")?"補正フォーム表示: 3幅成功。":"補正→確認→下書き: 3幅・応答喪失・古い版・会社切替・再編集の7条件成功。");
   writeFileSync(resolve(output, "result.json"), JSON.stringify({ results, cloudAccess: false }, null, 2));
-  console.log(process.argv.includes("--resolve-only") ? "別メール解除画面: 3幅・取消・応答喪失・古い版・未反映・元保留・会社切替の9条件成功。" : process.argv.includes("--hold-only") ? "別メール保留画面: 3幅・変更/取消・応答喪失・古い版の6条件成功。" : process.argv.includes("--open-only") ? "対応先から既存編集・取消を開く画面6条件成功。" : process.argv.includes("--binding-only") ? "対象案件対応確定: 3幅・選び直し・保存/再読込・応答喪失・古い版・会社切替の6条件成功。" : process.argv.includes("--targets-only") ? "別メール対象候補画面: 3幅・複数/該当なし/検索上限/検索不可の6条件成功、書込みなし。" : "受信候補画面: 既存導線と対象候補6条件成功。");
+  console.log(process.argv.includes("--draft-only") ? "原文補正画面の指定検証が完了。" : process.argv.includes("--resolve-only") ? "別メール解除画面: 3幅・取消・応答喪失・古い版・未反映・元保留・会社切替の9条件成功。" : process.argv.includes("--hold-only") ? "別メール保留画面: 3幅・変更/取消・応答喪失・古い版の6条件成功。" : process.argv.includes("--open-only") ? "対応先から既存編集・取消を開く画面6条件成功。" : process.argv.includes("--binding-only") ? "対象案件対応確定: 3幅・選び直し・保存/再読込・応答喪失・古い版・会社切替の6条件成功。" : process.argv.includes("--targets-only") ? "別メール対象候補画面: 3幅・複数/該当なし/検索上限/検索不可の6条件成功、書込みなし。" : "受信候補画面: 既存導線と対象候補6条件成功。");
 } catch (error) {
   if (browser) for (const context of browser.contexts()) for (const page of context.pages()) {
     await page.screenshot({ path: resolve(output, "failure.png"), fullPage: true }).catch(() => {});

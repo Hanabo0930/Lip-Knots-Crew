@@ -15,7 +15,7 @@ export async function hasCaseMailCollision(tx: FirebaseFirestore.Transaction, co
   }) || candidates.docs.some(snap => {
     const candidate = snap.data();
     return candidate.receiptId !== receiptId && (includeReview || candidate.status !== "review") &&
-      storeKey(candidate.input?.storeName) === storeKey(storeName);
+      (storeKey(candidate.input?.storeName) === storeKey(storeName) || storeKey(candidate.draftReview?.input?.storeName) === storeKey(storeName));
   });
 }
 

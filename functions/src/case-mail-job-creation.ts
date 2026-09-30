@@ -4,6 +4,7 @@ import { z } from "zod";
 import { db } from "./firebase";
 import { hasCaseMailCollision } from "./case-mail-collision";
 import { hashText } from "./case-id";
+import { readCaseMailDraftReview } from "./case-mail-draft-review";
 import { AdminJobInput } from "./job-management-core";
 import { allocateAdminJobGroup, stageAdminJobGroup } from "./job-group-creation";
 
@@ -17,7 +18,7 @@ const RequestSchema = z.object({ mailIntake: CommandSchema, expectedCompanyId: i
 const ReceiptSchema = z.object({
   version: z.literal(1), companyId: id, messageId: id, revision,
   status: z.enum(["ready", "review", "cancelled"]),
-  verification: z.literal("verified"), structuralComplete: z.literal(true), kind: z.literal("new"),
+  verification: z.literal("verified"), structuralComplete: z.boolean(), kind: z.literal("new"),
   sourceFingerprint: hash, ingestedBy: id, producerId: id, principalRevision: id,
   candidateIds: z.array(id).min(1).max(1000),
   parts: z.array(z.object({ partId: id, sha256: hash })).min(1).max(500),
@@ -90,9 +91,11 @@ export async function createCaseMailJobGroup(
     const candidateResult = CandidateSchema.safeParse(candidateSnap.data());
     if (!receiptResult.success || !candidateResult.success) fail("検証済みの受信記録・解析候補がありません。プレビューだけでは登録できません。");
     const receipt = receiptResult.data, candidate = candidateResult.data;
+    const reviewed = candidate.draftReview === undefined ? null : await readCaseMailDraftReview(tx, companyId, command.receiptId, command.candidateId, receiptSnap.data(), candidateSnap.data());
     if (receipt.companyId !== companyId || candidate.companyId !== companyId ||
         candidate.receiptId !== command.receiptId || candidate.messageId !== receipt.messageId ||
-        candidate.sourceFingerprint !== receipt.sourceFingerprint || receipt.status !== "ready" ||
+        candidate.sourceFingerprint !== receipt.sourceFingerprint ||
+        ((receipt.status !== "ready" || !receipt.structuralComplete) && !reviewed?.view.confirmed) ||
         receipt.revision !== command.expectedReceiptRevision ||
         new Set(receipt.candidateIds).size !== receipt.candidateIds.length ||
         !receipt.candidateIds.includes(command.candidateId) ||
@@ -107,7 +110,7 @@ export async function createCaseMailJobGroup(
       fail("受信実行者の登録・有効状態・確認版が一致しません。");
     }
     if (candidate.targetBinding !== undefined) fail("この受信候補は既存案件への対応記録があります。新規作成できません。");
-    const input = normalize(candidate.input);
+    const input = normalize(reviewed?.input ?? candidate.input);
     const date = new Date(input.workDate + "T00:00:00Z");
     if (input.slots !== 1 || input.basePay !== null || input.publicationMode !== "draft" || input.publishAt !== null ||
         input.workDate < "2026-10-01" || !/^\d{4}-\d{2}-\d{2}$/.test(input.workDate) ||
@@ -129,9 +132,9 @@ export async function createCaseMailJobGroup(
       }
       return committedResult(tx, (await tx.get(db.collection("caseMailJobCreates").doc(owner.operationRecordId))).data(), companyId);
     }
-    if (candidate.status !== "ready" || candidate.revision !== command.expectedRevision) fail("候補の状態・確認版が変わっています。");
+    if ((candidate.status !== "ready" && !(candidate.status === "review" && reviewed?.view.confirmed)) || candidate.revision !== command.expectedRevision) fail("候補の状態・確認版が変わっています。");
     if (featureSnap.data()?.caseMailJobCreationEnabled !== true) fail("受信案件の登録は未有効です。");
-    if (await hasCaseMailCollision(tx, companyId, command.receiptId, input.workDate, input.storeName, false)) {
+    if (await hasCaseMailCollision(tx, companyId, command.receiptId, input.workDate, input.storeName, reviewed?.view.confirmed === true)) {
       fail("同日・同店の別案件または別受信候補があります。追加せず確認してください。");
     }
     const mapping = mappingSnap.data();

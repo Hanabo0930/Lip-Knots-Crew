@@ -4,9 +4,10 @@ export type MailChangeValues = { workDate:string;clientName:string;storeName:str
 export type MailChangeReview = { jobId:string;reviewVersion:string;canConfirm:boolean;resolved:boolean;issue:string|null;current:MailChangeValues;proposed:MailChangeValues|null };
 export type MailReviewCommand = {receiptId:string;candidateId:string;jobId:string;reviewVersion:string;note:string;confirmed:true};
 export type MailTargetCandidates = {state:"complete"|"limited"|"insufficient";items:{jobId:string;workDate:string;storeName:string;clientName:string;makerName:string;menuName:string;entryTime:string;workTime:string;cancelled:boolean}[]};
+export type MailDraftReviewCommand = {receiptId:string;candidateId:string;reviewVersion:string;input:MailCandidate["input"];note:string;entireSourceConfirmed:true;newSingleCaseConfirmed:true};
 export type MailCandidate = { candidateId: string; revision: number; status: "ready" | "review" | "linked" | "cancelled"; creatable: boolean; linkedJobId: string | null;
   input: { workDate: string; clientName: string; storeName: string; makerName: string; menuName: string; entryTime: string; workTime: string };
-  source: { partId: string; rowKey: string; unitIndex: number }; changeReview?: MailChangeReview; targetCandidates?: MailTargetCandidates; targetBinding?: {jobId:string} };
+  source: { partId: string; rowKey: string; unitIndex: number }; draftReview?:{canConfirm:boolean;confirmed:boolean;reviewVersion:string|null;issue:string|null}; changeReview?: MailChangeReview; targetCandidates?: MailTargetCandidates; targetBinding?: {jobId:string} };
 /** 表示済みの候補から、原文との照合が必要な項目を固定文言で示す。登録可否は変更しない。 */
 export function mailCandidateRequirements(input: MailCandidate["input"]): string[] {
   const needed: string[] = [];
@@ -29,7 +30,7 @@ export function mailCandidateRequirements(input: MailCandidate["input"]): string
   return needed;
 }
 export type MailDetail = MailReceipt & { creationEnabled: boolean; producerReady: boolean; candidates: MailCandidate[] };
-export type MailApi = { receive?(cursor?: string): Promise<unknown>; list(cursor?: string): Promise<unknown>; read(receiptId: string): Promise<unknown>; create(command: MailCommand): Promise<unknown>; previewTarget?(command: MailTargetRequest): Promise<unknown>; confirmTarget?(command: MailTargetConfirm): Promise<unknown>; holdTarget?(command: MailTargetRequest & {reviewVersion:string;kind:"change"|"cancel";confirmed:true}): Promise<unknown>; resolveTarget?(command: MailTargetConfirm): Promise<unknown>; confirm?(command: MailReviewCommand): Promise<unknown> };
+export type MailApi = { confirmDraft?(command:MailDraftReviewCommand):Promise<unknown>; receive?(cursor?: string): Promise<unknown>; list(cursor?: string): Promise<unknown>; read(receiptId: string): Promise<unknown>; create(command: MailCommand): Promise<unknown>; previewTarget?(command: MailTargetRequest): Promise<unknown>; confirmTarget?(command: MailTargetConfirm): Promise<unknown>; holdTarget?(command: MailTargetRequest & {reviewVersion:string;kind:"change"|"cancel";confirmed:true}): Promise<unknown>; resolveTarget?(command: MailTargetConfirm): Promise<unknown>; confirm?(command: MailReviewCommand): Promise<unknown> };
 const fail = () => new Error("受信候補の確認情報が不完全です。最新の内容を読み直してください。");
 const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(value);
 const revision = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value < Number.MAX_SAFE_INTEGER;
@@ -62,7 +63,13 @@ export function mailDetail(value: unknown, receiptId: string): MailDetail {
         ["workDate", "clientName", "storeName", "makerName", "menuName", "entryTime", "workTime"].some(key => typeof input[key] !== "string") ||
         !id(source.partId) || typeof source.rowKey !== "string" || source.rowKey.length > 500 ||
         !Number.isInteger(source.unitIndex) || Number(source.unitIndex) < 0 || Number(source.unitIndex) > 99 ||
-        (candidate.creatable && (base.status !== "ready" || candidate.status !== "ready" || !row.creationEnabled || !row.producerReady))) throw fail();
+        (candidate.creatable && (((base.status !== "ready" || candidate.status !== "ready") && !(base.status === "review" && candidate.status === "review" && object(candidate.draftReview).confirmed === true)) || !row.creationEnabled || !row.producerReady))) throw fail();
+    if(candidate.draftReview !== undefined) {
+      const review=object(candidate.draftReview);
+      if(typeof review.canConfirm!=="boolean"||typeof review.confirmed!=="boolean"||(review.reviewVersion!==null&&(typeof review.reviewVersion!=="string"||!/^[a-f0-9]{64}$/.test(review.reviewVersion)))||
+        (review.issue!==null&&typeof review.issue!=="string")||((review.canConfirm||review.confirmed)&&(!review.reviewVersion||review.issue!==null))||
+        (review.canConfirm&&(review.confirmed||candidate.creatable||candidate.status!=="review"||base.status!=="review"||!row.creationEnabled||!row.producerReady)))throw fail();
+    }
     if (candidate.targetBinding !== undefined && (!id(object(candidate.targetBinding).jobId) || candidate.creatable || candidate.linkedJobId !== null)) throw fail();
     if (candidate.targetCandidates !== undefined) {
       const targets = object(candidate.targetCandidates);

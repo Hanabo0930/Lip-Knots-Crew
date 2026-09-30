@@ -38,6 +38,7 @@ export default function CaseMailIntakeEntry({ onCreated, onReviewJob }: { onCrea
     read: receiptId => call("getCaseMailReceipt", { receiptId }),
     create: command => call("createAdminJobGroup", command),
     confirm: command => call("confirmCaseMailReview", command),
+    confirmDraft: command => call("confirmCaseMailDraftReview", command),
     previewTarget: command => call("getCaseMailTargetPreview", command),
     confirmTarget: command => call("confirmCaseMailTarget", command),
     holdTarget: command => call("holdCaseMailTarget", command),

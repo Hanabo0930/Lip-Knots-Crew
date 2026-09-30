@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { resolve } from "node:path";
 import ts from "typescript";
 import { createServer } from "vite";
@@ -7,6 +8,22 @@ import { chromium } from "@playwright/test";
 import { targetResolutionFixture } from "./case-mail-target-resolution-harness.mjs";
 import { targetHoldFixture } from "./case-mail-target-hold-harness.mjs";
 import { harness, clone, companyId } from "./case-mail-test-harness.mjs";
+const clientModule = { exports: {} };
+runInNewContext(ts.transpileModule(readFileSync("apps/admin/src/case-mail-review.ts", "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, clientModule);
+const requirements = clientModule.exports.mailCandidateRequirements;
+const completeInput = {workDate:"2026-10-10",clientName:"合成取引先",storeName:"合成店舗",makerName:"合成メーカー",menuName:"合成企画",entryTime:"09:30",workTime:"10:00~18:00"};
+assert.deepEqual([...requirements(completeInput)], []);
+for(const [key,label] of [["workDate","実施日（年を含む正しい日付）"],["clientName","クライアント"],["storeName","店舗"],["makerName","メーカー"],["menuName","メニュー"],["entryTime","入店時間"],["workTime","実施時間（開始・終了）"]]) {
+  const input={...completeInput,[key]:"　 "},before=JSON.stringify(input);
+  assert.deepEqual([...requirements(input)], [label]);assert.equal(JSON.stringify(input),before);
+}
+for(const value of ["10月10日","2026-02-30","2026-13-01","private-invalid-value"]) assert.deepEqual([...requirements({...completeInput,workDate:value})], ["実施日（年を含む正しい日付）"]);
+assert.deepEqual([...requirements({...completeInput,workDate:"2026-09-30"})], ["実施日（2026年10月以降の対象日）"]);
+assert.deepEqual([...requirements({...completeInput,workDate:"2028-02-29",workTime:"１０：００～１８：００（予定）"})], []);
+for(const value of ["18:00-10:00","10:00-10:00","25:00-26:00","10:60-18:00"]) assert.deepEqual([...requirements({...completeInput,workTime:value})], ["実施時間（開始・終了）"]);
+assert.deepEqual([...requirements({...completeInput,entryTime:"10:30"})], ["入店時間と実施開始の前後関係"]);
+assert.deepEqual([...requirements({...completeInput,entryTime:"25:30"})], ["入店時間"]);
+console.log("確認項目の表示判定: 20条件成功（原文・登録状態を変更しない）。");
 const output = resolve(process.argv[2] ?? "release-evidence/research-decisions-20260918/mail-review-ui-1/browser");
 mkdirSync(output, { recursive: true });
 const states = new Map();
@@ -331,6 +348,22 @@ try {
     await page.close();results.push({headcount:needsReview?"unconfirmed":"one-slot",width,receiptStatus,candidateStatus});
   }
   console.log("候補人数の表示: 3幅 × 登録候補・候補確認待ち・受信全体確認待ちの9条件成功。");
+
+  for(const width of [320,390,1280]) {
+    const run="missing-fields-"+width,state=seed();states.set(run,state);
+    state.h.records.get(state.h.paths.receipt).status="review";
+    const candidate=state.h.records.get(state.h.paths.candidate);candidate.status="review";
+    Object.assign(candidate.input,{workDate:"10月10日",clientName:"",makerName:"",entryTime:"09:30",workTime:"10:00~18:00"});
+    const page=await browser.newPage({viewport:{width,height:1000}});await blockExternal(page);
+    await page.goto(base+"/__mail_test.html?run="+run);const box=panel(page);await openDetail(box);
+    const hints=box.getByRole("region",{name:"原文で確認する項目",exact:true});
+    assert.deepEqual(await hints.locator("li").allTextContents(),["実施日（年を含む正しい日付）","クライアント","メーカー"]);
+    assert.equal(await save(box).count(),0);assert.equal(state.calls.filter(call=>call.action==="create").length,0);
+    await box.screenshot({path:resolve(output,"missing-fields-"+width+".png")});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await page.close();results.push({missingFields:true,width});
+  }
+  console.log("不足項目の画面表示: 3幅で明記項目を再要求せず、作成ボタンを出さないことを確認。");
 
   writeFileSync(resolve(output, "result.json"), JSON.stringify({ results, cloudAccess: false }, null, 2));
   console.log(process.argv.includes("--resolve-only") ? "別メール解除画面: 3幅・取消・応答喪失・古い版・未反映・元保留・会社切替の9条件成功。" : process.argv.includes("--hold-only") ? "別メール保留画面: 3幅・変更/取消・応答喪失・古い版の6条件成功。" : process.argv.includes("--open-only") ? "対応先から既存編集・取消を開く画面6条件成功。" : process.argv.includes("--binding-only") ? "対象案件対応確定: 3幅・選び直し・保存/再読込・応答喪失・古い版・会社切替の6条件成功。" : process.argv.includes("--targets-only") ? "別メール対象候補画面: 3幅・複数/該当なし/検索上限/検索不可の6条件成功、書込みなし。" : "受信候補画面: 既存導線と対象候補6条件成功。");

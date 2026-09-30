@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { mailOwner, mailList, mailDetail, mailReceiveResult, mailCreationResult, loadMailAttempt, reserveMailAttempt, clearMailAttempt,
-  definiteMailRejection, mailStorageKey, type MailApi, type MailReceipt, type MailDetail, type MailCommand } from "./case-mail-review";
+  definiteMailRejection, mailStorageKey, mailCandidateRequirements, type MailApi, type MailReceipt, type MailDetail, type MailCommand } from "./case-mail-review";
 import "./case-mail-review.css";
 import CaseMailTargetBinding from "./CaseMailTargetBinding";
 const errorText = (value: unknown) => value instanceof Error ? value.message : "通信を確認できません。同じ操作の結果を確認してください。";
@@ -24,6 +24,7 @@ export default function CaseMailIntakePanel({ companyId, uid, api, onClose, onCr
   const [busy, setBusy] = useState(false), [rejected, setRejected] = useState(false);
   const isCurrent = () => mounted.current && ownerRef.current === owner;
   const candidate = detail?.candidates.find(item => item.candidateId === selected);
+  const requirements = candidate && (detail?.status === "review" || candidate.status === "review") ? mailCandidateRequirements(candidate.input) : [];
   function syncAttempt() {
     if (busyRef.current) return;
     try { const saved = loadMailAttempt(owner); setAttempt(current => JSON.stringify(current) === JSON.stringify(saved) ? current : saved); setInitialized(true); }
@@ -157,6 +158,11 @@ export default function CaseMailIntakePanel({ companyId, uid, api, onClose, onCr
             ["メーカー", candidate.input.makerName], ["メニュー", candidate.input.menuName], ["入店時間", candidate.input.entryTime],
             ["実施時間", candidate.input.workTime], ["人数", detail.status === "review" || candidate.status === "review" ? "未確定（原文で確認）" : "1名"], ["依頼元資料", candidate.source.partId.startsWith("body:") || candidate.source.partId === "body" ? "メール本文" : "添付資料"],
           ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || "未記載"}</dd></div>)}</dl>
+          {requirements.length > 0 && <section aria-label="原文で確認する項目" className="locked-note">
+            <h4>原文で確認する項目</h4>
+            <ul>{requirements.map(label => <li key={label}>{label}</li>)}</ul>
+            <p>受信内容から確認できていない項目です。元メール・添付資料と照合してください。</p>
+          </section>}
           {candidate.targetCandidates && <section aria-label="対応先の案件候補" className="locked-note">
             <h4>対応先の案件候補（未確定）</h4>
             <p>同じ日付・店舗の案件を表示しています。対象と一致する保証はありません。日付・店舗が変わった案件は表示されません。対象案件との対応は、原文と照合してから確定してください。</p>

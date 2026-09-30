@@ -7,6 +7,27 @@ export type MailTargetCandidates = {state:"complete"|"limited"|"insufficient";it
 export type MailCandidate = { candidateId: string; revision: number; status: "ready" | "review" | "linked" | "cancelled"; creatable: boolean; linkedJobId: string | null;
   input: { workDate: string; clientName: string; storeName: string; makerName: string; menuName: string; entryTime: string; workTime: string };
   source: { partId: string; rowKey: string; unitIndex: number }; changeReview?: MailChangeReview; targetCandidates?: MailTargetCandidates; targetBinding?: {jobId:string} };
+/** 表示済みの候補から、原文との照合が必要な項目を固定文言で示す。登録可否は変更しない。 */
+export function mailCandidateRequirements(input: MailCandidate["input"]): string[] {
+  const needed: string[] = [];
+  const day = input.workDate.trim(), date = new Date(day + "T00:00:00Z");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(date.valueOf()) || date.toISOString().slice(0, 10) !== day) needed.push("実施日（年を含む正しい日付）");
+  else if (day < "2026-10-01") needed.push("実施日（2026年10月以降の対象日）");
+  for (const [key, label] of [["clientName", "クライアント"], ["storeName", "店舗"], ["makerName", "メーカー"], ["menuName", "メニュー"]] as const) {
+    if (!input[key].trim()) needed.push(label);
+  }
+  const clock = (value: string) => {
+    const match = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(value.normalize("NFKC").trim());
+    return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+  };
+  const arrival = clock(input.entryTime);
+  if (arrival === null) needed.push("入店時間");
+  const span = /^(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})(?:\s*\(予定\))?$/.exec(input.workTime.normalize("NFKC").trim().replace(/[～〜~‐‑‒–—―−ー]/g, "-"));
+  const start = span ? clock(span[1]) : null, end = span ? clock(span[2]) : null;
+  if (start === null || end === null || end <= start) needed.push("実施時間（開始・終了）");
+  else if (arrival !== null && arrival > start) needed.push("入店時間と実施開始の前後関係");
+  return needed;
+}
 export type MailDetail = MailReceipt & { creationEnabled: boolean; producerReady: boolean; candidates: MailCandidate[] };
 export type MailApi = { receive?(cursor?: string): Promise<unknown>; list(cursor?: string): Promise<unknown>; read(receiptId: string): Promise<unknown>; create(command: MailCommand): Promise<unknown>; previewTarget?(command: MailTargetRequest): Promise<unknown>; confirmTarget?(command: MailTargetConfirm): Promise<unknown>; holdTarget?(command: MailTargetRequest & {reviewVersion:string;kind:"change"|"cancel";confirmed:true}): Promise<unknown>; resolveTarget?(command: MailTargetConfirm): Promise<unknown>; confirm?(command: MailReviewCommand): Promise<unknown> };
 const fail = () => new Error("受信候補の確認情報が不完全です。最新の内容を読み直してください。");

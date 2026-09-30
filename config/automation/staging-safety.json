@@ -104,6 +104,7 @@
     "getCaseMailReceipt",
     "getCaseMailTargetPreview",
     "confirmCaseMailTarget",
+    "confirmCaseMailDraftReview",
     "holdCaseMailTarget",
     "resolveCaseMailTargetHold",
     "confirmCaseMailReview"

@@ -166,6 +166,9 @@ for (const [path, expected] of [
   ["config/automation/staging-safety.json", "protected"],
 ]) { assert.equal(classify(path), expected); cases++; }
 assert.deepEqual(run("confirmCaseMailDraftReview"), {passed:true,exitCode:0});cases++;
+const draftPlan={mode:"functions-deploy",functions:"confirmCaseMailDraftReview",confirmation:safetyConfig.confirmations.functionsDeploy};
+assert.deepEqual(validatePlan(draftPlan).functions,["confirmCaseMailDraftReview"]);cases++;
+for(const change of [{project:"production"},{region:"us-central1"},{confirmation:""},{functions:"confirmCaseMailDraftReview,processSafeSheetWrite"}]){assert.throws(()=>validatePlan({...draftPlan,...change}));cases++;}
 for(const needle of ["requireAdmin(request)","input.expectedCompanyId!==companyId","input.expectedActorUid!==session.uid","await assertProductionOperational(companyId)","current.view.reviewVersion!==input.reviewVersion","hasCaseMailCollision(tx,companyId,input.receiptId,reviewed.workDate,reviewed.storeName)","s.sourceContext!==sourceContext","principal.active!==true","canonical(audit.review)!==canonical(c.draftReview)","entireSourceConfirmed:z.literal(true)","newSingleCaseConfirmed:z.literal(true)","/変更|取消|中止|キャンセル/.test(issue)"]) {
   reject("confirmCaseMailDraftReview",needle,"false","draft-review",null);
 }

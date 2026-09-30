@@ -12,6 +12,7 @@ import { readCaseMailResolution } from "./case-mail-resolution";
 import { caseMailReviewAccepted, caseMailResolutionIssue } from "./case-mail-resolution-core";
 import { assignmentPreparationPatch } from "./assignment-preparation-core";
 import { adminEditValueMatches, type EditSourceSnapshot } from "./admin-edit-state-core";
+import { readCaseMailDraftReview } from "./case-mail-draft-review";
 import { splitMenuConditions } from "./shift-parser";
 
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/);
@@ -93,11 +94,13 @@ export const getCaseMailReceipt = onCall(async request => {
       if (candidate.companyId !== companyId || candidate.receiptId !== input.receiptId || candidate.messageId !== record.messageId ||
           candidate.sourceFingerprint !== record.sourceFingerprint ||
           !record.parts.some(part => part.partId === candidate.source.partId && part.sha256 === candidate.source.sha256)) fail();
-      const normalized = normalizeJobInput(candidate.input);
+      const draftReview = candidateSnap.data()?.draftReview !== undefined || (candidate.status === "review" && record.status === "review" && !candidateSnap.data()?.targetBinding)
+        ? await readCaseMailDraftReview(tx, companyId, input.receiptId, candidateSnap.id, snap.data(), candidateSnap.data()) : null;
+      const normalized = normalizeJobInput(draftReview?.input ?? candidate.input);
       const value = normalized.value;
       const validDay = new Date(value.workDate + "T00:00:00Z");
-      const creatable = candidateSnap.data()?.targetBinding === undefined && creationEnabled && producerReady && record.status === "ready" && record.verification === "verified" &&
-        record.structuralComplete && record.kind === "new" && candidate.status === "ready" && !normalized.errors.length &&
+      const creatable = candidateSnap.data()?.targetBinding === undefined && creationEnabled && producerReady && ((record.status === "ready" && record.structuralComplete && candidate.status === "ready") ||
+        (draftReview?.view.confirmed === true && candidate.status === "review")) && record.verification === "verified" && record.kind === "new" && !normalized.errors.length &&
         value.slots === 1 && value.basePay === null && value.publicationMode === "draft" && value.publishAt === null &&
         value.workDate >= "2026-10-01" && Number.isFinite(validDay.valueOf()) && validDay.toISOString().slice(0, 10) === value.workDate;
       let linkedJobId: string | null = null;
@@ -110,11 +113,11 @@ export const getCaseMailReceipt = onCall(async request => {
       }
       const changeReview = candidate.status === "linked" && record.status === "review" && record.issues.includes("SOURCE_CHANGED")
         ? (await readCaseMailResolution(tx, companyId, input.receiptId, candidateSnap.id)).view : undefined;
-      const targetCandidates = record.status === "review" && !candidate.linkedJobId && candidate.status !== "linked"
+      const targetCandidates = record.status === "review" && !draftReview?.view.confirmed && !candidate.linkedJobId && candidate.status !== "linked"
         ? await readTargets(value.workDate, value.storeName) : undefined;
       const savedTarget = candidateSnap.data()?.targetBinding;
       if (savedTarget !== undefined && (!TargetBindingSchema.safeParse(savedTarget).success || savedTarget.companyId !== companyId || savedTarget.receiptId !== input.receiptId || savedTarget.candidateId !== candidateSnap.id)) fail();
-      candidates.push({ ...(savedTarget ? { targetBinding: { jobId: savedTarget.jobId } } : {}), ...(targetCandidates ? { targetCandidates } : {}), ...(changeReview ? { changeReview } : {}), candidateId: candidateSnap.id, revision: candidate.revision, status: candidate.status, creatable, linkedJobId,
+      candidates.push({ ...(draftReview ? { draftReview: draftReview.view } : {}), ...(savedTarget ? { targetBinding: { jobId: savedTarget.jobId } } : {}), ...(targetCandidates ? { targetCandidates } : {}), ...(changeReview ? { changeReview } : {}), candidateId: candidateSnap.id, revision: candidate.revision, status: candidate.status, creatable, linkedJobId,
         input: { workDate: value.workDate, clientName: value.clientName, storeName: value.storeName,
           makerName: value.makerName, menuName: value.menuName, entryTime: value.entryTime, workTime: value.workTime },
         source: { partId: candidate.source.partId, rowKey: candidate.source.rowKey, unitIndex: candidate.source.unitIndex } });

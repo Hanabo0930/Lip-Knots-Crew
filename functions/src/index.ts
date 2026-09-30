@@ -190,3 +190,5 @@ export { listCaseMailReceipts, getCaseMailReceipt, getCaseMailTargetPreview, con
 export { confirmCaseMailReview } from "./case-mail-resolution";
 
 export { receiveCaseMailMessage, receiveCaseMailMessages } from "./case-mail-receive";
+
+export { confirmCaseMailDraftReview } from "./case-mail-draft-review";

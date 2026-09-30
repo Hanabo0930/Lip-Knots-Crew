@@ -31,6 +31,7 @@ const supportedFunctions = new Set([
   "holdCaseMailTarget",
   "resolveCaseMailTargetHold",
   "confirmCaseMailReview",
+  "confirmCaseMailDraftReview",
   "loginGateway",
   "submitPilotOutcome",
   "decidePilotExpansion",
@@ -546,9 +547,12 @@ function checkAdminCore(name) {
       'featureSnap.data()?.caseMailJobCreationEnabled!==true', 'collisions.some(snap=>snap.exists)',
       'stageAdminJobGroup(tx,{...allocation,companyId,actorUid,input,rowQueueId,now,mailIntake:origin})',
       'tx.set(candidateRef,', 'tx.set(ownerRef,', 'tx.set(operationRef,', 'tx.set(auditRef,',
-      'structuralComplete:z.literal(true)', 'verification:z.literal("verified")', 'kind:z.literal("new")',
+      'structuralComplete:z.boolean()', 'verification:z.literal("verified")', 'kind:z.literal("new")',
+      '((receipt.status!=="ready"||!receipt.structuralComplete)&&!reviewed?.view.confirmed)',
+      'awaitreadCaseMailDraftReview(tx,companyId,command.receiptId,command.candidateId,receiptSnap.data(),candidateSnap.data())',
     ].every(part => intake.includes(part)) || /(?:db\.batch\(|(?:operationRef|ownerRef|candidateRef|auditRef)\.(?:set|create|update)\()/.test(intake)) return false;
   }
+  if (name === "createAdminJobGroup" && !checkCaseMailDraft()) return false;
   if (name === "updateJobPublication" && ((block.match(/if\(job\.assignedStaffId\)\{/g) ?? []).length !== 2 || (block.match(/tx\.set\(/g) ?? []).length !== 3 || /(?:batch|snap\.ref)\.(?:set|update|delete)\(/.test(block))) return false;
   const whole = compact(source);
   if (name === "generateJobExport" && !whole.includes('constExportSchema=z.object({from:z.iso.date(),through:z.iso.date(),')) return false;
@@ -1262,7 +1266,35 @@ function checkProcessNotificationQueue() {
 
 
 // 受信callableの既知の安全条件を固定する。動作試験と組み合わせ、配備許可とは分離する。
+function checkCaseMailDraft() {
+  const compact=text=>text.replace(/\/\*[\s\S]*?\*\//g," ").replace(/\/\/[^\r\n]*/g," ").replace(/\s+/g,"");
+  const source=sourceFile("functions/src/case-mail-draft-review.ts"),whole=compact(source);
+  if(!['import{requireAdmin,companyFromClaims}from"./utils";','import{assertProductionOperational}from"./system-safety";'].every(part=>whole.includes(part)))return false;
+  const start=whole.indexOf("exportconstconfirmCaseMailDraftReview=onCall(");
+  const block=whole.slice(start);
+  if(start<0||!block.startsWith("exportconstconfirmCaseMailDraftReview=onCall(asyncrequest=>{constsession=requireAdmin(request),companyId=id.parse(companyFromClaims(session.token)),input=RequestSchema.parse(request.data);if(input.expectedCompanyId!==companyId||input.expectedActorUid!==session.uid)fail();awaitassertProductionOperational(companyId);"))return false;
+  const checks=['entireSourceConfirmed:z.literal(true),newSingleCaseConfirmed:z.literal(true)}).strict()',
+    'verification:z.literal("verified"),verificationScope:z.literal("registered-server-provider")',
+    'candidateIds:z.array(id).length(1)', 'constreceipt=ReceiptSchema.safeParse(r),candidate=CandidateSchema.safeParse(c)',
+    'a.companyId!==companyId||b.companyId!==companyId', 'b.receiptId!==receiptId||a.messageId!==b.messageId',
+    'a.sourceFingerprint!==b.sourceFingerprint', 'p.partId===b.source.partId&&p.sha256===b.source.sha256',
+    'a.status!=="review"||r.heldAnalysisHash||r.heldSourceFingerprint||c.heldChange||c.targetBinding',
+    '/変更|取消|中止|キャンセル/.test(issue)', '[b.sourceValues.memo,b.parserSource.excerpt].some(value=>typeofvalue==="string"&&/変更|取消|中止|キャンセル/.test(value))',
+    's.sourceContext!==sourceContext', 'b.revision!==s.confirmedCandidateRevision+(b.status==="linked"?1:0)',
+    'audit.action!=="caseMail.draft.confirm"||canonical(audit.review)!==canonical(c.draftReview)',
+    'feature?.caseMailJobCreationEnabled!==true', 'principal.companyId!==companyId||principal.uid!==a.ingestedBy||principal.active!==true',
+    'principal.producerId!==a.producerId||principal.revision!==a.principalRevision',
+    'returndb.runTransaction(asynctx=>{', '!r||!c||r.companyId!==companyId||c.companyId!==companyId',
+    '!current.view.canConfirm||current.view.reviewVersion!==input.reviewVersion',
+    'if(current.view.reviewVersion!==input.reviewVersion||c.draftReview.actorUid!==session.uid||c.draftReview.note!==input.note||canonical(current.input)!==canonical(reviewed))fail();',
+    'hasCaseMailCollision(tx,companyId,input.receiptId,reviewed.workDate,reviewed.storeName)',
+    'if((awaittx.get(auditRef)).exists)fail()', 'normalizeCaseMailReviewedInput(input.input).input',
+    'tx.set(candidateRef,{draftReview:review,revision:c.revision+1,workDate:reviewed.workDate,updatedAt:now},{merge:true})',
+    'tx.set(auditRef,{companyId,actorUid:session.uid,action:"caseMail.draft.confirm",review,createdAt:now})'];
+  return checks.every(part=>whole.includes(part))&&(block.match(/tx\.set\(/g)??[]).length===2&&!/(?:candidateRef|auditRef)\.(?:set|update|delete|create)\(/.test(block);
+}
 function checkCaseMail(name) {
+  if(name==="getCaseMailReceipt"&&!checkCaseMailDraft())return false;
   const original = name === "confirmCaseMailReview";
   const source = sourceFile("functions/src/case-mail-" + (original ? "resolution" : "review") + ".ts");
   const clean = text => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\r\n]*/g, "");
@@ -1451,6 +1483,7 @@ const checkers = {
   holdCaseMailTarget: () => checkCaseMail("holdCaseMailTarget"),
   resolveCaseMailTargetHold: () => checkCaseMail("resolveCaseMailTargetHold"),
   confirmCaseMailReview: () => checkCaseMail("confirmCaseMailReview"),
+  confirmCaseMailDraftReview: () => checkCaseMailDraft(),
 
   submitPilotOutcome: () => checkPilotExpansionMutation("submitPilotOutcome"),
   decidePilotExpansion: () => checkPilotExpansionMutation("decidePilotExpansion"),

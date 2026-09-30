@@ -5,10 +5,10 @@ import {createRequire} from "node:module";
 import {validatePlan,safetyConfig} from "./validate-staging-scope.mjs";
 const require=createRequire(import.meta.url),{installInvokerAdapter,installCaseMailSecretGuard,resolveCli,VERSION}=require("./run-staging-firebase-deploy.cjs");
 let cases=0,iamWrites=0;
-const plan=validatePlan({mode:"functions-deploy",project:safetyConfig.projectId,region:safetyConfig.region,sourceRef:"main",functions:"getSheetWriteIssues,previewStaffImport",confirmation:safetyConfig.confirmations.functionsDeploy});
+const plan=validatePlan({mode:"functions-deploy",project:safetyConfig.projectId,region:safetyConfig.region,sourceRef:"main",functions:"getSheetWriteIssues,previewStaffImport,confirmCaseMailDraftReview",confirmation:safetyConfig.confirmations.functionsDeploy});
 const run={setInvokerCreate:async()=>{iamWrites++;}},messages=[];
 installInvokerAdapter(run,plan,line=>messages.push(line));
-for(const service of ["getsheetwriteissues","previewstaffimport"]){
+for(const service of ["getsheetwriteissues","previewstaffimport","confirmcasemaildraftreview"]){
  await run.setInvokerCreate(plan.project,"projects/"+plan.project+"/locations/"+plan.region+"/services/"+service,["public"]);cases++;
 }
 for(const [project,service,invokers]of [
@@ -25,7 +25,7 @@ for(const [project,service,invokers]of [
 ]){
  await assert.rejects(run.setInvokerCreate(project,service,invokers),/UNEXPECTED_INVOKER_CREATE_REQUEST/);cases++;
 }
-assert.equal(iamWrites,0);assert.equal(messages.length,2);cases++;
+assert.equal(iamWrites,0);assert.equal(messages.length,3);cases++;
 for(const changes of [{project:"other"},{region:"us-central1"},{functions:[]},{functions:["bad/name"]},{functions:null}]){
  assert.throws(()=>installInvokerAdapter({setInvokerCreate(){}},{...plan,...changes}),/INVALID_INVOKER_PLAN/);cases++;
 }

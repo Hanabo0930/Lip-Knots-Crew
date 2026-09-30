@@ -5,7 +5,7 @@ const read=p=>fs.readFileSync(new URL('../../'+p,import.meta.url),'utf8').replac
 const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^import .*;\n/gm,'');
 const modules={getSheetWriteIssues:'admin-operations',getOperationsDashboard:'analytics',getStaffPerformance:'analytics',createAdminJobGroup:'job-management',updateJobPublication:'job-management',adminEditJobInputs:'job-management',generateJobExport:'job-management',updateNetPrintNumbers:'netprint',adminSetJobCancellation:'analytics',adminRestoreCancelledJob:'analytics'};
 const sources=Object.fromEntries(Object.values(modules).map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
-for(const module of ["job-group-creation","case-mail-job-creation","native-job-creation"])sources["functions/src/"+module+".ts"]=read("functions/src/"+module+".ts");
+for(const module of ["job-group-creation","case-mail-job-creation","native-job-creation","case-mail-draft-review"])sources["functions/src/"+module+".ts"]=read("functions/src/"+module+".ts");
 let cases=0;
 function run(name,change){const files={...sources};change?.(files);const lines=[],process={argv:['node','guard','--functions',name,'--require-pass'],exitCode:0,exit:code=>{throw Error('Unexpected exit '+code);}};
  runInNewContext(guard,{process,console:{log:x=>lines.push(x),error:x=>lines.push(x)},execFileSync:(cmd,args)=>{assert.equal(cmd,'git');assert.equal(args[0],'show');const p=args[1].slice(args[1].indexOf(':')+1);assert.ok(Object.hasOwn(files,p));return files[p];}},{timeout:3000});

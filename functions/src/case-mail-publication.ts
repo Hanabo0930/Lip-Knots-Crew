@@ -1,3 +1,4 @@
+import { readCaseMailDraftReview } from "./case-mail-draft-review";
 import { db } from "./firebase";
 import { caseMailReviewAccepted } from "./case-mail-resolution-core";
 import { mailSourceIssue, mailPublicationContext } from "./case-mail-publication-core";
@@ -12,10 +13,11 @@ export async function readMailPublication(tx: FirebaseFirestore.Transaction, job
     db.collection("caseMailIntakeReceipts").doc(origin.receiptId), db.collection("caseMailIntakeCandidates").doc(origin.candidateId),
     db.collection("caseMailJobSources").doc(origin.sourceKey), db.collection("adminJobEditSources").doc(jobId));
   const receipt = receiptSnap!.data(), candidate = candidateSnap!.data(), owner = ownerSnap!.data();
+  const reviewed = candidate?.draftReview === undefined ? null : await readCaseMailDraftReview(tx, job.companyId, origin.receiptId, origin.candidateId, receipt, candidate);
   if (!receipt || !candidate || !owner || [receipt, candidate, owner].some(row => row.companyId !== job.companyId) ||
       receipt.version !== 1 || candidate.version !== 1 || !id(receipt.messageId) ||
       !/^[a-f0-9]{64}$/.test(receipt.sourceFingerprint ?? "") || !id(candidate.source?.partId) || !/^[a-f0-9]{64}$/.test(candidate.source?.sha256 ?? "") ||
-      !Number.isSafeInteger(candidate.revision) || candidate.revision < 1 || (receipt.status !== "ready" && !caseMailReviewAccepted(origin.receiptId, receipt, origin.candidateId, job)) || receipt.verification !== "verified" || receipt.structuralComplete !== true || receipt.kind !== "new" ||
+      !Number.isSafeInteger(candidate.revision) || candidate.revision < 1 || (receipt.status !== "ready" && !reviewed?.view.confirmed && !caseMailReviewAccepted(origin.receiptId, receipt, origin.candidateId, job)) || receipt.verification !== "verified" || (receipt.structuralComplete !== true && !reviewed?.view.confirmed) || receipt.kind !== "new" ||
       !Number.isSafeInteger(receipt.revision) || receipt.revision < 1 || !Array.isArray(receipt.candidateIds) || !receipt.candidateIds.includes(origin.candidateId) ||
       candidate.status !== "linked" || candidate.linkedJobId !== jobId || candidate.receiptId !== origin.receiptId ||
       candidate.messageId !== receipt.messageId || candidate.sourceFingerprint !== receipt.sourceFingerprint ||

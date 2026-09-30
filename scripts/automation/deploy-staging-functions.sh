@@ -116,6 +116,7 @@ for function_name in "${function_names[@]}"; do
     getCaseMailReceipt) service_name="getcasemailreceipt" ;;
     getCaseMailTargetPreview) service_name="getcasemailtargetpreview" ;;
     confirmCaseMailTarget) service_name="confirmcasemailtarget" ;;
+    confirmCaseMailDraftReview) service_name="confirmcasemaildraftreview" ;;
     holdCaseMailTarget) service_name="holdcasemailtarget" ;;
     resolveCaseMailTargetHold) service_name="resolvecasemailtargethold" ;;
     confirmCaseMailReview) service_name="confirmcasemailreview" ;;

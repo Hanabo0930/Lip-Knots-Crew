@@ -33,7 +33,11 @@ async function receiverFor(request: Parameters<typeof requireAdmin>[0], input: {
   if (!parsed.success || parsed.data.companyId !== companyId) {
     throw new HttpsError("failed-precondition", "案件メールの受信設定が未有効、または所属が一致しません。");
   }
-  const { gmailServiceAccountEmail, ...config } = parsed.data;
+  const { gmailServiceAccountEmail, ...storedConfig } = parsed.data;
+  // ミリ秒より細かい開始日時は切り上げ、開始前のメールを取得対象へ広げない。
+  const subMillisecond = (storedConfig.startedAt.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/)?.[1] ?? "").slice(3);
+  const startedAt = new Date(Date.parse(storedConfig.startedAt) + (/[1-9]/.test(subMillisecond) ? 1 : 0)).toISOString();
+  const config = { ...storedConfig, startedAt };
   await assertCaseMailReceiverEnabled(config);
   const dependencies = createCaseMailCloudAuth(gmailServiceAccountEmail, () => process.env[extractorSecretName] ?? "");
   return { config, dependencies, receive: createGmailCaseMailReceiver(config, dependencies) };

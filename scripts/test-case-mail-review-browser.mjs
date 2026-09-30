@@ -316,6 +316,22 @@ try {
     await page.close();results.push({resolve:mode,width});
   }
 
+  for (const width of [320,390,1280]) for (const [receiptStatus,candidateStatus] of [["ready","ready"],["review","review"],["review","ready"]]) {
+    const run=`count-${width}-${receiptStatus}-${candidateStatus}`,state=seed();states.set(run,state);
+    state.h.records.get(state.h.paths.receipt).status=receiptStatus;
+    state.h.records.get(state.h.paths.candidate).status=candidateStatus;
+    const page=await browser.newPage({viewport:{width,height:1000}});await blockExternal(page);
+    await page.goto(base+"/__mail_test.html?run="+run);const box=panel(page);await openDetail(box);
+    const needsReview=receiptStatus==="review"||candidateStatus==="review";
+    assert.equal(await box.locator(".mail-values>div").filter({has:page.locator("dt",{hasText:/^人数$/})}).locator("dd").innerText(),needsReview?"未確定（原文で確認）":"1名");
+    await box.getByText(/候補1件/).waitFor();
+    if(needsReview)assert.equal(await save(box).count(),0);
+    assert.equal(state.calls.filter(call=>call.action==="create").length,0);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await page.close();results.push({headcount:needsReview?"unconfirmed":"one-slot",width,receiptStatus,candidateStatus});
+  }
+  console.log("候補人数の表示: 3幅 × 登録候補・候補確認待ち・受信全体確認待ちの9条件成功。");
+
   writeFileSync(resolve(output, "result.json"), JSON.stringify({ results, cloudAccess: false }, null, 2));
   console.log(process.argv.includes("--resolve-only") ? "別メール解除画面: 3幅・取消・応答喪失・古い版・未反映・元保留・会社切替の9条件成功。" : process.argv.includes("--hold-only") ? "別メール保留画面: 3幅・変更/取消・応答喪失・古い版の6条件成功。" : process.argv.includes("--open-only") ? "対応先から既存編集・取消を開く画面6条件成功。" : process.argv.includes("--binding-only") ? "対象案件対応確定: 3幅・選び直し・保存/再読込・応答喪失・古い版・会社切替の6条件成功。" : process.argv.includes("--targets-only") ? "別メール対象候補画面: 3幅・複数/該当なし/検索上限/検索不可の6条件成功、書込みなし。" : "受信候補画面: 既存導線と対象候補6条件成功。");
 } catch (error) {

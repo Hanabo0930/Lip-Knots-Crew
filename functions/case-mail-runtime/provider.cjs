@@ -27,14 +27,14 @@ async function extractionJson(response) {
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 function createGmailCaseMailProvider({ mailbox, startedAt, obtainAccessToken, obtainExtractionCredentials,
-  analyze, fetchImpl = globalThis.fetch }) {
+  analyze, fetchImpl = globalThis.fetch, sanitizeCredentialError = (_error, message) => new Error(message) }) {
   ensure(mailbox === 'info@lipknots.com' && Number.isFinite(Date.parse(startedAt)), '受信箱・開始日時を確認してください。');
-  ensure([obtainAccessToken, obtainExtractionCredentials, analyze, fetchImpl].every(fn => typeof fn === 'function'), 'サーバーの取得・抽出設定が不足しています。');
+  ensure([obtainAccessToken, obtainExtractionCredentials, analyze, fetchImpl, sanitizeCredentialError].every(fn => typeof fn === 'function'), 'サーバーの取得・抽出設定が不足しています。');
   return {
     async fetch(request) {
       ensure(request && request.mailbox === mailbox && /^[A-Za-z0-9_-]+$/.test(request.messageId), '受信箱・メールIDが一致しません。');
       let accessToken;
-      try { accessToken = await obtainAccessToken(); } catch { throw Error('Gmail読取認証を取得できません。'); }
+      try { accessToken = await obtainAccessToken(); } catch (error) { throw sanitizeCredentialError(error, 'Gmail読取認証を取得できません。'); }
       ensure(typeof accessToken === 'string' && accessToken.length > 0 && !/\s/.test(accessToken), 'Gmail読取認証が不正です。');
       // profile/本文/全添付は同じ短期トークンを使用して取得アカウントの混在を防ぐ。
       const client = new GmailReadClient({ obtainAccessToken: async () => accessToken, fetchImpl });
@@ -65,7 +65,7 @@ function createGmailCaseMailProvider({ mailbox, startedAt, obtainAccessToken, ob
         ensure(mime && item.descriptor.mimeType === mime, '添付の実体と申告形式が一致しません。');
         if (!credentials) {
           try { credentials = await obtainExtractionCredentials(EXTRACTOR_ORIGIN); }
-          catch { throw Error('添付抽出の認証を取得できません。'); }
+          catch (error) { throw sanitizeCredentialError(error, '添付抽出の認証を取得できません。'); }
           ensure(credentials && typeof credentials.secret === 'string' && /^[A-Za-z0-9_-]{43,128}$/.test(credentials.secret) &&
             typeof credentials.idToken === 'string' && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(credentials.idToken),
           '添付抽出の認証が不正です。');

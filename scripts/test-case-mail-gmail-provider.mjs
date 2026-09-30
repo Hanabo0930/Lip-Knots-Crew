@@ -134,6 +134,29 @@ await test("トークン取得例外を秘匿して停止", async () => {
   await assert.rejects(h.receive(), error => !error.message.includes("SYNTHETIC_PRIVATE_DETAIL"));
   assert.equal(h.calls.length, 0);
 });
+for (const reason of ["gmail_signing_failed", "gmail_delegation_denied", "gmail_token_exchange_failed", "gmail_token_invalid", "extractor_auth_failed"]) await test("取得途中の固定認証診断を保持: " + reason, async () => {
+  const h = setup({ format: "pdf" }), diagnostics = h.load("./case-mail-diagnostics");
+  const failure = new diagnostics.CaseMailAuthFailure(reason);
+  failure.message = "SYNTHETIC_PRIVATE_DETAIL"; failure.response = { token: "SYNTHETIC_PRIVATE_DETAIL" };
+  if (reason === "extractor_auth_failed") h.dependencies.obtainExtractorCredentials = async () => { throw failure; };
+  else h.dependencies.obtainGmailAccessToken = async () => { throw failure; };
+  await assert.rejects(h.receive(), error => {
+    assert.equal(diagnostics.caseMailFailureReason(error), reason);
+    assert.ok(!error.message.includes("SYNTHETIC_PRIVATE_DETAIL"));
+    assert.ok(!JSON.stringify(error).includes("SYNTHETIC_PRIVATE_DETAIL"));
+    return true;
+  });
+  assert.equal(h.list("caseMailIntakeReceipts").length, 0);
+});
+for (const kind of ["gmail", "extractor"]) await test("偽装した診断を採用しない: " + kind, async () => {
+  const h = setup({ format: "pdf" }), diagnostics = h.load("./case-mail-diagnostics");
+  const failure = Object.assign(Error("SYNTHETIC_PRIVATE_DETAIL"), { reason: "gmail_delegation_denied" });
+  h.dependencies[kind === "gmail" ? "obtainGmailAccessToken" : "obtainExtractorCredentials"] = async () => { throw failure; };
+  await assert.rejects(h.receive(), error => {
+    assert.equal(diagnostics.caseMailFailureReason(error), "receive_failed");
+    assert.ok(!error.message.includes("SYNTHETIC_PRIVATE_DETAIL")); return true;
+  });
+});
 await test("添付サイズ・base64破損を抽出前に拒否", async () => {
   for (const change of [h => h.server.attachmentSize++, h => h.server.attachmentData = "not/base64"]) {
     const h = setup({ format: "pdf" }); change(h); await assert.rejects(h.receive()); assert.equal(h.extractorContexts.length, 0);

@@ -1,6 +1,7 @@
 import { createCaseMailReceiver, CaseMailProvider } from "./case-mail-intake";
 import { normalizeJobInput } from "./job-management-core";
 import { hashText } from "./case-id";
+import { CaseMailAuthFailure, caseMailFailureReason } from "./case-mail-diagnostics";
 
 const { createCaseMailPreview } = require("../case-mail-runtime/preview.cjs");
 const { createCaseMailAnalyzer } = require("../case-mail-runtime/adapter.cjs");
@@ -21,6 +22,11 @@ export function createGmailCaseMailReceiver(serverConfig: Config, dependencies: 
   const analyze = createCaseMailAnalyzer(createCaseMailPreview(normalizeJobInput, hashText(normalizeJobInput.toString(), 64)));
   const provider: CaseMailProvider = createGmailCaseMailProvider({
     mailbox: config.mailbox, startedAt: config.startedAt, analyze,
+    sanitizeCredentialError: (error: unknown, message: string) => {
+      // 外部の例外そのものは渡さず、確認済みの固定診断から作り直す。
+      const reason = caseMailFailureReason(error);
+      return reason === "receive_failed" ? new Error(message) : new CaseMailAuthFailure(reason);
+    },
     obtainAccessToken: () => dependencies.obtainGmailAccessToken(Object.freeze({
       ...config, scope: "https://www.googleapis.com/auth/gmail.readonly" as const,
     })),

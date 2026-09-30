@@ -3,6 +3,7 @@ const { GmailReadClient, readRequest } = require('./read-mail.cjs');
 const { createHash } = require('node:crypto');
 const mail = require('./mail-source.cjs');
 const { MAX_INPUT_BYTES } = require('./preview.cjs');
+const { resolveAttachmentFormat } = require('./attachment-format.cjs');
 // 旧抽出サービスの既知STAGING接続先。入力からURL/宛先を選ばせない。
 const EXTRACTOR_ORIGIN = 'https://lkcm-attachment-extractor-740154137290.asia-northeast1.run.app';
 const MAX_EXTRACTION_BYTES = 40 * 1024 * 1024;
@@ -74,9 +75,7 @@ function createGmailCaseMailProvider({ mailbox, startedAt, obtainAccessToken, ob
         let credentials;
         for (const item of result.attachments) {
           phase = "attachment_validation";
-          const mime = item.detected === 'pdf' ? 'application/pdf' :
-            item.detected === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : null;
-          ensure(mime && item.descriptor.mimeType === mime, '添付の実体と申告形式が一致しません。');
+          const { mime } = resolveAttachmentFormat(item.descriptor, item.detected);
           if (!credentials) {
             phase = "extractor_auth";
             try { credentials = await obtainExtractionCredentials(EXTRACTOR_ORIGIN); }

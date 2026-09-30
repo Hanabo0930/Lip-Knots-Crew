@@ -2,6 +2,7 @@
 const { createHash } = require('node:crypto');
 const mail = require('./mail-source.cjs'), generic = require('./generic-request.cjs');
 const progress = require('./progress-request.cjs'), core = require('./core.js');
+const { detectedFormat, resolveAttachmentFormat, REVIEW_ISSUE } = require('./attachment-format.cjs');
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const hash = value => createHash("sha256").update(value).digest("hex");
 const fingerprint = value => hash(core.canonical(value));
@@ -32,11 +33,14 @@ function checkedDocuments(message, documents) {
     const sha256 = hash(bytes);
     ensure(extraction && extraction.sha256 === sha256 && extraction.bytes === bytes.length, "元添付と抽出結果の指紋・サイズが一致しません。");
     ensure(extraction.complete === true, "添付の全文抽出が未完了です。");
-    ensure((attachment.mimeType === "application/pdf" && extraction.format === "pdf") ||
-      (attachment.mimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" && extraction.format === "xlsx"),
-    "未対応の添付形式です。");
+    const resolved = resolveAttachmentFormat(attachment, extraction.format);
+    if (resolved.reviewRequired) {
+      ensure(detectedFormat(bytes) === extraction.format, "元添付の実体と抽出形式が一致しません。");
+      // 元メールは変更せず、検証済みの内部解析だけで実体に合った形式を使う。
+      attachment.mimeType = resolved.mime;
+    }
     attachment.sha256 = sha256;
-    return { partId: document.partId, sha256, extraction };
+    return { partId: document.partId, sha256, extraction, mimeReviewRequired: resolved.reviewRequired };
   });
 }
 
@@ -94,6 +98,7 @@ function prepareCaseMailIntakePreview(input) {
   let extracted;
   try { extracted = checkedDocuments(message, documents); }
   catch (error) { output.issues.push(error.message); return output; }
+  if (extracted.some(document => document.mimeReviewRequired)) output.issues.push(REVIEW_ISSUE);
   output.source.attachments = message.attachments.map(({ partId, size, sha256 }) => ({ partId, size, sha256 }));
   output.source.contentFingerprint = fingerprint({ fingerprint: message.fingerprint, attachments: output.source.attachments });
   const useProgress = message.from.endsWith("@cs-progress.co.jp") && message.attachments.some(item => item.mimeType === "application/pdf");

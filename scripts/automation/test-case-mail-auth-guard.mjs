@@ -126,8 +126,11 @@ for (const name of receiverNames) {
     ['current.active !== true', 'false'], ['current.revision !== config.principalRevision', 'false'],
     ['feature.data()?.caseMailIntakeEnabled !== true', 'false'],
     ['await assertProductionOperational(config.companyId);', ''],
-    ['return db.runTransaction(async tx => { await checkReceiver(tx, config); const previous', 'return db.runTransaction(async tx => { const previous'],
+    ['return await db.runTransaction(async tx => { await checkReceiver(tx, config); const previous', 'return await db.runTransaction(async tx => { const previous'],
   ]) reject(name, before, after, 'intake', null);
+  // 診断の代入が増えても、取得直前の停止確認を省略できない。
+  for (const before of ['await assertProductionOperational(config.companyId);', 'await db.runTransaction(tx => checkReceiver(tx, config));'])
+    reject(name, before, '', 'intake', ['export function createCaseMailReceiver(', null]);
   reject(name, 'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.send', 'cloud-auth', null);
   reject(name, 'const secret = extractorSecret(); if (!/^[A-Za-z0-9_-]{43,128}$/.test(secret))', 'const secret = extractorSecret(); if (false)', 'cloud-auth', null);
 }

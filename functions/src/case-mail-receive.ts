@@ -1,7 +1,7 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { z } from "zod";
 import { warn } from "firebase-functions/logger";
-import { caseMailFailureReason } from "./case-mail-diagnostics";
+import { caseMailFailureReason, caseMailFailurePhase } from "./case-mail-diagnostics";
 import { db } from "./firebase";
 import { requireAdmin, companyFromClaims } from "./utils";
 import { createGmailCaseMailReceiver } from "./case-mail-gmail";
@@ -44,7 +44,8 @@ async function receiverFor(request: Parameters<typeof requireAdmin>[0], input: {
 }
 type ReceiveStage = "configuration" | "gmail_auth" | "mailbox" | "list" | "save" | "completion";
 function receiveError(error: unknown, stage: ReceiveStage): never {
-  const diagnostic = { stage, reason: caseMailFailureReason(error) };
+  const phase = caseMailFailurePhase(error);
+  const diagnostic = { stage, reason: caseMailFailureReason(error), ...(phase ? { phase } : {}) };
   // UID・メールID・外部例外・スタックを出さず、失敗工程だけを記録する。
   warn("case_mail_receive_failed", diagnostic);
   if (error instanceof HttpsError) throw new HttpsError(error.code, error.message, diagnostic);

@@ -324,7 +324,8 @@ try{
   await materials.getByRole('button',{name:'再送対象に選ぶ',exact:true}).first().click();
   assert.equal(await materials.locator('.selected-file-note').count(),1);
   await materials.locator('.resubmit-options select').selectOption('sales_floor');
-  await materials.getByRole('button',{name:'案件全体へ再提出を依頼する',exact:true}).waitFor();
+  // 種別変更で履歴を再取得するため、有効化まで待ってから操作可能状態を確認する。
+  await materials.getByRole('button',{name:'案件全体へ再提出を依頼する',exact:true}).and(materials.locator('button:enabled')).waitFor({timeout:10000});
   assert.equal(await materials.locator('.selected-file-note').count(),0);
   assert.equal(await materials.getByRole('button',{name:'案件全体へ再提出を依頼する',exact:true}).isEnabled(),true);
   await materials.getByRole('button',{name:'再読込',exact:true}).click();

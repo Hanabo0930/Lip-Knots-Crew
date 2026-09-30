@@ -207,6 +207,13 @@ test("会社入力不正と過大入力は拒否", () => {
   for (const companyId of [null, 123, "", "../other"]) assert.throws(() => preview({ ...fixture(), companyId }));
   const input = fixture("x".repeat(8 * 1024 * 1024)); assert.throws(() => preview(input), /8MiB/);
 });
+test("原本25MiB合計と解析metadata8MiBを個別に拒否", () => {
+  const originalTooLarge = attach(fixture("添付の依頼書をお願いします。"), { format: "pdf", pageCount: 1, pages: [{ number: 1, text: fields }] });
+  originalTooLarge.documents[0].contentBase64 = "A".repeat(Math.ceil((25 * 1024 * 1024 + 3) / 3) * 4);
+  assert.throws(() => preview(originalTooLarge), /25MiB/);
+  const textTooLarge = attach(fixture("添付の依頼書をお願いします。"), { format: "pdf", pageCount: 1, pages: [{ number: 1, text: "x".repeat(8 * 1024 * 1024) }] });
+  assert.throws(() => preview(textTooLarge), /8MiB/);
+});
 test("移植7ファイルは固定版と一致し通信・書込依存を含まない", () => {
   const root = new URL("../functions/case-mail-runtime/", import.meta.url);
   const manifest = JSON.parse(fs.readFileSync(new URL("provenance.json", root)));

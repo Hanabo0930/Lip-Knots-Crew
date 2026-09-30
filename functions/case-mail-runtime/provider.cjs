@@ -2,11 +2,11 @@
 const { GmailReadClient, readRequest } = require('./read-mail.cjs');
 const { createHash } = require('node:crypto');
 const mail = require('./mail-source.cjs');
-const { MAX_INPUT_BYTES } = require('./preview.cjs');
+const { MAX_INPUT_BYTES, MAX_ATTACHMENT_BYTES } = require('./preview.cjs');
 const { resolveAttachmentFormat } = require('./attachment-format.cjs');
 // 旧抽出サービスの既知STAGING接続先。入力からURL/宛先を選ばせない。
 const EXTRACTOR_ORIGIN = 'https://lkcm-attachment-extractor-740154137290.asia-northeast1.run.app';
-const MAX_EXTRACTION_BYTES = 40 * 1024 * 1024;
+const MAX_EXTRACTION_BYTES = MAX_INPUT_BYTES;
 const ensure = (ok, message) => { if (!ok) throw Error(message); };
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 async function extractionJson(response) {
@@ -57,8 +57,12 @@ function createGmailCaseMailProvider({ mailbox, startedAt, obtainAccessToken, ob
             ensure(rawSize <= MAX_INPUT_BYTES, "メール全体が解析入力の上限を超えています。");
             const normalized = mail.normalize(rawMessage);
             if (mail.gate(normalized, { startedAt }) === "ELIGIBLE") {
-              const encodedAttachmentSize = normalized.attachments.reduce((size, part) => size + Math.ceil(part.size / 3) * 4, 0);
-              ensure(rawSize + encodedAttachmentSize <= MAX_INPUT_BYTES, "添付合計が解析入力の上限を超えています。");
+              const attachmentSize = normalized.attachments.reduce((size, part) => {
+                ensure(Number.isSafeInteger(part.size) && part.size >= 0 && part.size <= MAX_ATTACHMENT_BYTES,
+                  "添付サイズが取得上限を超えています。");
+                return size + part.size;
+              }, 0);
+              ensure(attachmentSize <= MAX_ATTACHMENT_BYTES, "添付合計が取得上限を超えています。");
             }
             phase = "attachment_validation";
             return rawMessage;

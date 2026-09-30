@@ -255,12 +255,34 @@ await test("再取得・再抽出でも候補と案件を増やさない", async
   const second = await h.receive(); assert.equal(second.replayed, true); await h.createFrom(second);
   assert.equal(h.list("jobs").length, 1); assert.equal(h.list("caseMailIntakeCandidates").length, 1);
 });
+await test("15MiBのPDF本体と小さな解析結果は別々の上限で確認する", async () => {
+  const bytes = Buffer.alloc(15 * 1024 * 1024, 32); bytes.write("%PDF-");
+  const h = setup({ format: "pdf", bytes });
+  const out = await h.receive();
+  assert.equal(out.status, "ready"); assert.equal(out.candidateIds.length, 1);
+  assert.equal(h.list("caseMailIntakeCandidates")[0].source.sha256, digest(bytes));
+  assert.equal(h.calls.filter(call => call.method === "POST").length, 1);
+});
 await test("添付合計超過は添付取得・抽出前に止める", async () => {
   const h = setup({ format: "pdf" }), attachment = h.server.raw.payload.parts[1];
-  attachment.body.size = 4 * 1024 * 1024;
+  attachment.body.size = 13 * 1024 * 1024;
   h.server.raw.payload.parts.push({ ...clone(attachment), partId: "2", body: { ...attachment.body, attachmentId: "second" } });
   await assert.rejects(h.receive(), error => h.load("./case-mail-diagnostics").caseMailFailurePhase(error) === "message_validation");
   assert.equal(h.calls.length, 2); assert.equal(h.extractorContexts.length, 0); assert.equal(h.list("caseMailIntakeReceipts").length, 0);
+});
+for (const size of [-1, NaN, 25 * 1024 * 1024 + 1]) await test("不正・単件超過サイズは原本取得前に拒否: " + size, async () => {
+  const h = setup({ format: "pdf" }); h.server.raw.payload.parts[1].body.size = size;
+  await expectPhase(h, "message_validation"); assert.equal(h.calls.length, 2); assert.equal(h.extractorContexts.length, 0);
+});
+await test("本文metadataの8MiB上限は添付枠を分離しても維持", async () => {
+  const h = setup({ format: "pdf" }); h.server.raw.extra = "x".repeat(8 * 1024 * 1024);
+  await expectPhase(h, "message_validation"); assert.equal(h.calls.length, 2);
+});
+for (const declared of [true, false]) await test("抽出応答8MiB超過は保存前に拒否: " + declared, async () => {
+  const h = setup({ format: "pdf" });
+  if (declared) h.server.extractorHeaders["content-length"] = String(8 * 1024 * 1024 + 1);
+  else h.server.extraction.pages[0].text = "x".repeat(8 * 1024 * 1024);
+  await expectPhase(h, "attachment_extraction"); assert.equal(h.list("caseMailIntakeReceipts").length, 0);
 });
 const python = process.env.CASE_MAIL_TEST_PYTHON;
 assert.ok(python, "CASE_MAIL_TEST_PYTHONにローカル検証用Pythonを指定してください。");
@@ -269,6 +291,21 @@ try {
   const run = spawnSync(python, [fileURLToPath(new URL("./case-mail-extraction/make-test-fixtures.py", import.meta.url)), temp],
     { encoding: "utf8", timeout: 60000, windowsHide: true, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" } });
   assert.equal(run.status, 0, "合成ファイルの生成/既存Python抽出に失敗: " + run.stderr);
+  await test("15MiBの有効PDFを既存Pythonで全文抽出して候補保存まで接続", async () => {
+    const original = fs.readFileSync(path.join(temp, "request.pdf")), marker = original.lastIndexOf(Buffer.from("startxref"));
+    assert.ok(marker > 0);
+    const padding = Buffer.from("\n%" + "x".repeat(15 * 1024 * 1024 - original.length) + "\n");
+    const bytes = Buffer.concat([original.subarray(0, marker), padding, original.subarray(marker)]);
+    const largeFile = path.join(temp, "large-request.pdf"), extractedFile = path.join(temp, "large-extraction.json");
+    fs.writeFileSync(largeFile, bytes);
+    const run = spawnSync(python, [fileURLToPath(new URL("./case-mail-extraction/extract-request-pdf.py", import.meta.url)), largeFile, extractedFile],
+      { encoding: "utf8", timeout: 60000, windowsHide: true, env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONIOENCODING: "utf-8" } });
+    assert.equal(run.status, 0, "大きな合成PDFの抽出失敗: " + run.stderr);
+    const extraction = JSON.parse(fs.readFileSync(extractedFile, "utf8"));
+    assert.equal(extraction.complete, true); assert.equal(extraction.pageCount, 2); assert.equal(extraction.sha256, digest(bytes));
+    const h = setup({ format: "pdf", bytes, extraction }), out = await h.receive();
+    assert.equal(out.status, "ready"); assert.equal(out.candidateIds.length, 2);
+  });
   for (const format of ["pdf", "xlsx"]) await test("実体のある合成" + format.toUpperCase() + "を既存Python抽出→HTTP境界→Crew案件へ接続", async () => {
     const bytes = fs.readFileSync(path.join(temp, "request." + format));
     const extraction = JSON.parse(fs.readFileSync(path.join(temp, format + "-extraction.json"), "utf8"));
@@ -291,7 +328,7 @@ try {
     });
   }
 } finally {
-  for (const file of ["request.pdf", "request.xlsx", "pdf-extraction.json", "xlsx-extraction.json"]) {
+  for (const file of ["request.pdf", "request.xlsx", "pdf-extraction.json", "xlsx-extraction.json", "large-request.pdf", "large-extraction.json"]) {
     const filename = path.join(temp, file); if (fs.existsSync(filename)) fs.unlinkSync(filename);
   }
   fs.rmdirSync(temp);

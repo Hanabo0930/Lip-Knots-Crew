@@ -4,6 +4,7 @@ const mail = require('./mail-source.cjs'), generic = require('./generic-request.
 const progress = require('./progress-request.cjs'), core = require('./core.js');
 const { detectedFormat, resolveAttachmentFormat, REVIEW_ISSUE } = require('./attachment-format.cjs');
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const hash = value => createHash("sha256").update(value).digest("hex");
 const fingerprint = value => hash(core.canonical(value));
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -74,9 +75,23 @@ function mapCandidate(candidate, companyId, message) {
 /** full形式の保存メールと抽出済み資料だけを解析する。認証・登録・送信は行わない。 */
 function prepareCaseMailIntakePreview(input) {
   ensure(input && typeof input.companyId === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(input.companyId), "会社IDを明示してください。");
-  const encoded = JSON.stringify(input);
-  ensure(Buffer.byteLength(encoded) <= MAX_INPUT_BYTES, "ローカルプレビュー入力は8MiB以内で指定してください。");
+  const bodies = new Map();
+  let attachmentBytes = 0;
+  const originalDocuments = input.documents;
+  if (Array.isArray(originalDocuments)) ensure(originalDocuments.length <= 500, "添付の件数が上限を超えています。");
+  // 原本のbase64をJSONへ再複製しない。本文・抽出結果8MiBと原本合計25MiBを個別に制限する。
+  const metadata = Array.isArray(originalDocuments) ? { ...input, documents: originalDocuments.map((document, index) => {
+    if (!document || typeof document.contentBase64 !== "string") return document;
+    const body = document.contentBase64;
+    attachmentBytes += Math.max(0, Math.floor(body.length * 3 / 4) - (body.endsWith("==") ? 2 : body.endsWith("=") ? 1 : 0));
+    ensure(attachmentBytes <= MAX_ATTACHMENT_BYTES, "添付原本の合計は25MiB以内で指定してください。");
+    bodies.set(index, body);
+    return { ...document, contentBase64: "" };
+  }) } : input;
+  const encoded = JSON.stringify(metadata);
+  ensure(Buffer.byteLength(encoded) <= MAX_INPUT_BYTES, "本文と解析結果は8MiB以内で指定してください。");
   const { companyId, rawMessage, documents = [], startedAt, processedIds = [] } = JSON.parse(encoded);
+  for (const [index, body] of bodies) documents[index].contentBase64 = body;
   const output = {
     version: 1, kind: "case-mail.intake-preview", companyId, state: "REVIEW", issues: [], candidates: [],
     checkMethod: "local-synthetic-or-saved-input", sourceAuthenticationVerified: false,
@@ -132,4 +147,4 @@ function prepareCaseMailIntakePreview(input) {
 
 return prepareCaseMailIntakePreview;
 }
-module.exports = { createCaseMailPreview, MAX_INPUT_BYTES };
+module.exports = { createCaseMailPreview, MAX_INPUT_BYTES, MAX_ATTACHMENT_BYTES };

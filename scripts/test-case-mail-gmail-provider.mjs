@@ -194,9 +194,29 @@ await test("添付サイズ・base64破損を抽出前に拒否", async () => {
     const h = setup({ format: "pdf" }); change(h); await assert.rejects(h.receive()); assert.equal(h.extractorContexts.length, 0);
   }
 });
-await test("MIMEと実体の食い違いを抽出前に拒否", async () => {
-  const h = setup({ format: "pdf" }); h.server.raw.payload.parts[1].mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+await test("MIMEと拡張子の両方が実体と違う場合は抽出前に拒否", async () => {
+  const h = setup({ format: "pdf" }); h.server.raw.payload.parts[1].mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"; h.server.raw.payload.parts[1].filename = "request.xlsx";
   await assert.rejects(h.receive(), error => h.load("./case-mail-diagnostics").caseMailFailurePhase(error) === "attachment_validation"); assert.equal(h.extractorContexts.length, 0);
+});
+for (const declared of ["application/octet-stream", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]) {
+  await test("PDFの申告形式違いは抽出後に確認待ちとし原MIMEを保持: " + declared, async () => {
+    const h = setup({ format: "pdf" }); h.server.raw.payload.parts[1].mimeType = declared;
+    const before = JSON.stringify(h.server.raw), out = await h.receive();
+    assert.equal(out.status, "review"); assert.equal(out.candidateIds.length, 1);
+    assert.equal(h.list("caseMailIntakeCandidates")[0].input.workDate, "2026-10-10");
+    assert.ok(h.list("caseMailIntakeReceipts")[0].issues.includes("添付の申告形式と実体が異なるため確認してください。"));
+    await assert.rejects(h.createFrom(out)); assert.equal(h.list("jobs").length, 0);
+    assert.equal(JSON.stringify(h.server.raw), before);
+    assert.equal(h.calls.filter(call => call.method === "POST")[0].headers["Content-Type"], "application/pdf");
+  });
+}
+for (const [name, mutate] of [
+  ["拡張子不一致", part => { part.mimeType = "application/octet-stream"; part.filename = "request.xlsx"; }],
+  ["拡張子なし", part => { part.mimeType = "application/octet-stream"; part.filename = "request"; }],
+  ["未対応MIME", part => { part.mimeType = "application/zip"; }],
+]) await test(name + "は抽出前に拒否", async () => {
+  const h = setup({ format: "pdf" }); mutate(h.server.raw.payload.parts[1]);
+  await expectPhase(h, "attachment_validation"); assert.equal(h.extractorContexts.length, 0);
 });
 for (const field of ["sha256", "bytes", "format"]) await test("抽出結果の" + field + "不一致で候補を保存しない", async () => {
   const h = setup({ format: "pdf" }); h.server.extraction[field] = field === "bytes" ? 0 : "wrong";
@@ -258,6 +278,18 @@ try {
     for (let index = 0; index < out.candidateIds.length; index++) await h.createFrom(out, index);
     assert.equal(h.list("jobs").length, out.candidateIds.length);
   });
+  for (const [format, declared] of [["pdf", "application/octet-stream"], ["xlsx", "application/octet-stream"], ["xlsx", "application/pdf"]]) {
+    await test("実抽出済み" + format + "は申告形式違いでも候補内容を保留表示: " + declared, async () => {
+      const bytes = fs.readFileSync(path.join(temp, "request." + format));
+      const extraction = JSON.parse(fs.readFileSync(path.join(temp, format + "-extraction.json"), "utf8"));
+      const h = setup({ format, bytes, extraction }); h.server.raw.payload.parts[1].mimeType = declared;
+      const out = await h.receive();
+      assert.equal(out.status, "review"); assert.equal(out.candidateIds.length, format === "pdf" ? 2 : 1);
+      assert.ok(h.list("caseMailIntakeCandidates").every(candidate => candidate.input.workDate && candidate.input.storeName));
+      for (let i = 0; i < out.candidateIds.length; i++) await assert.rejects(h.createFrom(out, i));
+      assert.equal(h.list("jobs").length, 0);
+    });
+  }
 } finally {
   for (const file of ["request.pdf", "request.xlsx", "pdf-extraction.json", "xlsx-extraction.json"]) {
     const filename = path.join(temp, file); if (fs.existsSync(filename)) fs.unlinkSync(filename);

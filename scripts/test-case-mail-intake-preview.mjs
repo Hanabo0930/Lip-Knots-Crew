@@ -167,6 +167,13 @@ for (const [name, mutate] of [
   ["不明形式", x => x.rawMessage.payload.parts[1].mimeType = "application/zip"],
   ["埋込実体相違", x => x.rawMessage.payload.parts[1].body.data = Buffer.from("wrong").toString("base64url")],
 ]) test(name + "を部分成功にしない", () => { const input = progressFixture(); mutate(input); review(input); });
+test("申告形式違いでも実体の先頭が違う抽出結果は採用しない", () => {
+  const input = attach(fixture("添付の依頼書をお願いします。"), { format: "pdf", pageCount: 1, pages: [{ number: 1, text: fields }] });
+  input.rawMessage.payload.parts[1].mimeType = "application/octet-stream";
+  const out = preview(input);
+  assert.equal(out.state, "REVIEW"); assert.equal(out.candidates.length, 0);
+  assert.ok(out.issues.includes("元添付の実体と抽出形式が一致しません。"));
+});
 test("イオン既知45列XLSXからCrew下書き入力へ接続", () => {
   assert.equal(aeonHeaders.length, 45);
   const out = preview(aeonFixture());

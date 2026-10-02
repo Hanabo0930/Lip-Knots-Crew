@@ -85,7 +85,10 @@
     "googleapis-common@8.0.2": {
       "gaxios": "7.3.0"
     },
-    "whatwg-url": "7.1.0"
+    "whatwg-url": "7.1.0",
+    "@firebase/firestore@4.16.0": {
+      "@grpc/grpc-js": "1.13.6"
+    }
   },
   "devDependencies": {
     "@playwright/test": "1.62.0",

@@ -5,6 +5,8 @@ import {type ApplicationAttempt,applicationAttemptOwner,loadSavedApplicationAtte
 import {DeviceStorageError} from "./StartupBoundary";
 import {resubmissionNotificationId,readResubmissionNotification} from "./resubmission-notification";
 import {useShiftNotificationRoute} from "./useShiftNotificationRoute";
+import PastShiftHistory from "./PastShiftHistory";
+import { firestorePastShiftReader } from "./past-shift-reader";
 import ShiftJobCards,{shiftDateLabel,shiftTextLabel,shiftPage} from './ShiftJobCards';
 import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -265,7 +267,6 @@ export default function App(){
   const [showAllTasks,setShowAllTasks]=useState(false);
   const [showPastShifts,setShowPastShifts]=useState(false);
   const [upcomingPage,setUpcomingPage]=useState(0);
-  const [pastPage,setPastPage]=useState(0);
   const [shiftFocusRequest,setShiftFocusRequest]=useState(0);
   const homeHeadingRef=useRef<HTMLHeadingElement>(null),jobsHeadingRef=useRef<HTMLHeadingElement>(null),contactHeadingRef=useRef<HTMLHeadingElement>(null);
   const previousHeadingViewRef=useRef(view);
@@ -282,9 +283,6 @@ export default function App(){
   const [hasMoreUpcomingShifts,setHasMoreUpcomingShifts]=useState(false);
   const [upcomingShiftMessage,setUpcomingShiftMessage]=useState("" );
   const upcomingShiftCursorRef=useRef<QueryDocumentSnapshot|null>(null);
-  const [hasMorePastShifts,setHasMorePastShifts]=useState(false);
-  const [pastShiftMessage,setPastShiftMessage]=useState("");
-  const pastShiftCursorRef=useRef<QueryDocumentSnapshot|null>(null);
   const pastShiftDateRef=useRef("");
   const pastShiftVersionRef=useRef(0);
   const tasksReadVersionRef=useRef(0);
@@ -317,6 +315,8 @@ export default function App(){
   const draftHydratingRef=useRef(false);
   const skipNextDraftSaveRef=useRef(false);
   const authLoadVersionRef=useRef(0);
+  const pastHistoryAuthVersion=authLoadVersionRef.current;
+  const pastHistoryReader=useMemo(()=>db?firestorePastShiftReader<Job>(db):{oldest:async()=>null,page:async()=>[]},[]);
   const navigationVersionRef=useRef(0);
   const submissionPanelRef=useRef<HTMLElement>(null);
   const fileRemoveFocusRef=useRef<{index:number;authVersion:number;contextVersion:number;navigationVersion:number}|null>(null);
@@ -360,7 +360,7 @@ export default function App(){
   const shiftCopyContextRef=useRef("");
   shiftCopyContextRef.current=JSON.stringify([selectedJob?.id??"",shiftTextLabel(selectedJob?.storeAddress,""),contactShiftText]);
   const {upcoming:upcomingShifts,past:pastShifts}=useMemo(()=>splitAssignedJobs(myJobs,businessDate),[myJobs,businessDate]);
-  useEffect(()=>{const upcomingIndex=upcomingShifts.findIndex(job=>job.id===selectedJob?.id);const pastIndex=pastShifts.findIndex(job=>job.id===selectedJob?.id);if(upcomingIndex>=0)setUpcomingPage(Math.floor(upcomingIndex/50));if(pastIndex>=0)setPastPage(Math.floor(pastIndex/50));},[selectedJob?.id,shiftFocusRequest]);
+  useEffect(()=>{const upcomingIndex=upcomingShifts.findIndex(job=>job.id===selectedJob?.id);if(upcomingIndex>=0)setUpcomingPage(Math.floor(upcomingIndex/50));},[selectedJob?.id,shiftFocusRequest]);
   const draftOwner=firebaseConfigured?(user&&companyId?JSON.stringify([companyId,user.uid]):""):"demo";
   const draftKey=selectedAssignedJob?submissionDraftKey(draftOwner,selectedAssignedJob.id,submissionType,requestId):"";
   const submissionHistoryVersionRef=useRef(0);
@@ -498,13 +498,10 @@ export default function App(){
     setHasMoreOpenJobs(false);
     setOpenJobsPageMessage("");
     pastShiftVersionRef.current+=1;
-    pastShiftCursorRef.current=null;
     upcomingShiftCursorRef.current=null;
-    setUpcomingPage(0);setPastPage(0);
+    setUpcomingPage(0);
     setHasMoreUpcomingShifts(false);
     setUpcomingShiftMessage("" );
-    setHasMorePastShifts(false);
-    setPastShiftMessage("");
     submissionProcessingVersionRef.current+=1;
     setProcessingSubmission(false);
     setPendingApplicationJobId("");
@@ -716,34 +713,10 @@ export default function App(){
       upcomingShiftCursorRef.current=upcoming.docs.slice(0,300).at(-1)??null;
       setHasMoreUpcomingShifts(upcoming.docs.length>300);
       setUpcomingShiftMessage("" );
-      pastShiftCursorRef.current=history.docs.slice(0,50).at(-1)??null;
       pastShiftDateRef.current=today;
-      setHasMorePastShifts(history.docs.length>50);
-      setPastShiftMessage("");
     }
     return orderAssignedJobs([...upcoming.docs.slice(0,300),...history.docs.slice(0,50)].map(d=>({...d.data(),id:d.id} as Job)));
   }
-  async function loadMorePastShifts(){
-    if(!db||!companyId||!staffId||!hasMorePastShifts||!pastShiftCursorRef.current||businessRefreshing||isPending("past-shifts"))return;
-    const cursor=pastShiftCursorRef.current;
-    const today=pastShiftDateRef.current;
-    const version=pastShiftVersionRef.current;
-    const authVersion=authLoadVersionRef.current;
-    const isCurrent=()=>authVersion===authLoadVersionRef.current&&version===pastShiftVersionRef.current;
-    setPastShiftMessage("");
-    try{
-      await run("past-shifts",async()=>{
-        const page=await getDocs(query(collection(db!,"jobs"),where("companyId","==",companyId),where("assignedStaffId","==",staffId),where("dateKey","<",today),orderBy("dateKey","asc"),startAfter(cursor),limit(51)));
-        if(!isCurrent())return;
-        const rows=page.docs.slice(0,50);
-        const additions=rows.map(d=>({...d.data(),id:d.id} as Job));
-        setMyJobs(current=>orderAssignedJobs([...new Map([...current,...additions].map(job=>[job.id,job])).values()]));
-        pastShiftCursorRef.current=rows.at(-1)??cursor;
-        setHasMorePastShifts(page.docs.length>50);
-      });
-    }catch{if(isCurrent())setPastShiftMessage("過去のシフトを読み込めませんでした。続きを読み込むボタンで再試行できます。");}
-  }
-
   async function loadMoreUpcomingShifts(){
     if(!db||!companyId||!staffId||!hasMoreUpcomingShifts||!upcomingShiftCursorRef.current||businessRefreshing||isPending("upcoming-shifts"))return;
     const cursor=upcomingShiftCursorRef.current;
@@ -2017,14 +1990,19 @@ export default function App(){
           {hasMoreUpcomingShifts&&<><p>これからのシフトには続きがあります。日付順に50件ずつ追加できます。</p><button className="secondary" onClick={()=>void loadMoreUpcomingShifts()} disabled={isPending("upcoming-shifts")||businessRefreshing} aria-busy={isPending("upcoming-shifts")}>{isPending("upcoming-shifts")?"読み込み中…":"これからのシフトを続きを読み込む"}</button></>}
           {upcomingShiftMessage&&<p role="alert">{upcomingShiftMessage}</p>}
         </div>
-        {(pastShifts.length>0||hasMorePastShifts)&&<div className="past-shifts">
-          {upcomingShifts.length>0?<button className="secondary past-shifts-toggle" aria-expanded={showPastShifts} aria-controls="past-shifts-list" onClick={togglePastShifts}>{showPastShifts?"過去のシフトを閉じる":`過去のシフトを見る（${pastShifts.length}件）`}</button>:<div className="shift-list-heading past"><h3>過去のシフト</h3><span>{pastShifts.length}件</span></div>}
-          {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list" className="past-shift-grid"><ShiftJobCards jobs={pastShifts} page={pastPage} onPageChange={setPastPage} selectedId={selectedJob?.id} onSelect={openShiftJob} label="過去のシフト" accent={jobAccent} kind={jobKind} summary={prepSummary} submissionSummary={submissionSummary}/></div>}
-        </div>}
-        {(showPastShifts||!upcomingShifts.length)&&<div className="past-shift-pagination">
-          {hasMorePastShifts&&<><p>過去のシフトは古い順に50件ずつ追加します。</p><button className="secondary" onClick={()=>void loadMorePastShifts()} disabled={isPending("past-shifts")||businessRefreshing} aria-busy={isPending("past-shifts")}>{isPending("past-shifts")?"読み込み中…":"過去のシフトを続きを読み込む"}</button></>}
-          {pastShiftMessage&&<p role="alert">{pastShiftMessage}</p>}
-        </div>}
+        <div className="past-shifts past-history-shell">
+          {upcomingShifts.length>0&&<button className="secondary past-shifts-toggle" aria-expanded={showPastShifts} aria-controls="past-shifts-list" onClick={togglePastShifts}>{showPastShifts?"過去のシフトを閉じる":"年別の過去のシフトを見る"}</button>}
+          {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list">
+            {(!firebaseConfigured||!!user?.uid&&!!companyId&&!!staffId)&&<PastShiftHistory key={JSON.stringify([user?.uid,companyId,staffId,pastHistoryAuthVersion,businessDate])}
+              scope={{uid:user?.uid??"demo",companyId:companyId||"demo",staffId:staffId||"demo",today:businessDate}}
+              scopeVersion={pastHistoryAuthVersion} selectionRequest={shiftFocusRequest} reader={pastHistoryReader}
+              isCurrent={()=>pastHistoryAuthVersion===authLoadVersionRef.current}
+              selectedId={selectedJob?.id} selectedDateKey={selectedJob?.dateKey} onSelect={job=>{
+                setMyJobs(current=>orderAssignedJobs([...new Map([...current,job].map(row=>[row.id,row])).values()]));
+                openShiftJob(job);
+              }} accent={jobAccent} kind={jobKind} summary={prepSummary} submissionSummary={submissionSummary}/>}
+          </div>}
+        </div>
         {selectedJob&&<section ref={shiftDetailRef} tabIndex={-1} aria-label="選択したシフトの詳細" className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending||submissionContextPending||draftHydrating}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{shiftTextLabel(selectedJob.storeName,"店舗確認中")}</h2><p>{shiftTextLabel(selectedJob.storeAddress,shiftTextLabel(selectedJob.menuName,"業務確認中"))}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><dl className="job-details" aria-label="勤務日時"><div><dt>勤務日</dt><dd>{shiftDateLabel(selectedJob)}</dd></div><div><dt>勤務時間</dt><dd>{typeof selectedJob.workTime==="string"&&selectedJob.workTime.trim()?selectedJob.workTime:"確認中"}</dd></div></dl>{!hasValidDateKey(selectedJob)&&<p className="missing-work-date muted" role="status">勤務日を確認できません。「シフトを更新」で確認し、改善しない場合は管理者に日付を確認してください。</p>}<div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions">{typeof selectedJob.storeAddress==="string"&&selectedJob.storeAddress.trim()&&<button className="secondary" onClick={()=>void copyDisplayText("店舗住所",selectedJob.storeAddress??"")} disabled={isPending("text-copy")}>住所をコピー</button>}{mapDestination(selectedJob)?<><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a></>:<span>店舗名・住所を確認できません。「シフトを更新」を押してください。</span>}{shiftTextLabel(selectedJob.storeNearestStation,"")&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{shiftTextLabel(selectedJob.storeNearestStation,"")}</a>}</div></div>{selectedJob.preContact!=null&&<p className="muted" role="status" aria-label="登録済みの事前連絡">{typeof selectedJob.preContact.temperature==="number"&&Number.isFinite(selectedJob.preContact.temperature)&&selectedJob.preContact.temperature>=34&&selectedJob.preContact.temperature<=42&&typeof selectedJob.preContact.arrivalTime==="string"&&/^([01]?\d|2[0-3]):[0-5]\d$/.test(selectedJob.preContact.arrivalTime)?<>登録内容：体温 {selectedJob.preContact.temperature}℃ / 到着 {selectedJob.preContact.arrivalTime}。</>:"登録済みの事前連絡を確認できません。「シフトを更新」を押し、体温と到着予定時刻を確認してください。"}</p>}{preContactReadinessMessage(selectedJob)&&<p className="precontact-readiness" id="precontact-readiness" role="status">{preContactReadinessMessage(selectedJob)}</p>}{selectedJob.preContactNeedsReview===true&&!preContactReadinessMessage(selectedJob)&&<p role="status">事前連絡を入力し、内容を確認して送信してください。</p>}{selectedJob.preContactNeedsReview!==true&&selectedJob.preContactSyncPending===true&&!preContactReadinessMessage(selectedJob)&&<p role="status">アプリには保存済みです。シフト表への反映は未確認です。</p>}<div className="form-grid"><label>体温<input ref={preContactTemperatureRef} aria-invalid={preContactError==="temperature"} aria-describedby={preContactError==="temperature"?"precontact-input-error":undefined} inputMode="decimal" placeholder="例：36.5" value={temperature} onChange={e=>{if(preContactError==="temperature")setPreContactError("");setTemperature(e.target.value);preContactDraftsRef.current.set(preContactDraftKey,{temperature:e.target.value,arrivalTime});}} disabled={shiftActionPending}/></label><label>到着予定時刻<input ref={preContactArrivalRef} aria-invalid={preContactError==="arrival"} aria-describedby={preContactError==="arrival"?"precontact-input-error":undefined} type="time" value={arrivalTime} onChange={e=>{if(preContactError==="arrival")setPreContactError("");setArrivalTime(e.target.value);preContactDraftsRef.current.set(preContactDraftKey,{temperature,arrivalTime:e.target.value});}} disabled={shiftActionPending}/></label></div>{preContactError&&<p id="precontact-input-error">{preContactError==="temperature"?"体温の入力を確認してください（34〜42℃）。":"到着予定時刻を選んでください（例：09:30）。"}</p>}<button onClick={()=>void submitPreContact()} disabled={shiftActionPending||Boolean(preContactReadinessMessage(selectedJob))} aria-describedby={preContactReadinessMessage(selectedJob)?"precontact-readiness":undefined}>{pendingShiftAction==="preContact"?"送信中…":preContactReadinessMessage(selectedJob)?"事前連絡は確認待ち":"事前連絡を送信"}</button>{preContactDraftsRef.current.has(preContactDraftKey)&&<button className="secondary" disabled={shiftActionPending} onClick={resetPreContactInput}>入力を登録内容に戻す</button>}<hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{caseMailPreparationHeld(selectedJob)?"内容確認後に準備を再開できます。":typeof selectedJob.materialStatus==="string"&&selectedJob.materialStatus.trim()?selectedJob.materialStatus:"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(Array.isArray(selectedJob.netPrint?.items)?selectedJob.netPrint.items:[]).map((item,index)=>validNetPrintTarget(selectedJob.netPrint?.items,item)?<div className="netprint-row" key={item.id} role="group" aria-label={`ネットプリント ${item.number}`}><strong>{item.number}</strong><button className="secondary" onClick={()=>void copyDisplayText("ネットプリント番号 "+item.number,item.number)} disabled={isPending("text-copy")} aria-busy={isPending("text-copy")} aria-label={`ネットプリント番号 ${item.number} をコピー`}>番号をコピー</button><button className={item.printed===true?"secondary":""} aria-disabled={item.printed===true||shiftActionPending||caseMailPreparationHeld(selectedJob)} onClick={()=>{if(!shiftActionPending&&!caseMailPreparationHeld(selectedJob))void markPrinted(item);}}>{item.printed===true?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>:<div className="netprint-row" key={`invalid-${index}`} role="group" aria-label={validNetPrintItem(item)?`更新対象を特定できない印刷情報 ${item.number}`:"番号を確認できない印刷情報"}><strong>{validNetPrintItem(item)?`${item.number}：更新対象を特定できません`:"番号を確認できません"}</strong><span>{validNetPrintItem(item)?"シフトを更新し、改善しない場合は管理者に番号の再登録を依頼してください。":"シフトを更新し、改善しない場合は管理者に確認してください。"}</span></div>)}{(!Array.isArray(selectedJob.netPrint?.items??[])||!(selectedJob.netPrint?.items??[]).length)&&<div className="empty compact">{Array.isArray(selectedJob.netPrint?.items??[])?"ネットプリント番号はまだ届いていません。":"印刷情報を確認できません。「シフトを更新」を押してください。"}</div>}<hr/><p className="muted" aria-label="このシフトの提出状況">{submissionSummary(selectedJob)}</p><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)} disabled={submissionEditPending}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)} disabled={submissionEditPending}>📝 報告書を提出</button></div></section>}
       </>}
     </section>}

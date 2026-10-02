@@ -294,3 +294,21 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 @media(max-width:420px){ .mail-applications { padding:12px; } .mail-applications .section-heading { flex-wrap:wrap; gap:12px; } }
 
 .precontact-readiness { padding:12px 14px; border:1px solid #dfc5ce; border-radius:13px; background:#fff4f7; color:#563b47; line-height:1.7; overflow-wrap:anywhere; }
+
+/* Larger text and controls are limited to the past-shift history screen. */
+.past-history-shell { font-size:18px; line-height:1.6; }
+.past-history-shell button,.past-shift-history select { min-height:48px; min-width:48px; font-size:18px; white-space:normal; }
+.past-shift-history h3 { font-size:22px; color:#493b35; }
+.past-shift-history p,.past-shift-history label,.past-shift-history .shift-page-controls span,
+.past-shift-history .date,.past-shift-history .job-kind,.past-shift-history .prep-chip,
+.past-shift-history .shift-card-submission { font-size:18px; }
+.past-shift-history .job-kind,.past-shift-history .prep-chip,.past-shift-history .shift-card-submission,
+.past-shift-history .shift-card-time,.past-shift-history p { color:#65545f; }
+.past-shift-year { display:block; margin:16px 0; }
+.past-shift-year select { display:block; width:100%; max-width:100%; box-sizing:border-box; margin-top:8px; }
+.past-shift-history .shift-page-controls { gap:12px; }
+.past-shift-history [role="alert"] { font-weight:800; }
+.past-shift-history select:focus-visible { outline:3px solid #9d4c68; outline-offset:3px; }
+.past-history-shell * { box-sizing:border-box; }
+.past-shift-history .job-kind,.past-shift-history .prep-chip { white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; }
+.past-history-shell button:focus-visible { outline:3px solid #9d4c68; outline-offset:3px; }

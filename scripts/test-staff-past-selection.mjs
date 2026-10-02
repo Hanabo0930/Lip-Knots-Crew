@@ -6,13 +6,32 @@ assert.doesNotMatch(app,/useEffect\(\(\)=>\{\s*if\(showPastShifts/);assert.match
 console.log('Past shift selection passed: explicit past/future open, collapse/expand with and without upcoming jobs; no cross-view selection effect.');
 
 {
- const from=app.indexOf('  useEffect(()=>{const upcomingIndex='),end=app.indexOf(';',app.indexOf('},[',from))+1;assert.ok(from>=0&&end>from);const effect=compile(app.slice(from,end));
+ const from=app.indexOf('  useEffect(()=>{const upcomingIndex='),end=app.indexOf(';',app.indexOf('},[',from))+1;
+ assert.ok(from>=0&&end>from);const upcomingEffect=compile(app.slice(from,end));
+ const component=readFileSync('apps/staff/src/PastShiftHistory.tsx','utf8');
+ const marker=component.indexOf('    const year = preferredYear.current;');
+ const pastFrom=component.lastIndexOf('  useEffect(',marker),pastEnd=component.indexOf('  return <PastShiftHistoryView',marker);
+ assert.ok(marker>=0&&pastFrom>=0&&pastEnd>pastFrom,'Locate the actual year-history selection effect');
+ const pastEffect=compile(component.slice(pastFrom,pastEnd));
+ assert.match(app,/selectionRequest=\{shiftFocusRequest\}/);
  for(const kind of ['upcoming','past']){
-  const jobs=Array.from({length:120},(_,id)=>({id:String(id)})),state={page:0,previous:null};
-  const ctx={selectedJob:jobs[75],upcomingShifts:kind==='upcoming'?jobs:[],pastShifts:kind==='past'?jobs:[],shiftFocusRequest:0,setUpcomingPage:value=>{if(kind==='upcoming')state.page=value;},setPastPage:value=>{if(kind==='past')state.page=value;},useEffect:(fn,deps)=>{if(!state.previous||deps.some((value,index)=>value!==state.previous[index]))fn();state.previous=Array.from(deps);}};
-  runInNewContext(effect,ctx);assert.equal(state.page,1);state.page=0;
-  runInNewContext(effect,ctx);assert.equal(state.page,0,'Manual paging must remain available');
-  ctx.shiftFocusRequest++;runInNewContext(effect,ctx);assert.equal(state.page,1,'Reopening the same selected job returns to its page');
+  const jobs=Array.from({length:120},(_,id)=>({id:String(id),dateKey:'2025-01-01'})),state={page:0,previous:null};
+  const useEffect=(fn,deps)=>{if(!state.previous||deps.some((value,index)=>value!==state.previous[index]))fn();state.previous=Array.from(deps);};
+  const ctx=kind==='upcoming'
+   ? {selectedJob:jobs[75],upcomingShifts:jobs,shiftFocusRequest:0,setUpcomingPage:value=>{state.page=value;},useEffect}
+   : {props:{selectedId:jobs[75].id,selectedDateKey:jobs[75].dateKey,selectionRequest:0},
+      state:{years:[2026,2025],year:2025,rows:jobs},preferredYear:{current:2025},
+      controller:{current:{selectYear:year=>assert.equal(year,2025)}},setPage:value=>{state.page=value;},useEffect};
+  const effect=kind==='upcoming'?upcomingEffect:pastEffect;
+  runInNewContext(effect,ctx);assert.equal(state.page,1);
+  state.page=0;runInNewContext(effect,ctx);
+  assert.equal(state.page,0,'Manual paging must remain available');
+  if(kind==='upcoming')ctx.shiftFocusRequest++;else ctx.props.selectionRequest++;
+  runInNewContext(effect,ctx);
+  assert.equal(state.page,1,'Reopening the same selected job returns to its page');
+  state.page=0;if(kind==='past')ctx.props.isCurrent=()=>true;
+  runInNewContext(effect,ctx);
+  assert.equal(state.page,0,'An unrelated rerender must preserve the manually chosen page');
  }
 }
 console.log('Explicit shift reopen: same selected ID returns to its upcoming/past page, ordinary paging stays unchanged.');

@@ -1374,3 +1374,50 @@ body:has(.admin-shell) { background:#edf1ff; }
  .admin-shell .preview-pagination button { min-inline-size:44px; padding:10px; font-size:12px; }
 }
 @media(prefers-reduced-motion:reduce) { .admin-shell button { transition:none; }.admin-shell button:not(:disabled):is(:hover,:active) { transform:none; } }
+
+/* PC案件一覧は余白と説明の配置を整理し、表を先に読めるようにする。 */
+@media(min-width:761px) {
+ .admin-shell>header { min-height:56px; padding:4px 18px; margin:12px 0; border-radius:16px; }
+ .admin-shell .workspace-heading[data-workspace="jobs"] { min-height:80px; padding:10px 18px; margin-bottom:12px; }
+ .admin-shell .workspace-heading[data-workspace="jobs"]>div:first-child { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:4px 18px; min-width:0; max-width:none; }
+ .admin-shell .workspace-heading[data-workspace="jobs"] .workspace-breadcrumb { grid-column:1/-1; margin-bottom:0; }
+ .admin-shell .workspace-heading[data-workspace="jobs"] h1 { grid-column:1; grid-row:2; }
+ .admin-shell .workspace-heading[data-workspace="jobs"] .workspace-description { grid-column:2; grid-row:2; align-self:center; margin:0; max-width:none; }
+ .admin-shell .workspace-heading[data-workspace="jobs"] .liquid-orb-scene { position:absolute; top:50%; right:18px; margin:0; transform:translateY(-50%) scale(.45); transform-origin:right center; opacity:.45; }
+ .admin-shell .workspace-panel .job-directory { position:relative; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px 16px; padding:14px 16px; }
+ .admin-shell .workspace-panel .job-directory>h2 { position:absolute; width:1px; height:1px; padding:0; margin:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+ .admin-shell .workspace-panel .job-directory>.toolbar { grid-column:1/-1; grid-row:1; align-items:center; flex-wrap:wrap; }
+ .admin-shell .workspace-panel .job-directory>.toolbar input { min-width:0; flex:1 1 220px; }
+ .admin-shell .workspace-panel .job-directory>.toolbar select { max-width:100%; }
+ .admin-shell .workspace-panel .job-directory>.toolbar button { flex:0 0 auto; white-space:nowrap; }
+ .admin-shell .workspace-panel .job-directory>.search-help { grid-column:2; grid-row:2; align-self:center; margin:0; min-width:0; }
+ .admin-shell .workspace-panel .job-directory>.search-help summary { min-height:44px; padding:4px 0; }
+ .admin-shell .workspace-panel .job-directory>.job-search-summary { grid-column:1; grid-row:2; align-self:center; margin:0; }
+ .admin-shell .workspace-panel .job-directory>.search-help[open] { grid-column:1/-1; grid-row:3; }
+ .admin-shell .workspace-panel .job-directory>.search-help[open] p { display:block; max-width:none; margin:8px 0 0; }
+ .admin-shell .workspace-panel .job-directory>.table-wrap { grid-column:1/-1; grid-row:3; min-height:0; max-height:none; margin-top:0; overflow-x:auto; overflow-y:visible; }
+ .admin-shell .workspace-panel .job-directory:has(>.search-help[open])>.table-wrap { grid-row:4; }
+ .admin-shell .workspace-panel .job-directory>.job-directory-actions,
+ .admin-shell .workspace-panel .job-directory>.job-pagination,
+ .admin-shell .workspace-panel .job-directory>p:not(.job-search-summary) { grid-column:1/-1; margin-top:0; }
+ .admin-shell .workspace-panel .job-directory .table-wrap th,
+ .admin-shell .workspace-panel .job-directory .table-wrap td { padding:8px 12px; }
+ .admin-shell .workspace-panel .job-directory-table th:nth-child(7) { width:270px; }
+ .admin-shell .workspace-panel .job-directory .job-row-actions { align-items:center; gap:4px; }
+ .admin-shell .workspace-panel .job-directory .job-row-actions button { min-height:36px; padding:6px 9px; font-size:14px; line-height:1.4; }
+ .admin-shell .workspace-panel .job-directory .job-more-actions:not([open]) { width:auto; flex:1 0 80px; }
+ .admin-shell .workspace-panel .job-directory .job-more-actions[open] { width:100%; flex-basis:100%; }
+ .admin-shell .workspace-panel .job-directory .job-more-actions summary { min-height:36px; padding:4px 2px; }
+}
+
+/* モバイルでは補足・行操作の開閉も44pxの操作領域を保つ。 */
+@media(max-width:760px) {
+ .admin-shell .workspace-panel .job-directory .search-help summary,
+ .admin-shell .workspace-panel .job-directory .job-more-actions summary { min-height:44px; }
+}
+
+/* タッチ端末ではPC幅でも行操作の44pxを維持する。 */
+@media(pointer:coarse) {
+ .admin-shell .workspace-panel .job-directory .job-row-actions button,
+ .admin-shell .workspace-panel .job-directory .job-more-actions summary { min-height:44px; }
+}

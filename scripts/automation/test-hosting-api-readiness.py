@@ -142,11 +142,23 @@ class ReadinessTests(unittest.TestCase):
         check = workflow.index("      - name: Verify deployed upload APIs")
         self.assertLess(check, workflow.index("      - name: Back up both current live channels"))
         self.assertLess(check, workflow.index("      - name: Promote the already-tested versions"))
-        step = workflow[check:workflow.index("      - name: Back up both current live channels")]
+        next_step = workflow.find("\n      - name:", check)
+        self.assertNotEqual(next_step, -1)
+        step = workflow[check:next_step]
         self.assertNotIn("continue-on-error", step)
-        self.assertNotIn("if:", step)
+        # Promote and readiness require deployed-source verification. Restore
+        # uses the separately tested immutable successful-promotion evidence.
+        conditions = [line.strip() for line in step.splitlines() if line.strip().startswith("if:")]
+        self.assertEqual(conditions, ["if: env.LKC_OPERATION != 'restore'"])
         self.assertIn('npm run build -w @lkc/functions', step)
         self.assertIn('--source-sha "$LKC_SOURCE_SHA"', step)
+        for name in ("Back up both current live channels", "Promote the already-tested versions"):
+            start = workflow.index("      - name: " + name)
+            end = workflow.find("\n      - name:", start)
+            self.assertNotEqual(end, -1)
+            mutation = workflow[start:end]
+            conditions = [line.strip() for line in mutation.splitlines() if line.strip().startswith("if:")]
+            self.assertEqual(conditions, ["if: env.LKC_OPERATION == 'promote'"])
 
 if __name__ == "__main__":
     unittest.main()

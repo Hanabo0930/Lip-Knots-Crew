@@ -138,6 +138,7 @@ jobs:
           npx firebase hosting:channel:deploy "$LKC_CHANNEL" \
             --only "$LKC_TARGETS" \
             --expires 1d \
+            --no-authorized-domains \
             --project "$LKC_PROJECT_ID" \
             --json > "$LKC_EVIDENCE_DIR/channel-deploy.json"
           npx firebase hosting:channel:list \

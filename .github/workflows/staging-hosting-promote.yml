@@ -1,14 +1,25 @@
 name: Staging Hosting Promote
+run-name: ${{ github.event_name == 'workflow_run' && 'promote' || inputs.operation || 'promote' }} staging Hosting${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'restore' && format(' from {0}', inputs.restore_run_id) || '' }}
 
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: Explicit mode; readiness never changes Hosting
+        required: true
+        default: promote
+        type: choice
+        options: [promote, readiness, restore]
+      restore_run_id:
+        description: Successful promotion run ID; required only for restore
+        required: false
+        type: string
       source_sha:
         description: Current CI-passing main SHA; leave blank to use current main
         required: false
         type: string
       confirmation:
-        description: Type PROMOTE_LKC_STAGING_HOSTING
+        description: PROMOTE_LKC_STAGING_HOSTING / CHECK_LKC_STAGING_HOSTING_READINESS / RESTORE_LKC_STAGING_HOSTING
         required: true
         type: string
   workflow_run:
@@ -43,12 +54,15 @@ jobs:
       source_sha: ${{ steps.release.outputs.source_sha }}
       channel: ${{ steps.release.outputs.channel }}
       should_promote: ${{ steps.release.outputs.should_promote }}
+      operation: ${{ steps.release.outputs.operation }}
+      restore_run_id: ${{ steps.release.outputs.restore_run_id }}
     steps:
       - name: Require the deliberate live-staging enable switch
         env:
           LKC_PROMOTE_ENABLED: ${{ vars.LKC_STAGING_HOSTING_PROMOTE_ENABLED }}
+          LKC_OPERATION: ${{ github.event_name == 'workflow_run' && 'promote' || inputs.operation }}
         run: |
-          if [[ "$LKC_PROMOTE_ENABLED" != "true" ]]; then
+          if [[ "$LKC_OPERATION" != "readiness" && "$LKC_PROMOTE_ENABLED" != "true" ]]; then
             echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
             echo "HOSTING_PROMOTION_ERROR=ENABLE_SWITCH_OFF"
             exit 1
@@ -64,8 +78,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           LKC_REQUESTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.source_sha }}
           LKC_CONFIRMATION: ${{ github.event_name == 'workflow_run' && 'PROMOTE_LKC_STAGING_HOSTING' || inputs.confirmation }}
+          LKC_OPERATION: ${{ github.event_name == 'workflow_run' && 'promote' || inputs.operation }}
+          LKC_RESTORE_RUN_ID: ${{ inputs.restore_run_id }}
           LKC_PREVIEW_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || '' }}
         run: |
+          node scripts/automation/restore-staging-hosting.mjs \
+            --operation "$LKC_OPERATION" --guard-only \
+            --confirmation "$LKC_CONFIRMATION" \
+            --project "$LKC_PROJECT_ID" --region "$LKC_REGION"
+          if [[ "$LKC_OPERATION" == "restore" && ! "$LKC_RESTORE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]; then
+            echo "HOSTING_OPERATION_ERROR=RESTORE_RUN_ID_REQUIRED"
+            exit 1
+          fi
+          if [[ "$LKC_OPERATION" != "restore" && -n "$LKC_RESTORE_RUN_ID" ]]; then
+            echo "HOSTING_OPERATION_ERROR=UNEXPECTED_RESTORE_RUN_ID"
+            exit 1
+          fi
+          echo "operation=$LKC_OPERATION" >> "$GITHUB_OUTPUT"
+          echo "restore_run_id=$LKC_RESTORE_RUN_ID" >> "$GITHUB_OUTPUT"
           git fetch --no-tags origin main
           source_sha="$(git rev-parse origin/main)"
           if [[ -n "$LKC_REQUESTED_SHA" && "$LKC_REQUESTED_SHA" != "$source_sha" ]]; then
@@ -81,56 +111,65 @@ jobs:
             gh api \
               -H "Accept: application/vnd.github+json" \
               "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&status=completed&per_page=50" \
-              --jq '[.workflow_runs[] | select(.name == "Release Candidate Checks" and .conclusion == "success")] | length'
+              --jq '[.workflow_runs[] | select(.name == "Release Candidate Checks" and .path == ".github/workflows/release-candidate.yml" and .event == "push" and .head_branch == "main" and .conclusion == "success")] | length'
           )"
           if [[ "$canonical_ci" -lt 1 ]]; then
             echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
             echo "HOSTING_PROMOTION_ERROR=CANONICAL_CI_NOT_SUCCESSFUL"
             exit 1
           fi
-          canonical_preview="$(
-            gh api \
-              -H "Accept: application/vnd.github+json" \
-              "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&status=completed&per_page=50" \
-              --jq '[.workflow_runs[] | select(.name == "Staging Hosting Preview" and .event == "workflow_run" and .conclusion == "success")] | length'
-          )"
-          if [[ "$canonical_preview" -lt 1 ]]; then
-            echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
-            echo "HOSTING_PROMOTION_ERROR=CANONICAL_PREVIEW_NOT_SUCCESSFUL"
-            exit 1
-          fi
-          if [[ -n "$LKC_PREVIEW_RUN_ID" ]]; then
-            triggered_preview="$(
+          if [[ "$LKC_OPERATION" == "promote" ]]; then
+            canonical_preview="$(
               gh api \
                 -H "Accept: application/vnd.github+json" \
-                "/repos/${GITHUB_REPOSITORY}/actions/runs/${LKC_PREVIEW_RUN_ID}" \
-                --jq '[.name, .event, .conclusion, .head_branch, .head_sha] | @tsv'
+                "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&status=completed&per_page=50" \
+                --jq '[.workflow_runs[] | select(.name == "Staging Hosting Preview" and .path == ".github/workflows/staging-hosting-preview.yml" and .head_branch == "main" and .event == "workflow_run" and .conclusion == "success")] | length'
             )"
-            expected_preview="$(printf 'Staging Hosting Preview\tworkflow_run\tsuccess\tmain\t%s' "$source_sha")"
-            if [[ "$triggered_preview" != "$expected_preview" ]]; then
+            if [[ "$canonical_preview" -lt 1 ]]; then
               echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
-              echo "HOSTING_PROMOTION_ERROR=TRIGGER_PREVIEW_MISMATCH"
+              echo "HOSTING_PROMOTION_ERROR=CANONICAL_PREVIEW_NOT_SUCCESSFUL"
               exit 1
+            fi
+            if [[ -n "$LKC_PREVIEW_RUN_ID" ]]; then
+              triggered_preview="$(
+                gh api \
+                  -H "Accept: application/vnd.github+json" \
+                  "/repos/${GITHUB_REPOSITORY}/actions/runs/${LKC_PREVIEW_RUN_ID}" \
+                  --jq '[.name, .event, .conclusion, .head_branch, .head_sha] | @tsv'
+              )"
+              expected_preview="$(printf 'Staging Hosting Preview\tworkflow_run\tsuccess\tmain\t%s' "$source_sha")"
+              if [[ "$triggered_preview" != "$expected_preview" ]]; then
+                echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
+                echo "HOSTING_PROMOTION_ERROR=TRIGGER_PREVIEW_MISMATCH"
+                exit 1
+              fi
             fi
           fi
           channel="rc-${source_sha:0:12}"
-          node scripts/automation/validate-staging-scope.mjs \
-            --mode hosting-promote \
-            --project "$LKC_PROJECT_ID" \
-            --region "$LKC_REGION" \
-            --source-ref main \
-            --targets "$LKC_TARGETS" \
-            --channel "$channel" \
-            --confirmation "$LKC_CONFIRMATION"
+          if [[ "$LKC_OPERATION" == "promote" ]]; then
+            node scripts/automation/validate-staging-scope.mjs \
+              --mode hosting-promote \
+              --project "$LKC_PROJECT_ID" \
+              --region "$LKC_REGION" \
+              --source-ref main \
+              --targets "$LKC_TARGETS" \
+              --channel "$channel" \
+              --confirmation "$LKC_CONFIRMATION"
+          else
+            node scripts/automation/validate-staging-scope.mjs \
+              --mode hosting-preview --project "$LKC_PROJECT_ID" \
+              --region "$LKC_REGION" --source-ref main \
+              --targets "$LKC_TARGETS" --channel "$channel"
+          fi
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           prior_success="$(
             gh api \
               -H "Accept: application/vnd.github+json" \
               "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&status=completed&per_page=50" \
-              --jq "[.workflow_runs[] | select(.name == \"Staging Hosting Promote\" and .conclusion == \"success\" and .id != ${GITHUB_RUN_ID})] | length"
+              --jq "[.workflow_runs[] | select(.name == \"Staging Hosting Promote\" and .display_title == \"promote staging Hosting\" and .path == \".github/workflows/staging-hosting-promote.yml\" and .head_branch == \"main\" and .conclusion == \"success\" and .id != ${GITHUB_RUN_ID})] | length"
           )"
-          if [[ "$prior_success" -gt 0 ]]; then
+          if [[ "$LKC_OPERATION" == "promote" && "$prior_success" -gt 0 ]]; then
             echo "HOSTING_PROMOTION_RESULT=ALREADY_PROMOTED"
             echo "should_promote=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -147,6 +186,10 @@ jobs:
       LKC_SOURCE_SHA: ${{ needs.guard.outputs.source_sha }}
       LKC_CHANNEL: ${{ needs.guard.outputs.channel }}
       LKC_ROLLBACK_CHANNEL: rb-${{ github.run_id }}
+      LKC_OPERATION: ${{ needs.guard.outputs.operation }}
+      LKC_RESTORE_RUN_ID: ${{ needs.guard.outputs.restore_run_id }}
+      LKC_GCP_WORKLOAD_IDENTITY_PROVIDER: projects/740154137290/locations/global/workloadIdentityPools/lkc-github-staging/providers/lkc-main-workflows
+      LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT: lkc-gh-staging-deploy@lip-knots-crew-staging.iam.gserviceaccount.com
     steps:
       - name: Prepare evidence directory
         run: |
@@ -173,6 +216,14 @@ jobs:
             echo "HOSTING_PROMOTION_ERROR=SOURCE_SHA_CHANGED_DURING_APPROVAL"
             exit 1
           fi
+      - name: Stop source verification unless a no-fee path is established
+        id: no_fee_source
+        if: env.LKC_OPERATION != 'restore'
+        working-directory: source
+        run: |
+          node scripts/automation/restore-staging-hosting.mjs \
+            --no-fee-source-guard --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
+            --source-sha "$LKC_SOURCE_SHA" --evidence-dir "$LKC_EVIDENCE_DIR"
       - name: Set up Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -185,8 +236,8 @@ jobs:
       - name: Authenticate with the short-lived staging identity
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ env.LKC_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
       - name: Discover the two allowlisted Hosting sites
         id: hosting
         env:
@@ -209,6 +260,7 @@ jobs:
             --discover-only \
             --github-output "$GITHUB_OUTPUT"
       - name: Resolve the exact preview versions
+        if: env.LKC_OPERATION == 'promote'
         id: channel
         run: |
           (
@@ -230,6 +282,7 @@ jobs:
             --admin-channels-json "$RUNNER_TEMP/lkc-admin-channels.json" \
             --github-output "$GITHUB_OUTPUT"
       - name: Re-check both preview apps before any live change
+        if: env.LKC_OPERATION == 'promote'
         working-directory: source
         run: |
           if [[ -f /etc/apt/apt-mirrors.txt ]]; then
@@ -244,8 +297,11 @@ jobs:
             --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
             --evidence-dir "$LKC_EVIDENCE_DIR/preview"
       - name: Set up Google Cloud CLI for read-only API verification
+        if: env.LKC_OPERATION != 'restore'
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       - name: Verify deployed upload APIs before any live Hosting change
+        id: readiness
+        if: env.LKC_OPERATION != 'restore'
         working-directory: source
         run: |
           npm run build -w @lkc/functions
@@ -253,39 +309,65 @@ jobs:
             --root . \
             --source-sha "$LKC_SOURCE_SHA" \
             --evidence "$LKC_EVIDENCE_DIR/api-readiness.json"
+      - name: Recheck current main before any live operation
+        if: env.LKC_OPERATION != 'readiness'
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module -e '
+            import {requireCurrentMain} from "./scripts/automation/restore-staging-hosting.mjs";
+            await requireCurrentMain(process.env.LKC_SOURCE_SHA);
+          '
       - name: Back up both current live channels
+        if: env.LKC_OPERATION == 'promote'
         id: backup
         working-directory: source
         run: |
-          npx firebase hosting:clone \
-            "${{ steps.hosting.outputs.staff_site }}:live" \
-            "${{ steps.hosting.outputs.staff_site }}:$LKC_ROLLBACK_CHANNEL" \
-            --project "$LKC_PROJECT_ID" \
-            --json > "$LKC_EVIDENCE_DIR/staff-backup.json"
-          npx firebase hosting:clone \
-            "${{ steps.hosting.outputs.admin_site }}:live" \
-            "${{ steps.hosting.outputs.admin_site }}:$LKC_ROLLBACK_CHANNEL" \
-            --project "$LKC_PROJECT_ID" \
-            --json > "$LKC_EVIDENCE_DIR/admin-backup.json"
-          echo "ready=true" >> "$GITHUB_OUTPUT"
+          node scripts/automation/restore-staging-hosting.mjs \
+            --backup --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --source-sha "$LKC_SOURCE_SHA" --channel "$LKC_ROLLBACK_CHANNEL" \
+            --evidence-dir "$LKC_EVIDENCE_DIR" --github-output "$GITHUB_OUTPUT"
+      - name: Capture both saved live and immutable preview versions
+        id: capture
+        if: env.LKC_OPERATION == 'promote'
+        working-directory: source
+        run: |
+          node scripts/automation/restore-staging-hosting.mjs \
+            --capture --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --source-sha "$LKC_SOURCE_SHA" --channel "$LKC_ROLLBACK_CHANNEL" \
+            --preview-channel "$LKC_CHANNEL" --evidence-dir "$LKC_EVIDENCE_DIR" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Recheck the saved live pair immediately before promotion
+        if: env.LKC_OPERATION == 'promote'
+        working-directory: source
+        run: |
+          node scripts/automation/restore-staging-hosting.mjs \
+            --verify-capture --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --source-sha "$LKC_SOURCE_SHA" --evidence-dir "$LKC_EVIDENCE_DIR"
       - name: Promote the already-tested versions without rebuilding
+        if: env.LKC_OPERATION == 'promote'
         id: promotion
         continue-on-error: true
         working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          npx firebase hosting:clone \
-            "${{ steps.hosting.outputs.staff_site }}:$LKC_CHANNEL" \
-            "${{ steps.hosting.outputs.staff_site }}:live" \
-            --project "$LKC_PROJECT_ID" \
-            --json > "$LKC_EVIDENCE_DIR/staff-promotion.json"
-          npx firebase hosting:clone \
-            "${{ steps.hosting.outputs.admin_site }}:$LKC_CHANNEL" \
-            "${{ steps.hosting.outputs.admin_site }}:live" \
-            --project "$LKC_PROJECT_ID" \
-            --json > "$LKC_EVIDENCE_DIR/admin-promotion.json"
+          node scripts/automation/restore-staging-hosting.mjs \
+            --promote-capture --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --source-sha "$LKC_SOURCE_SHA" --evidence-dir "$LKC_EVIDENCE_DIR" \
+            --github-output "$GITHUB_OUTPUT"
       - name: Verify both live staging apps after promotion
         id: live_check
-        if: steps.promotion.outcome == 'success'
+        if: env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success'
         continue-on-error: true
         working-directory: source
         run: |
@@ -298,15 +380,19 @@ jobs:
         id: rollback
         if: >-
           always() &&
+          env.LKC_OPERATION == 'promote' &&
           steps.backup.outputs.ready == 'true' &&
-          (steps.promotion.outcome != 'success' || steps.live_check.outcome != 'success')
+          steps.promotion.outputs.rollback_allowed == 'true' &&
+          (steps.promotion.outcome == 'failure' ||
+          (steps.promotion.outcome == 'success' && steps.live_check.outcome != 'success'))
         working-directory: source
         run: |
           node scripts/automation/restore-staging-hosting.mjs \
             --project "$LKC_PROJECT_ID" \
             --staff-site "${{ steps.hosting.outputs.staff_site }}" \
             --admin-site "${{ steps.hosting.outputs.admin_site }}" \
-            --channel "$LKC_ROLLBACK_CHANNEL" \
+            --restore-capture --region "$LKC_REGION" \
+            --source-sha "$LKC_SOURCE_SHA" \
             --evidence-dir "$LKC_EVIDENCE_DIR" \
             --github-output "$GITHUB_OUTPUT"
       - name: Verify both live staging apps after rollback
@@ -320,27 +406,65 @@ jobs:
             --admin-url "${{ steps.hosting.outputs.admin_live_url }}" \
             --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
             --evidence-dir "$LKC_EVIDENCE_DIR/rollback"
-      - name: Remove temporary channels after a successful promotion
-        if: steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success'
+      - name: Persist successful promotion manifest before channel cleanup
+        if: env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success'
         working-directory: source
         run: |
-          for site in \
-            "${{ steps.hosting.outputs.staff_site }}" \
-            "${{ steps.hosting.outputs.admin_site }}"; do
-            npx firebase hosting:channel:delete "$LKC_CHANNEL" \
-              --site "$site" \
-              --project "$LKC_PROJECT_ID" \
-              --force
-            npx firebase hosting:channel:delete "$LKC_ROLLBACK_CHANNEL" \
-              --site "$site" \
-              --project "$LKC_PROJECT_ID" \
-              --force
-          done
+          node scripts/automation/restore-staging-hosting.mjs \
+            --finalize-capture --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --source-sha "$LKC_SOURCE_SHA" --evidence-dir "$LKC_EVIDENCE_DIR"
+      - name: Remove temporary channels after a successful promotion
+        if: env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success'
+        working-directory: source
+        run: |
+          node scripts/automation/restore-staging-hosting.mjs \
+            --cleanup --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --source-sha "$LKC_SOURCE_SHA" --channel "$LKC_ROLLBACK_CHANNEL" \
+            --preview-channel "$LKC_CHANNEL" --evidence-dir "$LKC_EVIDENCE_DIR"
+      - name: Prepare existing browser check for manual restore
+        if: env.LKC_OPERATION == 'restore'
+        working-directory: source
+        run: |
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i \
+              's#http://azure.archive.ubuntu.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' \
+              /etc/apt/apt-mirrors.txt
+          fi
+          npx playwright install --with-deps chromium --only-shell
+      - name: Restore the exact pair from successful promotion evidence
+        id: manual_restore
+        if: env.LKC_OPERATION == 'restore'
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          node scripts/automation/restore-staging-hosting.mjs \
+            --operation restore --confirmation "$LKC_CONFIRMATION" \
+            --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --restore-run-id "$LKC_RESTORE_RUN_ID" --source-sha "$LKC_SOURCE_SHA" \
+            --evidence-dir "$LKC_EVIDENCE_DIR" --github-output "$GITHUB_OUTPUT"
+      - name: Check both live apps after manual restore
+        id: manual_restore_check
+        if: env.LKC_OPERATION == 'restore' && steps.manual_restore.outcome == 'success'
+        working-directory: source
+        run: |
+          node scripts/automation/hosting-browser-check.mjs \
+            --staff-url "${{ steps.hosting.outputs.staff_live_url }}" \
+            --admin-url "${{ steps.hosting.outputs.admin_live_url }}" \
+            --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
+            --evidence-dir "$LKC_EVIDENCE_DIR/manual-restore-browser"
       - name: Upload promotion and rollback evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: staging-hosting-promote-${{ env.LKC_SOURCE_SHA }}
+          name: staging-hosting-${{ env.LKC_OPERATION }}-${{ env.LKC_SOURCE_SHA }}
           path: ${{ env.LKC_EVIDENCE_DIR }}
           if-no-files-found: warn
           retention-days: 30
@@ -350,6 +474,7 @@ jobs:
           {
             echo "## Staging Hosting promotion"
             echo
+            echo "- Operation: \`$LKC_OPERATION\`"
             echo "- Source: \`$LKC_SOURCE_SHA\`"
             echo "- Preview channel: \`$LKC_CHANNEL\`"
             echo "- Promotion result: \`${{ steps.promotion.outcome }}\`"
@@ -365,8 +490,28 @@ jobs:
       - name: Enforce the final result
         if: always()
         run: |
+          if [[ "$LKC_OPERATION" == "readiness" ]]; then
+            if [[ "${{ steps.readiness.outcome }}" != "success" ]]; then
+              echo "HOSTING_READINESS_RESULT=STOPPED_SAFELY"
+              exit 1
+            fi
+            echo "HOSTING_READINESS_RESULT=SUCCESS"
+            exit 0
+          fi
+          if [[ "$LKC_OPERATION" == "restore" ]]; then
+            if [[ "${{ steps.manual_restore.outcome }}" != "success" || "${{ steps.manual_restore_check.outcome }}" != "success" ]]; then
+              echo "HOSTING_MANUAL_RESTORE_RESULT=FAILED"
+              exit 1
+            fi
+            echo "HOSTING_MANUAL_RESTORE_RESULT=SUCCESS"
+            exit 0
+          fi
           if [[ "${{ steps.promotion.outcome }}" == "skipped" ]]; then
             echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
+            exit 1
+          fi
+          if [[ "${{ steps.promotion.outputs.rollback_allowed }}" != "true" ]]; then
+            echo "HOSTING_PROMOTION_RESULT=UNKNOWN_STOPPED"
             exit 1
           fi
           if [[ "${{ steps.promotion.outcome }}" != "success" || "${{ steps.live_check.outcome }}" != "success" ]]; then

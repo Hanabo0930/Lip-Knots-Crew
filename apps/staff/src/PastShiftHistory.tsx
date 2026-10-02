@@ -6,11 +6,11 @@ import {
 } from "./past-shift-history";
 
 type Props<T extends PastShiftRecord & ShiftCardJob, C> = {
-  scope: PastShiftScope; scopeVersion: number; reader: PastShiftReader<T, C>; isCurrent: () => boolean;
+  scope: PastShiftScope; scopeVersion: number; selectionRequest: number; reader: PastShiftReader<T, C>; isCurrent: () => boolean;
   selectedId?: string; selectedDateKey?: string; onSelect: (job: T) => void; accent: (menu: string) => string;
   kind: (menu: string) => string; summary: (job: T) => string; submissionSummary: (job: T) => string;
 };
-type ViewProps<T extends PastShiftRecord & ShiftCardJob> = Omit<Props<T, unknown>, "reader" | "scope" | "scopeVersion" | "isCurrent" | "selectedDateKey"> & {
+type ViewProps<T extends PastShiftRecord & ShiftCardJob> = Omit<Props<T, unknown>, "reader" | "scope" | "scopeVersion" | "isCurrent" | "selectedDateKey" | "selectionRequest"> & {
   state: PastShiftState<T>; page: number; onPage: (page: number) => void;
   onYear: (year: number) => void; onMore: () => void; onRetry: () => void;
 };
@@ -70,7 +70,7 @@ export default function PastShiftHistory<T extends PastShiftRecord & ShiftCardJo
     const index = state.rows.findIndex(row => row.id === props.selectedId);
     setPage(year === state.year && index >= 0 ? Math.floor(index / 50) : 0);
     controller.current?.selectYear(year);
-  }, [props.selectedId, props.selectedDateKey, state.years]);
+  }, [props.selectedId, props.selectedDateKey, state.years, props.selectionRequest]);
   return <PastShiftHistoryView state={state} page={page} onPage={setPage}
     onYear={year => { setPage(0); controller.current?.selectYear(year); }}
     onMore={() => controller.current?.loadMore()} onRetry={() => { setPage(0); controller.current?.retry(); }}

@@ -1995,7 +1995,7 @@ export default function App(){
           {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list">
             {(!firebaseConfigured||!!user?.uid&&!!companyId&&!!staffId)&&<PastShiftHistory key={JSON.stringify([user?.uid,companyId,staffId,pastHistoryAuthVersion,businessDate])}
               scope={{uid:user?.uid??"demo",companyId:companyId||"demo",staffId:staffId||"demo",today:businessDate}}
-              scopeVersion={pastHistoryAuthVersion} reader={pastHistoryReader}
+              scopeVersion={pastHistoryAuthVersion} selectionRequest={shiftFocusRequest} reader={pastHistoryReader}
               isCurrent={()=>pastHistoryAuthVersion===authLoadVersionRef.current}
               selectedId={selectedJob?.id} selectedDateKey={selectedJob?.dateKey} onSelect={job=>{
                 setMyJobs(current=>orderAssignedJobs([...new Map([...current,job].map(row=>[row.id,row])).values()]));

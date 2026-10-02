@@ -25,7 +25,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
-          cache: npm
+          package-manager-cache: false
       - name: Install dependencies
         run: npm ci
       - name: Build all deployable artifacts
@@ -49,6 +49,7 @@ jobs:
           node scripts/test-staff-shift-cards.mjs
           node scripts/test-staff-application-confirmation.mjs
           node scripts/test-staff-manual-refresh.mjs
+          node scripts/test-staff-past-shift-history.mjs
       - name: Install browser for local-only Staff demo checks
         run: npx playwright install --with-deps chromium --only-shell
       - name: Validate Staff browser recovery and layout
@@ -104,7 +105,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
-          cache: npm
+          package-manager-cache: false
       - name: Install dependencies
         run: npm ci
       - name: Build and test Functions
@@ -212,7 +213,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
-          cache: npm
+          package-manager-cache: false
       - name: Install dependencies
         run: npm ci
       - name: Validate automation scope and production dependencies

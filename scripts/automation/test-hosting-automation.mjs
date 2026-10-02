@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
+import {createRequire} from "node:module";
+import {spawnSync} from "node:child_process";
+import {runVersionRestoreTests} from "./test-hosting-version-restore.mjs";
 import { readFileSync } from "node:fs";
 import {
   mkdtemp,
   readFile,
   rm,
+  realpath,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
   dirname,
   join,
   resolve,
+  sep as pathSep,
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -405,5 +410,139 @@ assert.ok(
   }).includes("ROOT_NOT_MOUNTED"),
 );
 cases += 1;
+
+
+const require = createRequire(import.meta.url);
+const {parse} = require("yaml");
+const promoteSpec=parse(promoteWorkflow), previewSpec=parse(previewWorkflow);
+assert.deepEqual(promoteSpec.on.workflow_dispatch.inputs.operation.options,["promote","readiness","restore"]);
+assert.equal(promoteSpec.jobs.promote.environment,"lkc-staging-hosting");
+assert.equal(promoteSpec.concurrency.group,"lkc-staging-hosting-promote");
+assert.equal(promoteSpec.concurrency["cancel-in-progress"],false);
+assert.equal(promoteSpec.env.LKC_PROJECT_ID,projectId);
+assert.equal(promoteSpec.env.LKC_REGION,"asia-northeast1");
+assert.equal(promoteSpec.env.LKC_TARGETS,"staff,admin");
+assert.match(previewWorkflow,/--no-authorized-domains/u);
+assert.doesNotMatch(promoteWorkflow,/hosting:clone|hosting:channel:(?:create|delete)/u);
+const steps=promoteSpec.jobs.promote.steps;
+function stepRuns(step,mode,outcomes={},priorSuccess=true){
+  let expression=String(step.if??"true").trim().replace(/^\$\{\{|\}\}$/gu,"").trim();
+  if(!expression.includes("always()")&&!priorSuccess)return false;
+  expression=expression.replace(/env\.LKC_OPERATION/gu,JSON.stringify(mode))
+    .replace(/steps\.([a-z_]+)\.outcome/gu,(_,id)=>JSON.stringify(outcomes[id]??"skipped"))
+    .replace(/steps\.([a-z_]+)\.outputs\.([a-z_]+)/gu,(_,id,key)=>JSON.stringify(outcomes[id+"."+key]??""))
+    .replace(/always\(\)/gu,"true");
+  assert.match(expression,/^[a-z_\-\s()!&|='"]+$/u);
+  return Function("return ("+expression+");")();
+}
+const mutatingNames=[
+  "Back up both current live channels","Capture both saved live and immutable preview versions",
+  "Promote the already-tested versions without rebuilding","Restore both previous live versions on any failure",
+  "Persist successful promotion manifest before channel cleanup","Remove temporary channels after a successful promotion",
+  "Restore the exact pair from successful promotion evidence",
+];
+for(const step of steps.filter(s=>mutatingNames.includes(s.name))){
+ for(const priorSuccess of [true,false])for(const result of ["success","failure","skipped"]){
+  assert.equal(stepRuns(step,"readiness",{
+   promotion:result,live_check:result,"backup.ready":"true",manual_restore:result,
+  },priorSuccess),false,"readiness cannot reach "+step.name);
+ }
+ cases++;
+}
+for(const step of steps.filter(s=>mutatingNames.includes(s.name)&&s.id!=="manual_restore")){
+ assert.equal(stepRuns(step,"restore",{promotion:"success",live_check:"success","backup.ready":"true"}),false);
+ cases++;
+}
+const autoRestore=steps.find(s=>s.id==="rollback");
+assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"skipped"},false),false,"pre-write failure cannot run rollback");
+assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"failure","promotion.rollback_allowed":"true"},false),true);
+assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"success",live_check:"failure","promotion.rollback_allowed":"true"},false),true);
+assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"success",live_check:"success","promotion.rollback_allowed":"true"}),false);
+assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"failure","promotion.rollback_allowed":"false"},false),false,"unknown outcome cannot run rollback");
+assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"failure"},false),false,"absent result output cannot run rollback");
+const promotionStep=steps.find(s=>s.id==="promotion");
+assert.equal(promotionStep.env.GH_TOKEN,"${{ github.token }}","per-step current-main read needs the existing scoped token");
+assert.match(promotionStep.run,/--github-output "\$GITHUB_OUTPUT"/u);
+cases+=8;
+assert.equal(stepRuns(steps.find(s=>s.id==="readiness"),"restore"),false);
+assert.ok(steps.findIndex(s=>s.name==="Re-check source is still current main after approval")<steps.findIndex(s=>s.name==="Authenticate with the short-lived staging identity"));
+assert.match(promoteWorkflow,/\.display_title == \\"promote staging Hosting\\"/u,"readiness/restore success cannot count as a promotion");
+assert.match(promoteWorkflow,/name: staging-hosting-\$\{\{ env\.LKC_OPERATION \}\}/u);
+const feeIndex=steps.findIndex(s=>s.id==="no_fee_source");
+assert.ok(feeIndex>=0&&feeIndex<steps.findIndex(s=>s.name==="Authenticate with the short-lived staging identity"));
+assert.equal(stepRuns(steps[feeIndex],"readiness"),true);
+assert.equal(stepRuns(steps[feeIndex],"promote"),true);
+assert.equal(stepRuns(steps[feeIndex],"restore"),false);
+assert.match(promoteWorkflow,/format\(' from \{0\}', inputs\.restore_run_id\)/u,"restore run must be bound to target promotion before any attempt");
+cases+=3;
+const finalScript=steps.find(s=>s.name==="Enforce the final result").run;
+assert.ok(finalScript.indexOf('HOSTING_READINESS_RESULT=SUCCESS')<finalScript.indexOf('HOSTING_PROMOTION_RESULT=SUCCESS'));
+assert.match(finalScript,/HOSTING_READINESS_RESULT=SUCCESS[\s\S]*?exit 0/u);
+cases+=5;
+
+const guardScript=promoteSpec.jobs.guard.steps.find(s=>s.id==="release").run;
+const shellPath=process.platform==="win32"?"C:/Program Files/Git/bin/bash.exe":"/bin/bash";
+const shellTemp=await mkdtemp(join(repoRoot,".hosting-guard-test-"));
+try{
+ const baseEnvironment={
+  ...process.env,GITHUB_EVENT_NAME:"workflow_dispatch",GITHUB_REF_NAME:"main",GITHUB_REPOSITORY:"Hanabo0930/Lip-Knots-Crew",
+  GITHUB_RUN_ID:"777",GITHUB_RUN_ATTEMPT:"1",LKC_PROJECT_ID:projectId,LKC_REGION:"asia-northeast1",LKC_TARGETS:"staff,admin",
+  LKC_REQUESTED_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",LKC_PREVIEW_RUN_ID:"",
+  TEST_MAIN_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",TEST_CI_RESULT:"1",TEST_PREVIEW_RESULT:"1",
+  NODE_EXE:process.execPath.replaceAll("\\","/"),
+ };
+ const stubs=[
+  "set -euo pipefail",
+  'git(){ case "$1" in fetch) return 0;; rev-parse) printf "%s\\n" "$TEST_MAIN_SHA";; *) return 91;; esac; }',
+  'gh(){ case "$*" in *"Release Candidate Checks"*) printf "%s\\n" "$TEST_CI_RESULT";; *"promote staging Hosting"*) printf "0\\n";; *"Staging Hosting Preview"*) printf "%s\\n" "$TEST_PREVIEW_RESULT";; *) return 92;; esac; }',
+  'node(){ "$NODE_EXE" "$@"; }',
+ ].join("\n");
+ const scenarios=[
+  ["readiness",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:""},true],
+  ["restore",{LKC_OPERATION:"restore",LKC_CONFIRMATION:"RESTORE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:"123"},true],
+  ["promote",{LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},true],
+  ["bad confirmation",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
+  ["automatic restore",{GITHUB_EVENT_NAME:"workflow_run",LKC_OPERATION:"restore",LKC_CONFIRMATION:"RESTORE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:"123"},false],
+  ["missing run",{LKC_OPERATION:"restore",LKC_CONFIRMATION:"RESTORE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
+  ["output injection",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"123\noperation=restore"},false],
+  ["changed main",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",TEST_MAIN_SHA:"1".repeat(40)},false],
+  ["failed CI",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",TEST_CI_RESULT:"0"},false],
+  ["production",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",LKC_PROJECT_ID:"production"},false],
+  ["other region",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",LKC_REGION:"us-central1"},false],
+ ];
+ for(const [label,extra,expected] of scenarios){
+  const output=join(shellTemp,label.replaceAll(" ","-")+".txt");
+  const result=spawnSync(shellPath,["-c",stubs+"\n"+guardScript],{
+   cwd:repoRoot,encoding:"utf8",env:{...baseEnvironment,...extra,GITHUB_OUTPUT:output.replaceAll("\\","/")},maxBuffer:100000,
+  });
+  assert.equal(result.status===0,expected,"actual guard shell: "+label+" "+result.stdout+" "+result.stderr);
+  if(expected){const saved=await readFile(output,"utf8");assert.match(saved,new RegExp("operation="+extra.LKC_OPERATION));assert.match(saved,/should_promote=true/u);}
+  cases++;
+ }
+ for(const [label,values,marker,code] of [
+  ["unknown",{promotion:"failure","promotion.rollback_allowed":"false"},"UNKNOWN_STOPPED",1],
+  ["missing-result",{promotion:"failure"},"UNKNOWN_STOPPED",1],
+  ["known-rollback",{promotion:"failure","promotion.rollback_allowed":"true",rollback:"success",rollback_check:"success"},"ROLLED_BACK",1],
+  ["known-success",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success"},"SUCCESS",0],
+ ]){
+  const rendered=finalScript.replace(/\$\{\{ steps\.([a-z_]+)\.(outcome|outputs\.([a-z_]+)) \}\}/gu,
+   (_,id,field,key)=>values[key?id+"."+key:id]??"skipped");
+  assert.doesNotMatch(rendered,/\$\{\{/u);
+  const result=spawnSync(shellPath,["-c","set -euo pipefail\n"+rendered],{cwd:repoRoot,encoding:"utf8",
+   env:{...baseEnvironment,LKC_OPERATION:"promote"},maxBuffer:10000});
+  assert.equal(result.status,code,"actual final-result shell: "+label);assert.match(result.stdout,new RegExp("HOSTING_PROMOTION_RESULT="+marker));
+  cases++;
+ }
+ const realCli=resolve(repoRoot,"scripts/automation/restore-staging-hosting.mjs");
+ const cli=spawnSync(process.execPath,[realCli,"--operation","restore","--confirmation","RESTORE_LKC_STAGING_HOSTING","--project",projectId,"--region","asia-northeast1"],{
+  cwd:repoRoot,encoding:"utf8",env:{...baseEnvironment,GITHUB_ACTIONS:"false"},maxBuffer:100000,
+ });
+ assert.notEqual(cli.status,0);assert.match(cli.stderr,/PROTECTED_WORKFLOW_CONTEXT_REQUIRED/u);cases++;
+}finally{
+ const actual=await realpath(shellTemp),root=await realpath(repoRoot);
+ assert.ok(actual.startsWith(root+pathSep)&&actual.includes(".hosting-guard-test-"));
+ await rm(actual,{recursive:true,force:true});
+}
+cases+=await runVersionRestoreTests({repoRoot,pythonExecutable:process.argv[2]||"python3"});
 
 console.log(`staging Hosting automation tests passed (${cases} cases)`);

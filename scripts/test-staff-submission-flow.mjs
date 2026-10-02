@@ -321,7 +321,9 @@ function Fixture(){
 }
 createRoot(document.getElementById('root')).render(React.createElement(Fixture));
 </script></body></html>`;
-const upcomingControls=section(app,'        <div className="past-shift-pagination">','        {(pastShifts.length>0||hasMorePastShifts)');
+const upcomingControls=section(app,'        <div className="past-shift-pagination">','        <div className="past-shifts past-history-shell">');
+assert.match(upcomingControls,/loadMoreUpcomingShifts/);
+assert.doesNotMatch(upcomingControls,/PastShiftHistory|showPastShifts/);
 const upcomingFixtureCode=ts.transpileModule(`
 import React from 'react';import {createRoot} from 'react-dom/client';import '/src/styles.css';
 function Fixture(){

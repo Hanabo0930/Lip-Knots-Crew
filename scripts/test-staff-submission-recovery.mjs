@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-function moduleFrom(path) {
-  const scope={exports:{}};
+function moduleFrom(path,dependencies={}) {
+  const scope={exports:{},require:name=>{assert.ok(Object.hasOwn(dependencies,name),"Unexpected module "+name);return dependencies[name];}};
   runInNewContext(ts.transpileModule(readFileSync(path,"utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,scope);
   return scope.exports;
 }
@@ -49,7 +49,8 @@ console.log("Submission recovery passed: stop queued transfers, await active tra
 // 実fetchMyJobsを合成データに対するクエリで実行し、過去件数と将来取得を分離する。
 const from=app.indexOf('  async function fetchMyJobs('),to=app.indexOf('  async function fetchTasks(',from);
 assert.ok(from>=0&&to>from);
-const {orderAssignedJobs}=moduleFrom('apps/staff/src/job-list.ts');
+const jobList=moduleFrom('apps/staff/src/job-list.ts');
+const {orderAssignedJobs}=jobList;
 const today='2026-09-05';
 const jobs=[
  ...Array.from({length:1000},(_,index)=>({id:`past-${index}`,dateKey:'2025-01-01',status:'assigned',companyId:'a',assignedStaffId:'staff'})),
@@ -59,7 +60,7 @@ const jobs=[
  {id:'other-staff',dateKey:today,status:'assigned',companyId:'a',assignedStaffId:'other'},
 ];
 let requests=[],dateReads=0;
-const queryScope={upcomingShiftCursorRef:{current:null},hasMoreUpcomingShifts:false,setHasMoreUpcomingShifts:value=>{queryScope.hasMoreUpcomingShifts=value;},setUpcomingShiftMessage:value=>{queryScope.upcomingMessage=value;},authLoadVersionRef:{current:0},tasksReadVersionRef:{current:0},pastShiftVersionRef:{current:0},pastShiftCursorRef:{current:null},pastShiftDateRef:{current:""},hasMorePastShifts:false,businessRefreshing:false,isPending:()=>false,run:async(key,fn)=>fn(),setPastShiftMessage:value=>{queryScope.message=value;},setHasMorePastShifts:value=>{queryScope.hasMorePastShifts=value;},setMyJobs:fn=>{queryScope.myJobs=fn(queryScope.myJobs);},db:{},staffId:'staff',companyId:'a',localDateKey:()=>{dateReads++;return today;},orderAssignedJobs:items=>orderAssignedJobs(items,today),
+const queryScope={upcomingShiftCursorRef:{current:null},hasMoreUpcomingShifts:false,setHasMoreUpcomingShifts:value=>{queryScope.hasMoreUpcomingShifts=value;},setUpcomingShiftMessage:value=>{queryScope.upcomingMessage=value;},authLoadVersionRef:{current:0},tasksReadVersionRef:{current:0},pastShiftVersionRef:{current:0},pastShiftDateRef:{current:""},businessRefreshing:false,isPending:()=>false,run:async(key,fn)=>fn(),setMyJobs:fn=>{queryScope.myJobs=fn(queryScope.myJobs);},db:{},staffId:'staff',companyId:'a',localDateKey:()=>{dateReads++;return today;},orderAssignedJobs:items=>orderAssignedJobs(items,today),
  collection:()=>null,where:(field,op,value)=>({field,op,value}),orderBy:(field,direction)=>({sort:field,direction}),startAfter:cursor=>({cursor}),limit:value=>({limit:value}),query:(_, ...filters)=>filters,
  getDocs:async filters=>{
   requests.push(filters);
@@ -90,45 +91,94 @@ assert.ok(requests.every(filters=>filters.some(f=>f.field==='companyId'&&f.value
 requests=[];
 assert.equal((await queryScope.fetchMyJobs('','a')).length,0);assert.equal(requests.length,0);
 queryScope.myJobs=loaded;
+const readPage=queryScope.getDocs;
+// 過去の続きはAppのmyJobsではなく、年別履歴の実コントローラーとサーバー読取で検査する。
+const historyRequests=[];
+const sdk={collection:queryScope.collection,where:queryScope.where,orderBy:queryScope.orderBy,
+ startAfter:queryScope.startAfter,limit:queryScope.limit,query:queryScope.query,
+ getDocs:()=>assert.fail('Yearly history must never fall back to a cached read'),
+ getDocsFromServer:filters=>{historyRequests.push(filters);return queryScope.getDocs(filters);},
+};
+const historyModule=moduleFrom('apps/staff/src/past-shift-history.ts',{'./job-list':jobList});
+const {createPastShiftHistory}=historyModule;
+const {firestorePastShiftReader}=moduleFrom('apps/staff/src/past-shift-reader.ts',{
+ 'firebase/firestore':sdk,'./past-shift-history':historyModule,
+});
+let historyState;
+const makeHistory=()=>{
+ const ownerVersion=queryScope.authLoadVersionRef.current;
+ return createPastShiftHistory({uid:'synthetic-user',companyId:'a',staffId:'staff',today},
+  firestorePastShiftReader(queryScope.db),state=>{historyState=state;},
+  ()=>queryScope.authLoadVersionRef.current===ownerVersion);
+};
+// The adapter/controller contain only synthetic promise reads; drain their bounded microtask chain.
+const settleHistory=async()=>{for(let i=0;i<12;i++)await Promise.resolve();};
+let history=makeHistory();
+await history.initialize(()=>2025);
+assert.equal(historyState.year,2025);assert.equal(historyState.rows.length,50);
 let pageCount=0;
-while(queryScope.hasMorePastShifts){
- await queryScope.loadMorePastShifts();
+while(historyState.hasMore){
+ history.loadMore();await settleHistory();
+ assert.equal(historyState.loadingMore,false);assert.equal(historyState.error,'');
  if(++pageCount>25)assert.fail('Pagination did not terminate');
 }
 assert.equal(pageCount,19);
-assert.equal(queryScope.myJobs.length,1002);
-assert.equal(new Set(queryScope.myJobs.map(job=>job.id)).size,1002,'Equal-date rows must not repeat or disappear across snapshot cursors');
-assert.deepEqual(Array.from(queryScope.myJobs.slice(0,2),job=>job.id),['today','tomorrow']);
-const readPage=queryScope.getDocs;
-await queryScope.fetchMyJobs();
-queryScope.myJobs=loaded;
-const beforeCursor=queryScope.pastShiftCursorRef.current;
+assert.equal(historyState.rows.length,1000);
+assert.equal(new Set(historyState.rows.map(job=>job.id)).size,1000,'Equal-date rows must not repeat or disappear across snapshot cursors');
+assert.deepEqual(new Set(historyState.rows.map(job=>job.id)),new Set(jobs.filter(job=>job.dateKey==='2025-01-01').map(job=>job.id)));
+assert.deepEqual(Array.from(queryScope.myJobs.slice(0,2),job=>job.id),['today','tomorrow'],'Year history must not displace future shifts in App');
+assert.equal(queryScope.myJobs.length,52,'Year paging owns its list independently of the bounded App snapshot');
+assert.ok(historyRequests.every(filters=>filters.some(f=>f.field==='companyId'&&f.value==='a')&&filters.some(f=>f.field==='assignedStaffId'&&f.value==='staff')));
+assert.equal(historyRequests.filter(filters=>filters.some(f=>f.limit===51)).length,20);
+assert.equal(historyRequests.filter(filters=>filters.some(f=>f.cursor)).length,19);
+assert.ok(historyRequests.filter(filters=>filters.some(f=>f.limit===51)).every(filters=>
+ filters.some(f=>f.field==='dateKey'&&f.op==='>='&&f.value==='2025-01-01')&&
+ filters.some(f=>f.field==='dateKey'&&f.op==='<'&&f.value==='2026-01-01')));
+await history.initialize(()=>2025);
+const beforeRows=historyState.rows;
 queryScope.getDocs=async()=>{throw new Error('offline');};
-await queryScope.loadMorePastShifts();
-assert.equal(queryScope.pastShiftCursorRef.current,beforeCursor);
-assert.match(queryScope.message,/再試行/);
+history.loadMore();await settleHistory();
+const failedCursor=historyRequests.at(-1).find(filter=>filter.cursor).cursor;
+assert.equal(historyState.rows,beforeRows);assert.equal(historyState.hasMore,true);
+assert.equal(historyState.loadingMore,false);assert.match(historyState.error,/もう一度読み込/);
 queryScope.getDocs=readPage;
-await queryScope.loadMorePastShifts();
-assert.equal(queryScope.myJobs.length,102,'Failed page must be retryable without skipping rows');
+history.retry();await settleHistory();
+assert.equal(historyRequests.at(-1).find(filter=>filter.cursor).cursor,failedCursor,'Failed page must retry the same snapshot cursor');
+assert.equal(historyState.rows.length,100,'Failed page must be retryable without skipping rows');
+assert.equal(new Set(historyState.rows.map(job=>job.id)).size,100);assert.equal(historyState.error,'');
+const lateDocs=jobs.filter(job=>job.dateKey==='2025-01-01').slice(50,100).map(job=>({id:job.id,data:()=>({...job})}));
 for(const change of ['auth','refresh']){
- const gate=deferred();
+ history.dispose();history=makeHistory();await history.initialize(()=>2025);
+ const gate=deferred(),before=historyState.rows;
  queryScope.getDocs=()=>gate.promise;
- const before=queryScope.myJobs;
- const pending=queryScope.loadMorePastShifts();
- if(change==='auth')queryScope.authLoadVersionRef.current++;
- else queryScope.pastShiftVersionRef.current++;
- gate.resolve({docs:[]});await pending;
- assert.equal(queryScope.myJobs,before,'Stale page must not mutate the new session or refreshed list');
+ history.loadMore();
+ if(change==='auth'){
+  queryScope.authLoadVersionRef.current++;
+  gate.resolve({docs:lateDocs});await settleHistory();
+  assert.equal(historyState.rows,before,'Auth-stale page must not publish into the current session');
+  history.dispose();
+ }else{
+  // scopeVersion changes dispose the old UI controller and initialize a fresh instance.
+  history.dispose();queryScope.getDocs=readPage;
+  history=makeHistory();await history.initialize(()=>2025);
+  const refreshedRows=historyState.rows;
+  gate.resolve({docs:lateDocs});await settleHistory();
+  assert.equal(historyState.rows,refreshedRows,'Old page must not merge into the refreshed year');
+  assert.equal(historyState.rows.length,50);
+  history.loadMore();await settleHistory();
+  assert.equal(historyState.rows.length,100,'Fresh controller cursor/lock must survive the obsolete response');
+ }
+ queryScope.getDocs=readPage;
 }
-queryScope.getDocs=readPage;
-// 読込中の連打を同期ロックで抑止する。
-const gate=deferred();let calls=0,locked=false;
-queryScope.isPending=()=>locked;
-queryScope.run=async(key,fn)=>{locked=true;try{await fn();}finally{locked=false;}};
+history.dispose();history=makeHistory();await history.initialize(()=>2025);
+// 読込中の連打は実コントローラーの同期ロックで抑止する。
+const gate=deferred();let calls=0;
 queryScope.getDocs=()=>{calls++;return gate.promise;};
-const first=queryScope.loadMorePastShifts();await queryScope.loadMorePastShifts();
-assert.equal(calls,1);gate.resolve({docs:[]});await first;
-queryScope.isPending=()=>false;queryScope.run=async(key,fn)=>fn();
+history.loadMore();history.loadMore();
+assert.equal(calls,1);assert.equal(historyState.loadingMore,true);
+gate.resolve({docs:[]});await settleHistory();
+assert.equal(historyState.loadingMore,false);assert.equal(historyState.error,'');
+history.dispose();queryScope.getDocs=readPage;
 // 未読込のタスクを開くときも所属・状態を確認する。
 queryScope.doc=(_,collection,id)=>({id});
 for(const scenario of ['own','company','staff','cancelled','open','missing','auth']){
@@ -142,7 +192,7 @@ for(const scenario of ['own','company','staff','cancelled','open','missing','aut
  if(scenario!=='own')assert.equal(queryScope.myJobs,previous);
 }
 {const previous=queryScope.myJobs;let cacheReads=0;queryScope.getDoc=async()=>{cacheReads++;return {exists:()=>true,id:'stale-task',data:()=>({companyId:'a',assignedStaffId:'staff',status:'assigned'})};};queryScope.getDocFromServer=async()=>{throw Error('task server offline');};await assert.rejects(queryScope.loadTaskJob('stale-task'),/task server offline/);assert.equal(cacheReads,0);assert.equal(queryScope.myJobs,previous);queryScope.getDocFromServer=async()=>({exists:()=>true,id:'recovered-task',data:()=>({id:'wrong',companyId:'a',assignedStaffId:'staff',status:'assigned',dateKey:today})});const recovered=await queryScope.loadTaskJob('recovered-task');assert.equal(recovered.id,'recovered-task');queryScope.myJobs=previous;}
-console.log('History paging passed: 1000 equal-date rows, 50-row pages, retry without skipping, auth/refresh isolation, double-click lock, and task ownership checks.');
+console.log('Yearly history paging passed: 1000 equal-date rows, 50-row pages, retry without skipping, auth/refresh isolation, double-click lock, and task ownership checks.');
 // 初回300件を超える将来シフトも、同日の文書を飛ばさず必要時だけ取得する。
 queryScope.getDocs=readPage;
 jobs.push(...Array.from({length:1000},(_,index)=>({id:`future-${String(index).padStart(4,'0')}`,dateKey:'2027-01-01',status:'assigned',companyId:'a',assignedStaffId:'staff'})));
@@ -445,7 +495,8 @@ console.log('Japan business date: midnight/year/leap boundaries and past/open sh
 }
 
 {
- const a=app.indexOf('  async function fetchMyJobs('),b=app.indexOf('  async function loadMorePastShifts(',a),c=app.indexOf('  async function loadPrimaryBusinessData('),d=app.indexOf('  async function loadOpenJobs(',c);
+ const a=app.indexOf('  async function fetchMyJobs('),b=app.indexOf('  async function loadMoreUpcomingShifts(',a),c=app.indexOf('  async function loadPrimaryBusinessData('),d=app.indexOf('  async function loadOpenJobs(',c);
+ assert.ok(a>=0&&b>a&&c>=0&&d>c,'Primary read fixture must locate complete current function boundaries');
  for(const failed of ['upcoming','history','tasks'])for(const stale of [false,true]){
   const reads=[deferred(),deferred()],task=deferred();let readIndex=0,writes=0,settled=false;const scopes={db:{},staffId:'s',companyId:'c',user:{uid:'u'},authLoadVersionRef:{current:1},tasksReadVersionRef:{current:0},pastShiftVersionRef:{current:0},localDateKey:()=> '2026-09-10',getDocs:()=>reads[readIndex++].promise,collection:()=>{},where:()=>{},orderBy:()=>{},limit:()=>{},query:()=>{},fetchTasks:()=>task.promise,setMyJobs:()=>writes++,setTasks:()=>writes++,setSelectedJob:()=>writes++,saveBusinessSnapshot:()=>writes++,orderAssignedJobs:jobs=>jobs};
   runInNewContext(ts.transpileModule(app.slice(a,b)+app.slice(c,d),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,scopes);

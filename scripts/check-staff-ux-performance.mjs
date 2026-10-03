@@ -654,8 +654,8 @@ assert.match(
 
 assert.match(
   app,
-  /const submissionProcessingVersionRef=useRef\(0\);[\s\S]*submissionProcessingVersionRef\.current\+=1;[\s\S]*setProcessingSubmission\(false\);[\s\S]*async function pollSubmissionProcessing[\s\S]*const processingVersion=\+\+submissionProcessingVersionRef\.current;[\s\S]*const isCurrentProcessing=\(\)=>authLoadVersion===authLoadVersionRef\.current&&processingVersion===submissionProcessingVersionRef\.current;[\s\S]*if\(!isCurrentProcessing\(\)\)return;[\s\S]*loadSubmissionHistory\(jobId,type,authLoadVersion\)[\s\S]*refreshSelectedJob\(jobId,authLoadVersion\)[\s\S]*catch\{[\s\S]*if\(isCurrentProcessing\(\)\)showSubmissionMessage\("提出状況を確認できませんでした。[\s\S]*finally\{[\s\S]*if\(isCurrentProcessing\(\)\)setProcessingSubmission\(false\)/u,
-  "Submission completion polling must stop at an account change, suppress stale failures, and release only its own session lock.",
+  /const submissionProcessingVersionRef=useRef\(0\);[\s\S]*submissionProcessingVersionRef\.current\+=1;[\s\S]*setProcessingSubmission\(false\);[\s\S]*async function pollSubmissionProcessing[\s\S]*const processingVersion=\+\+submissionProcessingVersionRef\.current;[\s\S]*const contextVersion=submissionContextVersionRef\.current;[\s\S]*const ownsProcessing=\(\)=>authLoadVersion===authLoadVersionRef\.current&&processingVersion===submissionProcessingVersionRef\.current;[\s\S]*const isCurrentProcessing=\(\)=>ownsProcessing\(\)&&contextVersion===submissionContextVersionRef\.current;[\s\S]*if\(!isCurrentProcessing\(\)\)return;[\s\S]*loadSubmissionHistory\(jobId,type,authLoadVersion\)[\s\S]*refreshSelectedJob\(jobId,authLoadVersion\)[\s\S]*catch\{[\s\S]*if\(isCurrentProcessing\(\)\)showSubmissionMessage\("提出状況を確認できませんでした。[\s\S]*finally\{[\s\S]*if\(ownsProcessing\(\)\)setProcessingSubmission\(false\)/u,
+  "Submission completion polling must stop at an account or context change, suppress stale failures, and release only its own session lock.",
 );
 
 assert.match(

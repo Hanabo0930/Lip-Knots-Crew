@@ -1238,3 +1238,6 @@ try {
 if(process.argv.includes("--browser")){const {verifyStaffOfflineNavigation}=await import("./test-staff-offline-navigation.mjs");await verifyStaffOfflineNavigation();}
 
 if(process.argv.includes("--browser"))await import("./test-staff-day-rollover.mjs");
+
+if(process.argv.includes("--browser"))await import("./test-staff-receipt-recovery.mjs");
+if(process.argv.includes("--browser"))await import("./test-staff-login-accessibility.mjs");

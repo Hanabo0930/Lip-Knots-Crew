@@ -32,7 +32,7 @@ google.sheets=()=>({spreadsheets:{
 const management=require('../functions/lib/job-management.js'),worker=require('../functions/lib/sheet-row-creation.js'),sync=require('../functions/lib/shift-import.js'),jobs=require('../functions/lib/jobs.js');
 const {createCaseMailReceiver}=require('../functions/lib/case-mail-intake.js'),{caseMailRecordKey}=require('../functions/lib/case-mail-job-creation.js');
 const workDate=new Date(Date.now()+32*86400000).toISOString().slice(0,10),month=workDate.slice(0,4)+'.'+Number(workDate.slice(5,7));
-const columns={workDate:'A',staffName:'B',temperature:'G',arrivalTime:'H',reportSubmitted:'I',cancelled:'V',cancellationReason:'W',cancellationReasonCategory:'X',cancellationFinancialTreatment:'Y',transportation:'AK',purchase8:'AL',purchase10:'AM',netPrintCost:'AO',postageCost:'AP',clientName:'J',storeName:'K',makerName:'L',menuName:'M',entryTime:'N',workTime:'O',subcontractorName:'P',staffBasePay:'Q',caseId:'BC'};
+const columns={workDate:'A',staffName:'B',temperature:'G',arrivalTime:'H',reportSubmitted:'I',cancelled:'V',cancellationReason:'W',cancellationReasonCategory:'X',cancellationFinancialTreatment:'Y',transportation:'AK',purchase8:'AL',purchase10:'AM',netPrintCost:'AO',postageCost:'AP',clientName:'J',storeName:'K',makerName:'L',menuName:'M',entryTime:'N',workTime:'O',subcontractorName:'P',staffBasePay:'Q',staffPaymentTotal:'R',caseId:'BC'};
 async function fixture(slots=1){
  const companyId='synthetic-journey-'+(++sequence),spreadsheetId='synthetic-sheet-'+sequence,uid=companyId+'-receiver',auth={uid:companyId+'-admin',token:{companyId,role:'admin'}};
  const template=Array(55).fill('');Object.assign(template,{0:workDate,9:'合成取引先',10:'雛形店舗',11:'合成メーカー',12:'試食',13:'09:30',14:'10:00～18:00',54:'SYNTHETIC-TEMPLATE'});
@@ -65,22 +65,39 @@ try{
  async function ready(assigned){
   const h=await assignedFixture(),keys=['cancelled','cancellationReason','cancellationReasonCategory','cancellationFinancialTreatment'];
   await db.doc('companies/'+h.companyId+'/sheetMappings/shift').update({operations:{'job.assign':{values:['staffName']},'job.cancel.v2':{values:keys},'job.restore':{values:keys}}});
-  if(assigned){await h.apply();await admin.confirmApplication.run({auth:h.auth,data:{jobId:h.job.id,expectedRevision:(await h.job.get()).data().revision}});const q=(await h.list('sheetSyncQueue'))[0];await writes.processSafeSheetWrite.run({data:{after:await q.ref.get()}});assert.equal((await q.ref.get()).data().status,'completed');await h.import();}
+  if(assigned){await h.apply();await admin.confirmApplication.run({auth:h.auth,data:{jobId:h.job.id,expectedRevision:(await h.job.get()).data().revision}});const q=(await h.list('sheetSyncQueue'))[0];await writes.processSafeSheetWrite.run({data:{after:await q.ref.get()}});assert.equal((await q.ref.get()).data().status,'completed');const sourceCaseId=(await h.job.get()).data().caseId;const row=h.sheet.rows.find(r=>r[column(columns.caseId)]===sourceCaseId);assert.ok(row);row[column(columns.staffBasePay)]=6500;row[column(columns.staffPaymentTotal)]=8000;await h.import();}
   h.cancel=async()=>analytics.adminSetJobCancellation.run({auth:h.auth,data:{jobId:h.job.id,reasonCategory:'other',reasonNote:'合成取消',financialTreatment:'neither',expectedRevision:(await h.job.get()).data().revision}});
   h.restore=async()=>analytics.adminRestoreCancelledJob.run({auth:h.auth,data:{jobId:h.job.id,note:'合成復旧',expectedRevision:(await h.job.get()).data().revision}});
   h.queueFor=async operation=>(await h.list('sheetSyncQueue')).filter(doc=>doc.data().operation===operation).at(-1);
   h.process=async operation=>{const q=await h.queueFor(operation);await writes.processSafeSheetWrite.run({data:{after:await q.ref.get()}});return (await q.ref.get()).data();};return h;
  }
- for(const assigned of [false,true])await test('受信案件の取消・原本同期・復旧・再同期: 担当'+assigned,async()=>{
-  const h=await ready(assigned);await h.cancel();assert.equal((await h.job.get()).data().cancelled,true);assert.equal((await h.list('staffDayLocks')).filter(d=>d.data().active).length,0);
-  let q=await h.process('job.cancel.v2');assert.equal(q.status,'completed',q.errorMessage);await h.import();assert.equal((await h.job.get()).data().status,'cancelled');assert.equal((await h.job.get()).data().appOverride,undefined);
-  await h.restore();assert.equal((await h.job.get()).data().cancelled,false);q=await h.process('job.restore');assert.equal(q.status,'completed',q.errorMessage);await h.import();const restored=(await h.job.get()).data();assert.equal(restored.cancelled,false);assert.equal(restored.status,assigned?'assigned':'stopped');assert.equal(restored.publishable,false);assert.equal((await h.list('staffDayLocks')).filter(d=>d.data().active).length,assigned?1:0);
-  if(!assigned)assert.deepEqual((await h.publishCurrent()).updated,[h.job.id]);
+ for(const assigned of [false,true])await test('受信案件の取消・原本同期と履歴保持: 担当'+assigned,async()=>{
+  const h=await ready(assigned);await h.cancel();const cancelled=(await h.job.get()).data();assert.equal(cancelled.cancelled,true);
+  assert.equal((await h.list('staffDayLocks')).filter(d=>d.data().active).length,assigned?1:0);
+  if(assigned)assert.equal(cancelled.cancellationSheetWrite.sourceAckPending,true);
+  let q=await h.process('job.cancel.v2');assert.equal(q.status,'completed',q.errorMessage);
+  if(assigned){
+   // The existing worker writes cancellation flags only. A completed queue is not proof of a cleared name.
+   const pending=(await h.job.get()).data();assert.equal(pending.basePay,6500);assert.equal(pending.financials.staffPaymentTotal,8000);assert.equal(pending.cancellationSheetWrite.sourceAckPending,true);assert.equal((await h.list('staffDayLocks')).filter(d=>d.data().active).length,1);
+   const beforeImport=(await h.job.get()).data();await assert.rejects(h.import(),e=>e.code==='failed-precondition');assert.deepEqual((await h.job.get()).data(),beforeImport);assert.equal((await h.list('staffDayLocks')).filter(d=>d.data().active).length,1);
+   const before=await stateOf(h);await assert.rejects(h.restore(),e=>e.code==='failed-precondition');assert.deepEqual(await stateOf(h),before);
+   // Simulate the future bounded name writer in the fake Sheet only; this does not certify its runtime integration.
+   const matching=h.sheet.rows.filter(row=>row[column(columns.caseId)]===pending.caseId);assert.equal(matching.length,1);assert.ok(matching[0][column(columns.staffName)]);matching[0][column(columns.staffName)]='';
+   await h.import();const acknowledged=(await h.job.get()).data();assert.equal(acknowledged.rawStaffName,'');assert.equal(acknowledged.status,'cancelled');assert.equal(acknowledged.sourceCancellationClosed,true);
+   assert.equal(acknowledged.assignedStaffId,pending.assignedStaffId);assert.equal(acknowledged.assignedStaffName,pending.assignedStaffName);assert.equal(acknowledged.basePay,pending.basePay);assert.deepEqual(acknowledged.financials,pending.financials);
+   assert.equal(acknowledged.cancellationSheetWrite.sourceAckPending,false);assert.equal(acknowledged.cancellationSheetWrite.sourceAckProof.staffId,pending.assignedStaffId);assert.equal((await h.list('staffDayLocks')).filter(d=>d.data().active).length,0);
+   const afterAck=await stateOf(h);await assert.rejects(h.restore(),e=>e.code==='failed-precondition');assert.deepEqual(await stateOf(h),afterAck);
+   await h.import();const reimported=(await h.job.get()).data();assert.equal(reimported.assignedStaffId,pending.assignedStaffId);assert.equal(reimported.basePay,pending.basePay);assert.deepEqual(reimported.financials,pending.financials);assert.deepEqual(reimported.cancellationSheetWrite.sourceAckProof,acknowledged.cancellationSheetWrite.sourceAckProof);
+   assert.equal((await h.list('staffDayLocks')).filter(d=>d.data().active).length,0);assert.equal(h.sheet.deleted,0);return;
+  }
+  await h.import();assert.equal((await h.job.get()).data().status,'cancelled');assert.equal((await h.job.get()).data().appOverride,undefined);
+  await h.restore();assert.equal((await h.job.get()).data().cancelled,false);q=await h.process('job.restore');assert.equal(q.status,'completed',q.errorMessage);await h.import();const restored=(await h.job.get()).data();
+  assert.equal(restored.cancelled,false);assert.equal(restored.status,'stopped');assert.equal(restored.publishable,false);assert.equal((await h.list('staffDayLocks')).filter(d=>d.data().active).length,0);assert.deepEqual((await h.publishCurrent()).updated,[h.job.id]);
  });
- await test('復旧後に遅れて届いた取消イベントは原本を書き換えない',async()=>{
-  const h=await ready(true);await h.cancel();const cancelled=await h.queueFor('job.cancel.v2');await h.restore();const count=sheetWrites;await writes.processSafeSheetWrite.run({data:{after:await cancelled.ref.get()}});assert.equal((await cancelled.ref.get()).data().status,'blocked');assert.equal(sheetWrites,count);assert.equal((await h.process('job.restore')).status,'completed');await h.import();assert.equal((await h.job.get()).data().status,'assigned');
+ await test('未手配案件の復旧後に遅れて届いた取消イベントは原本を書き換えない',async()=>{
+  const h=await ready(false);await h.cancel();const cancelled=await h.queueFor('job.cancel.v2');await h.restore();const count=sheetWrites;await writes.processSafeSheetWrite.run({data:{after:await cancelled.ref.get()}});
+  assert.equal((await cancelled.ref.get()).data().status,'blocked');assert.equal(sheetWrites,count);assert.equal((await h.process('job.restore')).status,'completed');await h.import();assert.equal((await h.job.get()).data().status,'stopped');
  });
-
  for(const active of [false,null])await test('無効・有効性不明の担当者へ受信案件を復旧しない: '+active,async()=>{
   const h=await ready(true);await h.cancel();const profile=db.doc('staffProfiles/'+h.staff[0].token.staffId);
   if(active===null){const value=(await profile.get()).data();delete value.active;await profile.set(value);}else await profile.update({active});

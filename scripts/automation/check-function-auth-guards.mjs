@@ -729,8 +729,11 @@ function checkBusinessRecovery(name) {
     'CancelSchema.parse(request.data)', 'awaitdb.runTransaction(async(tx)=>{', 'constjobSnap=awaittx.get(jobRef);',
     'if(job.companyId!==companyId)', 'lockRef?awaittx.get(lockRef):null',
     'lock.jobId===input.jobId&&lock.companyId===companyId&&lock.staffId===job.assignedStaffId&&lock.dateKey===job.dateKey',
-    'if(job.cancelled===true&&job.status==="cancelled"&&job.cancellationReason===input.reason&&!ownsActiveLock)return;',
-    'if(lockRef&&ownsActiveLock){tx.set(lockRef,', 'tx.update(jobRef,',
+    'if(job.cancelled===true&&job.status==="cancelled"&&job.cancellationReason===input.reason&&(!ownsActiveLock||cancellationSourceAckPending(job)))return;',
+    'if(lockRef&&ownsActiveLock&&sourceAck.sourceAckPending!==true){tx.set(lockRef,', 'tx.update(jobRef,',
+    'constsourceAck=cancellationSourceAckFields(job,ownsActiveLock,now.toMillis(),nextAssignmentRevision(job));',
+    'assertAcknowledgedCancellationCanChange(job);',
+    'cancellationSheetWrite:{queueId:queueRef.id,operation:"job.cancel",identity:cancellationSheetWriteIdentity(job),...sourceAck}',
     'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.cancel",', 'actorUid:session.uid',
     'tx.set(db.collection("notificationQueue").doc(),queueDocumentData({companyId,targetStaffId:job.assignedStaffId,',
   ]);

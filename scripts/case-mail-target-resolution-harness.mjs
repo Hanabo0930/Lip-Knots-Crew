@@ -9,7 +9,7 @@ export async function targetResolutionFixture({assigned=true,kind="change",ready
  const h=await targetHoldFixture(base),api=h.load("./case-mail-review");
  await h.hold({...h.holdCommand,kind});
  h.prepareResolution=async()=>{
-   if(kind==="cancel"){await h.cancel();h.row[9]+="（キャンセル）";await h.reimport();}
+   if(kind==="cancel"){await h.cancel();h.row[1]="";h.row[2]="TRUE";h.row[3]=h.job().cancellationReason;h.row[9]+="（キャンセル）";await h.reimport();}
    else{await h.edit({makerName:h.input.makerName});await h.runEdit();await h.reimport();}
  };
  h.resolutionCommand=async()=>({...h.targetRequest,reviewVersion:(await h.targetPreview()).resolution.reviewVersion,note:"原文・原本・担当を照合",confirmed:true});

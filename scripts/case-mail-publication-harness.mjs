@@ -6,7 +6,7 @@ import { harness, clone, plain, companyId, Timestamp } from "./case-mail-test-ha
 const require=createRequire(import.meta.url),ts=require("typescript");
 const importSource=fs.readFileSync(new URL("../functions/src/shift-import.ts",import.meta.url),"utf8");
 const importCode=ts.transpileModule(importSource.slice(importSource.indexOf("async function writeJobsAndLocks("),importSource.indexOf("async function acquireSyncLock("))+"\nexports.write=writeJobsAndLocks;",{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
-const columns={workDate:"A",staffName:"B",temperature:"G",arrivalTime:"H",clientName:"J",storeName:"K",makerName:"L",menuName:"M",entryTime:"N",workTime:"O",caseId:"BC",basePayColumns:[]};
+const columns={workDate:"A",staffName:"B",temperature:"G",arrivalTime:"H",clientName:"J",storeName:"K",makerName:"L",menuName:"M",entryTime:"N",workTime:"O",caseId:"BC",cancelled:"C",cancellationReason:"D",basePayColumns:[]};
 export async function setup(imported=true,beforeCreate=null){
   const h=harness(),receiptId=h.key("case-mail-receipt",companyId,"message-1");
   h.records.set("caseMailIntakeReceipts/"+receiptId,h.records.get(h.paths.receipt));h.records.delete(h.paths.receipt);h.paths.receipt="caseMailIntakeReceipts/"+receiptId;
@@ -28,7 +28,7 @@ export async function setup(imported=true,beforeCreate=null){
     const parsed=h.load("./shift-parser").parseShiftSheet("synthetic-sheet","2099.10",[[],row],{companyId,headerRow:1,dataStartRow:2,columns:currentColumns});
     assert.equal(parsed.jobs.length,1);const current=parsed.jobs[0];assert.equal(current.jobId,jobId);
     current.sheetRef.sheetId=1;current.editSourceSnapshot=state.captureEditSource(current,row,currentColumns,"BC",Date.now());
-    return exports.write([current],new Map([["合成スタッフ","staff-1"]]),"synthetic-run",{ref:leaseRef,token:"test-lease"});
+    return exports.write([current],new Map([["合成スタッフ","staff-1"]]),"synthetic-run",{ref:leaseRef,token:"test-lease"},Timestamp.now().toMillis());
   };
   Object.assign(h,{jobId,path,row,importRow,job:()=>h.records.get(path),source:()=>h.records.get("adminJobEditSources/"+jobId),
     publishNow:()=>h.publish({jobIds:[jobId],action:"publish",expectedRevisions:{[jobId]:h.job().revision}})});

@@ -48,7 +48,9 @@ for(const [before,after]of [
  ['if (failedSheets > 0)','if (false)'],
 ])reject('syncStaffDirectoryReadOnly',before,after,{whole:true});
 for(const [before,after]of [
- ['lease.token !== lock.token','false'],['lease.companyId !== chunk[0]?.companyId','false'],
+ ['lease.token !== lock.token','false'],
+ ['const sourceReadStartedAtMs = Timestamp.now().toMillis();','const sourceReadStartedAtMs = 0;'],
+ ['lock,\n        sourceReadStartedAtMs\n      );','lock,\n        0\n      );'],['lease.companyId !== chunk[0]?.companyId','false'],
  ['!(lease.leaseUntil instanceof Timestamp)','false'],['lease.leaseUntil.toMillis() <= Timestamp.now().toMillis()','false'],
 ])reject('syncShiftSheetsReadOnly',before,after,{whole:true});
 for(const [before,after]of [

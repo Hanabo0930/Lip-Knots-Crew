@@ -1,9 +1,10 @@
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { assertCancelledAssignmentCanRestore, assertAcknowledgedCancellationCanChange } from "./cancellation-history-retention-core";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { z } from "zod";
 import { db } from "./firebase";
 import { queueDocumentData } from "./notification-core";
-import { cancellationSheetWriteIdentity } from "./sheet-write-core";
+import { cancellationSheetWriteIdentity, cancellationSourceAckFields, cancellationSourceAckPending, cancellationSourceLinked } from "./sheet-write-core";
 import { nextAssignmentRevision, resetApplicationConfirmation } from "./assignment-preparation-core";
 import {
   buildMonthlyDashboard,
@@ -157,19 +158,24 @@ export const adminSetJobCancellation = onCall(async (request) => {
       ? `${reasonLabel}：${input.reasonNote.trim()}`
       : reasonLabel;
 
-    if (job.cancelled === true && job.status === "cancelled" && job.cancellationReasonCategory === reasonCategory && job.cancellationReasonNote === input.reasonNote.trim() && job.cancellationFinancialTreatment === treatment && !ownsActiveLock) return;
+    if (job.cancelled === true && job.status === "cancelled" && job.cancellationReasonCategory === reasonCategory && job.cancellationReasonNote === input.reasonNote.trim() && job.cancellationFinancialTreatment === treatment && (!ownsActiveLock || cancellationSourceAckPending(job))) return;
+    try { assertAcknowledgedCancellationCanChange(job); }
+    catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "取消履歴の変更確認が必要です。"); }
+    const sourceAck = cancellationSourceAckFields(job, ownsActiveLock, now.toMillis(), nextAssignmentRevision(job));
     tx.set(jobRef, {
       ...resetApplicationConfirmation(),
       revision: nextAssignmentRevision(job),
       status: "cancelled",
       cancelled: true,
+      publishable: false,
+      ...(cancellationSourceLinked(job) ? { sourceCancellationClosed: true } : {}),
       cancellationReasonCategory: reasonCategory,
       cancellationReason: reason,
       cancellationReasonNote: input.reasonNote.trim(),
       cancellationFinancialTreatment: treatment,
       cancellationFinancialTreatmentLabel: cancellationTreatmentLabels[treatment],
       assignmentSheetWrite: null,
-      cancellationSheetWrite: { queueId: queueRef.id, operation: "job.cancel.v2", identity: cancellationSheetWriteIdentity(job) },
+      cancellationSheetWrite: { queueId: queueRef.id, operation: "job.cancel.v2", identity: cancellationSheetWriteIdentity(job), ...sourceAck },
       cancelledAt: now,
       cancelledBy: session.uid,
       preCancellationStatus: job.cancelled === true ? job.preCancellationStatus ?? "assigned" : job.status ?? "assigned",
@@ -178,7 +184,7 @@ export const adminSetJobCancellation = onCall(async (request) => {
     }, { merge: true });
 
     if (typeof job.assignedStaffId === "string" && job.assignedStaffId) {
-      if (lockRef && ownsActiveLock) {
+      if (lockRef && ownsActiveLock && sourceAck.sourceAckPending !== true) {
         tx.set(lockRef, {
           active: false,
           releasedAt: now,
@@ -252,7 +258,12 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
     if (job.cancelled !== true && job.status !== "cancelled") {
       throw new HttpsError("failed-precondition", "この案件はキャンセル状態ではありません。");
     }
+    if (cancellationSourceAckPending(job)) {
+      throw new HttpsError("failed-precondition", "取消の原本反映が未確認です。原本を確認してから復帰してください。");
+    }
 
+    try { assertCancelledAssignmentCanRestore(job); }
+    catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "取消履歴の再手配が必要です。"); }
     const assignedStaffId = typeof job.assignedStaffId === "string"
       ? job.assignedStaffId
       : "";
@@ -299,6 +310,7 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
       revision: nextAssignmentRevision(job),
       status: restoredStatus,
       cancelled: false,
+      sourceCancellationClosed: false,
       recruitmentStopped: Boolean(job.mailIntake),
       ...(job.mailIntake ? { mailPublication: FieldValue.delete() } : {}),
       cancellationReasonCategory: FieldValue.delete(),

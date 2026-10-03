@@ -7,6 +7,10 @@ class HttpsError extends Error {constructor(code,message){super(message);this.co
 const compile=name=>ts.transpileModule(fs.readFileSync(new URL('../functions/src/'+name+'.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
 const code=compile('job-management'),pure={exports:{}};
 runInNewContext(compile('job-management-core'),{exports:pure.exports});
+const sheet={exports:{}},cancellation={exports:{}};
+runInNewContext(compile('sheet-write-core'),{exports:sheet.exports});
+const identity={exports:{}};runInNewContext(compile("case-id"),{exports:identity.exports,require:name=>{assert.equal(name,"node:crypto");return dependency(name);}});
+runInNewContext(compile("cancellation-history-retention-core"),{exports:cancellation.exports,require:name=>{assert.ok(["./sheet-write-core","./case-id"].includes(name));return name==="./case-id"?identity.exports:sheet.exports;}});
 const initial={companyId:'company',status:'draft',sourceReady:true,revision:2,dateKey:'2026-09-20'};
 const clone=v=>v===undefined?undefined:structuredClone(v);
 function setup({job=initial,concurrent,count=0}={}) {
@@ -33,7 +37,7 @@ function setup({job=initial,concurrent,count=0}={}) {
  const boundary={
   'node:crypto':{randomUUID:()=>assert.fail('no group creation')},
   'firebase-admin/firestore':{FieldValue:{delete:()=>null,increment:n=>({increment:n}),serverTimestamp:()=>now},Timestamp:{now:()=>now,fromDate:date=>({date})}},
-  'firebase-functions/v2/https':{onCall:(options,handler)=>handler??options,HttpsError},'firebase-functions/v2/scheduler':{onSchedule:()=>null},zod:{z},'./firebase':{db},'./case-id':{hashText:()=>''},'./assignment-preparation-core':{},'./admin-edit-state-core':{},'./job-management-core':pure.exports,'./job-group-creation':{},'./native-job-creation':{createNativeJobGroup:()=>assert.fail('publication/export must not create')},'./case-mail-job-creation':{},'./case-mail-publication':{readMailPublication:()=>assert.fail('non-mail path must not use mail proof')},
+  'firebase-functions/v2/https':{onCall:(options,handler)=>handler??options,HttpsError},'firebase-functions/v2/scheduler':{onSchedule:()=>null},zod:{z},'./firebase':{db},'./case-id':{hashText:()=>''},'./assignment-preparation-core':{},'./admin-edit-state-core':{},'./job-management-core':pure.exports,'./cancellation-history-retention-core':cancellation.exports,'./sheet-write-core':sheet.exports,'./job-group-creation':{},'./native-job-creation':{createNativeJobGroup:()=>assert.fail('publication/export must not create')},'./case-mail-job-creation':{},'./case-mail-publication':{readMailPublication:()=>assert.fail('non-mail path must not use mail proof')},
   './utils':{requireAdmin:r=>{if(r.auth?.token.role!=='admin')throw new HttpsError('permission-denied','admin required');return r.auth;},companyFromClaims:t=>t.companyId,requestId:()=> 'request'},
   './system-safety':{assertProductionOperational:async()=>{},getProductionOperationalState:async()=>({operational:true})},
  };

@@ -10,6 +10,8 @@ import { createNativeJobGroup } from "./native-job-creation";
 import { createCaseMailJobGroup } from "./case-mail-job-creation";
 import { readMailPublication } from "./case-mail-publication";
 import { assignmentPreparationPatch } from "./assignment-preparation-core";
+import { cancellationSourceAckPending } from "./sheet-write-core";
+import { assertCancelledHistoricalAssignmentCanEdit } from "./cancellation-history-retention-core";
 import { prepareAdminEditIntent, EditSourceSnapshot, adminEditValueMatches, currentAdminEditValues } from "./admin-edit-state-core";
 import {
   buildJobCsv,
@@ -464,6 +466,11 @@ export const adminEditJobInputs = onCall(async (request) => {
       throw new HttpsError("not-found", "案件が見つかりません。");
     }
     const job = jobSnap.data()!;
+    if (cancellationSourceAckPending(job)) {
+      throw new HttpsError("failed-precondition", "取消の原本反映が未確認です。勤務枠を保持しているため、原本確認後に編集してください。");
+    }
+    try { assertCancelledHistoricalAssignmentCanEdit(job, input.fields); }
+    catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "取消履歴の再手配は停止しています。"); }
     const [mappingSnap, sourceSnap] = await Promise.all([tx.get(mappingRef), tx.get(sourceRef)]);
     const mapping = mappingSnap.data();
     const mappingEnabled = mapping?.enabled === true && mapping.spreadsheetId === job.sheetRef?.spreadsheetId;

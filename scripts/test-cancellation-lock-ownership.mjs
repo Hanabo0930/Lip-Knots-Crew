@@ -15,7 +15,7 @@ const ownLock = { companyId, staffId, dateKey, jobId: 'old-job', active: true };
 const pureModules = new Map();
 function pureModule(name) {
   if(name === "firebase-functions/v2/https") return { HttpsError };
-  assert.ok(['sheet-write-core', 'netprint-state-core', 'assignment-preparation-core'].includes(name), 'Pure module is allowlisted');
+  assert.ok(['sheet-write-core', 'netprint-state-core', 'assignment-preparation-core', 'cancellation-history-retention-core'].includes(name), 'Pure module is allowlisted');
   if (pureModules.has(name)) return pureModules.get(name);
   const module = { exports: {} };
   pureModules.set(name, module.exports);
@@ -61,6 +61,7 @@ for (const moduleName of ['jobs', 'analytics']) {
       './case-mail-publication': { readMailPublication: () => assert.fail('Native cancellation must not read mail publication') },
       './notification-time': { tokyoParts: () => assert.fail('Cancellation must not evaluate application dates') },
       './sheet-write-core': pureModule('sheet-write-core'),
+      './cancellation-history-retention-core': pureModule('cancellation-history-retention-core'),
       './assignment-preparation-core': pureModule('assignment-preparation-core'),
       './automation-intake': { readMailApplicationForAssignment: () => assert.fail('Cancellation must not read mail applications') },
       './system-safety': { assertProductionOperational: async () => {} },

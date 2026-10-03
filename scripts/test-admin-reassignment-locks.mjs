@@ -8,11 +8,13 @@ const ts = dependency('typescript');
 const loaded = new Map();
 function loadState(name) {
   if(name === "firebase-functions/v2/https") return { HttpsError: dependency(name).HttpsError };
-  assert.ok(['./sheet-write-core','./netprint-state-core','./assignment-preparation-core','./admin-edit-state-core','./job-management-core'].includes(name));
+  assert.ok(['./sheet-write-core','./cancellation-history-retention-core','./netprint-state-core','./assignment-preparation-core','./admin-edit-state-core','./job-management-core'].includes(name));
   if(loaded.has(name))return loaded.get(name);const exports={};loaded.set(name,exports);
   runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../functions/src/'+name.slice(2)+'.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports,require:loadState});return exports;
 }
 const {assignmentPreparationPatch}=loadState('./assignment-preparation-core');
+const {assertCancelledHistoricalAssignmentCanEdit}=loadState('./cancellation-history-retention-core');
+const {cancellationSourceAckPending}=loadState('./sheet-write-core');
 const {prepareAdminEditIntent,adminEditValueMatches,currentAdminEditValues}=loadState('./admin-edit-state-core');
 const source = fs.readFileSync(new URL('../functions/src/job-management.ts', import.meta.url), 'utf8');
 const schemaStart = source.indexOf('const EditSchema =');
@@ -57,7 +59,7 @@ function setup(lock, options = {}) {
   };
   const exports = {};
   runInNewContext(code, {
-    exports, db, assignmentPreparationPatch, prepareAdminEditIntent, adminEditValueMatches, currentAdminEditValues, z: dependency('zod').z, HttpsError, onCall: callback => callback,
+    exports, db, cancellationSourceAckPending, assertCancelledHistoricalAssignmentCanEdit, assignmentPreparationPatch, prepareAdminEditIntent, adminEditValueMatches, currentAdminEditValues, z: dependency('zod').z, HttpsError, onCall: callback => callback,
     requireAdmin: request => { if (request.auth.token.role !== 'admin') throw new HttpsError('permission-denied', 'admin required'); return request.auth; },
     companyFromClaims: token => token.companyId, assertProductionOperational: async () => {},
     Timestamp: { now: () => 12345 }, FieldValue: { delete: () => '__deleted__', serverTimestamp:()=>12345 },

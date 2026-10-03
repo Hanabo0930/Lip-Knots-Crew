@@ -330,7 +330,8 @@ function checkImportIssues(name) {
       'current?.companyId===item.data.companyId&&current?.staffId===item.data.staffId',
       'awaitdb.runTransaction(async(tx)=>{constnow=Timestamp.now();constleaseUntil=Timestamp.fromMillis(now.toMillis()+10*60*1000);',
     ] : [
-      'awaitwriteJobsAndLocks(allJobs,staffIndex.byName,runRef?.id??"",lock)',
+      'constsourceReadStartedAtMs=Timestamp.now().toMillis();',
+      'awaitwriteJobsAndLocks(allJobs,staffIndex.byName,runRef?.id??"",lock,sourceReadStartedAtMs)',
       'const[leaseSnap]=awaittx.getAll(lock.ref);', 'lease.token!==lock.token',
       'lease.companyId!==chunk[0]?.companyId', '!(lease.leaseUntilinstanceofTimestamp)',
       'lease.leaseUntil.toMillis()<=Timestamp.now().toMillis()',

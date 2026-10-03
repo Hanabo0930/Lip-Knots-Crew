@@ -6,8 +6,10 @@ import { runInNewContext } from 'node:vm';
 const dependency = createRequire(process.env.LKC_TEST_DEPENDENCY_ROOT ? path.join(process.env.LKC_TEST_DEPENDENCY_ROOT, 'package.json') : import.meta.url);
 const ts = dependency('typescript');
 const stateModules=new Map();
-function loadState(name){if(name === "node:crypto") return dependency(name);if(name === "firebase-functions/v2/https") return { HttpsError: dependency(name).HttpsError };assert.ok(['./sheet-write-core','./netprint-state-core','./assignment-preparation-core','./admin-edit-state-core','./job-management-core','./case-mail-publication-core','./shift-parser','./case-id'].includes(name));if(stateModules.has(name))return stateModules.get(name);const exports={};stateModules.set(name,exports);runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../functions/src/'+name.slice(2)+'.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports,require:loadState});return exports;}
+function loadState(name){if(name === "node:crypto") return dependency(name);if(name === "firebase-functions/v2/https") return { HttpsError: dependency(name).HttpsError };assert.ok(['./sheet-write-core','./cancellation-history-retention-core','./netprint-state-core','./assignment-preparation-core','./admin-edit-state-core','./job-management-core','./case-mail-publication-core','./shift-parser','./case-id'].includes(name));if(stateModules.has(name))return stateModules.get(name);const exports={};stateModules.set(name,exports);runInNewContext(ts.transpileModule(fs.readFileSync(new URL('../functions/src/'+name.slice(2)+'.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports,require:loadState});return exports;}
 const {assignmentPreparationPatch}=loadState('./assignment-preparation-core');
+const {importedCancellationSourceAck}=loadState('./sheet-write-core');
+const {retainedCancellationAssignment}=loadState('./cancellation-history-retention-core');
 const {netPrintAssignmentPatch}=loadState('./netprint-state-core');
 const {mailPublicationContext}=loadState('./case-mail-publication-core');
 const {importedEditConfirmation,adminEditContext,editProjection,sourceMoneyInputs,selectEditSourceColumns,importedEditRevision}=loadState('./admin-edit-state-core');
@@ -75,7 +77,7 @@ function harness(entries = [], options = {}) {
     },
   };
   const exports = {};
-  runInNewContext(code, { exports, db, HttpsError, netPrintAssignmentPatch, mailPublicationContext, assignmentPreparationPatch, importedEditConfirmation, adminEditContext, editProjection, sourceMoneyInputs, importedEditRevision, Timestamp: MockTimestamp, FieldValue: { delete: () => deleted }, normalizeName: name => name.normalize('NFKC').replace(/[\s　]+/g, '').trim() }, { timeout: 3000 });
+  runInNewContext(code, { exports, db, HttpsError, importedCancellationSourceAck, retainedCancellationAssignment, netPrintAssignmentPatch, mailPublicationContext, assignmentPreparationPatch, importedEditConfirmation, adminEditContext, editProjection, sourceMoneyInputs, importedEditRevision, Timestamp: MockTimestamp, FieldValue: { delete: () => deleted }, normalizeName: name => name.normalize('NFKC').replace(/[\s　]+/g, '').trim() }, { timeout: 3000 });
   return { records, commits, attempts, run: (jobs, index = names) => exports.writeJobsAndLocks(jobs, index, 'synthetic-run', { ref: leaseRef, token: 'synthetic-token' }) };
 }
 const baseEntries = () => [['jobs/job-a', oldJob()], [lockPath(), ownLock()]];

@@ -64,6 +64,26 @@ const same=(left:unknown,right:unknown)=>JSON.stringify(left)===JSON.stringify(r
 function millis(value:any):number|null {
   try {const result=value?.toMillis?.();return integer(result)?result:null;}catch{return null;}
 }
+
+/** Match the existing resolver's parsed CandidateSchema projection, independent of Firestore map key order. */
+function legacyTargetAnalysisHash(receipt:Data|undefined,candidate:Data|undefined):string {
+  const source=candidate?.source,input=candidate?.input;
+  if(!source||!input||typeof source!=="object"||typeof input!=="object"||Array.isArray(source)||Array.isArray(input)||
+    !digest(receipt?.sourceFingerprint)||!identifier(source.partId)||!digest(source.sha256)||
+    typeof source.rowKey!=="string"||source.rowKey.length<1||source.rowKey.length>500||
+    !integer(source.unitIndex)||source.unitIndex>99||
+    ([["workDate",20],["clientName",200],["storeName",200],["makerName",200],["menuName",500],
+      ["entryTime",100],["workTime",100]] as const).some(([key,max])=>typeof input[key]!=="string"||input[key].length>max)||
+    typeof input.slots!=="number"||!Number.isFinite(input.slots)||
+    !(input.basePay===null||(typeof input.basePay==="number"&&Number.isFinite(input.basePay)))||
+    !["draft","immediate","scheduled"].includes(input.publicationMode)||
+    !(input.publishAt===null||typeof input.publishAt==="string"))refuse();
+  return hashText(JSON.stringify([receipt!.sourceFingerprint,
+    {partId:source.partId,rowKey:source.rowKey,unitIndex:source.unitIndex,sha256:source.sha256},
+    {workDate:input.workDate,clientName:input.clientName,storeName:input.storeName,makerName:input.makerName,
+      menuName:input.menuName,entryTime:input.entryTime,workTime:input.workTime,slots:input.slots,basePay:input.basePay,
+      publicationMode:input.publicationMode,publishAt:input.publishAt}]),64);
+}
 function targetResolution(old:Data|undefined,incoming:Data):Data|null {
   const saved=old?.cancellationSheetWrite,review=old?.mailTargetReview,hold=review?.hold,proof=saved?.sourceAckProof;
   if(!old||saved?.identity===cancellationSheetWriteIdentity(old)||old.mailTargetHold!=null||
@@ -95,7 +115,7 @@ export function cancellationHistoricalTargetContext(old:Data|undefined,incoming:
   const requested=millis(hold.requestedAt),confirmed=millis(review.confirmedAt);
   const audit=evidence?.audit,candidate=evidence?.candidate,receipt=evidence?.receipt,binding=candidate?.targetBinding;
   const boundAt=millis(binding?.confirmedAt);
-  const analysisHash=receipt?.analysisHash??hashText(JSON.stringify([receipt?.sourceFingerprint,candidate?.source,candidate?.input]),64);
+  const analysisHash=receipt?.analysisHash??legacyTargetAnalysisHash(receipt,candidate);
   if(requested===null||confirmed===null||!integer(readStartedAtMs)||
     !integer(old!.cancellationSheetWrite.sourceAckRequestedAtMs)||
     !integer(proof.readStartedAtMs)||!integer(proof.confirmedAtMs)||

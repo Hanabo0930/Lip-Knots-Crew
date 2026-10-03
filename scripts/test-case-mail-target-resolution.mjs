@@ -135,4 +135,5 @@ for(const field of ["caseId","dateKey","workDate","sheetRef","assignedStaffName"
  const evidence=Object.fromEntries(Object.entries(h.evidencePaths).map(([key,path])=>[key,h.records.get(path)])),before=JSON.stringify([...h.records]);
  assert.throws(()=>{const projection=core.cancellationHistoricalTargetContext(old,input,evidence,Date.now());core.retainedCancellationAssignment(projection,input,false);});assert.equal(JSON.stringify([...h.records]),before);
 });
+await test("取消履歴: 旧hashはFirestoreのmap順と余分fieldsに依存しない",async()=>{const h=await resolvedCancellation({legacyHash:true,reorderedMap:true}),proof=clone(h.job().cancellationSheetWrite);await h.reimport();assert.deepEqual(h.job().cancellationSheetWrite,proof);h.records.get(h.evidencePaths.candidate).input.workTime="tampered";await unchangedRefusal(h);});
 console.log(JSON.stringify({passed:results.filter(x=>x.passed).length,total:results.length,results,cloudAccess:false},null,2));if(results.some(x=>!x.passed))process.exitCode=1;

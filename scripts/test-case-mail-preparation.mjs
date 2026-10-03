@@ -4,7 +4,8 @@ import { fixture } from "./case-mail-assignment-harness.mjs";
 import { setup as notificationSetup } from "./notification-test-harness.mjs";
 import { clone, plain, companyId } from "./case-mail-test-harness.mjs";
 let count=0;
-async function test(name,fn){try{await fn();count++;console.log("成功: "+name);}catch(error){error.message=name+": "+error.message;throw error;}}
+const match=process.argv.find(arg=>arg.startsWith("--match="))?.slice(8);
+async function test(name,fn){if(match&&!name.includes(match))return;try{await fn();count++;console.log("成功: "+name);}catch(error){error.message=name+": "+error.message;throw error;}}
 async function assigned(){
  const h=await fixture();await h.apply();await h.run();await h.importRow();
  Object.assign(h.records.get(h.paths.mapping).columns,{temperature:"G",arrivalTime:"H"});
@@ -123,11 +124,13 @@ await test("深夜まとめ通知でも保留済み受付案内を除外",async(
 });
 
 
-await test("実取消・同担当への復帰で昔の受付通知を復活させない",async()=>{
+await test("原本未確認の取消は復帰を拒否し昔の受付通知を配信しない",async()=>{
  const h=await assigned();
  await h.load("./analytics").adminSetJobCancellation({auth:h.auth,data:{jobId:h.jobId,expectedRevision:h.job().revision,reasonCategory:"other",reasonNote:"合成取消",financialTreatment:"neither"}});
- await h.load("./analytics").adminRestoreCancelledJob({auth:h.auth,data:{jobId:h.jobId,expectedRevision:h.job().revision}});
- assert.equal(h.job().status,"assigned");assert.equal(h.job().assignedStaffId,"staff-1");
+ const before=JSON.stringify([...h.records]);
+ await assert.rejects(h.load("./analytics").adminRestoreCancelledJob({auth:h.auth,data:{jobId:h.jobId,expectedRevision:h.job().revision}}),{code:"failed-precondition"});
+ assert.equal(JSON.stringify([...h.records]),before);assert.equal(h.job().status,"cancelled");assert.equal(h.job().assignedStaffId,"staff-1");
+ assert.equal(h.job().cancellationSheetWrite.sourceAckPending,true);assert.equal(h.lock().active,true);
  const n=notices(h);await n.send();assert.equal(n.state.sent.length,0);assert.equal(n.document(n.id).status,"superseded");
 });
 console.log("受信案件の通知・事前連絡統合 "+count+"条件成功（合成のみ）");

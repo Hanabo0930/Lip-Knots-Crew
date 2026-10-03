@@ -1,4 +1,5 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { assertAcknowledgedCancellationCanChange } from "./cancellation-history-retention-core";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { z } from "zod";
 import { db } from "./firebase";
@@ -11,7 +12,7 @@ import {
 } from "./utils";
 import { queueDocumentData } from "./notification-core";
 import { tokyoParts } from "./notification-time";
-import { cancellationSheetWriteIdentity } from "./sheet-write-core";
+import { cancellationSheetWriteIdentity, cancellationSourceAckFields, cancellationSourceAckPending, cancellationSourceLinked } from "./sheet-write-core";
 import { mailPreparationContext, applicationConfirmationIdentity, assignmentPreparationPatch, nextAssignmentRevision, resetApplicationConfirmation } from "./assignment-preparation-core";
 import { assertProductionOperational } from "./system-safety";
 import { readMailApplicationForAssignment } from "./automation-intake";
@@ -257,23 +258,28 @@ export const adminCancelJob = onCall(async (request) => {
       lock.staffId === job.assignedStaffId &&
       lock.dateKey === job.dateKey;
 
-    if (job.cancelled === true && job.status === "cancelled" && job.cancellationReason === input.reason && !ownsActiveLock) return;
+    if (job.cancelled === true && job.status === "cancelled" && job.cancellationReason === input.reason && (!ownsActiveLock || cancellationSourceAckPending(job))) return;
     const now = Timestamp.now();
+    try { assertAcknowledgedCancellationCanChange(job); }
+    catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "取消履歴の変更確認が必要です。"); }
+    const sourceAck = cancellationSourceAckFields(job, ownsActiveLock, now.toMillis(), nextAssignmentRevision(job));
     tx.update(jobRef, {
       ...resetApplicationConfirmation(),
       revision: nextAssignmentRevision(job),
       status: "cancelled",
       cancelled: true,
+      ...(cancellationSourceLinked(job) ? { sourceCancellationClosed: true } : {}),
       assignmentSheetWrite: null,
       cancellationReason: input.reason,
       publishable: false,
       appOverride: { type: "cancel", active: true, createdAt: now },
-      cancellationSheetWrite: { queueId: queueRef.id, operation: "job.cancel", identity: cancellationSheetWriteIdentity(job) },
+      cancellationSheetWrite: { queueId: queueRef.id, operation: "job.cancel", identity: cancellationSheetWriteIdentity(job), ...sourceAck },
       cancelledAt: now,
+      cancelledBy: session.uid,
       updatedAt: now,
     });
 
-    if (lockRef && ownsActiveLock) {
+    if (lockRef && ownsActiveLock && sourceAck.sourceAckPending !== true) {
       tx.set(lockRef, {
         active: false,
         releasedAt: now,

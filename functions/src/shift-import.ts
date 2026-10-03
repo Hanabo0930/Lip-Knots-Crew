@@ -14,7 +14,7 @@ import {
 } from "./sheet-reader";
 import { parseShiftSheet } from "./shift-parser";
 import { resolveSheetCaseIdColumn, extendSheetReadColumn, importedCancellationSourceAck } from "./sheet-write-core";
-import { retainedCancellationAssignment } from "./cancellation-history-retention-core";
+import { retainedCancellationAssignment, cancellationHistoricalTargetRead, cancellationHistoricalTargetContext } from "./cancellation-history-retention-core";
 import { assignmentPreparationPatch } from "./assignment-preparation-core";
 import { netPrintAssignmentPatch } from "./netprint-state-core";
 import { mailPublicationContext } from "./case-mail-publication-core";
@@ -449,6 +449,16 @@ async function writeJobsAndLocks(
           throw new HttpsError("failed-precondition", "管理者案件の旧IDまたは重複を検出しました。既存の案件を保持して取込を停止しました。");
         }
       }
+      const targetReads = chunk.map((job,index) => {
+        const old = snapshots[index]?.data();
+        if (old && old.companyId !== job.companyId) throw new HttpsError("permission-denied", "既存案件の会社が一致しません。取込を停止しました。");
+        return cancellationHistoricalTargetRead(old,job);
+      });
+      const evidenceRefs = [...new Map(targetReads.flatMap(read => read ? [
+        db.collection("auditLogs").doc(read.auditId),db.collection("caseMailIntakeCandidates").doc(read.candidateId),
+        db.collection("caseMailIntakeReceipts").doc(read.receiptId)] : []).map(ref => [ref.path,ref])).values()];
+      const evidenceSnaps = evidenceRefs.length ? await tx.getAll(...evidenceRefs) : [];
+      const evidence = new Map(evidenceRefs.map((ref,index) => [ref.path,evidenceSnaps[index]?.data()]));
       const now = Timestamp.now();
       const plans = chunk.map((job, index) => {
         const ref = jobRefs[index];
@@ -465,7 +475,13 @@ async function writeJobsAndLocks(
         try { editConfirmed = importedEditConfirmation(old, job); }
         catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "編集内容の確認が必要です。"); }
         let retained: { staffId: string; staffName: string } | null;
-        try { retained = retainedCancellationAssignment(old, job, sourceCancellationConfirmed); }
+        try {
+          const read = targetReads[index];
+          const historical = cancellationHistoricalTargetContext(old,job,read ? {
+            audit:evidence.get("auditLogs/"+read.auditId),candidate:evidence.get("caseMailIntakeCandidates/"+read.candidateId),
+            receipt:evidence.get("caseMailIntakeReceipts/"+read.receiptId)} : undefined,sourceReadStartedAtMs);
+          retained = retainedCancellationAssignment(historical,job,sourceCancellationConfirmed);
+        }
         catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "取消履歴の確認が必要です。"); }
         const importedStaffName = job.assignedStaffName || retained?.staffName || "";
         const resolvedStaffId = job.assignedStaffName

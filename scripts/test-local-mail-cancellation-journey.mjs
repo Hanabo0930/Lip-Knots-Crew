@@ -98,12 +98,12 @@ try{
   const h=await ready(false);await h.cancel();const cancelled=await h.queueFor('job.cancel.v2');await h.restore();const count=sheetWrites;await writes.processSafeSheetWrite.run({data:{after:await cancelled.ref.get()}});
   assert.equal((await cancelled.ref.get()).data().status,'blocked');assert.equal(sheetWrites,count);assert.equal((await h.process('job.restore')).status,'completed');await h.import();assert.equal((await h.job.get()).data().status,'stopped');
  });
- for(const active of [false,null])await test('無効・有効性不明の担当者へ受信案件を復旧しない: '+active,async()=>{
+ for(const active of [false,null])await test('ACK待ち取消は無効・有効性不明担当でも復旧しない: '+active,async()=>{
   const h=await ready(true);await h.cancel();const profile=db.doc('staffProfiles/'+h.staff[0].token.staffId);
   if(active===null){const value=(await profile.get()).data();delete value.active;await profile.set(value);}else await profile.update({active});
   const before=await stateOf(h);await assert.rejects(h.restore(),e=>e.code==='failed-precondition');assert.deepEqual(await stateOf(h),before);
  });
- await test('取消後に別案件が勤務枠を獲得した場合は復旧しない',async()=>{
+ await test('ACK待ち取消は別案件が勤務枠を所有していても復旧しない',async()=>{
   const h=await ready(true);await h.cancel();const lock=(await h.list('staffDayLocks'))[0];await lock.ref.update({active:true,jobId:'synthetic-other-job'});const before=await stateOf(h);await assert.rejects(h.restore(),e=>e.code==='failed-precondition');assert.deepEqual(await stateOf(h),before);
  });
  for(const restore of [false,true])await test('受信案件の古い確認版で'+(restore?'復旧':'取消')+'を行わない',async()=>{

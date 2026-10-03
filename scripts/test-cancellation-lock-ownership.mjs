@@ -14,8 +14,9 @@ const lockPath = `staffDayLocks/${companyId}_${staffId}_${dateKey}`;
 const ownLock = { companyId, staffId, dateKey, jobId: 'old-job', active: true };
 const pureModules = new Map();
 function pureModule(name) {
+  if(name === "node:crypto") return requireDependency(name);
   if(name === "firebase-functions/v2/https") return { HttpsError };
-  assert.ok(['sheet-write-core', 'netprint-state-core', 'assignment-preparation-core', 'cancellation-history-retention-core'].includes(name), 'Pure module is allowlisted');
+  assert.ok(['sheet-write-core', 'netprint-state-core', 'assignment-preparation-core', 'cancellation-history-retention-core', 'case-id'].includes(name), 'Pure module is allowlisted');
   if (pureModules.has(name)) return pureModules.get(name);
   const module = { exports: {} };
   pureModules.set(name, module.exports);

@@ -23,14 +23,15 @@ export async function setup(imported=true,beforeCreate=null){
   h.records.set(leaseRef.path,{companyId,token:"test-lease",leaseUntil:Timestamp.fromMillis(Date.now()+600000)});
   const row=Array(55).fill(""),job=h.records.get(path);
   row[0]=job.workDate;row[9]=job.clientName;row[10]=job.storeName;row[11]=job.makerName;row[12]=job.menuName;row[13]=job.entryTime;row[14]=job.workTime;row[54]=job.caseId;
-  const importRow=async(extraColumns={})=>{
+  const importRows=async(rows,extraColumns={})=>{
     const currentColumns={...columns,...extraColumns};
-    const parsed=h.load("./shift-parser").parseShiftSheet("synthetic-sheet","2099.10",[[],row],{companyId,headerRow:1,dataStartRow:2,columns:currentColumns});
-    assert.equal(parsed.jobs.length,1);const current=parsed.jobs[0];assert.equal(current.jobId,jobId);
-    current.sheetRef.sheetId=1;current.editSourceSnapshot=state.captureEditSource(current,row,currentColumns,"BC",Date.now());
-    return exports.write([current],new Map([["合成スタッフ","staff-1"]]),"synthetic-run",{ref:leaseRef,token:"test-lease"},Timestamp.now().toMillis());
+    const parsed=h.load("./shift-parser").parseShiftSheet("synthetic-sheet","2099.10",[[],...rows],{companyId,headerRow:1,dataStartRow:2,columns:currentColumns});
+    assert.equal(parsed.jobs.length,rows.length);if(rows.length===1&&rows[0]===row)assert.equal(parsed.jobs[0].jobId,jobId);
+    for(const [index,current]of parsed.jobs.entries()){current.sheetRef.sheetId=1;current.editSourceSnapshot=state.captureEditSource(current,rows[index],currentColumns,"BC",Date.now());}
+    return exports.write(parsed.jobs,new Map([["合成スタッフ","staff-1"]]),"synthetic-run",{ref:leaseRef,token:"test-lease"},Timestamp.now().toMillis());
   };
-  Object.assign(h,{jobId,path,row,importRow,job:()=>h.records.get(path),source:()=>h.records.get("adminJobEditSources/"+jobId),
+  const importRow=async(extraColumns={})=>importRows([row],extraColumns);
+  Object.assign(h,{jobId,path,row,importRow,importRows,job:()=>h.records.get(path),source:()=>h.records.get("adminJobEditSources/"+jobId),
     publishNow:()=>h.publish({jobIds:[jobId],action:"publish",expectedRevisions:{[jobId]:h.job().revision}})});
   if(imported){Object.assign(job,{sourceReady:true,pendingSourceWrite:false});await importRow();}
   return h;

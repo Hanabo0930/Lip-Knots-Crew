@@ -1,4 +1,5 @@
 import {cancellationSheetWriteIdentity} from "./sheet-write-core";
+import {hashText} from "./case-id";
 type Data=Record<string,any>;
 const present=(value:unknown):value is string=>typeof value==="string"&&value.trim().length>0;
 const integer=(value:unknown):value is number=>Number.isSafeInteger(value)&&Number(value)>=0;
@@ -54,4 +55,69 @@ export function assertCancelledHistoricalAssignmentCanEdit(job:Data,fields:Recor
   if(["assignedStaffId","workDate","dateKey"].some(key=>Object.hasOwn(fields,key))){
     assertAcknowledgedCancellationCanChange(job);
   }
+}
+
+type TargetEvidence={audit?:Data;candidate?:Data;receipt?:Data};
+const identifier=(value:unknown):value is string=>typeof value==="string"&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(value);
+const digest=(value:unknown):value is string=>typeof value==="string"&&/^[a-f0-9]{64}$/.test(value);
+const same=(left:unknown,right:unknown)=>JSON.stringify(left)===JSON.stringify(right);
+function millis(value:any):number|null {
+  try {const result=value?.toMillis?.();return integer(result)?result:null;}catch{return null;}
+}
+function targetResolution(old:Data|undefined,incoming:Data):Data|null {
+  const saved=old?.cancellationSheetWrite,review=old?.mailTargetReview,hold=review?.hold,proof=saved?.sourceAckProof;
+  if(!old||saved?.identity===cancellationSheetWriteIdentity(old)||old.mailTargetHold!=null||
+    old.companyId!==incoming.companyId||old.sourceCancellationClosed!==true||old.cancelled!==true||old.status!=="cancelled"||
+    typeof old.rawStaffName!=="string"||old.rawStaffName.trim()||!present(old.assignedStaffId)||
+    saved?.sourceAckVersion!==1||saved.sourceAckPending!==false||!proof||review?.version!==1||hold?.version!==1||
+    hold.kind!=="cancel"||review.companyId!==incoming.companyId||review.jobId!==incoming.jobId||
+    ![review.companyId,review.jobId,review.receiptId,review.candidateId,review.actorUid].every(identifier)||
+    !integer(review.receiptRevision)||review.receiptRevision<1||
+    ![review.analysisHash,review.bindingVersion,review.reviewVersion].every(digest)||!present(review.note)||
+    typeof review.originReviewRequired!=="boolean"||typeof hold.previousReviewRequired!=="boolean"||
+    ["companyId","jobId","receiptId","candidateId","receiptRevision","analysisHash","bindingVersion"].some(key=>hold[key]!==review[key])||
+    saved.identity!==proof.originalIdentity||saved.identity!==cancellationSheetWriteIdentity({...old,mailTargetHold:hold}))return null;
+  return review;
+}
+/** Exact existing resolution records only; caller batches these reads inside the import transaction. */
+export function cancellationHistoricalTargetRead(old:Data|undefined,incoming:Data) {
+  const review=targetResolution(old,incoming);
+  return review?{receiptId:review.receiptId as string,candidateId:review.candidateId as string,
+    auditId:hashText(JSON.stringify(["case-mail-target-resolution",review.companyId,review.receiptId,
+      review.candidateId,review.receiptRevision,review.analysisHash]),64)}:null;
+}
+/** Comparison-only historical context. Never persist this projection or replace the original acknowledgement. */
+export function cancellationHistoricalTargetContext(old:Data|undefined,incoming:Data,
+  evidence:TargetEvidence|undefined,readStartedAtMs:number):Data|undefined {
+  const review=targetResolution(old,incoming);
+  if(!review)return old;
+  const hold=review.hold,proof=old!.cancellationSheetWrite.sourceAckProof;
+  const requested=millis(hold.requestedAt),confirmed=millis(review.confirmedAt);
+  const audit=evidence?.audit,candidate=evidence?.candidate,receipt=evidence?.receipt,binding=candidate?.targetBinding;
+  const boundAt=millis(binding?.confirmedAt);
+  const analysisHash=receipt?.analysisHash??hashText(JSON.stringify([receipt?.sourceFingerprint,candidate?.source,candidate?.input]),64);
+  if(requested===null||confirmed===null||!integer(readStartedAtMs)||
+    !integer(old!.cancellationSheetWrite.sourceAckRequestedAtMs)||
+    !integer(proof.readStartedAtMs)||!integer(proof.confirmedAtMs)||
+    !(requested<=old!.cancellationSheetWrite.sourceAckRequestedAtMs&&
+      old!.cancellationSheetWrite.sourceAckRequestedAtMs<proof.readStartedAtMs&&
+      proof.readStartedAtMs<=proof.confirmedAtMs&&proof.confirmedAtMs<=confirmed&&confirmed<=readStartedAtMs)||
+    !audit||audit.companyId!==review.companyId||audit.action!=="caseMail.target.resolve"||
+    audit.actorUid!==review.actorUid||!same(audit.createdAt,review.confirmedAt)||!same(audit.resolution,review)||
+    !candidate||candidate.version!==1||candidate.companyId!==review.companyId||
+    candidate.receiptId!==review.receiptId||candidate.status!=="review"||candidate.linkedJobId||!same(candidate.targetResolution,review)||
+    !integer(candidate.revision)||candidate.revision<1||candidate.heldChange!=null||
+    !binding||binding.version!==1||binding.reviewVersion!==review.bindingVersion||
+    binding.candidateRevision!==candidate.revision||
+    ["companyId","jobId","receiptId","candidateId","receiptRevision"].some(key=>binding[key]!==review[key])||
+    !identifier(binding.actorUid)||!present(binding.note)||boundAt===null||boundAt>requested||
+    !receipt||receipt.version!==1||receipt.companyId!==review.companyId||
+    receipt.revision!==review.receiptRevision||analysisHash!==review.analysisHash||
+    receipt.heldAnalysisHash!=null||receipt.verification!=="verified"||receipt.structuralComplete!==true||
+    receipt.status!=="review"||
+    !Array.isArray(receipt.candidateIds)||receipt.candidateIds.filter((id:unknown)=>id===review.candidateId).length!==1||
+    candidate.messageId!==receipt.messageId||!digest(receipt.sourceFingerprint)||candidate.sourceFingerprint!==receipt.sourceFingerprint||
+    !identifier(candidate.source?.partId)||!digest(candidate.source?.sha256)||
+    !Array.isArray(receipt.parts)||!receipt.parts.some((part:Data)=>part?.partId===candidate.source.partId&&part.sha256===candidate.source.sha256))refuse();
+  return {...old,mailTargetHold:hold};
 }

@@ -9,7 +9,8 @@ const code=compile('job-management'),pure={exports:{}};
 runInNewContext(compile('job-management-core'),{exports:pure.exports});
 const sheet={exports:{}},cancellation={exports:{}};
 runInNewContext(compile('sheet-write-core'),{exports:sheet.exports});
-runInNewContext(compile('cancellation-history-retention-core'),{exports:cancellation.exports,require:name=>{assert.equal(name,'./sheet-write-core');return sheet.exports;}});
+const identity={exports:{}};runInNewContext(compile("case-id"),{exports:identity.exports,require:name=>{assert.equal(name,"node:crypto");return dependency(name);}});
+runInNewContext(compile("cancellation-history-retention-core"),{exports:cancellation.exports,require:name=>{assert.ok(["./sheet-write-core","./case-id"].includes(name));return name==="./case-id"?identity.exports:sheet.exports;}});
 const initial={companyId:'company',status:'draft',sourceReady:true,revision:2,dateKey:'2026-09-20'};
 const clone=v=>v===undefined?undefined:structuredClone(v);
 function setup({job=initial,concurrent,count=0}={}) {

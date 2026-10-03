@@ -13,7 +13,8 @@ import {
   selectImportSheets,
 } from "./sheet-reader";
 import { parseShiftSheet } from "./shift-parser";
-import { resolveSheetCaseIdColumn, extendSheetReadColumn } from "./sheet-write-core";
+import { resolveSheetCaseIdColumn, extendSheetReadColumn, importedCancellationSourceAck } from "./sheet-write-core";
+import { retainedCancellationAssignment } from "./cancellation-history-retention-core";
 import { assignmentPreparationPatch } from "./assignment-preparation-core";
 import { netPrintAssignmentPatch } from "./netprint-state-core";
 import { mailPublicationContext } from "./case-mail-publication-core";
@@ -205,6 +206,7 @@ async function executeShiftImport(
 
   const lock = mode === "commit" ? await acquireSyncLock(companyId) : null;
   let runRef: FirebaseFirestore.DocumentReference | null = null;
+  const sourceReadStartedAtMs = Timestamp.now().toMillis();
 
   try {
     if (mode === "commit") {
@@ -299,7 +301,8 @@ async function executeShiftImport(
         allJobs,
         staffIndex.byName,
         runRef?.id ?? "",
-        lock
+        lock,
+        sourceReadStartedAtMs
       );
 
       if (config.markMissingAsArchived) {
@@ -418,7 +421,8 @@ async function writeJobsAndLocks(
   jobs: ParsedShiftJob[],
   staffNameIndex: Map<string, string>,
   runId: string,
-  lock: { ref: FirebaseFirestore.DocumentReference; token: string }
+  lock: { ref: FirebaseFirestore.DocumentReference; token: string },
+  sourceReadStartedAtMs: number
 ): Promise<number> {
   // 案件と旧/新勤務枠を同じtransactionに収め、通信を最大25案件単位にまとめる。
   if (new Set(jobs.map((job) => job.jobId)).size !== jobs.length) {
@@ -454,18 +458,25 @@ async function writeJobsAndLocks(
         if (old && old.companyId !== job.companyId) {
           throw new HttpsError("permission-denied", "既存案件の会社が一致しません。取込を停止しました。");
         }
+        let sourceCancellationConfirmed: boolean;
+        try { sourceCancellationConfirmed = importedCancellationSourceAck(old, job, sourceReadStartedAtMs); }
+        catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "取消の原本確認が必要です。"); }
         let editConfirmed: boolean | null;
         try { editConfirmed = importedEditConfirmation(old, job); }
         catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "編集内容の確認が必要です。"); }
+        let retained: { staffId: string; staffName: string } | null;
+        try { retained = retainedCancellationAssignment(old, job, sourceCancellationConfirmed); }
+        catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "取消履歴の確認が必要です。"); }
+        const importedStaffName = job.assignedStaffName || retained?.staffName || "";
         const resolvedStaffId = job.assignedStaffName
           ? staffNameIndex.get(normalizeName(job.assignedStaffName)) ?? null
-          : null;
+          : retained?.staffId ?? null;
         const override = old?.appOverride as { type?: string; active?: boolean } | undefined;
         const sourceMatchesOverride = override?.type === "cancel"
           ? job.cancelled === true
           : override?.type === "restore" ? job.cancelled !== true : true;
         const preserveAppOverride = override?.active === true && !sourceMatchesOverride;
-        if (old?.mailIntake && old.cancelled === true && !job.cancelled && !(override?.active === true && override.type === "restore")) {
+        if ((old?.mailIntake || old?.sourceCancellationClosed === true) && old.cancelled === true && !job.cancelled && !(override?.active === true && override.type === "restore")) {
           throw new HttpsError("failed-precondition", "受信案件の取消解除は明示的な復帰操作を確認してください。");
         }
         const preserveAppPublication = Boolean(old?.mailIntake || old?.mailTargetReview || old?.adminCreated) && job.status === "open" &&
@@ -505,7 +516,7 @@ async function writeJobsAndLocks(
           workTime: job.workTime,
           subcontractorName: job.subcontractorName,
           materialStatus: job.materialStatus,
-          assignedStaffName: job.assignedStaffName || FieldValue.delete(),
+          assignedStaffName: importedStaffName || FieldValue.delete(),
           rawStaffName: job.rawStaffName,
           assignedStaffId: resolvedStaffId ?? FieldValue.delete(),
           assignmentUnresolved:
@@ -518,7 +529,8 @@ async function writeJobsAndLocks(
             ? old?.recruitmentStopped === true
             : job.recruitmentStopped,
           cancelled: effectiveCancelled,
-          cancellationReason: preserveAppOverride
+          // A verified historical cancellation keeps its exact original reason, including on an unmapped/blank source read.
+          cancellationReason: preserveAppOverride || retained
             ? (old?.cancellationReason ?? FieldValue.delete())
             : (job.cancellationReason || FieldValue.delete()),
           basePay: job.basePay,
@@ -546,7 +558,7 @@ async function writeJobsAndLocks(
 
         if (old?.mailIntake && job.status === "open" && !preserveAppOverride) {
           const keepOpen = old.status === "open" && old.publishable === true && old.recruitmentStopped !== true &&
-            old.mailPublication?.context === mailPublicationContext({ ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null });
+            old.mailPublication?.context === mailPublicationContext({ ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: importedStaffName || null });
           if (!keepOpen) {
             data.status = old.status === "draft" ? "draft" : "stopped";
             data.publishable = false; data.recruitmentStopped = true;
@@ -559,10 +571,10 @@ async function writeJobsAndLocks(
           data.scheduledPublishAt=FieldValue.delete();data.mailPublication=FieldValue.delete();
         }
         Object.assign(data, assignmentPreparationPatch(old, {
-          ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null,
+          ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: importedStaffName || null,
         }));
         if (editConfirmed !== null) {
-          const finalJob = { ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null };
+          const finalJob = { ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: importedStaffName || null };
           data.adminEditSheetWrite = editConfirmed ? { ...old!.adminEditSheetWrite, pending: false, confirmedAtMs: now.toMillis(), context: adminEditContext(finalJob), projection: editProjection(finalJob, Object.keys(old!.adminEditSheetWrite.updates)) } : null;
           if (editConfirmed) { data.pendingSourceWrite = false; data.pendingSourceFields = []; }
         }
@@ -570,7 +582,7 @@ async function writeJobsAndLocks(
           data.appOverride = sourceMatchesOverride ? FieldValue.delete() : override;
         }
         try {
-          const finalJob = { ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: job.assignedStaffName || null };
+          const finalJob = { ...old, ...data, assignedStaffId: resolvedStaffId ?? null, assignedStaffName: importedStaffName || null };
           data.revision = importedEditRevision(old, finalJob);
           if (old?.mailIntake && mailPublicationContext(old) !== mailPublicationContext(finalJob)) {
             data.revision = Math.max(Number(data.revision), Number(old.revision ?? 0) + 1);
@@ -589,7 +601,13 @@ async function writeJobsAndLocks(
             data.assignmentSheetWrite = { ...old.assignmentSheetWrite, awaitingImportConfirmation: false };
           }
         }
-        return { job, oldStaffId, oldDateKey, oldLockId, newLockId, data, ref };
+        if (sourceCancellationConfirmed) data.cancellationSheetWrite = {
+          ...old!.cancellationSheetWrite, sourceAckPending: false,
+          sourceAckProof: { readStartedAtMs: sourceReadStartedAtMs, confirmedAtMs: now.toMillis(), runId,
+            originalRevision: old!.revision, originalIdentity: old!.cancellationSheetWrite.identity,
+            staffId: oldStaffId, dateKey: oldDateKey },
+        };
+        return { job, oldStaffId, oldDateKey, oldLockId, newLockId, sourceCancellationConfirmed, data, ref };
       });
       const lockIds = [...new Set(plans.flatMap((plan) => [plan.oldLockId, plan.newLockId]).filter((id): id is string => id !== null))];
       const lockRefs = lockIds.map((id) => db.collection("staffDayLocks").doc(id));
@@ -602,6 +620,13 @@ async function writeJobsAndLocks(
       const claims = new Map<string, string>();
       // 全検査を終えてから書く。既存の別案件枠や同じ取込内の重複手配は上書きしない。
       for (const plan of plans) {
+        if (plan.sourceCancellationConfirmed) {
+          const previous = plan.oldLockId ? locks.get(plan.oldLockId) : undefined;
+          if (!previous || previous.active !== true || previous.companyId !== plan.job.companyId ||
+            previous.jobId !== plan.job.jobId || previous.staffId !== plan.oldStaffId || previous.dateKey !== plan.oldDateKey) {
+            throw new HttpsError("failed-precondition", "取消対象の勤務枠の所有者が変更されています。原本と履歴を確認してください。");
+          }
+        }
         if (!plan.newLockId) continue;
         const lock = locks.get(plan.newLockId);
         const claimedBy = claims.get(plan.newLockId);
@@ -632,6 +657,13 @@ async function writeJobsAndLocks(
             active: false, releasedAt: now, releaseReason: "sheet.import.assignment_changed", jobId: plan.job.jobId,
           }, { merge: true });
           committedWrites++;
+          if (plan.sourceCancellationConfirmed) {
+            tx.set(db.collection("auditLogs").doc(), { companyId: plan.job.companyId, jobId: plan.job.jobId,
+              action: "job.cancel.source.confirm", queueId: (plan.data.cancellationSheetWrite as Record<string, unknown>).queueId,
+              staffId: plan.oldStaffId, dateKey: plan.oldDateKey,
+              confirmation: (plan.data.cancellationSheetWrite as Record<string, unknown>).sourceAckProof, createdAt: now });
+            committedWrites++;
+          }
         }
         if (plan.newLockId) {
           tx.set(db.collection("staffDayLocks").doc(plan.newLockId), {

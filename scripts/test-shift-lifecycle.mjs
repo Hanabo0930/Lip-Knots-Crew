@@ -3,16 +3,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
+import { pathToFileURL } from 'node:url';
 import crypto from 'node:crypto';
 const dependency=createRequire(process.env.LKC_TEST_DEPENDENCY_ROOT ? path.join(process.env.LKC_TEST_DEPENDENCY_ROOT,'package.json') : import.meta.url);
 const ts=dependency('typescript');
-const {Timestamp}=dependency('firebase-admin/firestore');
+const {Timestamp,FieldValue}=dependency('firebase-admin/firestore');
 const {HttpsError}=dependency('firebase-functions/v2/https');
 const companyId='synthetic-company',staffId='synthetic-staff',sheetId='synthetic-sheet-only',dateKey='2099-09-20';
 const lockPath=`staffDayLocks/${companyId}_${staffId}_${dateKey}`;
 const deletion=Symbol('delete');
 function clone(v) {
-  if(v instanceof Timestamp || v===deletion)return v;
+  if(v instanceof Timestamp || v instanceof FieldValue || v===deletion)return v;
   if(Array.isArray(v))return v.map(clone);
   if(v && typeof v==='object')return Object.fromEntries(Object.entries(v).map(([k,x])=>[k,clone(x)]));
   assert.notEqual(v,undefined,'undefined field');return v;
@@ -21,7 +22,7 @@ function row(store,staff='',cancelled=false){
   const r=Array(55).fill('');Object.assign(r,{0:dateKey,1:staff,5:'F-only',9:'Synthetic client',10:store,11:'Synthetic maker',12:'Synthetic menu',14:'10:00-18:00',44:true,54:cancelled});return r;
 }
 // 実モジュール全体を接続する。許可したSDK境界以外のimportは即時拒否する。
-function harness(rows,clock){
+function harness(rows,clock,options={}){
   const records=new Map(),modules=new Map(),loaded=new Set();let serial=0;
   const h={rows,records,loaded,commits:[],beforeCommit:null,afterCommit:null,reads:0,failRead:false,secondTab:false,environment:'development'};
   const snap=ref=>({id:ref.id,exists:records.has(ref.path),data:()=>records.has(ref.path)?clone(records.get(ref.path)):undefined});
@@ -39,16 +40,21 @@ function harness(rows,clock){
   };
   const ref=(name,id=`generated-${++serial}`)=>({id,path:`${name}/${id}`,get:async function(){return snap(this);},set:async function(data,options){apply([{ref:this,data,merge:options?.merge}]);}});
   const collection=(name,filters=[])=>({add:async data=>{const r=ref(name);await r.set(data);return r;},doc:id=>ref(name,id),where:(field,op,value)=>{assert.equal(op,'==');return collection(name,[...filters,[field,value]]);},limit:()=>collection(name,filters),get:async()=>({docs:[...records].filter(([k,v])=>k.startsWith(name+'/')&&filters.every(([f,x])=>v[f]===x)).map(([k])=>snap(ref(name,k.slice(name.length+1))))})});
-  const db={collection,runTransaction:async callback=>{
-    const pending=[];const get=async r=>{assert.equal(pending.length,0,'transaction read after write');return snap(r);};
+  const memoryDB={collection,runTransaction:async callback=>{
+    for(let attempt=0;attempt<10;attempt++){
+    const observations=new Map(),pending=[];const get=async r=>{assert.equal(pending.length,0,'transaction read after write');observations.set(r.path,JSON.stringify(records.get(r.path)));return snap(r);};
     const result=await callback({create:(ref,data)=>pending.push({ref,data,create:true}),get,getAll:(...refs)=>Promise.all(refs.map(get)),set:(ref,data,options)=>pending.push({ref,data,merge:options?.merge}),update:(ref,data)=>pending.push({ref,data,merge:true,update:true}),delete:ref=>pending.push({ref,remove:true})});
-    await h.beforeCommit?.(pending);apply(pending);h.commits.push(pending);await h.afterCommit?.(pending);return result;
+    await h.beforeCommit?.(pending);
+    if(h.optimistic && [...observations].some(([key,value])=>JSON.stringify(records.get(key))!==value)){h.casRetries=(h.casRetries??0)+1;continue;}
+    apply(pending);h.commits.push(pending);await h.afterCommit?.(pending);return result;
+    }throw Error('synthetic CAS retry limit');
   }};
+  const db=options.firestore??memoryDB;
   const sheets={spreadsheets:{get:async input=>{assert.equal(input.spreadsheetId,sheetId);return {data:{sheets:[{properties:{sheetId:1,title:'2099.9',gridProperties:{rowCount:100,columnCount:55}}},{properties:{sheetId:2,title:'2099.10',hidden:!h.secondTab}}]}};},values:{get:async input=>{
     assert.equal(input.spreadsheetId,sheetId);assert.match(input.range,/^'2099\.(9|10)'!/);h.reads++;h.lastReadRange=input.range;
     if(h.failRead || (h.secondTab && input.range.startsWith("'2099.10'")))throw new Error('synthetic sheet read failure');const captured=clone(h.rows);await h.afterSheetRead?.();return {data:{values:[Array(55).fill('header'),...captured]}};
   }}}};
-  const boundaries={'./firebase':{db},'firebase-admin/firestore':{Timestamp,FieldValue:{delete:()=>deletion,serverTimestamp:()=>Timestamp.now()}},'firebase-functions/v2/https':{HttpsError,onCall:(...args)=>args.at(-1)},'firebase-functions/v2/scheduler':{onSchedule:(options,callback)=>callback},zod:dependency('zod'),'node:crypto':crypto,googleapis:{google:{auth:{GoogleAuth:class{constructor(options){assert.deepEqual(Array.from(options.scopes),['https://www.googleapis.com/auth/spreadsheets.readonly']);}}},sheets:()=>sheets}}};
+  const boundaries={'./firebase':{db},'firebase-admin/firestore':{Timestamp,FieldValue:options.firestore?FieldValue:{delete:()=>deletion,serverTimestamp:()=>Timestamp.now()}},'firebase-functions/v2/https':{HttpsError,onCall:(...args)=>args.at(-1)},'firebase-functions/v2/scheduler':{onSchedule:(options,callback)=>callback},zod:dependency('zod'),'node:crypto':crypto,googleapis:{google:{auth:{GoogleAuth:class{constructor(options){assert.deepEqual(Array.from(options.scopes),['https://www.googleapis.com/auth/spreadsheets.readonly']);}}},sheets:()=>sheets}}};
   function load(name){
     if(Object.hasOwn(boundaries,name))return boundaries[name];
     assert.match(name,/^\.\/[a-z0-9-]+$/,`External import refused: ${name}`);
@@ -62,10 +68,111 @@ function harness(rows,clock){
   records.set(`sheetImportConfigs/${companyId}`,{companyId,enabled:true,spreadsheetId:sheetId,headerRow:1,dataStartRow:2,readRangeEndColumn:'BC',columns:{workDate:'A',staffName:'B',temperature:'G',arrivalTime:'H',clientName:'J',storeName:'K',makerName:'L',menuName:'M',workTime:'O',cancelled:'BC'}});
   records.set(`staffProfiles/${staffId}`,{companyId,active:true,displayName:'Synthetic Staff'});
   const admin={uid:'synthetic-admin',token:{companyId,role:'admin'}},staff={uid:'synthetic-user',token:{companyId,role:'staff',staffId}};
+  h.managedCancel=jobId=>load('./analytics').adminSetJobCancellation({auth:admin,data:{jobId,reasonCategory:'other',reasonNote:'Synthetic cancellation',financialTreatment:'neither'}});
+  h.restore=jobId=>load('./analytics').adminRestoreCancelledJob({auth:admin,data:{jobId,note:'Synthetic restore'}});
+  h.checkCancellationSource=(old,incoming,readStartedAtMs)=>load('./sheet-write-core').importedCancellationSourceAck(old,incoming,readStartedAtMs);
+  h.load=load;
   return Object.assign(h,{edit:(jobId,fields,revision=records.get("jobs/"+jobId).revision??0)=>load("./job-management").adminEditJobInputs({auth:admin,data:{jobId,fields,revision}}),tasks:()=>load("./task-core").deriveStaffTasks({jobs:[...records].filter(([key])=>key.startsWith("jobs/")).map(([key,value])=>({id:key.split("/")[1],...value})),resubmissions:[],nowMs:Date.parse("2099-09-19T00:00:00Z")}),precontact:(jobId,values={temperature:36.5,arrivalTime:'09:30'},auth=staff)=>precontact.submitPreContact({auth,data:{jobId,...values}}),scheduled:()=>importer.syncShiftSheetsScheduled(),sync:()=>importer.syncShiftSheetsReadOnly({auth:admin,data:{}}),preview:(data={})=>importer.previewShiftImport({auth:admin,data}),apply:(jobId,requestId='request-0001',auth=staff)=>jobs.applyToJob({auth,data:{jobId,requestId}}),cancel:jobId=>jobs.adminCancelJob({auth:admin,data:{jobId,reason:'Synthetic cancellation'}}),list:name=>[...records].filter(([k])=>k.startsWith(name+'/')).map(([k,v])=>({id:k.slice(name.length+1),...v}))});
 }
 const results=[];
-async function test(name,callback){try{await callback();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.message});}}
+const runningAsMain=import.meta.url===pathToFileURL(path.resolve(process.argv[1]??'')).href;
+const selectedMatch=process.argv.find(arg=>arg.startsWith('--match='))?.slice(8);
+async function test(name,callback){if(!runningAsMain||(selectedMatch&&!new RegExp(selectedMatch).test(name)))return;try{await callback();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.message});}}
+
+await test('cancellation source acknowledgement holds day lock before original row confirmation',async()=>{
+ const h=harness([row('Cancel source','Synthetic Staff'),row('Alternative')]);await h.sync();
+ const job=h.list('jobs')[0];await h.cancel(job.id);
+ assert.equal(h.records.get('jobs/'+job.id).status,'cancelled');
+ assert.equal(h.records.get(lockPath).active,true,'original row is not yet cancelled/blank; retain date occupancy');
+});
+
+const afterCancellation=()=>new Promise(resolve=>setTimeout(resolve,3));
+for(const route of ['cancel','managedCancel']){
+ await test('cancellation source acknowledgement '+route+' replay and pending edit/restore refusal',async()=>{
+  const h=harness([row('Pending '+route,'Synthetic Staff')]);await h.sync();const job=h.list('jobs')[0];await h[route](job.id);
+  assert.equal(h.records.get(lockPath).active,true);assert.equal(h.records.get('jobs/'+job.id).cancellationSheetWrite.sourceAckPending,true);
+  const before=JSON.stringify([...h.records]);await h[route](job.id);assert.equal(JSON.stringify([...h.records]),before,'exact cancellation replay must not replace intent/notice');
+  await assert.rejects(h.edit(job.id,{assignedStaffId:null}),{code:'failed-precondition'});
+  await assert.rejects(h.restore(job.id),{code:'failed-precondition'});assert.equal(JSON.stringify([...h.records]),before);
+ });
+ await test('cancellation source acknowledgement '+route+' blank/cancel import releases once and permits another job',async()=>{
+  const h=harness([row('Confirmed '+route,'Synthetic Staff'),row('Other')]);h.optimistic=true;await h.sync();const [job,other]=h.list('jobs');await h[route](job.id);
+  await assert.rejects(h.apply(other.id,'before-source-ack'),{code:'failed-precondition'});
+  h.rows[0][1]='';h.rows[0][54]=true;await afterCancellation();await h.sync();
+  const current=h.records.get('jobs/'+job.id);assert.equal(current.status,'cancelled');assert.equal(current.publishable,false);assert.equal(current.assignedStaffName,'Synthetic Staff');assert.equal(current.assignedStaffId,staffId);assert.equal(current.rawStaffName,'');assert.ok(current.cancellationReason?.includes('Synthetic cancellation'),'unmapped source reason must not erase the cancellation intent');
+  assert.equal(current.cancellationSheetWrite.sourceAckPending,false);assert.equal(current.cancellationSheetWrite.sourceAckProof.staffId,staffId);
+  assert.equal(h.records.get(lockPath).active,false);await h.apply(other.id,'after-source-ack');
+  await assert.rejects(h.apply(job.id,'cancelled-job'),error=>['already-exists','failed-precondition'].includes(error.code));await h[route](job.id);
+  assert.equal(h.records.get(lockPath).jobId,other.id);assert.equal(h.records.get(lockPath).active,true);
+  h.rows[0][54]=false;await assert.rejects(h.sync(),{code:'failed-precondition'});
+  assert.equal(h.records.get('jobs/'+job.id).status,'cancelled','blank row must not reopen cancellation');
+ });
+}
+for(const [name,staff,cancelled] of [['name-remains','Synthetic Staff',true],['not-cancelled','',false],['text-marker','(キャンセル)',true]]){
+ await test('cancellation source acknowledgement refuses '+name,async()=>{
+  const h=harness([row('Invalid '+name,'Synthetic Staff')]);await h.sync();const job=h.list('jobs')[0];await h.cancel(job.id);
+  h.rows[0][1]=staff;h.rows[0][54]=cancelled;await afterCancellation();
+  const before=JSON.stringify([h.records.get('jobs/'+job.id),h.records.get(lockPath)]);
+  await assert.rejects(h.sync(),{code:'failed-precondition'});assert.equal(JSON.stringify([h.records.get('jobs/'+job.id),h.records.get(lockPath)]),before);
+ });
+}
+await test('cancellation source acknowledgement refuses a source read started before cancellation',async()=>{
+ const h=harness([row('Read race','Synthetic Staff')]);await h.sync();const job=h.list('jobs')[0];h.rows[0][1]='';h.rows[0][54]=true;
+ h.afterSheetRead=async()=>{h.afterSheetRead=null;await afterCancellation();await h.cancel(job.id);};
+ await assert.rejects(h.sync(),{code:'failed-precondition'});assert.equal(h.records.get(lockPath).active,true);
+ await afterCancellation();await h.sync();assert.equal(h.records.get(lockPath).active,false);
+});
+await test('cancellation source acknowledgement CAS refuses a changed lock owner without any job write',async()=>{
+ const h=harness([row('Ownership race','Synthetic Staff')]);h.optimistic=true;await h.sync();const job=h.list('jobs')[0];await h.cancel(job.id);
+ h.rows[0][1]='';h.rows[0][54]=true;await afterCancellation();const before=JSON.stringify(h.records.get('jobs/'+job.id));
+ h.beforeCommit=pending=>{if(pending.some(p=>p.ref.path===lockPath&&p.data?.active===false)){h.beforeCommit=null;h.records.set(lockPath,{...h.records.get(lockPath),jobId:'new-owner'});}};
+ await assert.rejects(h.sync(),{code:'failed-precondition'});assert.ok(h.casRetries>=1);
+ assert.equal(JSON.stringify(h.records.get('jobs/'+job.id)),before);assert.equal(h.records.get(lockPath).jobId,'new-owner');assert.equal(h.records.get(lockPath).active,true);
+});
+await test('cancellation source acknowledgement lost response replay preserves a new assignment and one winner',async()=>{
+ const h=harness([row('Response lost','Synthetic Staff'),row('Alternative A'),row('Alternative B')]);h.optimistic=true;await h.sync();const [job,a,b]=h.list('jobs');await h.cancel(job.id);
+ h.rows[0][1]='';h.rows[0][54]=true;await afterCancellation();
+ h.afterCommit=pending=>{if(pending.some(p=>p.ref.path===lockPath&&p.data?.active===false)){h.afterCommit=null;throw Error('synthetic lost response');}};
+ await assert.rejects(h.sync());assert.equal(h.records.get(lockPath).active,false);assert.equal(h.records.get('jobs/'+job.id).cancellationSheetWrite.sourceAckPending,false);
+ const results=await Promise.allSettled([h.apply(a.id,'parallel-a'),h.apply(b.id,'parallel-b')]);assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+ const owner=h.records.get(lockPath).jobId;await h.cancel(job.id);assert.equal(h.records.get(lockPath).jobId,owner);assert.equal(h.records.get(lockPath).active,true);assert.ok(h.casRetries>=1);
+});
+
+for(const change of ['company','case','date','source','sheet','month','column','revision','version','identity','time-equal','time-before']){
+ await test('cancellation source acknowledgement rejects source binding '+change,async()=>{
+  const h=harness([row('Proof '+change,'Synthetic Staff')]);await h.sync();const job=h.list('jobs')[0];await h.cancel(job.id);
+  const current=h.records.get('jobs/'+job.id),incoming={...current,rawStaffName:'',cancelled:true,status:'cancelled',sheetRef:{...current.sheetRef}};
+  const old=clone(current);let at=old.cancellationSheetWrite.sourceAckRequestedAtMs+1;
+  if(change==='company')incoming.companyId='another-company';
+  if(change==='case')incoming.caseId='another-case';
+  if(change==='date')incoming.dateKey='2099-09-21';
+  if(change==='source')incoming.sheetRef.spreadsheetId='another-source';
+  if(change==='sheet')incoming.sheetRef.sheetId=2;
+  if(change==='month')incoming.sheetRef.sheetName='2099.10';
+  if(change==='column')incoming.sheetRef.caseIdColumn='BD';
+  if(change==='revision')old.revision++;
+  if(change==='version')old.cancellationSheetWrite.sourceAckVersion=2;
+  if(change==='identity')old.cancellationSheetWrite.identity='tampered';
+  if(change==='time-equal')at--;
+  if(change==='time-before')at-=2;
+  assert.throws(()=>h.checkCancellationSource(old,incoming,at));assert.equal(h.records.get(lockPath).active,true);
+ });
+}
+await test('cancellation source acknowledgement commit abort retains job, proof and occupancy together',async()=>{
+ const h=harness([row('Commit abort','Synthetic Staff')]);await h.sync();const job=h.list('jobs')[0];await h.cancel(job.id);
+ h.rows[0][1]='';h.rows[0][54]=true;await afterCancellation();const before=JSON.stringify([h.records.get('jobs/'+job.id),h.records.get(lockPath)]);
+ h.beforeCommit=pending=>{if(pending.some(p=>p.ref.path===lockPath&&p.data?.active===false))throw Error('synthetic abort');};
+ await assert.rejects(h.sync());assert.equal(JSON.stringify([h.records.get('jobs/'+job.id),h.records.get(lockPath)]),before);
+ h.beforeCommit=null;await h.sync();assert.equal(h.records.get(lockPath).active,false);
+});
+await test('cancellation source acknowledgement durable closure refuses unsafe correction and retains audit',async()=>{
+ const h=harness([row('Durable cancellation','Synthetic Staff')]);await h.sync();const job=h.list('jobs')[0];await h.cancel(job.id);
+ h.rows[0][1]='';h.rows[0][54]=true;await afterCancellation();await h.sync();
+ const proof=h.list('auditLogs').find(a=>a.action==='job.cancel.source.confirm');assert.ok(proof);assert.equal(proof.staffId,staffId);
+ const before=JSON.stringify(h.records.get('jobs/'+job.id));await assert.rejects(h.managedCancel(job.id),{code:'failed-precondition'});assert.equal(JSON.stringify(h.records.get('jobs/'+job.id)),before);assert.equal(h.records.get('jobs/'+job.id).sourceCancellationClosed,true);
+ await h.sync();h.rows[0][54]=false;await assert.rejects(h.sync(),{code:'failed-precondition'});
+ assert.equal(h.records.get('jobs/'+job.id).status,'cancelled');assert.equal(h.records.get('auditLogs/'+proof.id).staffId,staffId);
+});
 
 await test('full preview uses real admin scope and returns every row without business writes; legacy response stays bounded',async()=>{
  const h=harness(Array.from({length:26},(_,i)=>row('Preview '+i,i%2?'Synthetic Staff':'')));
@@ -99,8 +206,9 @@ await test('import -> apply -> stale sync -> confirm -> cancel -> stale sync -> 
   await assert.rejects(h.apply(other.id,'request-0002'),{code:'failed-precondition'});
   await assert.rejects(h.sync(),{code:'failed-precondition'});assert.equal(h.records.get(`jobs/${job.id}`).assignedStaffId,staffId);
   h.rows[0][1]='Synthetic Staff';await h.sync();assert.equal(h.records.get(`jobs/${job.id}`).applicationUnconfirmed,false);
-  await h.cancel(job.id);assert.equal(h.records.get(lockPath).active,false);await h.sync();
-  assert.equal(h.records.get(`jobs/${job.id}`).status,'cancelled','stale sheet must not undo app cancellation');assert.equal(h.records.get(`jobs/${job.id}`).publishable,false);assert.equal(h.records.get(lockPath).active,false);
+   await h.cancel(job.id);assert.equal(h.records.get(lockPath).active,true);await assert.rejects(h.sync(),{code:'failed-precondition'});
+   assert.equal(h.records.get(`jobs/${job.id}`).status,'cancelled','stale sheet must not undo app cancellation');assert.equal(h.records.get(`jobs/${job.id}`).publishable,false);assert.equal(h.records.get(lockPath).active,true);
+   h.rows[0][1]='';h.rows[0][54]=true;await afterCancellation();await h.sync();assert.equal(h.records.get(lockPath).active,false);
   await h.apply(other.id,'request-0003');await h.cancel(job.id);assert.equal(h.records.get(lockPath).jobId,other.id);assert.equal(h.records.get(lockPath).active,true);
   h.rows[0][54]=true;h.rows[1][1]='Synthetic Staff';await h.sync();assert.equal(h.records.get(`jobs/${job.id}`).appOverride,undefined);assert.equal(h.records.get(lockPath).jobId,other.id);assert.equal(h.records.get(lockPath).active,true);
   for(const name of ['./shift-import','./sheet-reader','./shift-parser','./case-id','./jobs','./utils','./notification-core','./notification-time','./system-safety'])assert.ok(h.loaded.has(name));
@@ -341,5 +449,9 @@ await test('unchanged source and row movement preserve admin confirmation',async
 await test('source acceptance preserves independent admin receipt review',async()=>{const h=harness([row('Pending review')]);await h.sync();const id=h.list('jobs')[0].id;await h.apply(id);seedAdminConfirmation(h,id);h.rows[0][1]='Synthetic Staff';await h.sync();const current=h.records.get('jobs/'+id);assert.equal(current.applicationAdminConfirmed,true);assert.equal(current.applicationUnconfirmed,false);});
 
 await test('application advances revision once and duplicate receipt preserves it',async()=>{const h=harness([row('Revision')]);await h.sync();const id=h.list('jobs')[0].id;assert.equal(h.records.get('jobs/'+id).revision,0);await h.apply(id);assert.equal(h.records.get('jobs/'+id).revision,1);await h.apply(id);assert.equal(h.records.get('jobs/'+id).revision,1);});
-console.log(JSON.stringify({passed:results.filter(r=>r.ok).length,results,boundary:'Full TypeScript modules; in-memory DB and Google API; network-capable application imports refused. No emulator, token validation, SDK concurrency or actual delivery.'},null,2));
-if(results.some(r=>!r.ok))process.exitCode=1;
+if(runningAsMain){
+ console.log(JSON.stringify({passed:results.filter(r=>r.ok).length,results,boundary:'Full TypeScript modules; in-memory DB and Google API; network-capable application imports refused. No emulator, token validation, SDK concurrency or actual delivery.'},null,2));
+ if(selectedMatch&&results.length===0)throw Error('No scenarios matched the requested selection');
+ if(results.some(r=>!r.ok))process.exitCode=1;
+}
+export {harness as shiftFixture,row,clone,companyId,staffId,sheetId,dateKey,lockPath};

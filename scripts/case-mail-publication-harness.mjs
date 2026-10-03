@@ -17,7 +17,7 @@ export async function setup(imported=true,beforeCreate=null){
   const state=h.load("./admin-edit-state-core"),exports={};
   runInNewContext(importCode,{exports,db:h.load("./firebase").db,HttpsError:h.load("firebase-functions/v2/https").HttpsError,
     Timestamp,FieldValue:h.load("firebase-admin/firestore").FieldValue,
-    ...state,...h.load("./netprint-state-core"),...h.load("./assignment-preparation-core"),...h.load("./case-mail-publication-core"),
+    ...state,...h.load("./sheet-write-core"),...h.load("./cancellation-history-retention-core"),...h.load("./netprint-state-core"),...h.load("./assignment-preparation-core"),...h.load("./case-mail-publication-core"),
     normalizeName:value=>value.normalize("NFKC").replace(/[\s　]+/g,"").trim()});
   const leaseRef=h.load("./firebase").db.collection("syncLocks").doc("synthetic-lease");
   h.records.set(leaseRef.path,{companyId,token:"test-lease",leaseUntil:Timestamp.fromMillis(Date.now()+600000)});

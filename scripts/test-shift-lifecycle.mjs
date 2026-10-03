@@ -227,8 +227,12 @@ await test('application confirmation restores precontact through the actual sour
   assert.equal(h.list('sheetSyncQueue').filter(q=>q.operation==='precontact.submit').length,1);
   await h.precontact(job.id);assert.equal(h.list('sheetSyncQueue').filter(q=>q.operation==='precontact.submit').length,1);
 });
-await test('cancel unconfirmed application then resync blank B',async()=>{
-  const h=harness([row('Pending')]);await h.sync();const job=h.list('jobs')[0];await h.apply(job.id);await h.cancel(job.id);await h.sync();assert.equal(h.records.get(`jobs/${job.id}`).status,'cancelled');assert.equal(h.records.get(lockPath).active,false);
+await test('cancel unconfirmed application holds lock without fresh source cancellation proof',async()=>{
+  const h=harness([row('Pending')]);await h.sync();const job=h.list('jobs')[0];await h.apply(job.id);await h.cancel(job.id);
+  await assert.rejects(h.sync(),{code:'failed-precondition'});
+  const saved=h.records.get(`jobs/${job.id}`);
+  assert.equal(saved.status,'cancelled');assert.equal(saved.assignedStaffId,staffId);
+  assert.equal(saved.cancellationSheetWrite.sourceAckPending,true);assert.equal(h.records.get(lockPath).active,true);
 });
 await test('second chunk failure records error, keeps first 25 jobs and retries',async()=>{
   const h=harness(Array.from({length:30},(_,i)=>row(`Store ${i}`)));let chunks=0;h.beforeCommit=p=>{if(p.some(x=>x.ref.path.startsWith('jobs/'))&&++chunks===2)throw new Error('synthetic second chunk failure');};await assert.rejects(h.sync(),{code:'internal'});assert.equal(h.list('jobs').length,25);assert.equal(h.list('sheetImportRuns')[0].status,'error');assert.equal(h.list('syncLocks').length,0);h.beforeCommit=null;await h.sync();assert.equal(h.list('jobs').length,30);

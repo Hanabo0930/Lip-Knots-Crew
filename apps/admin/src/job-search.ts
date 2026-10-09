@@ -1,8 +1,14 @@
-export type JobListFilter = "all" | "precontact" | "assigned" | "cancelled" | "report-completed" | "report-unconfirmed";
+export type JobListFilter = "all" | "unassigned" | "precontact" | "assigned" | "cancelled" | "report-completed" | "report-unconfirmed";
 type SearchableJob = {
   workDate:string; dateKey?:string; assignedStaffName?:string; storeName:string;
   makerName:string; clientName:string; status:string; cancelled?:boolean; preContact?:unknown; applicationUnconfirmed?:boolean; sourceMissing?:boolean; assignmentUnresolved?:boolean; submissionStatus?:{report?:{completed?:boolean;deadlineReviewRequired?:boolean}};
 };
+export function isCancelledJob(job:Pick<SearchableJob,"status"|"cancelled">):boolean{
+  return job.status==="cancelled"||job.cancelled===true;
+}
+export function isUnassignedJob(job:SearchableJob):boolean{
+  return job.status==="open"&&!isCancelledJob(job)&&job.sourceMissing!==true&&job.assignmentUnresolved!==true;
+}
 export function reportCompletion(job:SearchableJob):"completed"|"unconfirmed"|"excluded"{
   if(job.status!=="assigned"||job.cancelled===true)return "excluded";
   return job.submissionStatus?.report?.completed===true?"completed":"unconfirmed";
@@ -13,7 +19,7 @@ export function reportCompletionLabel(job:SearchableJob){
   return state==="completed"?"完了記録あり":state==="unconfirmed"?"完了未確認":"対象外";
 }
 export function jobReadinessLabel(job:SearchableJob):string{
-  if(job.cancelled===true||job.status==="cancelled")return "キャンセル";
+  if(isCancelledJob(job))return "キャンセル";
   if(job.sourceMissing===true)return "取込元の案件を確認中";
   if(job.assignmentUnresolved===true)return "担当者の照合待ち";
   if(job.status==="assigned")return job.applicationUnconfirmed===true?"原本の担当確認待ち":job.preContact?"事前連絡あり":"事前連絡待ち";
@@ -27,7 +33,8 @@ export function buildJobSearchIndex<T extends SearchableJob>(jobs:T[]){
 export function filterJobSearchIndex<T extends SearchableJob>(index:ReturnType<typeof buildJobSearchIndex<T>>,query:string,filter:JobListFilter){
   const terms=normalize(query).trim().split(/\s+/u).filter(Boolean);
   return index.filter(({job,text})=>{
-    const cancelled=job.status==="cancelled"||job.cancelled===true;
+    const cancelled=isCancelledJob(job);
+    if(filter==="unassigned"&&!isUnassignedJob(job))return false;
     if(filter==="cancelled"&&!cancelled)return false;
     if((filter==="assigned"||filter==="precontact")&&(cancelled||job.status!=="assigned"))return false;
     if(filter==="precontact"&&job.preContact)return false;

@@ -17,7 +17,7 @@ import { auth, firebaseApp, firebaseConfigured, functions } from "./firebase";
 import { expectedFirebaseProjectId } from "./firebase-config";
 import type { ProductionEvidenceView } from "./ProductionAcceptanceRollbackConsole";
 
-import { reportCompletionLabel, jobReadinessLabel, buildStaffSearchIndex, filterStaffSearchIndex, buildJobSearchIndex, filterJobSearchIndex, jobListPage, type JobListFilter } from "./job-search";
+import { isCancelledJob, reportCompletionLabel, jobReadinessLabel, buildStaffSearchIndex, filterStaffSearchIndex, buildJobSearchIndex, filterJobSearchIndex, jobListPage, type JobListFilter } from "./job-search";
 
 import type { QueryDocumentSnapshot } from "firebase/firestore";
 
@@ -1004,7 +1004,7 @@ export default function App() {
   const [dashboardError,setDashboardError]=useState("");
   const dashboardVersionRef=useRef(0),dashboardMonthRef=useRef(dashboardMonth);dashboardMonthRef.current=dashboardMonth;
   useEffect(()=>{if(!firebaseConfigured)void loadDashboard();},[jobs,dashboardMonth]);
-  const [cancellationJobId, setCancellationJobId] = useState(demoJobs.find((job)=>job.status!=="cancelled")?.id ?? "");
+  const [cancellationJobId, setCancellationJobId] = useState(demoJobs.find((job)=>!isCancelledJob(job))?.id ?? "");
   const [cancellationReasonCategory, setCancellationReasonCategory] = useState("maker");
   const [cancellationTreatment, setCancellationTreatment] = useState("invoice_and_pay");
   const [cancellationNote, setCancellationNote] = useState("");
@@ -3389,7 +3389,7 @@ function downloadCsv(filename:string,content:string) {
     );
   }
 
-  const unresolved = jobs.filter((job) => job.status === "assigned" && !job.preContact).length;
+  const unresolved = filterJobSearchIndex(jobSearchIndex,"","precontact").length;
   const monthly = dashboard;
   const pendingResubmissions=resubmissions.filter((request)=>!["completed","closed","resolved"].includes(request.status)).length;
   const actionableSheetIssues=sheetIssues.filter((issue)=>!["completed","resolved"].includes(issue.status)).length;
@@ -3925,7 +3925,7 @@ function downloadCsv(filename:string,content:string) {
             <thead><tr><th>日付</th><th>スタッフ</th><th>店舗・メーカー</th><th>状態</th><th>報告書</th><th>公開</th><th>操作</th></tr></thead>
             <tbody>
               {jobPageView.rows.map((job) => (
-                <tr key={job.id} className={job.status === "cancelled" ? "cancelled" : ""}>
+                <tr key={job.id} className={isCancelledJob(job) ? "cancelled" : ""}>
                   <td>{job.workDate}</td>
                   <td>{job.assignedStaffName ?? "募集中"}</td>
                   <td><strong className="job-store-name">{job.storeName}</strong><small className="job-maker-name">{job.makerName}</small></td>
@@ -3937,7 +3937,7 @@ function downloadCsv(filename:string,content:string) {
                     <button className="ghost compact" disabled={resubmissionBusy} onClick={()=>openReportReview(job)}>報告書を確認</button>
                     <details className="job-more-actions"><summary>その他の操作</summary><div>
                     <button className="ghost compact" onClick={()=>duplicateJob(job)}>複製</button>
-                    {job.status!=="cancelled" && !job.assignedStaffId && (
+                    {!isCancelledJob(job) && !job.assignedStaffId && (
                       job.publishable
                         ? <button className="ghost compact" onClick={()=>changePublication(job,"stop")}>募集停止</button>
                         : <button className="ghost compact" onClick={()=>changePublication(job,"publish")}>{job.mailIntake?"募集内容を確認":"募集開始"}</button>
@@ -3946,7 +3946,7 @@ function downloadCsv(filename:string,content:string) {
                     {job.applicationAdminConfirmed && !job.cancelled && job.status==="assigned" && <span className="mini-tag">管理者確認済み</span>}
                     <button className="ghost compact" onClick={()=>loadExpenseReview(job.id,true)}>経費</button>
                     <button className="ghost compact" onClick={()=>openJobSheet(job)}>スプシ</button>
-                    {job.status === "cancelled" ? (
+                    {isCancelledJob(job) ? (
                       <button className="ghost compact" onClick={() => restoreCancellation(job)} disabled={cancellationBusy}>復帰</button>
                     ) : (
                       <button className="danger compact" onClick={() => prepareCancellation(job)}>取消</button>
@@ -3983,12 +3983,12 @@ function downloadCsv(filename:string,content:string) {
             <h2>案件キャンセル管理</h2>
             <p>行を削除せず、理由・請求・スタッフ支払の扱いを残します。解除時は同日重複を再確認します。</p>
           </div>
-          <span className="mini-tag">キャンセル {jobs.filter((job)=>job.status==="cancelled").length}件</span>
+          <span className="mini-tag">キャンセル {jobs.filter(isCancelledJob).length}件</span>
         </div>
         <div className="cancellation-grid">
           <label>対象案件
             <select value={cancellationJobId} onChange={(event)=>setCancellationJobId(event.target.value)}>
-              {jobs.filter((job)=>job.status!=="cancelled").map((job)=><option value={job.id} key={job.id}>{job.workDate} {job.storeName} {job.assignedStaffName ?? "募集中"}</option>)}
+              {jobs.filter((job)=>!isCancelledJob(job)).map((job)=><option value={job.id} key={job.id}>{job.workDate} {job.storeName} {job.assignedStaffName ?? "募集中"}</option>)}
             </select>
           </label>
           <label>キャンセル理由
@@ -4017,9 +4017,9 @@ function downloadCsv(filename:string,content:string) {
         <div className="sync-actions">
           <button className="danger" onClick={submitCancellation} disabled={cancellationBusy || !cancellationJobId}>キャンセルとして記録</button>
         </div>
-        {!!jobs.filter((job)=>job.status==="cancelled").length && (
+        {!!jobs.filter(isCancelledJob).length && (
           <div className="cancelled-list">
-            {jobs.filter((job)=>job.status==="cancelled").map((job)=><article key={job.id}>
+            {jobs.filter(isCancelledJob).map((job)=><article key={job.id}>
               <div><strong>{job.workDate} {job.storeName}</strong><small>{job.cancellationReason || "キャンセル"} / {job.assignedStaffName || "未手配"}</small></div>
               <button className="ghost compact" onClick={()=>restoreCancellation(job)} disabled={cancellationBusy}>キャンセル解除</button>
             </article>)}

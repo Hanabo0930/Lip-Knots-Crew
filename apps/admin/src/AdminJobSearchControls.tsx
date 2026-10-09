@@ -3,7 +3,7 @@ export default function AdminJobSearchControls({queryText,jobListFilter,total,co
         <div className="toolbar">
           <input value={queryText} aria-label="案件を検索" onChange={(event) => {onQuery(event.target.value);}} placeholder="スタッフ名・店舗・メーカー・クライアントを検索" />
           <select aria-label="案件の絞り込み" value={jobListFilter} onChange={event=>{onFilter(event.target.value as JobListFilter);}}>
-            <option value="all">すべて</option><option value="precontact">事前連絡待ち</option><option value="assigned">担当確定</option><option value="cancelled">キャンセル</option><option value="report-completed">報告書：完了記録あり</option><option value="report-unconfirmed">報告書：完了未確認</option>
+            <option value="all">すべて</option><option value="unassigned">未手配</option><option value="precontact">事前連絡待ち</option><option value="assigned">担当確定</option><option value="cancelled">キャンセル</option><option value="report-completed">報告書：完了記録あり</option><option value="report-unconfirmed">報告書：完了未確認</option>
           </select>
           <button className="ghost" onClick={()=>{onClear();}}>条件をクリア</button>
         </div>

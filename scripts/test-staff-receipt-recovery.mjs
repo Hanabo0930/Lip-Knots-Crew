@@ -217,7 +217,7 @@ try{
   const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>document.documentElement.clientWidth+1);
   assert.equal(overflow,false,"Small-screen recovery must not scroll horizontally");
   await page.evaluate(()=>window.renderRecovery({disabled:true,submissions:[{id:"receipt-2",purpose:"replacement",status:"paused_global",createdAt:null,files:[{}]}]}));
-  await button.waitFor();assert.equal(await button.isDisabled(),true);assert.equal(await select.isDisabled(),true);
+  await page.waitForFunction(()=>document.querySelector("button")?.disabled===true&&document.querySelector("select")?.disabled===true);assert.equal(await button.isDisabled(),true);assert.equal(await select.isDisabled(),true);
   await page.evaluate(()=>window.renderRecovery({disabled:false,submissions:[{id:"receipt-2",purpose:"initial",status:"constructor",createdAt:"invalid",files:[]}]}));
   await page.waitForFunction(()=>document.querySelector("select option").textContent.includes("状態確認中"));
   assert.equal(await button.isDisabled(),true);assert.equal(errors.length,0);

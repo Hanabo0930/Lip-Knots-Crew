@@ -8,6 +8,7 @@ import {readFileSync,mkdirSync,writeFileSync} from "node:fs";
 import {resolve} from "node:path";
 import {runInNewContext} from "node:vm";
 import ts from "typescript";
+import {verifyAdminPrecontactCounter} from './admin-precontact-counter-regression.mjs';
 const source=readFileSync("apps/admin/src/App.tsx","utf8").replace(/\r\n/g,"\n");
 const start=source.indexOf('  // 運用情報は画面を開いたときだけ取得');
 const end=source.indexOf('  // 提出履歴は案件・種類・認証ごとに応答を分離する。',start);
@@ -37,6 +38,7 @@ console.log('Admin workspace logic passed: 11 deferred loaders, global control r
 const searchScope={exports:{}};
 runInNewContext(ts.transpileModule(readFileSync('apps/admin/src/job-search.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,searchScope);
 const {buildJobSearchIndex,filterJobSearchIndex,jobListPage}=searchScope.exports;
+verifyAdminPrecontactCounter(source,{buildJobSearchIndex,filterJobSearchIndex});
 const synthetic=Array.from({length:10000},(_,id)=>({id,workDate:'2026-09-05',storeName:'店舗 ＡＢＣ',makerName:'メーカー',clientName:'取引先',assignedStaffName:`担当${id}`,status:id%5===0?'cancelled':'assigned',preContact:id%2?{}:undefined}));
 const index=buildJobSearchIndex(synthetic);
 assert.equal(filterJobSearchIndex(index,' abc　２０２６-０９ ','all').length,10000);

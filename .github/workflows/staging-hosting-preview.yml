@@ -11,7 +11,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: lkc-staging-hosting-preview
+  group: >-
+    ${{ (github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.head_branch == 'main') &&
+        'lkc-staging-hosting-preview' ||
+        format('lkc-staging-hosting-preview-ignored-{0}', github.run_id) }}
   cancel-in-progress: true
 
 env:

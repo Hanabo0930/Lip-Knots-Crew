@@ -32,7 +32,14 @@ permissions:
   id-token: write
 
 concurrency:
-  group: lkc-staging-hosting-promote
+  group: >-
+    ${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+         (github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'workflow_run' &&
+          github.event.workflow_run.head_branch == 'main')) &&
+        'lkc-staging-hosting-promote' ||
+        format('lkc-staging-hosting-promote-ignored-{0}', github.run_id) }}
   cancel-in-progress: false
 
 env:

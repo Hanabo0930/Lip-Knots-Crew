@@ -417,7 +417,56 @@ const {parse} = require("yaml");
 const promoteSpec=parse(promoteWorkflow), previewSpec=parse(previewWorkflow);
 assert.deepEqual(promoteSpec.on.workflow_dispatch.inputs.operation.options,["promote","readiness","restore"]);
 assert.equal(promoteSpec.jobs.promote.environment,"lkc-staging-hosting");
-assert.equal(promoteSpec.concurrency.group,"lkc-staging-hosting-promote");
+// Eligible runs retain the shared queue; skipped events must not compete for it.
+function hostingQueueContext({id="100", event="workflow_run", upstream="push", conclusion="success",
+  branch="main", ref="refs/heads/main", operation="promote"}={}) {
+  return {event_name:event, ref, run_id:id,
+    event:{workflow_run:{event:upstream, conclusion, head_branch:branch}, inputs:{operation}}};
+}
+const hostingGroups={};
+for (const [spec, kind] of [[previewSpec, "preview"], [promoteSpec, "promote"]]) {
+  const compact = value => String(value).replace(/'(?:[^']|'')*'|\s+/gu,
+    part => part.startsWith("'") ? part : "");
+  const shared = `lkc-staging-hosting-${kind}`;
+  const expected = "${{ (" + compact(spec.jobs.guard.if) + ") && '" + shared +
+    "' || format('" + shared + "-ignored-{0}', github.run_id) }}";
+  assert.equal(compact(spec.concurrency.group), compact(expected),
+    `${kind}: concurrency eligibility must match the unchanged job guard`);
+  assert.equal(spec.concurrency["cancel-in-progress"], kind === "preview");
+  cases += 1;
+  // After the exact guard/group contract above, evaluate this small common
+  // expression subset against canonical API event strings, without cloud access.
+  const expression=String(spec.concurrency.group).trim().slice(3,-2);
+  const evaluate=Function("github", "format", "return ("+expression+");");
+  const select=context=>evaluate(context,(pattern,id)=>pattern.replace("{0}",id));
+  hostingGroups[kind]=select;
+  const upstream=kind==="preview"?"push":"workflow_run";
+  const samples=[
+    [hostingQueueContext({upstream}),true],
+    [hostingQueueContext({upstream,branch:"feature"}),false],
+    [hostingQueueContext({upstream:"pull_request"}),false],
+    [hostingQueueContext({upstream,conclusion:null}),false],
+    ...["failure","cancelled","skipped"].map(conclusion=>[hostingQueueContext({upstream,conclusion}),false]),
+    [hostingQueueContext({event:"workflow_dispatch",ref:"refs/heads/feature",upstream:""}),false],
+  ];
+  if(kind==="promote") {
+    for(const operation of ["promote","readiness","restore"])
+      samples.push([hostingQueueContext({event:"workflow_dispatch",upstream:"",operation}),true]);
+  } else {
+    samples.push([hostingQueueContext({upstream:"workflow_dispatch"}),false]);
+  }
+  for(const [context,eligible] of samples) {
+    assert.equal(select(context),eligible?shared:shared+"-ignored-"+context.run_id);
+    cases+=1;
+  }
+  assert.notEqual(select(hostingQueueContext({id:"ignored-1",conclusion:"skipped"})),
+    select(hostingQueueContext({id:"ignored-2",conclusion:"skipped"})));
+  cases+=1;
+}
+assert.equal(hostingGroups.promote(hostingQueueContext({upstream:"workflow_run"})),
+  hostingGroups.promote(hostingQueueContext({event:"workflow_dispatch",upstream:"",operation:"restore"})),
+  "Automatic promotion and manual restore must retain the same serialized group");
+cases+=1;
 assert.equal(promoteSpec.concurrency["cancel-in-progress"],false);
 assert.equal(promoteSpec.env.LKC_PROJECT_ID,projectId);
 assert.equal(promoteSpec.env.LKC_REGION,"asia-northeast1");

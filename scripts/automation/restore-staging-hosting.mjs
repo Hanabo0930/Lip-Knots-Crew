@@ -207,7 +207,7 @@ const confirmations = Object.freeze({
   restore: "RESTORE_LKC_STAGING_HOSTING",
 });
 function requireValue(condition, code) { if (!condition) throw new Error(code); }
-function requireProtectedContext() {
+export function requireProtectedContext() {
   requireValue(process.env.GITHUB_ACTIONS === "true" && process.env.GITHUB_REPOSITORY === allowedRepository
     && process.env.GITHUB_REF === "refs/heads/main" && process.env.GITHUB_JOB === "promote"
     && process.env.GITHUB_WORKFLOW_REF === allowedRepository + "/" + workflowPath + "@refs/heads/main", "PROTECTED_WORKFLOW_CONTEXT_REQUIRED");

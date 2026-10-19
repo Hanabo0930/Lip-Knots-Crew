@@ -146,10 +146,21 @@ class ReadinessTests(unittest.TestCase):
         self.assertNotEqual(next_step, -1)
         step = workflow[check:next_step]
         self.assertNotIn("continue-on-error", step)
-        # Promote and readiness require deployed-source verification. Restore
-        # uses the separately tested immutable successful-promotion evidence.
+        # Ordinary promote/readiness require deployed-source verification;
+        # metadata-only collects observations without source reads or promotion.
+        # Restore uses immutable successful-promotion evidence instead.
         conditions = [line.strip() for line in step.splitlines() if line.strip().startswith("if:")]
-        self.assertEqual(conditions, ["if: env.LKC_OPERATION != 'restore'"])
+        self.assertEqual(conditions, ["if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true'"])
+        # Evaluate only the exact two != clauses above, without eval.
+        clauses = [term.split(" != ") for term in conditions[0].removeprefix("if: ").split(" && ")]
+        for operation, metadata_only, expected in (
+            ("readiness", "false", True), ("promote", "false", True), ("restore", "false", False),
+            ("readiness", "true", False), ("promote", "true", False), ("restore", "true", False),
+        ):
+            with self.subTest(operation=operation, metadata_only=metadata_only):
+                env = {"env.LKC_OPERATION": operation, "env.LKC_METADATA_ONLY": metadata_only}
+                gate_runs = all(env[field] != literal.strip("'") for field, literal in clauses)
+                self.assertEqual(gate_runs, expected)
         self.assertIn('npm run build -w @lkc/functions', step)
         self.assertIn('--source-sha "$LKC_SOURCE_SHA"', step)
         for name in ("Back up both current live channels", "Promote the already-tested versions"):

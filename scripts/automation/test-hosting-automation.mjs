@@ -169,7 +169,7 @@ assert.match(
 );
 assert.match(
   promoteWorkflow,
-  /- name: Verify both live staging apps after rollback[\s\S]*?if: always\(\) && steps\.rollback\.outputs\.attempted == 'true'/u,
+  /- name: Verify both live staging apps after rollback[\s\S]*?if: always\(\) && env\.LKC_METADATA_ONLY != 'true' && steps\.rollback\.outputs\.attempted == 'true'/u,
 );
 const safeStopIndex = promoteWorkflow.indexOf(
   'if [[ "${{ steps.promotion.outcome }}" == "skipped" ]]',
@@ -419,8 +419,9 @@ assert.deepEqual(promoteSpec.on.workflow_dispatch.inputs.operation.options,["pro
 assert.equal(promoteSpec.jobs.promote.environment,"lkc-staging-hosting");
 // Eligible runs retain the shared queue; skipped events must not compete for it.
 function hostingQueueContext({id="100", event="workflow_run", upstream="push", conclusion="success",
-  branch="main", ref="refs/heads/main", operation="promote"}={}) {
+  branch="main", ref="refs/heads/main", operation="promote", metadataOnly=false}={}) {
   return {event_name:event, ref, run_id:id,
+    inputs:{operation,metadata_only:metadataOnly},
     event:{workflow_run:{event:upstream, conclusion, head_branch:branch}, inputs:{operation}}};
 }
 const hostingGroups={};
@@ -428,7 +429,10 @@ for (const [spec, kind] of [[previewSpec, "preview"], [promoteSpec, "promote"]])
   const compact = value => String(value).replace(/'(?:[^']|'')*'|\s+/gu,
     part => part.startsWith("'") ? part : "");
   const shared = `lkc-staging-hosting-${kind}`;
-  const expected = "${{ (" + compact(spec.jobs.guard.if) + ") && '" + shared +
+  const metadataPrefix = kind === "promote" ?
+    "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && " +
+    "inputs.operation == 'readiness' && inputs.metadata_only == true) && 'lkc-staging-hosting-metadata-readiness' || " : "";
+  const expected = "${{ " + metadataPrefix + "(" + compact(spec.jobs.guard.if) + ") && '" + shared +
     "' || format('" + shared + "-ignored-{0}', github.run_id) }}";
   assert.equal(compact(spec.concurrency.group), compact(expected),
     `${kind}: concurrency eligibility must match the unchanged job guard`);
@@ -437,8 +441,8 @@ for (const [spec, kind] of [[previewSpec, "preview"], [promoteSpec, "promote"]])
   // After the exact guard/group contract above, evaluate this small common
   // expression subset against canonical API event strings, without cloud access.
   const expression=String(spec.concurrency.group).trim().slice(3,-2);
-  const evaluate=Function("github", "format", "return ("+expression+");");
-  const select=context=>evaluate(context,(pattern,id)=>pattern.replace("{0}",id));
+  const evaluate=Function("github", "inputs", "format", "return ("+expression+");");
+  const select=context=>evaluate(context,context.inputs,(pattern,id)=>pattern.replace("{0}",id));
   hostingGroups[kind]=select;
   const upstream=kind==="preview"?"push":"workflow_run";
   const samples=[
@@ -452,6 +456,11 @@ for (const [spec, kind] of [[previewSpec, "preview"], [promoteSpec, "promote"]])
   if(kind==="promote") {
     for(const operation of ["promote","readiness","restore"])
       samples.push([hostingQueueContext({event:"workflow_dispatch",upstream:"",operation}),true]);
+    assert.equal(select(hostingQueueContext({event:"workflow_dispatch",operation:"readiness",metadataOnly:true})),
+      "lkc-staging-hosting-metadata-readiness");
+    assert.equal(select(hostingQueueContext({event:"workflow_dispatch",operation:"readiness",metadataOnly:true,ref:"refs/heads/feature"})),
+      shared+"-ignored-100");
+    cases+=2;
   } else {
     samples.push([hostingQueueContext({upstream:"workflow_dispatch"}),false]);
   }
@@ -474,10 +483,11 @@ assert.equal(promoteSpec.env.LKC_TARGETS,"staff,admin");
 assert.match(previewWorkflow,/--no-authorized-domains/u);
 assert.doesNotMatch(promoteWorkflow,/hosting:clone|hosting:channel:(?:create|delete)/u);
 const steps=promoteSpec.jobs.promote.steps;
-function stepRuns(step,mode,outcomes={},priorSuccess=true){
+function stepRuns(step,mode,outcomes={},priorSuccess=true,metadataOnly=false){
   let expression=String(step.if??"true").trim().replace(/^\$\{\{|\}\}$/gu,"").trim();
   if(!expression.includes("always()")&&!priorSuccess)return false;
   expression=expression.replace(/env\.LKC_OPERATION/gu,JSON.stringify(mode))
+    .replace(/env\.LKC_METADATA_ONLY/gu,JSON.stringify(String(metadataOnly)))
     .replace(/steps\.([a-z_]+)\.outcome/gu,(_,id)=>JSON.stringify(outcomes[id]??"skipped"))
     .replace(/steps\.([a-z_]+)\.outputs\.([a-z_]+)/gu,(_,id,key)=>JSON.stringify(outcomes[id+"."+key]??""))
     .replace(/always\(\)/gu,"true");
@@ -536,6 +546,7 @@ try{
  const baseEnvironment={
   ...process.env,GITHUB_EVENT_NAME:"workflow_dispatch",GITHUB_REF_NAME:"main",GITHUB_REPOSITORY:"Hanabo0930/Lip-Knots-Crew",
   GITHUB_RUN_ID:"777",GITHUB_RUN_ATTEMPT:"1",LKC_PROJECT_ID:projectId,LKC_REGION:"asia-northeast1",LKC_TARGETS:"staff,admin",
+  LKC_METADATA_ONLY:"false",
   LKC_REQUESTED_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",LKC_PREVIEW_RUN_ID:"",
   TEST_MAIN_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",TEST_CI_RESULT:"1",TEST_PREVIEW_RESULT:"1",
   NODE_EXE:process.execPath.replaceAll("\\","/"),

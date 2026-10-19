@@ -219,6 +219,7 @@ jobs:
       - name: Validate automation scope and production dependencies
         run: |
           npm run test:automation-safety
+          node --test scripts/automation/test-upload-metadata.mjs
           python3 scripts/automation/test-hosting-api-readiness.py
           python3 scripts/automation/test-sheet-worker-migration.py
           python3 scripts/automation/test-staging-worker-migration.py

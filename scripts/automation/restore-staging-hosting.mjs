@@ -11,6 +11,9 @@ import {
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import {requireProtectedContext, validateHostingOperation} from "./hosting-operation-context.mjs";
+import {validatePilotReport} from "./hosting-limited-pilot.mjs";
+export {requireProtectedContext, validateHostingOperation} from "./hosting-operation-context.mjs";
 
 const allowedProjectId = "lip-knots-crew-staging";
 const siteIdPattern = /^[a-z0-9][a-z0-9-]{2,62}$/u;
@@ -56,7 +59,8 @@ export function validateRestoreOptions({
   };
 }
 
-export async function releaseHostingVersion({source, target, projectId, cwd, expectedLiveVersion}, {reader} = {}) {
+export async function releaseHostingVersion({source, target, projectId, cwd, expectedLiveVersion,
+  authorizeMutation = async () => {}}, {reader} = {}) {
   let writeAttempted = false;
   try {
     requireValue(projectId === allowedProjectId, "ENVIRONMENT_REJECTED");
@@ -69,6 +73,9 @@ export async function releaseHostingVersion({source, target, projectId, cwd, exp
     const live = versionId(m[1],(await api.channel(m[1],"live"))?.release?.version);
     if (live !== id) {
       requireValue(!expectedLiveVersion || live === expectedLiveVersion, "LIVE_CHANGED_SINCE_PROMOTION");
+      // After all potentially slow reads, before any POST is attempted. A
+      // review expiry here is a known non-write, so same-run recovery stays safe.
+      await authorizeMutation({kind:"promote",siteId:t[1],previousVersion:live,promotedVersion:id});
       writeAttempted = true;
       await api.release(m[1],"live",id);
     }
@@ -201,26 +208,7 @@ const hostingSites = Object.freeze({staff: allowedProjectId, admin: allowedProje
 const hexVersion = /^[a-f0-9]{16}$/u;
 const sourceShaPattern = /^[a-f0-9]{40}$/u;
 const decimalId = /^[1-9][0-9]{0,19}$/u;
-const confirmations = Object.freeze({
-  promote: "PROMOTE_LKC_STAGING_HOSTING",
-  readiness: "CHECK_LKC_STAGING_HOSTING_READINESS",
-  restore: "RESTORE_LKC_STAGING_HOSTING",
-});
 function requireValue(condition, code) { if (!condition) throw new Error(code); }
-export function requireProtectedContext() {
-  requireValue(process.env.GITHUB_ACTIONS === "true" && process.env.GITHUB_REPOSITORY === allowedRepository
-    && process.env.GITHUB_REF === "refs/heads/main" && process.env.GITHUB_JOB === "promote"
-    && process.env.GITHUB_WORKFLOW_REF === allowedRepository + "/" + workflowPath + "@refs/heads/main", "PROTECTED_WORKFLOW_CONTEXT_REQUIRED");
-}
-export function validateHostingOperation({operation, eventName, confirmation, projectId, region, sourceRef, runAttempt = 1}) {
-  requireValue(projectId === allowedProjectId && region === allowedRegion && sourceRef === "main", "ENVIRONMENT_REJECTED");
-  requireValue(Object.hasOwn(confirmations, operation), "OPERATION_REJECTED");
-  requireValue(eventName === "workflow_dispatch" || eventName === "workflow_run", "TRIGGER_REJECTED");
-  requireValue(eventName !== "workflow_run" || operation === "promote", "MANUAL_OPERATION_REQUIRED");
-  requireValue(confirmation === confirmations[operation], "CONFIRMATION_REJECTED");
-  requireValue(Number.isSafeInteger(runAttempt) && runAttempt > 0 && (operation === "readiness" || runAttempt === 1),"WORKFLOW_RERUN_REJECTED");
-  return operation;
-}
 function validatePair(manifest) {
   requireValue(manifest?.schemaVersion === 1 && manifest.operation === "promote", "MANIFEST_SCHEMA_REJECTED");
   requireValue(manifest.projectId === allowedProjectId && manifest.region === allowedRegion, "ENVIRONMENT_REJECTED");
@@ -429,6 +417,39 @@ function validateRuntime({projectId, region, staffSite, adminSite, evidenceDir})
   requireValue(staffSite === hostingSites.staff && adminSite === hostingSites.admin, "SITE_PAIR_REJECTED");
   requireValue(path.isAbsolute(evidenceDir), "EVIDENCE_DIRECTORY_MUST_BE_ABSOLUTE");
 }
+export async function requireCurrentPilotMutationReview(options, {
+  read = readFile, now = () => new Date().toISOString(),
+} = {}) {
+  const policy = options.evidencePolicy ?? "source-provenance";
+  requireValue(["source-provenance", "limited-staff-pilot"].includes(policy), "EVIDENCE_POLICY_REJECTED");
+  if (policy === "source-provenance") return;
+  validateRuntime(options);
+  requireValue(sourceShaPattern.test(options.sourceSha ?? "") && decimalId.test(options.promotionRunId ?? "")
+    && options.runAttempt === 1, "PILOT_MUTATION_CONTEXT_REJECTED");
+  const raw = await read(path.join(options.evidenceDir, "limited-pilot-evidence.json"), "utf8");
+  requireValue(typeof raw === "string" && Buffer.byteLength(raw) <= 48 * 1024, "PILOT_MUTATION_REPORT_REJECTED");
+  let report;
+  try { report = JSON.parse(raw); } catch { throw new Error("PILOT_MUTATION_REPORT_REJECTED"); }
+  validatePilotReport(report, {now: now(), allowedStates: ["PREAUTH_READY"]});
+  requireValue(report.sourceSha === options.sourceSha && report.observationRunId === options.promotionRunId
+    && report.stagingTrialAuthorized === true, "PILOT_MUTATION_REPORT_MISMATCH");
+  const mutation=options.mutation;
+  const label=Object.keys(hostingSites).find(key=>hostingSites[key]===mutation?.siteId);
+  requireValue(label && ["backup","promote"].includes(mutation.kind)
+    && mutation.previousVersion === report.hosting.previousVersions[label], "PILOT_MUTATION_VERSION_MISMATCH");
+  if(mutation.kind==="promote"){
+    const capture=options.capture;
+    validatePair(capture);
+    requireValue(capture.promotionResult==="prepared" && capture.sourceSha===options.sourceSha
+      && capture.promotionRunId===options.promotionRunId && capture.runAttempt===options.runAttempt,
+    "PILOT_MUTATION_CAPTURE_MISMATCH");
+    for(const site of ["staff","admin"])requireValue(
+      capture[site].previousVersion===report.hosting.previousVersions[site]
+      && capture[site].promotedVersion===report.hosting.previewVersions[site],
+    "PILOT_MUTATION_CAPTURE_MISMATCH");
+    requireValue(mutation.promotedVersion===report.hosting.previewVersions[label],"PILOT_MUTATION_VERSION_MISMATCH");
+  }
+}
 export async function createHostingReader({projectId, cwd = process.cwd()}, {sdk} = {}) {
   requireValue(projectId === allowedProjectId, "ENVIRONMENT_REJECTED");
   const require = createRequire(path.join(cwd, "package.json"));
@@ -477,7 +498,7 @@ export async function readRestoreSnapshots(manifest, reader) {
   }));
   return Object.fromEntries(pairs);
 }
-export async function backupCurrentPair(options, api) {
+export async function backupCurrentPair(options, api, {authorizeMutation = async () => {}} = {}) {
   validateRuntime(options);
   requireValue(typeof options.promotionRunId === "string" && decimalId.test(options.promotionRunId)
     && options.rollbackChannel === "rb-" + options.promotionRunId, "ROLLBACK_CHANNEL_REJECTED");
@@ -486,7 +507,9 @@ export async function backupCurrentPair(options, api) {
   for (const label of ["staff","admin"]) {
     const site=hostingSites[label];
     requireValue(versionId(site,(await api.channel(site,"live"))?.release?.version) === before[label],"BACKUP_LIVE_CHANGED");
+    await authorizeMutation({kind:"backup",siteId:site,previousVersion:before[label]});
     await api.createBackup(site,options.rollbackChannel);
+    await authorizeMutation({kind:"backup",siteId:site,previousVersion:before[label]});
     await api.release(site,options.rollbackChannel,before[label]);
     requireValue(versionId(site,(await api.channel(site,options.rollbackChannel))?.release?.version) === before[label],"BACKUP_READBACK_MISMATCH");
   }
@@ -572,7 +595,8 @@ async function requireUnusedPromotionAttempt(evidenceDir) {
   throw new Error("PROMOTION_ATTEMPT_ALREADY_RECORDED");
 }
 
-export async function restoreVersionPair(manifest, options, {reader, executor=runFirebaseClone, githubOutputPath="", authorize = async () => {}} = {}) {
+export async function restoreVersionPair(manifest, options, {reader, executor=runFirebaseClone, githubOutputPath="",
+  authorize = async () => {}, authorizeMutation = async () => {}} = {}) {
   validateRuntime(options);
   if(options.mode==="promotion")await requireUnusedPromotionAttempt(options.evidenceDir);
   const plan=planVersionRestore(manifest,await readRestoreSnapshots(manifest,reader));
@@ -600,7 +624,7 @@ export async function restoreVersionPair(manifest, options, {reader, executor=ru
       await checkpoint("write-uncertain",label);
       writeSubmitted=true;
       let clone;
-      try{clone=await executor({...request,projectId:allowedProjectId,cwd:options.cwd??process.cwd()});}
+      try{clone=await executor({...request,projectId:allowedProjectId,cwd:options.cwd??process.cwd(),authorizeMutation});}
       catch{clone={code:1,outcome:"unknown"};}
       // An unknown promotion POST may still arrive later; readback cannot authorize reversal.
       if(options.mode==="promotion"&&!["applied","rejected","not-attempted"].includes(clone?.outcome)){
@@ -681,13 +705,14 @@ async function captureMain() {
     staffSite:valueAfter("--staff-site"),adminSite:valueAfter("--admin-site"),evidenceDir:valueAfter("--evidence-dir"),
     sourceSha:valueAfter("--source-sha"),promotionRunId:process.env.GITHUB_RUN_ID,
     runAttempt:Number(process.env.GITHUB_RUN_ATTEMPT),rollbackChannel:valueAfter("--channel"),
-    previewChannel:valueAfter("--preview-channel")};
+    previewChannel:valueAfter("--preview-channel"),evidencePolicy:process.env.LKC_EVIDENCE_POLICY ?? "source-provenance"};
   validateRuntime(options);
+  const authorizeMutation = mutation => requireCurrentPilotMutationReview({...options,mutation});
   let reader;
   const getReader=async()=>reader??=await createHostingReader({projectId:allowedProjectId});
   const pendingPath=path.join(options.evidenceDir,"pending-restore-manifest.json");
   if(process.argv.includes("--backup")) {
-    await backupCurrentPair(options,await getReader());
+    await backupCurrentPair(options,await getReader(),{authorizeMutation});
     await writeGitHubOutput(valueAfter("--github-output"),{ready:"true"});
   } else if(process.argv.includes("--capture")){
     const manifest=await capturePromotion(options,await getReader());
@@ -716,7 +741,12 @@ async function captureMain() {
       reader=await getReader();
       const operationManifest=promotion?promotionExecutionManifest(manifest):{...manifest,promotionResult:"success"};
       if(promotion)await verifyCapturedLive(manifest,reader,"before");
-      const result=await restoreVersionPair(operationManifest,{...options,mode:promotion?"promotion":"restore"},{reader,githubOutputPath:valueAfter("--github-output"),authorize:promotion?()=>requireCurrentMain(options.sourceSha):async()=>{}});
+      const result=await restoreVersionPair(operationManifest,{...options,mode:promotion?"promotion":"restore"},{
+        reader,githubOutputPath:valueAfter("--github-output"),
+        authorize:promotion?()=>requireCurrentMain(options.sourceSha):async()=>{},
+        // Expired review blocks new trial writes; it must never block rollback.
+        authorizeMutation:promotion?mutation=>requireCurrentPilotMutationReview({...options,mutation,capture:manifest}):async()=>{},
+      });
       if(!result.success)process.exitCode=1;
       console.log("HOSTING_CAPTURED_PAIR_RESULT="+result.status.toUpperCase());
       return;

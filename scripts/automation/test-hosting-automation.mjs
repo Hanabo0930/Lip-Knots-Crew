@@ -163,6 +163,17 @@ assert.match(
   "Promotion must re-check current main after protected-environment approval and before any cloud authentication",
 );
 cases += 14;
+const historyStep = promoteWorkflow.match(
+  /      - name: Require resolved earlier Hosting writes before a limited promotion\n([\s\S]*?)(?=      - name:)/u,
+);
+assert.ok(historyStep, "Limited promotion requires resolved earlier writes");
+assert.match(historyStep[1], /if: env\.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' && env\.LKC_OPERATION == 'promote'/u,
+  "History must not block read-only readiness or alter the strict default path");
+assert.match(historyStep[1], /run: node scripts\/automation\/check-hosting-promotion-history\.mjs/u);
+assert.doesNotMatch(historyStep[1], /continue-on-error/u, "Unresolved history must stop Hosting writes");
+assert.ok(promoteWorkflow.indexOf(historyStep[0]) < promoteWorkflow.indexOf("- name: Back up both current live channels"),
+  "History must be checked before the first Hosting channel write");
+cases += 5;
 assert.match(
   promoteWorkflow,
   /node scripts\/automation\/restore-staging-hosting\.mjs/u,
@@ -626,6 +637,7 @@ try{
  const baseEnvironment={
   ...process.env,GITHUB_EVENT_NAME:"workflow_dispatch",GITHUB_REF_NAME:"main",GITHUB_REPOSITORY:"Hanabo0930/Lip-Knots-Crew",
   GITHUB_RUN_ID:"777",GITHUB_RUN_ATTEMPT:"1",LKC_PROJECT_ID:projectId,LKC_REGION:"asia-northeast1",LKC_TARGETS:"staff,admin",
+  GITHUB_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",
   LKC_METADATA_ONLY:"false",LKC_EVIDENCE_POLICY:"source-provenance",LKC_LIMITED_EVIDENCE:"",
   LKC_REQUESTED_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",LKC_PREVIEW_RUN_ID:"",
   TEST_MAIN_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",TEST_CI_RESULT:"1",TEST_PREVIEW_RESULT:"1",TEST_PREVIEW_ID:"321",
@@ -633,7 +645,7 @@ try{
  };
  const stubs=[
   "set -euo pipefail",
-  'git(){ case "$1" in fetch) return 0;; rev-parse) printf "%s\\n" "$TEST_MAIN_SHA";; *) return 91;; esac; }',
+  'git(){ case "$1" in fetch) return 0;; rev-parse) if [[ "$2" == "HEAD" ]]; then printf "%s\\n" "${TEST_CHECKOUT_SHA:-$TEST_MAIN_SHA}"; else printf "%s\\n" "$TEST_MAIN_SHA"; fi;; *) return 91;; esac; }',
   'gh(){ case "$*" in *"sort_by(.id)"*) printf "%s\\n" "$TEST_PREVIEW_ID";; *"[.name, .event"*) printf "Staging Hosting Preview\\tworkflow_run\\tsuccess\\tmain\\t%s\\n" "$TEST_MAIN_SHA";; *"Release Candidate Checks"*) printf "%s\\n" "$TEST_CI_RESULT";; *"promote staging Hosting"*) printf "0\\n";; *"Staging Hosting Preview"*) printf "%s\\n" "$TEST_PREVIEW_RESULT";; *) return 92;; esac; }',
   'node(){ "$NODE_EXE" "$@"; }',
  ].join("\n");
@@ -646,6 +658,9 @@ try{
   ["missing run",{LKC_OPERATION:"restore",LKC_CONFIRMATION:"RESTORE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
   ["output injection",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"123\noperation=restore"},false],
   ["changed main",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",TEST_MAIN_SHA:"1".repeat(40)},false],
+  ["stale queued manual head",{GITHUB_SHA:"1".repeat(40),LKC_REQUESTED_SHA:"",LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
+  ["stale automatic run head",{GITHUB_EVENT_NAME:"workflow_run",GITHUB_SHA:"1".repeat(40),LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
+  ["checkout changed during fetch",{TEST_CHECKOUT_SHA:"1".repeat(40),LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:""},false],
   ["failed CI",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",TEST_CI_RESULT:"0"},false],
   ["production",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",LKC_PROJECT_ID:"production"},false],
   ["other region",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",LKC_REGION:"us-central1"},false],

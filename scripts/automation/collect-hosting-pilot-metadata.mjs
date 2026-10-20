@@ -2,7 +2,7 @@
 import {mkdir, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {pathToFileURL} from "node:url";
-import {requireProtectedContext, validateHostingOperation} from "./restore-staging-hosting.mjs";
+import {requireProtectedContext, validateHostingOperation} from "./hosting-operation-context.mjs";
 
 const PROJECT = "lip-knots-crew-staging";
 const REGION = "asia-northeast1";

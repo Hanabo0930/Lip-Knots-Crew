@@ -7,7 +7,7 @@ import {createHash} from "node:crypto";
 import {mkdir, readFile, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {pathToFileURL} from "node:url";
-import {requireProtectedContext, validateHostingOperation} from "./restore-staging-hosting.mjs";
+import {requireProtectedContext, validateHostingOperation} from "./hosting-operation-context.mjs";
 import {PILOT_FUNCTIONS, normalizePilotFunction} from "./collect-hosting-pilot-metadata.mjs";
 
 const PROJECT = "lip-knots-crew-staging", REGION = "asia-northeast1";
@@ -40,6 +40,14 @@ function timestamp(value) {
   return Date.parse(value);
 }
 function evidenceReference(value) {requireValue(typeof value === "string" && DIGEST.test(value), "PILOT_RECORD_DIGEST_REQUIRED");}
+function validateMailAttempts(attempts) {
+  requireValue(Array.isArray(attempts) && attempts.length <= 1, "PILOT_SINGLE_RECIPIENT_MAIL_LEDGER_REQUIRED");
+  for (const attempt of attempts) {
+    keys(attempt, ["outcome", "evidenceDigest"]);
+    requireValue(["SENT", "CONFIRMED_NOT_SENT"].includes(attempt.outcome), "PILOT_MAIL_OUTCOME_UNRESOLVED");
+    evidenceReference(attempt.evidenceDigest);
+  }
+}
 function versionPair(value) {
   keys(value, ["staff", "admin"]);
   requireValue(typeof value.staff === "string" && typeof value.admin === "string"
@@ -98,13 +106,9 @@ function validateReview(review, {operation, pilotId, createdAt, expiresAt}) {
     && mail.irreversibleAcknowledged === true && Array.isArray(mail.attempts) && mail.attempts.length <= 1,
   "PILOT_SINGLE_RECIPIENT_MAIL_LEDGER_REQUIRED");
   evidenceReference(mail.evidenceDigest);
-  for (const attempt of mail.attempts) {
-    keys(attempt, ["outcome", "evidenceDigest"]);
-    // An unknown delivery outcome consumes the single attempt and blocks further
-    // progression until read-only evidence resolves it. Never infer not-sent.
-    requireValue(["SENT", "CONFIRMED_NOT_SENT"].includes(attempt.outcome), "PILOT_MAIL_OUTCOME_UNRESOLVED");
-    evidenceReference(attempt.evidenceDigest);
-  }
+  // An unknown delivery outcome consumes the single attempt and blocks further
+  // progression until read-only evidence resolves it. Never infer not-sent.
+  validateMailAttempts(mail.attempts);
   keys(previewAuth, ["status", "reason", "evidenceDigest"]);
   requireValue(["SUPPORTED", "UNSUPPORTED_VERIFIED", "UNKNOWN"].includes(previewAuth.status),
     "PILOT_PREVIEW_AUTH_REJECTED");
@@ -172,6 +176,7 @@ export function validateLimitedPilotPreflight(evidence, {sourceSha, operation = 
 }
 
 function validateSnapshot(snapshot, {sourceSha, now}) {
+  requireValue(typeof sourceSha === "string" && SHA.test(sourceSha), "PILOT_SOURCE_SHA_MISMATCH");
   keys(snapshot, ["schemaVersion", "status", "policy", "projectId", "region", "sourceSha",
     "sourceAuthenticity", "submissionAcceptance", "hostingPromotionAuthorized", "apiCompatibilityVerified",
     "observation", "functions", "requests"]);
@@ -214,6 +219,7 @@ export function validateLimitedPilotEvidence({evidence, sourceSha, previewRunId,
     deploymentSnapshotDigest: pilotEvidenceDigest(snapshot.functions), observationRunId: currentRunId,
     hosting: structuredClone(evidence.hosting), accountDigest: evidence.review.account.identityDigest,
     mailAttemptsConsumed: evidence.review.mail.attempts.length,
+    mailAttempts: structuredClone(evidence.review.mail.attempts),
     mailRecipientDigest: evidence.review.mail.recipientDigest,
     reviewedReadScopeDigest: pilotEvidenceDigest(evidence.review.scope), checkedAt: now,
     expiresAt: evidence.expiresAt,
@@ -221,6 +227,7 @@ export function validateLimitedPilotEvidence({evidence, sourceSha, previewRunId,
 }
 
 export function recheckPilotDeployment({before, after, sourceSha, currentRunId, now = new Date().toISOString()}) {
+  requireValue(typeof currentRunId === "string" && RUN.test(currentRunId), "PILOT_METADATA_RUN_MISMATCH");
   validateSnapshot(before, {sourceSha, now}); validateSnapshot(after, {sourceSha, now});
   requireValue(before.observation.runId === currentRunId && after.observation.runId === currentRunId,
     "PILOT_METADATA_RUN_MISMATCH");
@@ -233,13 +240,59 @@ export function recheckPilotDeployment({before, after, sourceSha, currentRunId, 
     checkedAt: now, sourceAuthenticity: "UNVERIFIED"};
 }
 
+/**
+ * Validate transition input format and consistency, not the authenticity of an
+ * external record. Only preauth and trial reports can advance to another state.
+ */
+export function validatePilotReport(report, {
+  now = new Date().toISOString(), allowedStates = ["PREAUTH_READY", "STAGING_TRIAL"],
+} = {}) {
+  requireValue(Array.isArray(allowedStates) && allowedStates.length > 0
+    && allowedStates.every(state => ["PREAUTH_READY", "STAGING_TRIAL"].includes(state))
+    && allowedStates.includes(report?.readinessState), "PILOT_PREAUTH_REPORT_REQUIRED");
+  const trial = report.readinessState === "STAGING_TRIAL";
+  keys(report, ["schemaVersion", "policy", "evidenceValidation", "evidenceDigest", "sourceSha", "pilotId",
+    "declarationsRequireProtectedReview", "sourceAuthenticity", "submissionAcceptance", "readinessState",
+    "stagingTrialAuthorized", "authenticatedStaffAcceptance", "deploymentSnapshotDigest", "observationRunId",
+    "hosting", "accountDigest", "mailAttemptsConsumed", "mailAttempts", "mailRecipientDigest",
+    "reviewedReadScopeDigest", "checkedAt", "expiresAt", "backupAndPreviewCleanupAuthorized", "adminAuthenticated",
+    ...(trial ? ["trialRecordedAt"] : [])]);
+  requireValue(report.schemaVersion === 1 && report.policy === POLICY && report.evidenceValidation === "VALID"
+    && report.declarationsRequireProtectedReview === true
+    && report.sourceAuthenticity === "UNVERIFIED" && report.submissionAcceptance === "UNVERIFIED"
+    && report.authenticatedStaffAcceptance === "UNVERIFIED" && report.backupAndPreviewCleanupAuthorized === false
+    && report.adminAuthenticated === false && typeof report.stagingTrialAuthorized === "boolean",
+  "PILOT_REPORT_INVARIANT_REJECTED");
+  requireValue(typeof report.sourceSha === "string" && SHA.test(report.sourceSha)
+    && typeof report.pilotId === "string" && /^[a-f0-9]{32}$/u.test(report.pilotId)
+    && typeof report.observationRunId === "string" && RUN.test(report.observationRunId),
+  "PILOT_REPORT_IDENTITY_REJECTED");
+  for (const field of ["evidenceDigest", "deploymentSnapshotDigest", "accountDigest",
+    "mailRecipientDigest", "reviewedReadScopeDigest"]) evidenceReference(report[field]);
+  requireValue(report.mailRecipientDigest === report.accountDigest, "PILOT_REPORT_IDENTITY_REJECTED");
+  keys(report.hosting, ["previewRunId", "previewRunAttempt", "previewVersions", "previousVersions"]);
+  requireValue(typeof report.hosting.previewRunId === "string" && RUN.test(report.hosting.previewRunId)
+    && report.hosting.previewRunAttempt === 1, "PILOT_PREVIEW_RUN_REJECTED");
+  versionPair(report.hosting.previewVersions); versionPair(report.hosting.previousVersions);
+  for (const label of ["staff", "admin"]) requireValue(
+    report.hosting.previewVersions[label] !== report.hosting.previousVersions[label], "PILOT_VERSION_PAIR_REJECTED");
+  validateMailAttempts(report.mailAttempts);
+  requireValue(Number.isInteger(report.mailAttemptsConsumed)
+    && report.mailAttemptsConsumed === report.mailAttempts.length, "PILOT_SINGLE_RECIPIENT_MAIL_LEDGER_REQUIRED");
+  const current = timestamp(now), checked = timestamp(report.checkedAt), expires = timestamp(report.expiresAt);
+  requireValue(checked <= current && current < expires && expires > checked && expires - checked <= MAX_AGE,
+    "PILOT_REVIEW_EXPIRED_OR_FUTURE");
+  if (trial) requireValue(report.stagingTrialAuthorized === true
+    && timestamp(report.trialRecordedAt) >= checked && timestamp(report.trialRecordedAt) <= current
+    && timestamp(report.trialRecordedAt) < expires, "PILOT_TRIAL_REPORT_REJECTED");
+  return report;
+}
+
 /** A successful Hosting trial remains unauthenticated until a separate observation is evaluated. */
 export function recordStagingTrial({report, manifest, currentRunId, now = new Date().toISOString()}) {
-  requireValue(report?.evidenceValidation === "VALID" && report.policy === POLICY
-    && report.readinessState === "PREAUTH_READY" && report.stagingTrialAuthorized === true
+  validatePilotReport(report, {now, allowedStates: ["PREAUTH_READY"]});
+  requireValue(report.stagingTrialAuthorized === true
     && report.observationRunId === currentRunId, "PILOT_PREAUTH_REPORT_REQUIRED");
-  requireValue(timestamp(now) >= timestamp(report.checkedAt) && timestamp(now) < timestamp(report.expiresAt),
-    "PILOT_REVIEW_EXPIRED_OR_FUTURE");
   requireValue(manifest?.schemaVersion === 1 && manifest.operation === "promote"
     && manifest.projectId === PROJECT && manifest.region === REGION && manifest.sourceSha === report.sourceSha
     && manifest.promotionRunId === currentRunId && manifest.runAttempt === 1
@@ -249,7 +302,7 @@ export function recordStagingTrial({report, manifest, currentRunId, now = new Da
       && manifest[label]?.previousVersion === report.hosting.previousVersions[label]
       && manifest[label]?.promotedVersion === report.hosting.previewVersions[label], "PILOT_TRIAL_VERSION_MISMATCH");
   }
-  return {...report, readinessState: "STAGING_TRIAL", trialRecordedAt: now,
+  return {...structuredClone(report), readinessState: "STAGING_TRIAL", trialRecordedAt: now,
     sourceAuthenticity: "UNVERIFIED", submissionAcceptance: "UNVERIFIED",
     authenticatedStaffAcceptance: "UNVERIFIED", backupAndPreviewCleanupAuthorized: false};
 }
@@ -260,21 +313,21 @@ export function recordStagingTrial({report, manifest, currentRunId, now = new Da
  */
 export function evaluateStaffAcceptance({report, observation, beforeSnapshot, afterSnapshot,
   now = new Date().toISOString()}) {
-  requireValue(report?.evidenceValidation === "VALID" && report.policy === POLICY
-    && ["PREAUTH_READY", "STAGING_TRIAL"].includes(report.readinessState), "PILOT_PREAUTH_REPORT_REQUIRED");
-  requireValue(timestamp(now) >= timestamp(report.checkedAt) && timestamp(now) < timestamp(report.expiresAt),
-    "PILOT_REVIEW_EXPIRED_OR_FUTURE");
+  validatePilotReport(report, {now});
+  const checkpoint = timestamp(report.readinessState === "STAGING_TRIAL" ? report.trialRecordedAt : report.checkedAt);
   keys(observation, ["sourceSha", "pilotId", "accountDigest", "evidenceDigest", "target", "capturedAt", "observationRunId",
     "versions", "authenticated", "staffRole", "adminAuthenticated", "claimsUnchanged",
     "functionResults", "readScopeDigest", "writes", "mailAttemptsConsumed",
     "mailRecipientDigest", "mail", "submissionInvoked", "storageInvoked", "scopeViolations"]);
   evidenceReference(observation.evidenceDigest);
-  requireValue(RUN.test(observation.observationRunId ?? "") && timestamp(now) >= timestamp(observation.capturedAt)
+  requireValue(typeof observation.observationRunId === "string" && RUN.test(observation.observationRunId)
+    && timestamp(now) >= timestamp(observation.capturedAt)
     && timestamp(now) - timestamp(observation.capturedAt) <= 10 * 60 * 1000
-    && timestamp(observation.capturedAt) >= timestamp(report.checkedAt), "PILOT_ACCEPTANCE_STALE");
+    && timestamp(observation.capturedAt) >= checkpoint, "PILOT_ACCEPTANCE_STALE");
   recheckPilotDeployment({before: beforeSnapshot, after: afterSnapshot, sourceSha: report.sourceSha,
     currentRunId: observation.observationRunId, now});
   requireValue(pilotEvidenceDigest(afterSnapshot.functions) === report.deploymentSnapshotDigest
+    && timestamp(beforeSnapshot.observation.capturedAt) >= checkpoint
     && timestamp(beforeSnapshot.observation.capturedAt) <= timestamp(observation.capturedAt)
     && timestamp(afterSnapshot.observation.capturedAt) >= timestamp(observation.capturedAt),
   "PILOT_ACCEPTANCE_DEPLOYMENT_MISMATCH");
@@ -305,13 +358,12 @@ export function evaluateStaffAcceptance({report, observation, beforeSnapshot, af
   requireValue(mail.completeHistory === true && mail.recipientDigest === report.mailRecipientDigest
     && Array.isArray(mail.attempts) && mail.attempts.length === observation.mailAttemptsConsumed,
   "PILOT_SINGLE_RECIPIENT_MAIL_LEDGER_REQUIRED");
-  for (const attempt of mail.attempts) {
-    keys(attempt, ["outcome", "evidenceDigest"]);
-    requireValue(["SENT", "CONFIRMED_NOT_SENT"].includes(attempt.outcome), "PILOT_MAIL_OUTCOME_UNRESOLVED");
-    evidenceReference(attempt.evidenceDigest);
-  }
-  return {...report, readinessState: "STAFF_UI_ACCEPTED", authenticatedStaffAcceptance: "ACCEPTED",
+  validateMailAttempts(mail.attempts);
+  requireValue(report.mailAttempts.every((attempt, index) =>
+    pilotEvidenceDigest(attempt) === pilotEvidenceDigest(mail.attempts[index])), "PILOT_MAIL_HISTORY_CHANGED");
+  return {...structuredClone(report), readinessState: "STAFF_UI_ACCEPTED", authenticatedStaffAcceptance: "ACCEPTED",
     acceptanceObservationDigest: observation.evidenceDigest, mailAttemptsConsumed: observation.mailAttemptsConsumed,
+    mailAttempts: structuredClone(mail.attempts),
     sourceAuthenticity: "UNVERIFIED", submissionAcceptance: "UNVERIFIED",
     // Cleanup is a separate, reviewed lifecycle operation; this validator never performs it.
     backupAndPreviewCleanupAuthorized: false};

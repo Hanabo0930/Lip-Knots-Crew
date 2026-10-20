@@ -14,6 +14,7 @@ const publicEnv = {
   GITHUB_REF: "refs/heads/main", GITHUB_REF_NAME: "main", GITHUB_JOB: "promote",
   GITHUB_WORKFLOW_REF: "Hanabo0930/Lip-Knots-Crew/.github/workflows/staging-hosting-promote.yml@refs/heads/main",
   GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_RUN_ATTEMPT: "1", GITHUB_RUN_ID: "12345",
+  GITHUB_SHA: "a".repeat(40),
   LKC_OPERATION: "readiness", LKC_METADATA_ONLY: "true", LKC_SOURCE_SHA: "a".repeat(40),
   LKC_CONFIRMATION: "CHECK_LKC_STAGING_HOSTING_READINESS", LKC_PROJECT_ID: PROJECT, LKC_REGION: REGION,
 };

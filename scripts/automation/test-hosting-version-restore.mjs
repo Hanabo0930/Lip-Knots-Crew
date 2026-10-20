@@ -8,7 +8,7 @@ import {
   loadVerifiedPromotionManifest, planVersionRestore, readManifestArchive, releaseHostingVersion,
   requireCurrentMain, restoreVersionPair, validateHostingOperation, validatePromotionEvidence,
   promotionManifestDigest, requireRestoreRetrySafety, validateRestoreRetryEvidence, requireNoFeeSourcePath, requireKnownPromotionResult, loadKnownPromotionResult,
-  verifyCapturedLive,
+  verifyCapturedLive, requireCurrentPilotMutationReview,
 } from "./restore-staging-hosting.mjs";
 
 const project="lip-knots-crew-staging", region="asia-northeast1", repository="Hanabo0930/Lip-Knots-Crew";
@@ -46,6 +46,20 @@ const evidence=m=>{
  workflow:{id:320632310,name:"Staging Hosting Promote",path:".github/workflows/staging-hosting-promote.yml"},
  artifact:{id:123,size_in_bytes:blob.length,name:"staging-hosting-promote-"+sha,expired:false,
  workflow_run:{id:Number(m.promotionRunId),head_sha:sha},digest:"sha256:"+createHash("sha256").update(blob).digest("hex")}};
+};
+const pilotReportFixture=()=>{
+ const m=fixture(),digest="sha256:"+"a".repeat(64);
+ return {schemaVersion:1,policy:"limited-staff-pilot",evidenceValidation:"VALID",evidenceDigest:digest,
+  sourceSha:sha,pilotId:"a".repeat(32),declarationsRequireProtectedReview:true,
+  sourceAuthenticity:"UNVERIFIED",submissionAcceptance:"UNVERIFIED",readinessState:"PREAUTH_READY",
+  stagingTrialAuthorized:true,authenticatedStaffAcceptance:"UNVERIFIED",deploymentSnapshotDigest:digest,
+  observationRunId:m.promotionRunId,
+  hosting:{previewRunId:"123456788",previewRunAttempt:1,
+   previewVersions:{staff:m.staff.promotedVersion,admin:m.admin.promotedVersion},
+   previousVersions:{staff:m.staff.previousVersion,admin:m.admin.previousVersion}},
+  accountDigest:digest,mailAttemptsConsumed:0,mailAttempts:[],mailRecipientDigest:digest,
+  reviewedReadScopeDigest:digest,checkedAt:"2026-10-20T12:00:00.000Z",expiresAt:"2026-10-20T12:00:10.000Z",
+  backupAndPreviewCleanupAuthorized:false,adminAuthenticated:false};
 };
 
 export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3"}){
@@ -414,6 +428,111 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
    const writes=model.calls.length;
    await assert.rejects(()=>backupCurrentPair({...options,promotionRunId:m.promotionRunId,rollbackChannel:"rb-"+m.promotionRunId},broken),/VERSION_NOT_FINALIZED/);
    assert.equal(model.calls.length,writes);
+  });
+  const pilotOptions={...options,promotionRunId:fixture().promotionRunId,rollbackChannel:"rb-"+fixture().promotionRunId,
+   evidencePolicy:"limited-staff-pilot",runAttempt:1,
+   mutation:{kind:"backup",siteId:project,previousVersion:fixture().staff.previousVersion}};
+  await test("strict mutation path never consumes limited evidence",async()=>{
+   await requireCurrentPilotMutationReview({}, {read:()=>assert.fail("strict path read limited evidence")});
+   await requireCurrentPilotMutationReview({...pilotOptions,evidencePolicy:"source-provenance"},
+    {read:()=>assert.fail("strict path read limited evidence")});
+  });
+  await test("limited mutation requires fresh current-run authorized report",async()=>{
+   const report=pilotReportFixture();
+   const check=doc=>requireCurrentPilotMutationReview(pilotOptions,{
+    read:async()=>JSON.stringify(doc),now:()=>"2026-10-20T12:00:01.000Z"});
+   await check(report);
+   for(const mutate of [
+    r=>{r.sourceSha="b".repeat(40);},r=>{r.observationRunId="999";},
+    r=>{r.stagingTrialAuthorized=false;},r=>{r.expiresAt="2026-10-20T12:00:01.000Z";},
+    r=>{r.sourceAuthenticity="VERIFIED";},r=>{r.extra=true;},
+   ]){
+    const changed=structuredClone(report);mutate(changed);
+    await assert.rejects(()=>check(changed));
+   }
+   await assert.rejects(()=>requireCurrentPilotMutationReview(pilotOptions,{
+    read:async()=>"broken JSON",now:()=>"2026-10-20T12:00:01.000Z"}),/PILOT_MUTATION_REPORT_REJECTED/);
+   for(const mutation of [
+    {kind:"backup",siteId:project,previousVersion:"0".repeat(16)},
+    {kind:"backup",siteId:"production",previousVersion:fixture().staff.previousVersion},
+    {kind:"delete",siteId:project,previousVersion:fixture().staff.previousVersion},
+   ])await assert.rejects(()=>requireCurrentPilotMutationReview({...pilotOptions,mutation},{
+    read:async()=>JSON.stringify(report),now:()=>"2026-10-20T12:00:01.000Z",
+   }),/PILOT_MUTATION_VERSION_MISMATCH/);
+  });
+  for(const expireAt of [1,2,3,4,5])await test("review rechecked before each backup POST boundary "+expireAt,async()=>{
+   const m=fixture(),model=statefulReader(m),report=pilotReportFixture();
+   model.state.staff=m.staff.previousVersion;model.state.admin=m.admin.previousVersion;
+   let checks=0;
+   const authorizeMutation=mutation=>requireCurrentPilotMutationReview({...pilotOptions,mutation},{
+    read:async()=>JSON.stringify(report),
+    now:()=>++checks>=expireAt?"2026-10-20T12:00:10.000Z":"2026-10-20T12:00:01.000Z",
+   });
+   const run=()=>backupCurrentPair(pilotOptions,model.reader,{authorizeMutation});
+   if(expireAt<=4)await assert.rejects(run,/PILOT_REVIEW_EXPIRED_OR_FUTURE/);
+   else await run();
+   assert.equal(checks,Math.min(expireAt,4));
+   assert.equal(model.calls.length,Math.min(expireAt-1,4),"no create/release POST after review expiry");
+  });
+  await test("review expiring during final live GET blocks POST with known non-write outcome",async()=>{
+   const m=fixture(),model=statefulReader(m),report=pilotReportFixture();
+   let now="2026-10-20T12:00:01.000Z",checks=0;
+   const reader={...model.reader,channel:async(...args)=>{
+    const result=await model.reader.channel(...args);now="2026-10-20T12:00:10.000Z";return result;
+   }};
+   const result=await releaseHostingVersion({projectId:project,source:project+"@"+m.staff.previousVersion,
+    target:project+":live",expectedLiveVersion:m.staff.promotedVersion,
+    authorizeMutation:mutation=>requireCurrentPilotMutationReview({...pilotOptions,mutation},{
+     read:async()=>{checks++;return JSON.stringify(report);},now:()=>now,
+    })},{reader});
+   assert.equal(result.code,1);assert.equal(result.outcome,"not-attempted");
+   assert.equal(checks,1);assert.deepEqual(model.calls,[]);
+  });
+  await test("expiry between live sites preserves known partial result and permits rollback",async()=>{
+   const m=fixture(),model=statefulReader(m),report=pilotReportFixture();
+   model.state.staff=m.staff.previousVersion;model.state.admin=m.admin.previousVersion;
+   const execution={...m,...Object.fromEntries(["staff","admin"].map(label=>[label,{
+    ...m[label],previousVersion:m[label].promotedVersion,promotedVersion:m[label].previousVersion,
+   }]))};
+   const evidenceDir=path.join(temp,"expiry-partial-promotion"),liveOptions={...pilotOptions,currentRunId:undefined,evidenceDir,mode:"promotion"};
+   let now="2026-10-20T12:00:01.000Z",checks=0;
+   const reader={...model.reader,release:async(...args)=>{
+    await model.reader.release(...args);now="2026-10-20T12:00:10.000Z";
+   }};
+   const result=await restoreVersionPair(execution,liveOptions,{reader,
+    executor:req=>releaseHostingVersion(req,{reader}),
+    authorizeMutation:mutation=>requireCurrentPilotMutationReview({...liveOptions,mutation,capture:{...m,promotionResult:"prepared"}},{
+     read:async()=>{checks++;return JSON.stringify(report);},now:()=>now,
+    })});
+   assert.equal(result.success,false);assert.equal(result.retryAllowed,true);
+   assert.equal(result.attempts[0].outcome,"applied");assert.equal(result.attempts[1].outcome,"not-attempted");
+   assert.equal(checks,2);assert.equal(model.calls.length,1);
+   await loadKnownPromotionResult(m,evidenceDir);
+   const restored=await restoreVersionPair(m,{...liveOptions,mode:"restore"},{
+    reader,executor:req=>releaseHostingVersion(req,{reader}),
+   });
+   assert.equal(restored.success,true);assert.equal(checks,2,"rollback must not recheck expired trial authorization");
+   assert.equal(model.state.staff,m.staff.previousVersion);assert.equal(model.state.admin,m.admin.previousVersion);
+  });
+  await test("live review gate binds the entire current capture and actual release",async()=>{
+   const m=fixture(),report=pilotReportFixture();
+   const context={...pilotOptions,capture:{...m,promotionResult:"prepared"},
+    mutation:{kind:"promote",siteId:project,previousVersion:m.staff.previousVersion,promotedVersion:m.staff.promotedVersion}};
+   const io={read:async()=>JSON.stringify(report),now:()=>"2026-10-20T12:00:01.000Z"};
+   await requireCurrentPilotMutationReview(context,io);
+   for(const mutate of [
+    o=>{o.capture.admin.promotedVersion="0".repeat(16);},
+    o=>{o.capture.staff.previousVersion="0".repeat(16);},
+    o=>{o.capture.sourceSha="0".repeat(40);},
+    o=>{o.capture.promotionRunId="888";},
+    o=>{o.capture.runAttempt=2;},
+    o=>{o.capture.promotionResult="success";},
+    o=>{o.mutation.promotedVersion="0".repeat(16);},
+    o=>{o.mutation.previousVersion="0".repeat(16);},
+   ]){
+    const changed=structuredClone(context);mutate(changed);
+    await assert.rejects(()=>requireCurrentPilotMutationReview(changed,io),/PILOT_MUTATION_(?:CAPTURE|VERSION)_MISMATCH/);
+   }
   });
   await test("capture and finalization require exact pair",async()=>{
    const m=fixture(),model=statefulReader(m);model.state.staff=m.staff.previousVersion;model.state.admin=m.admin.previousVersion;

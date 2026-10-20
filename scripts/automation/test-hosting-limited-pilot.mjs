@@ -7,7 +7,7 @@ import {spawnSync} from "node:child_process";
 import {PILOT_FUNCTIONS, normalizePilotFunction} from "./collect-hosting-pilot-metadata.mjs";
 import {PILOT_READ_SCOPE, PILOT_WRITE_SCOPE, evaluateStaffAcceptance, pilotEvidenceDigest,
   recordStagingTrial, recheckPilotDeployment, validateEvidencePolicy,
-  validateLimitedPilotEvidence, validateLimitedPilotPreflight} from "./hosting-limited-pilot.mjs";
+  validateLimitedPilotEvidence, validateLimitedPilotPreflight, validatePilotReport} from "./hosting-limited-pilot.mjs";
 
 const PROJECT = "lip-knots-crew-staging", REGION = "asia-northeast1";
 const PREFIX = `projects/${PROJECT}/locations/${REGION}`, SHA = "a".repeat(40), RUN = "39367729999";
@@ -86,8 +86,9 @@ function acceptance(report) {
     submissionInvoked: false, storageInvoked: false, scopeViolations: []};
 }
 function evaluate(input) {
-  const afterSnapshot = snapshot(); afterSnapshot.observation.capturedAt = NOW;
-  return evaluateStaffAcceptance({beforeSnapshot: snapshot(), afterSnapshot, now: NOW, ...input});
+  const beforeSnapshot = snapshot(), afterSnapshot = snapshot();
+  beforeSnapshot.observation.capturedAt = NOW; afterSnapshot.observation.capturedAt = NOW;
+  return evaluateStaffAcceptance({beforeSnapshot, afterSnapshot, now: NOW, ...input});
 }
 
 test("strict policy remains default; limited policy is manual, explicit and never restore/metadata-only/rerun", () => {
@@ -272,6 +273,124 @@ test("acceptance expires and requires unchanged deployments around the authentic
   assert.throws(() => evaluate({report, observation, afterSnapshot}), /DEPLOYMENT_CHANGED/u);
   observation.mail.attempts[0].outcome = "UNKNOWN";
   assert.throws(() => evaluate({report, observation}), /MAIL_OUTCOME_UNRESOLVED/u);
+});
+test("every transition report field is required and unknown fields cannot carry alternate state", () => {
+  const report = validateLimitedPilotEvidence(context()), savedManifest = manifest(report), observation = acceptance(report);
+  assert.equal(validatePilotReport(report, {now: NOW}), report);
+  for (const key of Object.keys(report)) {
+    const malformed = structuredClone(report); delete malformed[key];
+    assert.throws(() => validatePilotReport(malformed, {now: NOW}), /PILOT_/u, key);
+    assert.throws(() => recordStagingTrial({report: malformed, manifest: savedManifest, currentRunId: RUN, now: NOW}), /PILOT_/u, key);
+    assert.throws(() => evaluate({report: malformed, observation}), /PILOT_/u, key);
+  }
+  for (const extra of [{unknown: true}, {trialRecordedAt: NOW}, {acceptanceObservationDigest: DIGEST}]) {
+    assert.throws(() => evaluate({report: {...report, ...extra}, observation}), /PILOT_FIELDS_REJECTED/u);
+  }
+});
+test("report types, safety invariants, source identity and exact Hosting pair cannot be substituted", () => {
+  const report = validateLimitedPilotEvidence(context());
+  const mutations = [
+    r => {r.schemaVersion = 2;}, r => {r.policy = "source-provenance";}, r => {r.evidenceValidation = "PASS";},
+    r => {r.sourceSha = "not-a-sha";}, r => {r.sourceSha = [SHA];}, r => {r.pilotId = null;},
+    r => {r.observationRunId = Number(RUN);}, r => {r.stagingTrialAuthorized = "true";},
+    r => {r.declarationsRequireProtectedReview = false;}, r => {r.sourceAuthenticity = "PASS";},
+    r => {r.submissionAcceptance = "PASS";}, r => {r.authenticatedStaffAcceptance = "ACCEPTED";},
+    r => {r.backupAndPreviewCleanupAuthorized = true;}, r => {r.adminAuthenticated = true;},
+    r => {r.mailRecipientDigest = "sha256:" + "c".repeat(64);}, r => {r.mailAttemptsConsumed = 1;},
+    r => {r.hosting.previewRunId = 123;}, r => {r.hosting.previewRunAttempt = 2;},
+    r => {r.hosting.previewVersions.staff = "invalid";}, r => {r.hosting.previousVersions.admin = r.hosting.previewVersions.admin;},
+    r => {r.expiresAt = r.checkedAt;}, r => {r.expiresAt = "2026-10-22T12:00:00.000Z";},
+    r => {r.checkedAt = "2026-10-20T12:01:00.000Z";},
+    ...["evidenceDigest", "deploymentSnapshotDigest", "accountDigest", "mailRecipientDigest", "reviewedReadScopeDigest"]
+      .map(field => r => {r[field] = null;}),
+  ];
+  for (const mutate of mutations) {
+    const malformed = structuredClone(report); mutate(malformed);
+    assert.throws(() => validatePilotReport(malformed, {now: NOW}), /PILOT_/u);
+    assert.throws(() => evaluate({report: malformed, observation: acceptance(malformed)}), /PILOT_/u);
+  }
+  const missingIdentity = structuredClone(report);
+  for (const field of ["accountDigest", "pilotId", "reviewedReadScopeDigest", "mailRecipientDigest"]) missingIdentity[field] = null;
+  assert.throws(() => evaluate({report: missingIdentity, observation: acceptance(missingIdentity)}), /PILOT_/u,
+    "Matching null identity fields cannot turn an incomplete report into authenticated acceptance");
+  const badSha = structuredClone(report), beforeSnapshot = snapshot(), afterSnapshot = snapshot();
+  badSha.sourceSha = beforeSnapshot.sourceSha = afterSnapshot.sourceSha = "not-a-sha";
+  beforeSnapshot.observation.capturedAt = afterSnapshot.observation.capturedAt = NOW;
+  const observation = acceptance(badSha); observation.sourceSha = badSha.sourceSha;
+  assert.throws(() => evaluate({report: badSha, observation, beforeSnapshot, afterSnapshot}), /PILOT_/u);
+  assert.throws(() => recheckPilotDeployment({before: beforeSnapshot, after: afterSnapshot,
+    sourceSha: "not-a-sha", currentRunId: RUN, now: NOW}), /PILOT_SOURCE_SHA_MISMATCH/u);
+  assert.throws(() => recheckPilotDeployment({before: snapshot(), after: snapshot(),
+    sourceSha: SHA, currentRunId: Number(RUN), now: NOW}), /PILOT_METADATA_RUN_MISMATCH/u);
+});
+test("one recorded mail attempt must remain the exact prefix of the acceptance history", () => {
+  for (const outcome of ["SENT", "CONFIRMED_NOT_SENT"]) {
+    const evidence = pilotFixture();
+    evidence.review.mail.attempts = [{outcome, evidenceDigest: "sha256:" + "1".repeat(64)}];
+    const report = validateLimitedPilotEvidence(context(evidence, "readiness")), observation = acceptance(report);
+    observation.mail.attempts = structuredClone(evidence.review.mail.attempts);
+    assert.equal(evaluate({report, observation}).readinessState, "STAFF_UI_ACCEPTED");
+    const changes = [
+      o => {o.mail.attempts[0].evidenceDigest = "sha256:" + "2".repeat(64);},
+      o => {o.mail.attempts[0].outcome = outcome === "SENT" ? "CONFIRMED_NOT_SENT" : "SENT";},
+      o => {o.mailAttemptsConsumed = 0; o.mail.attempts = [];},
+      o => {o.mailAttemptsConsumed = 2; o.mail.attempts.push({outcome: "SENT", evidenceDigest: DIGEST});},
+    ];
+    for (const change of changes) {
+      const changed = structuredClone(observation); change(changed);
+      assert.throws(() => evaluate({report, observation: changed}), /PILOT_MAIL_HISTORY_CHANGED|PILOT_SINGLE_RECIPIENT_MAIL_LEDGER_REQUIRED/u);
+    }
+  }
+});
+test("staging acceptance and its initial metadata observation must follow the recorded trial", () => {
+  const report = validateLimitedPilotEvidence(context());
+  const trial = recordStagingTrial({report, manifest: manifest(report), currentRunId: RUN, now: "2026-10-20T12:05:00.000Z"});
+  const observation = acceptance(trial), beforeSnapshot = snapshot(), afterSnapshot = snapshot();
+  observation.capturedAt = "2026-10-20T12:05:30.000Z";
+  beforeSnapshot.observation.capturedAt = "2026-10-20T12:05:00.000Z";
+  afterSnapshot.observation.capturedAt = "2026-10-20T12:05:45.000Z";
+  const input = {report: trial, observation, beforeSnapshot, afterSnapshot, now: "2026-10-20T12:06:00.000Z"};
+  assert.equal(evaluateStaffAcceptance(input).readinessState, "STAFF_UI_ACCEPTED");
+  const premature = structuredClone(input);
+  premature.observation.capturedAt = "2026-10-20T12:01:00.000Z";
+  premature.beforeSnapshot.observation.capturedAt = "2026-10-20T12:00:30.000Z";
+  premature.afterSnapshot.observation.capturedAt = "2026-10-20T12:01:30.000Z";
+  assert.throws(() => evaluateStaffAcceptance(premature), /PILOT_ACCEPTANCE_STALE/u);
+  const staleBefore = structuredClone(input); staleBefore.beforeSnapshot.observation.capturedAt = "2026-10-20T12:04:59.000Z";
+  assert.throws(() => evaluateStaffAcceptance(staleBefore), /PILOT_ACCEPTANCE_DEPLOYMENT_MISMATCH/u);
+  assert.throws(() => evaluate({report, observation: acceptance(report), beforeSnapshot: snapshot()}), /PILOT_ACCEPTANCE_DEPLOYMENT_MISMATCH/u,
+    "Preauth acceptance also requires a new metadata observation after its readiness checkpoint");
+});
+test("state labels cannot skip a trial or repeat one-way transitions", () => {
+  const report = validateLimitedPilotEvidence(context()), readiness = validateLimitedPilotEvidence(context(pilotFixture(), "readiness"));
+  const trial = recordStagingTrial({report, manifest: manifest(report), currentRunId: RUN, now: NOW});
+  for (const malformed of [
+    {...readiness, readinessState: "STAGING_TRIAL"},
+    {...readiness, readinessState: "STAGING_TRIAL", trialRecordedAt: NOW},
+    {...trial, trialRecordedAt: "2026-10-20T11:59:59.000Z"},
+    {...trial, trialRecordedAt: "2026-10-20T12:00:01.000Z"},
+  ]) assert.throws(() => evaluate({report: malformed, observation: acceptance(malformed)}), /PILOT_/u);
+  assert.throws(() => recordStagingTrial({report: trial, manifest: manifest(trial), currentRunId: RUN, now: NOW}), /PILOT_PREAUTH_REPORT_REQUIRED/u);
+  const accepted = evaluate({report: trial, observation: acceptance(trial)});
+  assert.throws(() => evaluate({report: accepted, observation: acceptance(accepted)}), /PILOT_PREAUTH_REPORT_REQUIRED/u);
+  assert.throws(() => recordStagingTrial({report: accepted, manifest: manifest(accepted), currentRunId: RUN, now: NOW}), /PILOT_PREAUTH_REPORT_REQUIRED/u);
+});
+test("report histories and transition outputs do not alias mutable inputs", () => {
+  const evidence = pilotFixture(); evidence.review.mail.attempts = [{outcome: "SENT", evidenceDigest: DIGEST}];
+  const report = validateLimitedPilotEvidence(context(evidence));
+  evidence.review.mail.attempts[0].evidenceDigest = "sha256:" + "1".repeat(64);
+  assert.equal(report.mailAttempts[0].evidenceDigest, DIGEST);
+  const trial = recordStagingTrial({report, manifest: manifest(report), currentRunId: RUN, now: NOW});
+  assert.notEqual(trial.mailAttempts, report.mailAttempts);
+  assert.notEqual(trial.mailAttempts[0], report.mailAttempts[0]);
+  assert.notEqual(trial.hosting.previewVersions, report.hosting.previewVersions);
+  const observation = acceptance(trial), original = JSON.stringify({report: trial, observation});
+  const accepted = evaluate({report: trial, observation});
+  assert.equal(JSON.stringify({report: trial, observation}), original);
+  observation.mail.attempts[0].evidenceDigest = "sha256:" + "2".repeat(64);
+  accepted.hosting.previewVersions.staff = "f".repeat(16);
+  assert.equal(accepted.mailAttempts[0].evidenceDigest, DIGEST);
+  assert.equal(trial.hosting.previewVersions.staff, "1111111111111111");
 });
 test("evidence digests are order independent and never mutate input", () => {
   assert.equal(pilotEvidenceDigest({z: 1, a: {b: 2, a: 1}}), pilotEvidenceDigest({a: {a: 1, b: 2}, z: 1}));

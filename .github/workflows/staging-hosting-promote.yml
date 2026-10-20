@@ -146,6 +146,16 @@ jobs:
             echo "HOSTING_PROMOTION_ERROR=SOURCE_SHA_INVALID"
             exit 1
           fi
+          if [[ "$GITHUB_SHA" != "$source_sha" ]]; then
+            echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
+            echo "HOSTING_PROMOTION_ERROR=WORKFLOW_HEAD_NOT_CURRENT_MAIN"
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$source_sha" ]]; then
+            echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
+            echo "HOSTING_PROMOTION_ERROR=CHECKOUT_NOT_CURRENT_MAIN"
+            exit 1
+          fi
           canonical_ci="$(
             gh api \
               -H "Accept: application/vnd.github+json" \
@@ -436,6 +446,13 @@ jobs:
             import {requireCurrentMain} from "./scripts/automation/restore-staging-hosting.mjs";
             await requireCurrentMain(process.env.LKC_SOURCE_SHA);
           '
+      - name: Require resolved earlier Hosting writes before a limited promotion
+        id: pilot_history
+        if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' && env.LKC_OPERATION == 'promote'
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/automation/check-hosting-promotion-history.mjs
       - name: Back up both current live channels
         if: env.LKC_OPERATION == 'promote'
         id: backup

@@ -65,6 +65,8 @@ validator は `retainUntil` を記録作成から24時間以内、受入期限�
 `PREAUTH_READY` までの読取確認用。staging trial は `operation=promote` と通常の確認語を使う。
 両方とも `metadata_only=false`、attempt 1、最新 main の正式 CI / Preview を必須とする。
 既定の2関数 metadata 診断に限定 policy を併用しない。
+実行の `GITHUB_SHA` と checkout HEAD もその main SHA に一致させる。
+待機中に main が更新された古い run で新しい SHA を反映しない。
 
 `limited_evidence` は48KiB以内の JSON。正確な構造は
 [`validateLimitedPilotPreflight`](../../scripts/automation/hosting-limited-pilot.mjs) とそのテストで管理する。
@@ -76,11 +78,27 @@ Boolean や digest の形式が合うだけでは事実の証明にならない�
 artifact には正規化した metadata、Hosting version pin、証拠 digest と判定だけを残す。
 7関数の metadata は GET のみで取得し、`createUploadSession` / `finalizeStagedUpload` の実行や
 source ZIP の取得を行わない。反映直前・直後にも配備固定を再確認する。
+限定 trial は backup 作成/固定と各 live release の POST 直前にも report を読み直し、
+期限・run/SHA・対象versionを照合する。途中で期限切れなら残りの反映を止める。
+結果が既知の部分反映を旧版へ戻す処理は、期限切れを理由に妨げない。
+
+書込前には同じ正規workflowの過去 promote/restore 履歴も確認する。
+未完了run、結果不明の書込み、履歴の欠落を無視して次のtrialを開始しない。
+失敗runは書込stepが未実行だったと実証できる場合だけ通過する。
+書込開始後の失敗を、現在の画面が旧版に見えることだけで解決済みにしない。
+この初期実装には手動の解除flagはない。停止した場合は既存の実行証拠を読取確認し、
+未解決結果を解決したと証明できる検査を別途レビューするまで新しい反映を止める。
+旧run-name導入以前の成功writerは、現行の成功step証拠と同等と推定せず停止する。
+履歴が1000件を超える場合、一覧やjobが欠ける場合、ページ取得中に一覧が変わる場合も停止する。
+読取だけの `readiness` にはこの書込履歴gateを適用しない。
 
 workflow の `limited-pilot-evidence.json` は前提証拠の検査結果、
 `limited-pilot-trial.json` は反映完了・Staff受入未完了の記録。
 `evaluateStaffAcceptance` は別途取得した実認証観測・期限・前後 snapshot を評価する純粋関数であり、
 メール送信や実ブラウザ操作を自動実行しない。
+report は全必須属性・型・未証明状態を再検査する。Staff の実観測とその前の metadata snapshot は、
+Preview なら `checkedAt`、staging なら `trialRecordedAt` 以後でなければ受入できない。
+trial より前に得たログイン結果を staging 受入へ流用しない。
 
 ## メール送信前に固定する対象
 
@@ -106,6 +124,8 @@ Admin 分岐は毎回 claims を設定して監査ログと会社の一覧を読
 応答不明、配送未確認、UI エラーでも自動再送しない。
 `requestStaffLoginLink` の `accepted:true` は未登録宛先でも返るため配送証明ではない。
 既存ログを読取り、0件・複数・失敗・処理中を送信成功と扱わない。
+前提確認時の試行記録は report に保持し、受入記録の先頭と完全一致させる。
+件数だけを合わせて既存送信の digest や結果を別の試行へ差し替えない。
 トークン、確認コード、メールリンク、メール本文、認証済み storageState はログや artifact に保存しない。
 
 ## 現行ソースで確認した Staff 起動範囲

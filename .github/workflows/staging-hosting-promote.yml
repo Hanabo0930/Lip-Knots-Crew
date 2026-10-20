@@ -15,6 +15,16 @@ on:
         required: false
         default: false
         type: boolean
+      evidence_policy:
+        description: Source provenance by default; limited Staff pilot requires reviewed evidence and never proves submission acceptance
+        required: true
+        default: source-provenance
+        type: choice
+        options: [source-provenance, limited-staff-pilot]
+      limited_evidence:
+        description: Reviewed limited pilot JSON with digest references only; no addresses, tokens or personal data
+        required: false
+        type: string
       restore_run_id:
         description: Successful promotion run ID; required only for restore
         required: false
@@ -39,7 +49,8 @@ permissions:
 concurrency:
   group: >-
     ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
-         inputs.operation == 'readiness' && inputs.metadata_only == true) &&
+         inputs.operation == 'readiness' && inputs.metadata_only == true &&
+         (inputs.evidence_policy == 'source-provenance' || !inputs.evidence_policy)) &&
         'lkc-staging-hosting-metadata-readiness' ||
         ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
          (github.event_name == 'workflow_run' &&
@@ -72,6 +83,8 @@ jobs:
       operation: ${{ steps.release.outputs.operation }}
       restore_run_id: ${{ steps.release.outputs.restore_run_id }}
       metadata_only: ${{ steps.release.outputs.metadata_only }}
+      evidence_policy: ${{ steps.release.outputs.evidence_policy }}
+      preview_run_id: ${{ steps.release.outputs.preview_run_id }}
     steps:
       - name: Require the deliberate live-staging enable switch
         env:
@@ -98,7 +111,10 @@ jobs:
           LKC_RESTORE_RUN_ID: ${{ inputs.restore_run_id }}
           LKC_PREVIEW_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || '' }}
           LKC_METADATA_ONLY: ${{ inputs.metadata_only == true && 'true' || 'false' }}
+          LKC_EVIDENCE_POLICY: ${{ github.event_name == 'workflow_run' && 'source-provenance' || inputs.evidence_policy || 'source-provenance' }}
+          LKC_LIMITED_EVIDENCE: ${{ inputs.limited_evidence }}
         run: |
+          node scripts/automation/hosting-limited-pilot.mjs --guard-only
           if [[ "$LKC_METADATA_ONLY" == "true" && "$LKC_OPERATION" != "readiness" ]]; then
             echo "HOSTING_OPERATION_ERROR=METADATA_READINESS_ONLY"
             exit 1
@@ -117,6 +133,7 @@ jobs:
           fi
           echo "operation=$LKC_OPERATION" >> "$GITHUB_OUTPUT"
           echo "metadata_only=$LKC_METADATA_ONLY" >> "$GITHUB_OUTPUT"
+          echo "evidence_policy=$LKC_EVIDENCE_POLICY" >> "$GITHUB_OUTPUT"
           echo "restore_run_id=$LKC_RESTORE_RUN_ID" >> "$GITHUB_OUTPUT"
           git fetch --no-tags origin main
           source_sha="$(git rev-parse origin/main)"
@@ -140,7 +157,7 @@ jobs:
             echo "HOSTING_PROMOTION_ERROR=CANONICAL_CI_NOT_SUCCESSFUL"
             exit 1
           fi
-          if [[ "$LKC_OPERATION" == "promote" ]]; then
+          if [[ "$LKC_OPERATION" == "promote" || "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" ]]; then
             canonical_preview="$(
               gh api \
                 -H "Accept: application/vnd.github+json" \
@@ -151,6 +168,16 @@ jobs:
               echo "HOSTING_PROMOTION_RESULT=STOPPED_SAFELY"
               echo "HOSTING_PROMOTION_ERROR=CANONICAL_PREVIEW_NOT_SUCCESSFUL"
               exit 1
+            fi
+            if [[ "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" ]]; then
+              LKC_PREVIEW_RUN_ID="$(
+                gh api "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&status=completed&per_page=50" \
+                  --jq '[.workflow_runs[] | select(.name == "Staging Hosting Preview" and .path == ".github/workflows/staging-hosting-preview.yml" and .head_branch == "main" and .event == "workflow_run" and .conclusion == "success" and .run_attempt == 1)] | sort_by(.id) | last | .id // empty'
+              )"
+              if [[ ! "$LKC_PREVIEW_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]]; then
+                echo "HOSTING_PROMOTION_ERROR=CANONICAL_PREVIEW_ID_REQUIRED"
+                exit 1
+              fi
             fi
             if [[ -n "$LKC_PREVIEW_RUN_ID" ]]; then
               triggered_preview="$(
@@ -185,11 +212,12 @@ jobs:
           fi
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "preview_run_id=$LKC_PREVIEW_RUN_ID" >> "$GITHUB_OUTPUT"
           prior_success="$(
             gh api \
               -H "Accept: application/vnd.github+json" \
               "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&status=completed&per_page=50" \
-              --jq "[.workflow_runs[] | select(.name == \"Staging Hosting Promote\" and .display_title == \"promote staging Hosting\" and .path == \".github/workflows/staging-hosting-promote.yml\" and .head_branch == \"main\" and .conclusion == \"success\" and .id != ${GITHUB_RUN_ID})] | length"
+              --jq "[.workflow_runs[] | select((.name == \"Staging Hosting Promote\" or .name == \"promote staging Hosting\") and .display_title == \"promote staging Hosting\" and .path == \".github/workflows/staging-hosting-promote.yml\" and .head_branch == \"main\" and .conclusion == \"success\" and .id != ${GITHUB_RUN_ID})] | length"
           )"
           if [[ "$LKC_OPERATION" == "promote" && "$prior_success" -gt 0 ]]; then
             echo "HOSTING_PROMOTION_RESULT=ALREADY_PROMOTED"
@@ -211,6 +239,9 @@ jobs:
       LKC_OPERATION: ${{ needs.guard.outputs.operation }}
       LKC_RESTORE_RUN_ID: ${{ needs.guard.outputs.restore_run_id }}
       LKC_METADATA_ONLY: ${{ needs.guard.outputs.metadata_only }}
+      LKC_EVIDENCE_POLICY: ${{ needs.guard.outputs.evidence_policy }}
+      LKC_PREVIEW_RUN_ID: ${{ needs.guard.outputs.preview_run_id }}
+      LKC_CONFIRMATION: ${{ github.event_name == 'workflow_run' && 'PROMOTE_LKC_STAGING_HOSTING' || inputs.confirmation }}
       LKC_GCP_WORKLOAD_IDENTITY_PROVIDER: projects/740154137290/locations/global/workloadIdentityPools/lkc-github-staging/providers/lkc-main-workflows
       LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT: lkc-gh-staging-deploy@lip-knots-crew-staging.iam.gserviceaccount.com
     steps:
@@ -241,7 +272,7 @@ jobs:
           fi
       - name: Stop source verification unless a no-fee path is established
         id: no_fee_source
-        if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true'
+        if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'
         working-directory: source
         run: |
           node scripts/automation/restore-staging-hosting.mjs \
@@ -270,12 +301,20 @@ jobs:
         env:
           LKC_CONFIRMATION: ${{ inputs.confirmation }}
         run: node scripts/automation/collect-upload-metadata.mjs --guard-only
+      - name: Validate limited review and no additional cost before cloud access
+        if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot'
+        working-directory: source
+        env:
+          LKC_LIMITED_EVIDENCE: ${{ inputs.limited_evidence }}
+        run: node scripts/automation/hosting-limited-pilot.mjs --validate-review
       - name: Authenticate with the short-lived staging identity
         if: env.LKC_METADATA_ONLY != 'true'
+        id: hosting_auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ env.LKC_GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ env.LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
+          token_format: access_token
       - name: Authenticate for limited metadata GETs
         if: env.LKC_METADATA_ONLY == 'true'
         id: metadata_auth
@@ -318,7 +357,7 @@ jobs:
             --discover-only \
             --github-output "$GITHUB_OUTPUT"
       - name: Resolve the exact preview versions
-        if: env.LKC_OPERATION == 'promote'
+        if: env.LKC_OPERATION == 'promote' || env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot'
         id: channel
         run: |
           (
@@ -339,8 +378,13 @@ jobs:
             --staff-channels-json "$RUNNER_TEMP/lkc-staff-channels.json" \
             --admin-channels-json "$RUNNER_TEMP/lkc-admin-channels.json" \
             --github-output "$GITHUB_OUTPUT"
+      - name: Pin limited trial preview and previous live versions
+        if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot'
+        id: pilot_pins
+        working-directory: source
+        run: node scripts/automation/hosting-limited-workflow.mjs --pins
       - name: Re-check both preview apps before any live change
-        if: env.LKC_OPERATION == 'promote'
+        if: env.LKC_OPERATION == 'promote' || env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot'
         working-directory: source
         run: |
           if [[ -f /etc/apt/apt-mirrors.txt ]]; then
@@ -355,11 +399,11 @@ jobs:
             --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
             --evidence-dir "$LKC_EVIDENCE_DIR/preview"
       - name: Set up Google Cloud CLI for read-only API verification
-        if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true'
+        if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       - name: Verify deployed upload APIs before any live Hosting change
         id: readiness
-        if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true'
+        if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'
         working-directory: source
         run: |
           npm run build -w @lkc/functions
@@ -367,6 +411,21 @@ jobs:
             --root . \
             --source-sha "$LKC_SOURCE_SHA" \
             --evidence "$LKC_EVIDENCE_DIR/api-readiness.json"
+      - name: Validate limited evidence against fresh pinned API metadata
+        id: pilot_readiness
+        if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot'
+        working-directory: source
+        env:
+          LKC_PILOT_METADATA_ACCESS_TOKEN: ${{ steps.hosting_auth.outputs.access_token }}
+          LKC_LIMITED_EVIDENCE: ${{ inputs.limited_evidence }}
+          LKC_STAFF_VERSION: ${{ steps.pilot_pins.outputs.staff_version }}
+          LKC_ADMIN_VERSION: ${{ steps.pilot_pins.outputs.admin_version }}
+          LKC_PREVIOUS_STAFF_VERSION: ${{ steps.pilot_pins.outputs.previous_staff_version }}
+          LKC_PREVIOUS_ADMIN_VERSION: ${{ steps.pilot_pins.outputs.previous_admin_version }}
+        run: |
+          node scripts/automation/collect-hosting-pilot-metadata.mjs
+          node scripts/automation/hosting-limited-pilot.mjs --validate
+          node scripts/automation/hosting-limited-workflow.mjs --verify-review-pins
       - name: Recheck current main before any live operation
         if: env.LKC_OPERATION != 'readiness'
         working-directory: source
@@ -409,6 +468,15 @@ jobs:
             --staff-site "${{ steps.hosting.outputs.staff_site }}" \
             --admin-site "${{ steps.hosting.outputs.admin_site }}" \
             --source-sha "$LKC_SOURCE_SHA" --evidence-dir "$LKC_EVIDENCE_DIR"
+      - name: Recheck limited trial capture and API revisions before live write
+        if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' && env.LKC_OPERATION == 'promote'
+        working-directory: source
+        env:
+          LKC_PILOT_METADATA_ACCESS_TOKEN: ${{ steps.hosting_auth.outputs.access_token }}
+        run: |
+          node scripts/automation/hosting-limited-workflow.mjs --verify-capture
+          node scripts/automation/collect-hosting-pilot-metadata.mjs --before-write
+          node scripts/automation/hosting-limited-pilot.mjs --recheck-before-write
       - name: Promote the already-tested versions without rebuilding
         if: env.LKC_OPERATION == 'promote'
         id: promotion
@@ -434,6 +502,30 @@ jobs:
             --admin-url "${{ steps.hosting.outputs.admin_live_url }}" \
             --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
             --evidence-dir "$LKC_EVIDENCE_DIR/live"
+      - name: Recheck unchanged APIs after the limited trial
+        id: pilot_after
+        if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' && env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success'
+        continue-on-error: true
+        working-directory: source
+        env:
+          LKC_PILOT_METADATA_ACCESS_TOKEN: ${{ steps.hosting_auth.outputs.access_token }}
+        run: |
+          node scripts/automation/collect-hosting-pilot-metadata.mjs --after
+          node scripts/automation/hosting-limited-pilot.mjs --recheck
+      - name: Persist successful promotion manifest before channel cleanup
+        id: finalize_capture
+        continue-on-error: true
+        if: env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success' && (env.LKC_EVIDENCE_POLICY == 'source-provenance' || steps.pilot_after.outcome == 'success')
+        working-directory: source
+        run: |
+          node scripts/automation/restore-staging-hosting.mjs \
+            --finalize-capture --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --source-sha "$LKC_SOURCE_SHA" --evidence-dir "$LKC_EVIDENCE_DIR"
+          if [[ "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" ]]; then
+            node scripts/automation/hosting-limited-pilot.mjs --finalize
+          fi
       - name: Restore both previous live versions on any failure
         id: rollback
         if: >-
@@ -442,7 +534,9 @@ jobs:
           steps.backup.outputs.ready == 'true' &&
           steps.promotion.outputs.rollback_allowed == 'true' &&
           (steps.promotion.outcome == 'failure' ||
-          (steps.promotion.outcome == 'success' && steps.live_check.outcome != 'success'))
+          (steps.promotion.outcome == 'success' && (steps.live_check.outcome != 'success' ||
+          steps.finalize_capture.outcome != 'success' ||
+          (env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' && steps.pilot_after.outcome != 'success'))))
         working-directory: source
         run: |
           node scripts/automation/restore-staging-hosting.mjs \
@@ -464,17 +558,8 @@ jobs:
             --admin-url "${{ steps.hosting.outputs.admin_live_url }}" \
             --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
             --evidence-dir "$LKC_EVIDENCE_DIR/rollback"
-      - name: Persist successful promotion manifest before channel cleanup
-        if: env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success'
-        working-directory: source
-        run: |
-          node scripts/automation/restore-staging-hosting.mjs \
-            --finalize-capture --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
-            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
-            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
-            --source-sha "$LKC_SOURCE_SHA" --evidence-dir "$LKC_EVIDENCE_DIR"
       - name: Remove temporary channels after a successful promotion
-        if: env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success'
+        if: env.LKC_OPERATION == 'promote' && env.LKC_EVIDENCE_POLICY == 'source-provenance' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success' && steps.finalize_capture.outcome == 'success'
         working-directory: source
         run: |
           node scripts/automation/restore-staging-hosting.mjs \
@@ -519,13 +604,43 @@ jobs:
             --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
             --evidence-dir "$LKC_EVIDENCE_DIR/manual-restore-browser"
       - name: Upload promotion and rollback evidence
+        id: promotion_evidence
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: staging-hosting-${{ env.LKC_OPERATION }}-${{ env.LKC_SOURCE_SHA }}
           path: ${{ env.LKC_EVIDENCE_DIR }}
           if-no-files-found: warn
           retention-days: 30
+      - name: Restore the trial if durable promotion evidence failed
+        id: evidence_rollback
+        if: >-
+          always() && env.LKC_OPERATION == 'promote' &&
+          steps.promotion_evidence.outcome != 'success' &&
+          steps.promotion.outcome == 'success' &&
+          steps.finalize_capture.outcome == 'success' &&
+          steps.promotion.outputs.rollback_allowed == 'true' &&
+          steps.rollback.outputs.attempted != 'true'
+        working-directory: source
+        run: |
+          node scripts/automation/restore-staging-hosting.mjs \
+            --restore-capture --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
+            --staff-site "${{ steps.hosting.outputs.staff_site }}" \
+            --admin-site "${{ steps.hosting.outputs.admin_site }}" \
+            --source-sha "$LKC_SOURCE_SHA" --evidence-dir "$LKC_EVIDENCE_DIR" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Check both apps after evidence failure recovery
+        id: evidence_rollback_check
+        if: always() && env.LKC_OPERATION == 'promote' && env.LKC_METADATA_ONLY != 'true' && steps.evidence_rollback.outputs.attempted == 'true'
+        continue-on-error: true
+        working-directory: source
+        run: |
+          node scripts/automation/hosting-browser-check.mjs \
+            --staff-url "${{ steps.hosting.outputs.staff_live_url }}" \
+            --admin-url "${{ steps.hosting.outputs.admin_live_url }}" \
+            --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
+            --evidence-dir "$LKC_EVIDENCE_DIR/evidence-failure-rollback"
       - name: Publish promotion summary
         if: always()
         run: |
@@ -533,6 +648,7 @@ jobs:
             echo "## Staging Hosting promotion"
             echo
             echo "- Operation: \`$LKC_OPERATION\`"
+            echo "- Evidence policy: \`$LKC_EVIDENCE_POLICY\`"
             echo "- Metadata only: \`$LKC_METADATA_ONLY\`"
             echo "- Metadata collection step: \`${{ steps.metadata_collection.outcome }}\`"
             echo "- Source: \`$LKC_SOURCE_SHA\`"
@@ -543,13 +659,26 @@ jobs:
             echo "- Staff rollback: \`${{ steps.rollback.outputs.staff_status || 'not-attempted' }}\`"
             echo "- Admin rollback: \`${{ steps.rollback.outputs.admin_status || 'not-attempted' }}\`"
             echo "- Rollback browser result: \`${{ steps.rollback_check.outcome }}\`"
+            echo "- Evidence upload: \`${{ steps.promotion_evidence.outcome }}\`"
+            echo "- Evidence-failure recovery: \`${{ steps.evidence_rollback.outcome }} / ${{ steps.evidence_rollback_check.outcome }}\`"
             echo "- Functions deployed: \`false\`"
             echo "- Firestore / Storage / Rules / IAM changed: \`false\`"
             echo "- Production touched: \`false\`"
+            if [[ "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" ]]; then
+              echo "- Staff authenticated acceptance: \`UNVERIFIED\`"
+              echo "- Source authenticity / submission / Drive transfer: \`UNVERIFIED\`"
+              echo "- Anonymous browser checks do not establish Staff acceptance."
+              echo "- Trial backups and previews are retained; no acceptance cleanup performed."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Enforce the final result
         if: always()
         run: |
+          if [[ "${{ steps.promotion_evidence.outcome }}" != "success" ]]; then
+            echo "HOSTING_EVIDENCE_RESULT=FAILED"
+            echo "HOSTING_EVIDENCE_RECOVERY=${{ steps.evidence_rollback.outcome }}"
+            exit 1
+          fi
           if [[ "$LKC_METADATA_ONLY" == "true" ]]; then
             if [[ "$LKC_OPERATION" != "readiness" || "${{ steps.metadata_collection.outcome }}" != "success" ]]; then
               echo "HOSTING_METADATA_RESULT=STOPPED_SAFELY"
@@ -560,6 +689,15 @@ jobs:
             exit 0
           fi
           if [[ "$LKC_OPERATION" == "readiness" ]]; then
+            if [[ "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" ]]; then
+              if [[ "${{ steps.pilot_readiness.outcome }}" != "success" ]]; then
+                echo "HOSTING_LIMITED_RESULT=STOPPED_SAFELY"
+                exit 1
+              fi
+              echo "HOSTING_LIMITED_RESULT=PREAUTH_READY"
+              echo "HOSTING_STAFF_ACCEPTANCE=UNVERIFIED"
+              exit 0
+            fi
             if [[ "${{ steps.readiness.outcome }}" != "success" ]]; then
               echo "HOSTING_READINESS_RESULT=STOPPED_SAFELY"
               exit 1
@@ -583,12 +721,23 @@ jobs:
             echo "HOSTING_PROMOTION_RESULT=UNKNOWN_STOPPED"
             exit 1
           fi
-          if [[ "${{ steps.promotion.outcome }}" != "success" || "${{ steps.live_check.outcome }}" != "success" ]]; then
+          if [[ "${{ steps.promotion.outcome }}" != "success" || "${{ steps.live_check.outcome }}" != "success" || \
+                "${{ steps.finalize_capture.outcome }}" != "success" || \
+                ( "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" && "${{ steps.pilot_after.outcome }}" != "success" ) ]]; then
             if [[ "${{ steps.rollback.outcome }}" != "success" || "${{ steps.rollback_check.outcome }}" != "success" ]]; then
               echo "HOSTING_PROMOTION_RESULT=ROLLBACK_FAILED"
               exit 1
             fi
             echo "HOSTING_PROMOTION_RESULT=ROLLED_BACK"
             exit 1
+          fi
+          if [[ "${{ steps.finalize_capture.outcome }}" != "success" ]]; then
+            echo "HOSTING_PROMOTION_RESULT=EVIDENCE_INCOMPLETE"
+            exit 1
+          fi
+          if [[ "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" ]]; then
+            echo "HOSTING_LIMITED_RESULT=STAGING_TRIAL"
+            echo "HOSTING_STAFF_ACCEPTANCE=UNVERIFIED"
+            exit 0
           fi
           echo "HOSTING_PROMOTION_RESULT=SUCCESS"

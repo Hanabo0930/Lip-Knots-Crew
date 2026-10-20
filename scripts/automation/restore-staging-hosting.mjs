@@ -261,13 +261,24 @@ export function planVersionRestore(manifest, snapshots) {
   return Object.freeze({projectId: allowedProjectId, status: requests.length ? "PLANNED" : "ALREADY_RESTORED",
     requests: Object.freeze(requests), alreadyRestored: Object.freeze(alreadyRestored)});
 }
-export function validatePromotionEvidence({run, artifact, manifest, restoreRunId, repository}) {
+function validatePromotionRun({run, restoreRunId, repository}) {
   requireValue(repository === allowedRepository, "REPOSITORY_REJECTED");
   requireValue(typeof restoreRunId === "string" && decimalId.test(restoreRunId), "PROMOTION_RUN_REJECTED");
   requireValue(String(run?.id) === restoreRunId && run?.repository?.full_name === repository
-    && run.name === "Staging Hosting Promote" && run.path === workflowPath
+    && ["Staging Hosting Promote", "promote staging Hosting"].includes(run.name) && run.path === workflowPath
     && run.head_branch === "main" && run.display_title === "promote staging Hosting" && run.status === "completed" && run.conclusion === "success"
     && ["workflow_run","workflow_dispatch"].includes(run.event), "PROMOTION_EVIDENCE_REJECTED");
+  requireValue(Number.isSafeInteger(run.workflow_id) && run.workflow_id > 0, "PROMOTION_WORKFLOW_ID_REJECTED");
+}
+function validatePromotionWorkflow(run, workflow) {
+  // GitHub may expose the run-name as run.name. Resolve the definition through
+  // its numeric ID, never treat the run's title as proof of workflow identity.
+  requireValue(workflow?.id === run.workflow_id && workflow.name === "Staging Hosting Promote"
+    && workflow.path === workflowPath, "PROMOTION_WORKFLOW_IDENTITY_REJECTED");
+}
+export function validatePromotionEvidence({run, workflow, artifact, manifest, restoreRunId, repository}) {
+  validatePromotionRun({run, restoreRunId, repository});
+  validatePromotionWorkflow(run, workflow);
   validatePair(manifest);
   requireValue(manifest.promotionResult === "success" && manifest.promotionRunId === restoreRunId
     && manifest.sourceSha === run.head_sha && manifest.runAttempt === run.run_attempt, "MANIFEST_PROVENANCE_REJECTED");
@@ -306,9 +317,9 @@ export async function loadVerifiedPromotionManifest({repository, restoreRunId}, 
   const prefix = "/repos/" + repository + "/actions/runs/" + restoreRunId;
   const run = JSON.parse(await github([prefix]));
   // Reject non-successful/foreign runs before downloading anything.
-  requireValue(String(run.id) === restoreRunId && run.repository?.full_name === repository
-    && run.name === "Staging Hosting Promote" && run.path === workflowPath && run.display_title === "promote staging Hosting" && run.head_branch === "main"
-    && run.status === "completed" && run.conclusion === "success" && ["workflow_run","workflow_dispatch"].includes(run.event), "PROMOTION_EVIDENCE_REJECTED");
+  validatePromotionRun({run, restoreRunId, repository});
+  const workflow = JSON.parse(await github(["/repos/" + repository + "/actions/workflows/" + run.workflow_id]));
+  validatePromotionWorkflow(run, workflow);
   const listing = JSON.parse(await github([prefix + "/artifacts?per_page=100"]));
   requireValue(Number.isInteger(listing.total_count) && listing.total_count <= 100 && Array.isArray(listing.artifacts) && listing.artifacts.length === listing.total_count, "ARTIFACT_LIST_INCOMPLETE");
   const artifacts = (listing.artifacts ?? []).filter(a=>a.name === "staging-hosting-promote-" + run.head_sha);
@@ -321,7 +332,7 @@ export async function loadVerifiedPromotionManifest({repository, restoreRunId}, 
   const blob = await github(["/repos/" + repository + "/actions/artifacts/" + artifact.id + "/zip"], null);
   requireValue(Buffer.isBuffer(blob) && blob.length === artifact.size_in_bytes,"ARTIFACT_SIZE_MISMATCH");
   const manifest = await archiveReader(blob, artifact.digest);
-  return validatePromotionEvidence({run, artifact, manifest, restoreRunId, repository});
+  return validatePromotionEvidence({run, workflow, artifact, manifest, restoreRunId, repository});
 }
 export async function requireCurrentMain(sourceSha, github = runGh) {
   requireValue(typeof sourceSha === "string" && sourceShaPattern.test(sourceSha), "SOURCE_SHA_REJECTED");

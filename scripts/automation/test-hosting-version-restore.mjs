@@ -41,8 +41,9 @@ const evidence=m=>{
  const blob=Buffer.from("synthetic artifact");
  return {repository,restoreRunId:m.promotionRunId,manifest:m,blob,
  run:{id:Number(m.promotionRunId),repository:{full_name:repository},name:"Staging Hosting Promote",
- path:".github/workflows/staging-hosting-promote.yml",display_title:"promote staging Hosting",
+ workflow_id:320632310,path:".github/workflows/staging-hosting-promote.yml",display_title:"promote staging Hosting",
  head_branch:"main",head_sha:sha,status:"completed",conclusion:"success",event:"workflow_run",run_attempt:1},
+ workflow:{id:320632310,name:"Staging Hosting Promote",path:".github/workflows/staging-hosting-promote.yml"},
  artifact:{id:123,size_in_bytes:blob.length,name:"staging-hosting-promote-"+sha,expired:false,
  workflow_run:{id:Number(m.promotionRunId),head_sha:sha},digest:"sha256:"+createHash("sha256").update(blob).digest("hex")}};
 };
@@ -87,12 +88,25 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
  await test("non-main blocked",()=>assert.throws(()=>validateHostingOperation({operation:"readiness",confirmation:"CHECK_LKC_STAGING_HOSTING_READINESS",eventName:"workflow_dispatch",projectId:project,region,sourceRef:"branch"}),/ENVIRONMENT_REJECTED/));
  await test("unknown operation",()=>assert.throws(()=>validateHostingOperation({operation:"deploy",confirmation:"x",eventName:"workflow_dispatch",projectId:project,region,sourceRef:"main"}),/OPERATION_REJECTED/));
  await test("valid provenance",()=>{const e=evidence(fixture());assert.equal(validatePromotionEvidence(e),e.manifest);});
+ await test("run-name is accepted only with separately resolved canonical workflow",()=>{
+  const e=evidence(fixture());e.run.name=e.run.display_title;
+  assert.equal(validatePromotionEvidence(e),e.manifest);
+ });
  for(const [name,mutate,error] of [
   ["foreign repository",e=>{e.repository="other/repo";},"REPOSITORY_REJECTED"],
   ["pending run",e=>{e.run.status="pending";},"PROMOTION_EVIDENCE_REJECTED"],
   ["failed run",e=>{e.run.conclusion="failure";},"PROMOTION_EVIDENCE_REJECTED"],
   ["readiness run",e=>{e.run.display_title="readiness staging Hosting";},"PROMOTION_EVIDENCE_REJECTED"],
   ["foreign workflow",e=>{e.run.path=".github/workflows/other.yml";},"PROMOTION_EVIDENCE_REJECTED"],
+  ["unknown run name",e=>{e.run.name="other staging Hosting";},"PROMOTION_EVIDENCE_REJECTED"],
+  ["missing workflow ID",e=>{delete e.run.workflow_id;},"PROMOTION_WORKFLOW_ID_REJECTED"],
+  ["string workflow ID",e=>{e.run.workflow_id="320632310";},"PROMOTION_WORKFLOW_ID_REJECTED"],
+  ["unsafe workflow ID",e=>{e.run.workflow_id=Number.MAX_SAFE_INTEGER+1;},"PROMOTION_WORKFLOW_ID_REJECTED"],
+  ["missing workflow definition",e=>{delete e.workflow;},"PROMOTION_WORKFLOW_IDENTITY_REJECTED"],
+  ["other workflow ID",e=>{e.workflow.id++;},"PROMOTION_WORKFLOW_IDENTITY_REJECTED"],
+  ["other workflow definition name",e=>{e.workflow.name="Staging Hosting Preview";},"PROMOTION_WORKFLOW_IDENTITY_REJECTED"],
+  ["run-name cannot stand in for definition name",e=>{e.workflow.name="promote staging Hosting";},"PROMOTION_WORKFLOW_IDENTITY_REJECTED"],
+  ["other workflow definition path",e=>{e.workflow.path=".github/workflows/other.yml";},"PROMOTION_WORKFLOW_IDENTITY_REJECTED"],
   ["foreign branch",e=>{e.run.head_branch="automation/x";},"PROMOTION_EVIDENCE_REJECTED"],
   ["changed source",e=>{e.manifest.sourceSha="1".repeat(40);},"MANIFEST_PROVENANCE_REJECTED"],
   ["different attempt",e=>{e.manifest.runAttempt=2;},"MANIFEST_PROVENANCE_REJECTED"],
@@ -102,24 +116,48 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
  ])await test(name,()=>{const e=evidence(fixture());mutate(e);assert.throws(()=>validatePromotionEvidence(e),new RegExp(error));});
  await test("verified loader uses exact run and artifact",async()=>{
   const e=evidence(fixture()),calls=[];
-  const result=await loadVerifiedPromotionManifest(e,{github:async(args,encoding)=>{calls.push(args[0]);if(args[0].endsWith("/zip")){assert.equal(encoding,null);return e.blob;}return JSON.stringify(args[0].includes("/artifacts?")?{total_count:1,artifacts:[e.artifact]}:e.run);},archiveReader:(blob,digest)=>readManifestArchive(blob,digest,()=>e.manifest)});
-  assert.deepEqual(result,e.manifest);assert.equal(calls.length,3);
+  e.run.name=e.run.display_title;
+  const result=await loadVerifiedPromotionManifest(e,{github:async(args,encoding)=>{
+   calls.push(args[0]);if(args[0].endsWith("/zip")){assert.equal(encoding,null);return e.blob;}
+   return JSON.stringify(args[0].includes("/actions/workflows/")?e.workflow:args[0].includes("/artifacts?")?{total_count:1,artifacts:[e.artifact]}:e.run);
+  },archiveReader:(blob,digest)=>readManifestArchive(blob,digest,()=>e.manifest)});
+  assert.deepEqual(result,e.manifest);
+  assert.deepEqual(calls,[
+   "/repos/"+repository+"/actions/runs/"+e.restoreRunId,
+   "/repos/"+repository+"/actions/workflows/"+e.run.workflow_id,
+   "/repos/"+repository+"/actions/runs/"+e.restoreRunId+"/artifacts?per_page=100",
+   "/repos/"+repository+"/actions/artifacts/"+e.artifact.id+"/zip",
+  ]);
+ });
+ await test("loader rejects unbound definition before artifact access",async()=>{
+  for(const mutation of [e=>{e.workflow.id++;},e=>{e.workflow.name="other";},e=>{e.workflow.path=".github/workflows/other.yml";}]){
+   const e=evidence(fixture()),calls=[];e.run.name=e.run.display_title;mutation(e);
+   await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async(args)=>{
+    calls.push(args[0]);return JSON.stringify(calls.length===1?e.run:e.workflow);
+   }}),/PROMOTION_WORKFLOW_IDENTITY_REJECTED/);
+   assert.equal(calls.length,2);
+  }
+ });
+ await test("loader rejects invalid workflow ID before definition lookup",async()=>{
+  const e=evidence(fixture());e.run.workflow_id="../../other";let calls=0;
+  await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async()=>{calls++;return JSON.stringify(e.run);}}),/PROMOTION_WORKFLOW_ID_REJECTED/);
+  assert.equal(calls,1);
  });
  await test("loader rejects duplicate artifacts without download",async()=>{
   const e=evidence(fixture()),calls=[];
-  await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async(args)=>{calls.push(args[0]);return JSON.stringify(calls.length===1?e.run:{total_count:2,artifacts:[e.artifact,e.artifact]});}}),/ARTIFACT_NOT_UNIQUE/);
-  assert.equal(calls.length,2);
+  await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async(args)=>{calls.push(args[0]);return JSON.stringify(calls.length===1?e.run:calls.length===2?e.workflow:{total_count:2,artifacts:[e.artifact,e.artifact]});}}),/ARTIFACT_NOT_UNIQUE/);
+  assert.equal(calls.length,3);
  });
  await test("loader rejects incomplete artifact page",async()=>{
   const e=evidence(fixture());let calls=0;
-  await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async()=>JSON.stringify(++calls===1?e.run:{total_count:101,artifacts:[e.artifact]})}),/ARTIFACT_LIST_INCOMPLETE/);
+  await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async()=>JSON.stringify(++calls===1?e.run:calls===2?e.workflow:{total_count:101,artifacts:[e.artifact]})}),/ARTIFACT_LIST_INCOMPLETE/);
  });
  await test("loader rejects missing entries and oversized artifact before download",async()=>{
   for(const scenario of ["missing","oversized"]){
    const e=evidence(fixture());let calls=0;
    if(scenario==="oversized")e.artifact.size_in_bytes=9*1024*1024;
-   await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async()=>JSON.stringify(++calls===1?e.run:{total_count:scenario==="missing"?2:1,artifacts:[e.artifact]})}),scenario==="missing"?/ARTIFACT_LIST_INCOMPLETE/:/ARTIFACT_PROVENANCE_REJECTED/);
-   assert.equal(calls,2);
+   await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async()=>JSON.stringify(++calls===1?e.run:calls===2?e.workflow:{total_count:scenario==="missing"?2:1,artifacts:[e.artifact]})}),scenario==="missing"?/ARTIFACT_LIST_INCOMPLETE/:/ARTIFACT_PROVENANCE_REJECTED/);
+   assert.equal(calls,3);
   }
  });
  await test("digest mismatch prevents decode",()=>{

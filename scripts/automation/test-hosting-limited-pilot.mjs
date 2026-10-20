@@ -1,0 +1,332 @@
+import assert from "node:assert/strict";
+import {after, before, test} from "node:test";
+import {mkdtemp, readFile, rm, writeFile, mkdir, stat} from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import {spawnSync} from "node:child_process";
+import {PILOT_FUNCTIONS, normalizePilotFunction} from "./collect-hosting-pilot-metadata.mjs";
+import {PILOT_READ_SCOPE, PILOT_WRITE_SCOPE, evaluateStaffAcceptance, pilotEvidenceDigest,
+  recordStagingTrial, recheckPilotDeployment, validateEvidencePolicy,
+  validateLimitedPilotEvidence, validateLimitedPilotPreflight} from "./hosting-limited-pilot.mjs";
+
+const PROJECT = "lip-knots-crew-staging", REGION = "asia-northeast1";
+const PREFIX = `projects/${PROJECT}/locations/${REGION}`, SHA = "a".repeat(40), RUN = "39367729999";
+const NOW = "2026-10-20T12:00:00.000Z", DIGEST = "sha256:" + "b".repeat(64);
+let savedFetch;
+before(() => {savedFetch = globalThis.fetch; globalThis.fetch = () => assert.fail("Offline tests must never access a live endpoint");});
+after(() => {globalThis.fetch = savedFetch;});
+
+/** Synthetic declarations for offline tests. These are not operational evidence. */
+export function pilotFixture() {
+  return {schemaVersion: 1, policy: "limited-staff-pilot", projectId: PROJECT, region: REGION,
+    sourceSha: SHA, pilotId: "1".repeat(32), createdAt: "2026-10-20T11:00:00.000Z",
+    expiresAt: "2026-10-20T15:00:00.000Z", sourceAuthenticity: "UNVERIFIED", submissionAcceptance: "UNVERIFIED",
+    review: {recordDigest: DIGEST,
+      cost: {actions: "NO_ADDITIONAL_COST", hosting: "NO_ADDITIONAL_COST", apiAndFirestore: "NO_ADDITIONAL_COST", evidenceDigest: DIGEST},
+      account: {identityDigest: DIGEST, existingDedicatedStaff: true, emailVerified: true,
+        activeProfileAndEmailIndex: true, exactExistingStaffClaims: true, excludedFromAdminEmails: true,
+        gatewayNonproduction: true, evidenceDigest: DIGEST},
+      scope: {functions: [...PILOT_FUNCTIONS], firestoreReads: [...PILOT_READ_SCOPE], allowedWrites: [...PILOT_WRITE_SCOPE],
+        requestBoundaryEnforced: true, admin: "SIGNED_OUT_INITIAL_SCREEN_ONLY", authClaimsWrites: "FORBIDDEN",
+        businessMutations: "FORBIDDEN", uploadAndStorage: "FORBIDDEN", transferPause: "UNOBSERVED_UNCHANGED",
+        pushRegistration: "FORBIDDEN", evidenceDigest: DIGEST},
+      mail: {pilotId: "1".repeat(32), recipientDigest: DIGEST, maximumMessages: 1, attempts: [],
+        completeHistory: true, irreversibleAcknowledged: true, evidenceDigest: DIGEST},
+      previewAuth: {status: "UNSUPPORTED_VERIFIED", reason: "EXISTING_AUTHORIZED_DOMAINS_EXCLUDE_PREVIEW", evidenceDigest: DIGEST},
+      recovery: {bothPreviousVersionsAvailable: true, restoreWorkflowVerified: true,
+        retainUntil: "2026-10-21T10:00:00.000Z", cleanupBeforeAcceptance: false,
+        externalWritersExcluded: true, externalWritersExcludedUntil: "2026-10-20T15:00:00.000Z",
+        evidenceDigest: DIGEST},
+    },
+    hosting: {previewRunId: "39367728888", previewRunAttempt: 1,
+      previewVersions: {staff: "1111111111111111", admin: "2222222222222222"},
+      previousVersions: {staff: "3333333333333333", admin: "4444444444444444"}},
+    functions: Object.fromEntries(PILOT_FUNCTIONS.map(name => [name, normalizePilotFunction({
+      name: `${PREFIX}/functions/${name}`, environment: "GEN_2", state: "ACTIVE",
+      updateTime: "2026-10-19T01:00:00.123456Z",
+      buildConfig: {build: `${PREFIX}/builds/90834a05-b919-42a1-b963-bd8e07d13213`, runtime: "nodejs22", entryPoint: name},
+      serviceConfig: {service: `${PREFIX}/services/${name.toLowerCase()}`,
+        revision: `${name.toLowerCase()}-00001-abc`, allTrafficOnLatestRevision: true},
+    }, name)])),
+  };
+}
+function snapshot(evidence = pilotFixture()) {
+  return {schemaVersion: 1, status: "METADATA_COLLECTED", policy: "limited-staff-pilot", projectId: PROJECT,
+    region: REGION, sourceSha: SHA, sourceAuthenticity: "UNVERIFIED", submissionAcceptance: "UNVERIFIED",
+    hostingPromotionAuthorized: false, apiCompatibilityVerified: false,
+    observation: {runId: RUN, runAttempt: 1, capturedAt: "2026-10-20T11:59:00.000Z"},
+    functions: structuredClone(evidence.functions),
+    requests: PILOT_FUNCTIONS.map(name => ({method: "GET", function: name, status: 200}))};
+}
+function context(evidence = pilotFixture(), operation = "promote") {
+  return {evidence, sourceSha: SHA, currentRunId: RUN, operation, now: NOW,
+    previewRunId: evidence.hosting.previewRunId, previewVersions: evidence.hosting.previewVersions,
+    previousVersions: evidence.hosting.previousVersions, snapshot: snapshot(evidence)};
+}
+function manifest(report) {
+  return {schemaVersion: 1, operation: "promote", projectId: PROJECT, region: REGION, sourceSha: SHA,
+    promotionRunId: RUN, runAttempt: 1, promotionResult: "success",
+    ...Object.fromEntries(["staff", "admin"].map(label => [label, {
+      siteId: PROJECT + (label === "admin" ? "-admin" : ""),
+      previousVersion: report.hosting.previousVersions[label], promotedVersion: report.hosting.previewVersions[label],
+    }]))};
+}
+function acceptance(report) {
+  return {sourceSha: SHA, pilotId: report.pilotId, accountDigest: report.accountDigest, evidenceDigest: DIGEST,
+    capturedAt: NOW, observationRunId: RUN,
+    target: report.readinessState === "STAGING_TRIAL" ? "staging" : "preview",
+    versions: structuredClone(report.hosting.previewVersions), authenticated: true, staffRole: "staff",
+    adminAuthenticated: false, claimsUnchanged: true,
+    functionResults: Object.fromEntries(PILOT_FUNCTIONS.filter(f => !["loginGateway", "requestStaffLoginLink"].includes(f))
+      .map(f => [f, "OBSERVED_COMPATIBLE_RESPONSE"])),
+    readScopeDigest: report.reviewedReadScopeDigest, writes: [...PILOT_WRITE_SCOPE], mailAttemptsConsumed: 1,
+    mailRecipientDigest: report.mailRecipientDigest,
+    mail: {completeHistory: true, recipientDigest: report.mailRecipientDigest,
+      attempts: [{outcome: "SENT", evidenceDigest: DIGEST}], evidenceDigest: DIGEST},
+    submissionInvoked: false, storageInvoked: false, scopeViolations: []};
+}
+function evaluate(input) {
+  const afterSnapshot = snapshot(); afterSnapshot.observation.capturedAt = NOW;
+  return evaluateStaffAcceptance({beforeSnapshot: snapshot(), afterSnapshot, now: NOW, ...input});
+}
+
+test("strict policy remains default; limited policy is manual, explicit and never restore/metadata-only/rerun", () => {
+  assert.equal(validateEvidencePolicy({eventName: "workflow_run", operation: "promote"}), "source-provenance");
+  assert.equal(validateEvidencePolicy({policy: "limited-staff-pilot", eventName: "workflow_dispatch", operation: "promote"}),
+    "limited-staff-pilot");
+  for (const change of [{policy: ""}, {policy: "skip"}, {eventName: "workflow_run"}, {operation: "restore"},
+    {operation: "deploy"}, {metadataOnly: true}, {runAttempt: 2}, {runAttempt: "1"}]) {
+    assert.throws(() => validateEvidencePolicy({policy: "limited-staff-pilot", eventName: "workflow_dispatch",
+      operation: "promote", ...change}), /REJECTED|MANUAL_ONLY/u);
+  }
+});
+test("pure preflight validates declarations without calling HTTP or proving source, submission or actual authentication", () => {
+  const evidence = pilotFixture(), original = JSON.stringify(evidence);
+  const result = validateLimitedPilotPreflight(evidence, {sourceSha: SHA, operation: "promote", now: NOW});
+  assert.equal(result.evidenceValidation, "VALID");
+  assert.equal(result.declarationsRequireProtectedReview, true);
+  assert.equal(result.sourceAuthenticity, "UNVERIFIED"); assert.equal(result.submissionAcceptance, "UNVERIFIED");
+  assert.equal(result.readinessState, undefined);
+  assert.equal(JSON.stringify(evidence), original);
+});
+test("metadata and Hosting pins yield PREAUTH_READY only, never source/API/auth acceptance", () => {
+  const input = context(), original = JSON.stringify(input), result = validateLimitedPilotEvidence(input);
+  assert.equal(result.readinessState, "PREAUTH_READY"); assert.equal(result.stagingTrialAuthorized, true);
+  assert.equal(result.authenticatedStaffAcceptance, "UNVERIFIED");
+  assert.equal(result.sourceAuthenticity, "UNVERIFIED"); assert.equal(result.submissionAcceptance, "UNVERIFIED");
+  assert.equal(result.backupAndPreviewCleanupAuthorized, false); assert.equal(result.adminAuthenticated, false);
+  assert.equal(JSON.stringify(input), original);
+});
+test("supported or unknown Preview auth permits read-only preauth but cannot authorize staging fallback", () => {
+  for (const status of ["SUPPORTED", "UNKNOWN"]) {
+    const evidence = pilotFixture(); evidence.review.previewAuth = {status, reason: "NONE", evidenceDigest: DIGEST};
+    const result = validateLimitedPilotEvidence(context(evidence, "readiness"));
+    assert.equal(result.stagingTrialAuthorized, false); assert.equal(result.readinessState, "PREAUTH_READY");
+    assert.throws(() => validateLimitedPilotEvidence(context(evidence)), /STAGING_FALLBACK_NOT_PROVEN/u);
+  }
+});
+test("all safety prerequisites are fail-closed, including exact claims and unknown API/read costs", () => {
+  const mutations = [
+    ["schemaVersion", 2], ["policy", "source-provenance"], ["projectId", "prod"], ["region", "us-central1"],
+    ["sourceSha", "c".repeat(40)], ["pilotId", ""], ["sourceAuthenticity", "PASS"], ["submissionAcceptance", "PASS"],
+    ["review.recordDigest", "unknown"], ["review.cost.actions", "UNKNOWN"], ["review.cost.hosting", "UNKNOWN"],
+    ["review.cost.apiAndFirestore", "ASSUMED_FREE"], ["review.account.existingDedicatedStaff", false],
+    ["review.account.emailVerified", false], ["review.account.activeProfileAndEmailIndex", false],
+    ["review.account.exactExistingStaffClaims", false], ["review.account.excludedFromAdminEmails", false],
+    ["review.account.gatewayNonproduction", false], ["review.scope.requestBoundaryEnforced", false],
+    ["review.scope.admin", "EXISTING_SESSION"], ["review.scope.authClaimsWrites", "ALLOWED"],
+    ["review.scope.businessMutations", "READ_WRITE"], ["review.scope.uploadAndStorage", "PAUSE_PROBE"],
+    ["review.scope.transferPause", "PAUSED"], ["review.scope.pushRegistration", "ALLOWED"],
+    ["review.mail.maximumMessages", 2], ["review.mail.completeHistory", false],
+    ["review.mail.irreversibleAcknowledged", false], ["review.mail.pilotId", "2".repeat(32)],
+    ["review.mail.recipientDigest", "sha256:" + "c".repeat(64)],
+    ["review.previewAuth.reason", "NOT_YET_TESTED"], ["review.recovery.bothPreviousVersionsAvailable", false],
+    ["review.recovery.restoreWorkflowVerified", false], ["review.recovery.cleanupBeforeAcceptance", true],
+    ["review.recovery.retainUntil", "2026-10-20T12:00:00.000Z"], ["hosting.previewRunAttempt", 2],
+    ["review.recovery.retainUntil", "2026-10-21T12:00:00.000Z"],
+    ["review.recovery.externalWritersExcluded", false],
+    ["review.recovery.externalWritersExcludedUntil", "2026-10-20T12:00:00.000Z"],
+  ];
+  for (const [field, value] of mutations) {
+    const evidence = pilotFixture(), parts = field.split("."), last = parts.pop();
+    let target = evidence; for (const part of parts) target = target[part];
+    target[last] = value;
+    assert.throws(() => validateLimitedPilotPreflight(evidence, {sourceSha: SHA, operation: "promote", now: NOW}),
+      /PILOT_/u, field);
+  }
+});
+test("unknown fields, missing records, unsupported read families and upload APIs reject", () => {
+  for (const mutate of [
+    e => {e.email = "synthetic-personal-value";}, e => {delete e.review.account;},
+    e => {e.review.account.fullName = "synthetic";}, e => {e.review.scope.functions.push("createUploadSession");},
+    e => {e.review.scope.firestoreReads.pop();}, e => {e.review.scope.firestoreReads.push("all-jobs");},
+    e => {e.review.scope.allowedWrites.push("business-records");},
+    e => {e.functions.createUploadSession = e.functions.getMyTasks;},
+    e => {delete e.functions.getPushStatus;}, e => {e.functions.getPushStatus.environmentVariables = {};},
+  ]) {
+    const evidence = pilotFixture(); mutate(evidence);
+    assert.throws(() => validateLimitedPilotPreflight(evidence, {sourceSha: SHA, now: NOW}), /PILOT_/u);
+  }
+});
+test("source/revision/build/runtime/traffic pin mutations cannot borrow old two-Function metadata", () => {
+  for (const change of [
+    c => {c.snapshot.functions = {createUploadSession: {}, finalizeStagedUpload: {}};},
+    c => {c.snapshot.sourceSha = "b".repeat(40);}, c => {c.snapshot.policy = "source-provenance";},
+    c => {c.snapshot.functions.getMyTasks.revision = "getmytasks-00002-def";},
+    c => {c.snapshot.functions.bootstrapSession.runtime = "nodejs20";},
+    c => {c.snapshot.functions.loginGateway.state = "DEPLOYING";},
+    c => {c.snapshot.functions.getPushStatus.allTrafficOnLatestRevision = false;},
+    c => {c.snapshot.functions.registerDeviceSession.build = c.snapshot.functions.registerDeviceSession.build.replace("asia-northeast1", "us-central1");},
+    c => {c.snapshot.observation.runId = "123";}, c => {c.snapshot.observation.runAttempt = 2;},
+    c => {c.snapshot.hostingPromotionAuthorized = true;},
+  ]) {
+    const input = context(); change(input);
+    assert.throws(() => validateLimitedPilotEvidence(input), /PILOT_/u);
+  }
+});
+test("stale, future, malformed and overly long reviewed intervals fail", () => {
+  for (const [field, value] of [["expiresAt", NOW], ["createdAt", "2026-10-20T13:00:00.000Z"],
+    ["expiresAt", "2026-10-22T12:00:00.000Z"], ["createdAt", "2026-02-30T12:00:00.000Z"],
+    ["expiresAt", "never"]]) {
+    const evidence = pilotFixture(); evidence[field] = value;
+    assert.throws(() => validateLimitedPilotPreflight(evidence, {sourceSha: SHA, now: NOW}), /PILOT_/u);
+  }
+  for (const capturedAt of ["2026-10-20T11:49:59.000Z", "2026-10-20T12:00:01.000Z"]) {
+    const input = context(); input.snapshot.observation.capturedAt = capturedAt;
+    assert.throws(() => validateLimitedPilotEvidence(input), /METADATA_STALE/u);
+  }
+});
+test("changed or mismatched preview/rollback pair is rejected", () => {
+  for (const mutate of [
+    c => {c.previewRunId = "123";}, c => {c.previewVersions = {staff: "c".repeat(16), admin: "d".repeat(16)};},
+    c => {c.previousVersions = {staff: "c".repeat(16), admin: "d".repeat(16)};},
+    c => {c.evidence.hosting.previousVersions.staff = c.evidence.hosting.previewVersions.staff;},
+    c => {c.evidence.hosting.previewVersions.staff = "../live";},
+  ]) {
+    const input = context(); mutate(input);
+    assert.throws(() => validateLimitedPilotEvidence(input), /PILOT_/u);
+  }
+});
+test("single mail ledger is across the pilot, no resend on unknown or confirmed-not-sent attempt", () => {
+  const evidence = pilotFixture();
+  for (const outcome of ["SENT", "CONFIRMED_NOT_SENT"]) {
+    evidence.review.mail.attempts = [{outcome, evidenceDigest: DIGEST}];
+    assert.equal(validateLimitedPilotEvidence(context(evidence)).mailAttemptsConsumed, 1);
+  }
+  evidence.review.mail.attempts = [{outcome: "UNKNOWN", evidenceDigest: DIGEST}];
+  assert.throws(() => validateLimitedPilotEvidence(context(evidence)), /MAIL_OUTCOME_UNRESOLVED/u);
+  evidence.review.mail.attempts = Array.from({length: 2}, () => ({outcome: "SENT", evidenceDigest: DIGEST}));
+  assert.throws(() => validateLimitedPilotEvidence(context(evidence)), /MAIL_LEDGER_REQUIRED/u);
+});
+test("posttrial deployment drift and backwards observation time fail", () => {
+  const before = snapshot(), after = snapshot(); after.observation.capturedAt = NOW;
+  assert.equal(recheckPilotDeployment({before, after, sourceSha: SHA, currentRunId: RUN, now: NOW}).deploymentUnchanged, true);
+  after.functions.getPushStatus.revision = "getpushstatus-00002-def";
+  assert.throws(() => recheckPilotDeployment({before, after, sourceSha: SHA, currentRunId: RUN, now: NOW}), /DEPLOYMENT_CHANGED/u);
+  after.functions = structuredClone(before.functions); after.observation.capturedAt = "2026-10-20T11:58:00.000Z";
+  assert.throws(() => recheckPilotDeployment({before, after, sourceSha: SHA, currentRunId: RUN, now: NOW}), /DEPLOYMENT_CHANGED/u);
+});
+test("successful trial manifest records STAGING_TRIAL with no authentication acceptance or cleanup", () => {
+  const report = validateLimitedPilotEvidence(context());
+  const result = recordStagingTrial({report, manifest: manifest(report), currentRunId: RUN, now: NOW});
+  assert.equal(result.readinessState, "STAGING_TRIAL"); assert.equal(result.authenticatedStaffAcceptance, "UNVERIFIED");
+  assert.equal(result.sourceAuthenticity, "UNVERIFIED"); assert.equal(result.submissionAcceptance, "UNVERIFIED");
+  assert.equal(result.backupAndPreviewCleanupAuthorized, false);
+  for (const change of [
+    m => {m.promotionResult = "prepared";}, m => {m.operation = "limited-promote";},
+    m => {m.sourceSha = "c".repeat(40);}, m => {m.runAttempt = 2;},
+    m => {m.promotionRunId = "123";}, m => {m.staff.previousVersion = "d".repeat(16);},
+    m => {m.admin.promotedVersion = "d".repeat(16);}, m => {m.admin.siteId = PROJECT;},
+  ]) {
+    const value = manifest(report); change(value);
+    assert.throws(() => recordStagingTrial({report, manifest: value, currentRunId: RUN, now: NOW}), /PILOT_/u);
+  }
+});
+test("separate authenticated observation required for STAFF_UI_ACCEPTED, other scopes remain unverified", () => {
+  const report = validateLimitedPilotEvidence(context(pilotFixture(), "readiness"));
+  const result = evaluate({report, observation: acceptance(report)});
+  assert.equal(result.readinessState, "STAFF_UI_ACCEPTED"); assert.equal(result.authenticatedStaffAcceptance, "ACCEPTED");
+  assert.equal(result.sourceAuthenticity, "UNVERIFIED"); assert.equal(result.submissionAcceptance, "UNVERIFIED");
+  assert.equal(result.backupAndPreviewCleanupAuthorized, false);
+  assert.throws(() => evaluate({report, observation: {browserResult: "PASS"}}), /PILOT_/u);
+});
+test("anonymous browser success, Admin session, claim change, scope violations and submission cannot pass", () => {
+  const report = validateLimitedPilotEvidence(context());
+  for (const mutate of [
+    o => {o.authenticated = false;}, o => {o.staffRole = "admin";}, o => {o.adminAuthenticated = true;},
+    o => {o.claimsUnchanged = false;}, o => {o.functionResults.getMyTasks = "METADATA_ACTIVE";},
+    o => {delete o.functionResults.getPushStatus;}, o => {o.scopeViolations.push("unknown-request");},
+    o => {o.submissionInvoked = true;}, o => {o.storageInvoked = true;},
+    o => {o.mailAttemptsConsumed = 2;}, o => {o.mailRecipientDigest = "sha256:" + "c".repeat(64);},
+    o => {o.target = "staging";}, o => {o.accountDigest = "sha256:" + "c".repeat(64);},
+  ]) {
+    const observation = acceptance(report); mutate(observation);
+    assert.throws(() => evaluate({report, observation}), /PILOT_/u);
+  }
+});
+test("acceptance expires and requires unchanged deployments around the authenticated observation", () => {
+  const report = validateLimitedPilotEvidence(context()), observation = acceptance(report);
+  assert.throws(() => evaluate({report, observation, now: "2026-10-20T16:00:00.000Z"}), /EXPIRED/u);
+  const afterSnapshot = snapshot(); afterSnapshot.observation.capturedAt = NOW;
+  afterSnapshot.functions.getMyTasks.revision = "getmytasks-00002-def";
+  assert.throws(() => evaluate({report, observation, afterSnapshot}), /DEPLOYMENT_CHANGED/u);
+  observation.mail.attempts[0].outcome = "UNKNOWN";
+  assert.throws(() => evaluate({report, observation}), /MAIL_OUTCOME_UNRESOLVED/u);
+});
+test("evidence digests are order independent and never mutate input", () => {
+  assert.equal(pilotEvidenceDigest({z: 1, a: {b: 2, a: 1}}), pilotEvidenceDigest({a: {a: 1, b: 2}, z: 1}));
+});
+test("CLI preflight keeps reviewed source outside artifacts; runtime validation emits sanitized report", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lkc-pilot-test-"));
+  const now = new Date(), evidence = pilotFixture();
+  evidence.createdAt = new Date(now.getTime() - 60_000).toISOString();
+  evidence.expiresAt = new Date(now.getTime() + 60 * 60_000).toISOString();
+  evidence.review.recovery.retainUntil = evidence.expiresAt;
+  evidence.review.recovery.externalWritersExcludedUntil = evidence.expiresAt;
+  const evidenceDir = path.join(root, "hosting-promote-evidence");
+  const env = {...process.env, GITHUB_ACTIONS: "true", GITHUB_REPOSITORY: "Hanabo0930/Lip-Knots-Crew",
+    GITHUB_REF: "refs/heads/main", GITHUB_REF_NAME: "main", GITHUB_JOB: "promote",
+    GITHUB_WORKFLOW_REF: "Hanabo0930/Lip-Knots-Crew/.github/workflows/staging-hosting-promote.yml@refs/heads/main",
+    GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_RUN_ID: RUN, GITHUB_RUN_ATTEMPT: "1",
+    RUNNER_TEMP: root, LKC_EVIDENCE_DIR: evidenceDir, LKC_SOURCE_SHA: SHA, LKC_PROJECT_ID: PROJECT, LKC_REGION: REGION,
+    LKC_OPERATION: "promote", LKC_CONFIRMATION: "PROMOTE_LKC_STAGING_HOSTING",
+    LKC_EVIDENCE_POLICY: "limited-staff-pilot", LKC_METADATA_ONLY: "false",
+    LKC_LIMITED_EVIDENCE: JSON.stringify(evidence), LKC_PREVIEW_RUN_ID: evidence.hosting.previewRunId,
+    LKC_STAFF_VERSION: evidence.hosting.previewVersions.staff, LKC_ADMIN_VERSION: evidence.hosting.previewVersions.admin,
+    LKC_PREVIOUS_STAFF_VERSION: evidence.hosting.previousVersions.staff, LKC_PREVIOUS_ADMIN_VERSION: evidence.hosting.previousVersions.admin};
+  const cli = (...args) => spawnSync(process.execPath, ["scripts/automation/hosting-limited-pilot.mjs", ...args],
+    {env, encoding: "utf8"});
+  try {
+    assert.equal(cli("--guard-only").status, 0);
+    const guard = spawnSync(process.execPath, ["scripts/automation/hosting-limited-pilot.mjs", "--guard-only"],
+      {env: {GITHUB_JOB: "guard", GITHUB_EVENT_NAME: "workflow_run", GITHUB_RUN_ATTEMPT: "1",
+        LKC_OPERATION: "promote", LKC_EVIDENCE_POLICY: "source-provenance", LKC_METADATA_ONLY: "false"}, encoding: "utf8"});
+    assert.equal(guard.status, 0, guard.stderr);
+    const preflight = cli("--preflight-only"); assert.equal(preflight.status, 0, preflight.stderr);
+    assert(!preflight.stdout.includes(DIGEST));
+    assert.equal((await stat(path.join(root, "lkc-limited-pilot-review.json"))).mode & 0o777, 0o600);
+    await mkdir(evidenceDir);
+    const metadata = snapshot(evidence); metadata.observation.capturedAt = now.toISOString();
+    await writeFile(path.join(evidenceDir, "pilot-metadata.json"), JSON.stringify(metadata));
+    const check = cli("--validate"); assert.equal(check.status, 0, check.stderr);
+    const report = JSON.parse(await readFile(path.join(evidenceDir, "limited-pilot-evidence.json"), "utf8"));
+    assert.equal(report.readinessState, "PREAUTH_READY"); assert.equal(report.review, undefined);
+    assert.equal(cli("--validate").status, 1, "No overwrite of existing evidence");
+    await writeFile(path.join(evidenceDir, "pilot-metadata-before-write.json"), JSON.stringify(metadata));
+    const beforeWrite = cli("--recheck-before-write"); assert.equal(beforeWrite.status, 0, beforeWrite.stderr);
+    await writeFile(path.join(evidenceDir, "pilot-metadata-after.json"), JSON.stringify(metadata));
+    const afterWrite = cli("--recheck"); assert.equal(afterWrite.status, 0, afterWrite.stderr);
+    const recheckFile = path.join(evidenceDir, "limited-pilot-deployment-recheck.json");
+    const recheckText = await readFile(recheckFile, "utf8");
+    await writeFile(path.join(evidenceDir, "restore-manifest.json"), JSON.stringify(manifest(report)));
+    await writeFile(recheckFile, JSON.stringify({deploymentUnchanged: true}));
+    assert.equal(cli("--finalize").status, 1, "Unbound boolean recheck cannot finalize a trial");
+    await writeFile(recheckFile, recheckText);
+    const finalize = cli("--finalize"); assert.equal(finalize.status, 0, finalize.stderr);
+    const trial = JSON.parse(await readFile(path.join(evidenceDir, "limited-pilot-trial.json"), "utf8"));
+    assert.equal(trial.readinessState, "STAGING_TRIAL");
+    assert.equal(trial.authenticatedStaffAcceptance, "UNVERIFIED");
+    const unknown = cli("--anything", "synthetic-sensitive-data");
+    assert.equal(unknown.status, 1); assert(!unknown.stderr.includes("synthetic-sensitive-data"));
+  } finally {await rm(root, {recursive: true, force: true});}
+});

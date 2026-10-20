@@ -416,12 +416,14 @@ const require = createRequire(import.meta.url);
 const {parse} = require("yaml");
 const promoteSpec=parse(promoteWorkflow), previewSpec=parse(previewWorkflow);
 assert.deepEqual(promoteSpec.on.workflow_dispatch.inputs.operation.options,["promote","readiness","restore"]);
+assert.deepEqual(promoteSpec.on.workflow_dispatch.inputs.evidence_policy.options,["source-provenance","limited-staff-pilot"]);
+assert.equal(promoteSpec.on.workflow_dispatch.inputs.evidence_policy.default,"source-provenance");
 assert.equal(promoteSpec.jobs.promote.environment,"lkc-staging-hosting");
 // Eligible runs retain the shared queue; skipped events must not compete for it.
 function hostingQueueContext({id="100", event="workflow_run", upstream="push", conclusion="success",
-  branch="main", ref="refs/heads/main", operation="promote", metadataOnly=false}={}) {
+  branch="main", ref="refs/heads/main", operation="promote", metadataOnly=false, evidencePolicy="source-provenance"}={}) {
   return {event_name:event, ref, run_id:id,
-    inputs:{operation,metadata_only:metadataOnly},
+    inputs:{operation,metadata_only:metadataOnly,evidence_policy:evidencePolicy},
     event:{workflow_run:{event:upstream, conclusion, head_branch:branch}, inputs:{operation}}};
 }
 const hostingGroups={};
@@ -431,7 +433,8 @@ for (const [spec, kind] of [[previewSpec, "preview"], [promoteSpec, "promote"]])
   const shared = `lkc-staging-hosting-${kind}`;
   const metadataPrefix = kind === "promote" ?
     "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && " +
-    "inputs.operation == 'readiness' && inputs.metadata_only == true) && 'lkc-staging-hosting-metadata-readiness' || " : "";
+    "inputs.operation == 'readiness' && inputs.metadata_only == true && " +
+    "(inputs.evidence_policy == 'source-provenance' || !inputs.evidence_policy)) && 'lkc-staging-hosting-metadata-readiness' || " : "";
   const expected = "${{ " + metadataPrefix + "(" + compact(spec.jobs.guard.if) + ") && '" + shared +
     "' || format('" + shared + "-ignored-{0}', github.run_id) }}";
   assert.equal(compact(spec.concurrency.group), compact(expected),
@@ -460,7 +463,12 @@ for (const [spec, kind] of [[previewSpec, "preview"], [promoteSpec, "promote"]])
       "lkc-staging-hosting-metadata-readiness");
     assert.equal(select(hostingQueueContext({event:"workflow_dispatch",operation:"readiness",metadataOnly:true,ref:"refs/heads/feature"})),
       shared+"-ignored-100");
-    cases+=2;
+    assert.equal(select(hostingQueueContext({event:"workflow_dispatch",operation:"readiness",metadataOnly:true,evidencePolicy:""})),
+      "lkc-staging-hosting-metadata-readiness","legacy metadata dispatch retains its existing queue");
+    for(const operation of ["promote","readiness"])for(const metadataOnly of [false,true])
+      assert.equal(select(hostingQueueContext({event:"workflow_dispatch",operation,metadataOnly,evidencePolicy:"limited-staff-pilot"})),
+        shared,"limited requests cannot use the independent metadata queue");
+    cases+=7;
   } else {
     samples.push([hostingQueueContext({upstream:"workflow_dispatch"}),false]);
   }
@@ -475,6 +483,9 @@ for (const [spec, kind] of [[previewSpec, "preview"], [promoteSpec, "promote"]])
 assert.equal(hostingGroups.promote(hostingQueueContext({upstream:"workflow_run"})),
   hostingGroups.promote(hostingQueueContext({event:"workflow_dispatch",upstream:"",operation:"restore"})),
   "Automatic promotion and manual restore must retain the same serialized group");
+assert.equal(hostingGroups.promote(hostingQueueContext({upstream:"workflow_run"})),
+  hostingGroups.promote(hostingQueueContext({event:"workflow_dispatch",upstream:"",operation:"promote",evidencePolicy:"limited-staff-pilot"})),
+  "Automatic promotion and manual limited trial must retain the same serialized group");
 cases+=1;
 assert.equal(promoteSpec.concurrency["cancel-in-progress"],false);
 assert.equal(promoteSpec.env.LKC_PROJECT_ID,projectId);
@@ -483,11 +494,12 @@ assert.equal(promoteSpec.env.LKC_TARGETS,"staff,admin");
 assert.match(previewWorkflow,/--no-authorized-domains/u);
 assert.doesNotMatch(promoteWorkflow,/hosting:clone|hosting:channel:(?:create|delete)/u);
 const steps=promoteSpec.jobs.promote.steps;
-function stepRuns(step,mode,outcomes={},priorSuccess=true,metadataOnly=false){
+function stepRuns(step,mode,outcomes={},priorSuccess=true,metadataOnly=false,evidencePolicy="source-provenance"){
   let expression=String(step.if??"true").trim().replace(/^\$\{\{|\}\}$/gu,"").trim();
   if(!expression.includes("always()")&&!priorSuccess)return false;
   expression=expression.replace(/env\.LKC_OPERATION/gu,JSON.stringify(mode))
     .replace(/env\.LKC_METADATA_ONLY/gu,JSON.stringify(String(metadataOnly)))
+    .replace(/env\.LKC_EVIDENCE_POLICY/gu,JSON.stringify(evidencePolicy))
     .replace(/steps\.([a-z_]+)\.outcome/gu,(_,id)=>JSON.stringify(outcomes[id]??"skipped"))
     .replace(/steps\.([a-z_]+)\.outputs\.([a-z_]+)/gu,(_,id,key)=>JSON.stringify(outcomes[id+"."+key]??""))
     .replace(/always\(\)/gu,"true");
@@ -499,12 +511,15 @@ const mutatingNames=[
   "Promote the already-tested versions without rebuilding","Restore both previous live versions on any failure",
   "Persist successful promotion manifest before channel cleanup","Remove temporary channels after a successful promotion",
   "Restore the exact pair from successful promotion evidence",
+  "Restore the trial if durable promotion evidence failed",
 ];
 for(const step of steps.filter(s=>mutatingNames.includes(s.name))){
+ for(const policy of ["source-provenance","limited-staff-pilot"])
  for(const priorSuccess of [true,false])for(const result of ["success","failure","skipped"]){
   assert.equal(stepRuns(step,"readiness",{
    promotion:result,live_check:result,"backup.ready":"true",manual_restore:result,
-  },priorSuccess),false,"readiness cannot reach "+step.name);
+   pilot_after:result,finalize_capture:result,
+  },priorSuccess,false,policy),false,policy+" readiness cannot reach "+step.name);
  }
  cases++;
 }
@@ -513,12 +528,50 @@ for(const step of steps.filter(s=>mutatingNames.includes(s.name)&&s.id!=="manual
  cases++;
 }
 const autoRestore=steps.find(s=>s.id==="rollback");
+const evidenceRestore=steps.find(s=>s.id==="evidence_rollback");
+const evidenceUpload=steps.find(s=>s.id==="promotion_evidence");
+assert.equal(evidenceUpload["continue-on-error"],true);
+assert.ok(steps.indexOf(evidenceUpload)<steps.indexOf(evidenceRestore));
+for(const policy of ["source-provenance","limited-staff-pilot"]){
+ const knownPromotion={promotion:"success",finalize_capture:"success","promotion.rollback_allowed":"true","rollback.attempted":""};
+ for(const upload of ["failure","cancelled","skipped"]){
+  assert.equal(stepRuns(evidenceRestore,"promote",{...knownPromotion,promotion_evidence:upload},false,false,policy),true,
+   "lost durable evidence requires same-run recovery after known publication");
+ }
+ for(const overrides of [
+  {promotion_evidence:"success"},
+  {promotion:"skipped"},
+  {promotion:"failure"},
+  {finalize_capture:"failure"},
+  {"promotion.rollback_allowed":"false"},
+  {"promotion.rollback_allowed":""},
+  {"rollback.attempted":"true"},
+ ]){
+  assert.equal(stepRuns(evidenceRestore,"promote",{...knownPromotion,promotion_evidence:"failure",...overrides},false,false,policy),false,
+   "durable evidence recovery must not bypass known-outcome or prior-rollback guards");
+ }
+}
 assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"skipped"},false),false,"pre-write failure cannot run rollback");
 assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"failure","promotion.rollback_allowed":"true"},false),true);
 assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"success",live_check:"failure","promotion.rollback_allowed":"true"},false),true);
-assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"success",live_check:"success","promotion.rollback_allowed":"true"}),false);
+assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"success",live_check:"success",finalize_capture:"success","promotion.rollback_allowed":"true"}),false);
 assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"failure","promotion.rollback_allowed":"false"},false),false,"unknown outcome cannot run rollback");
 assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"failure"},false),false,"absent result output cannot run rollback");
+for(const after of ["failure","skipped"]){
+ assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"success",live_check:"success",
+  pilot_after:after,"promotion.rollback_allowed":"true"},false,false,"limited-staff-pilot"),true,
+  "limited metadata "+after+" after a known write must restore the pinned pair");
+}
+assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"success",live_check:"success",
+ pilot_after:"success",finalize_capture:"success","promotion.rollback_allowed":"true"},true,false,"limited-staff-pilot"),false);
+assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"success",live_check:"success",
+ pilot_after:"failure","promotion.rollback_allowed":"false"},false,false,"limited-staff-pilot"),false,
+ "unknown write outcome still prohibits rollback");
+for(const policy of ["source-provenance","limited-staff-pilot"])
+ for(const finalization of ["failure","skipped"])
+  assert.equal(stepRuns(autoRestore,"promote",{"backup.ready":"true",promotion:"success",live_check:"success",
+   pilot_after:"success",finalize_capture:finalization,"promotion.rollback_allowed":"true"},true,false,policy),true,
+   policy+" failed final evidence must restore the pinned pair");
 const promotionStep=steps.find(s=>s.id==="promotion");
 assert.equal(promotionStep.env.GH_TOKEN,"${{ github.token }}","per-step current-main read needs the existing scoped token");
 assert.match(promotionStep.run,/--github-output "\$GITHUB_OUTPUT"/u);
@@ -532,6 +585,29 @@ assert.ok(feeIndex>=0&&feeIndex<steps.findIndex(s=>s.name==="Authenticate with t
 assert.equal(stepRuns(steps[feeIndex],"readiness"),true);
 assert.equal(stepRuns(steps[feeIndex],"promote"),true);
 assert.equal(stepRuns(steps[feeIndex],"restore"),false);
+for(const mode of ["readiness","promote"]){
+ assert.equal(stepRuns(steps[feeIndex],mode,{},true,false,"limited-staff-pilot"),false);
+ assert.equal(stepRuns(steps.find(s=>s.id==="readiness"),mode),true,
+  "strict source verification is still required for "+mode);
+ assert.equal(stepRuns(steps.find(s=>s.id==="readiness"),mode,{},true,false,"limited-staff-pilot"),false);
+}
+const cleanup=steps.find(s=>s.name==="Remove temporary channels after a successful promotion");
+for(const mode of ["readiness","promote","restore"])
+ assert.equal(stepRuns(cleanup,mode,{promotion:"success",live_check:"success",pilot_after:"success",finalize_capture:"success"},
+  true,false,"limited-staff-pilot"),false,"limited trials cannot clean up backup or preview channels");
+assert.equal(stepRuns(cleanup,"promote",{promotion:"success",live_check:"success",finalize_capture:"success"}),true);
+assert.equal(stepRuns(cleanup,"promote",{promotion:"success",live_check:"success",finalize_capture:"failure"}),false);
+const limitedReviewIndex=steps.findIndex(s=>s.name==="Validate limited review and no additional cost before cloud access");
+assert.ok(limitedReviewIndex>=0&&limitedReviewIndex<steps.findIndex(s=>s.id==="hosting_auth"));
+assert.match(steps[limitedReviewIndex].run,/hosting-limited-pilot\.mjs --validate-review/u);
+assert.equal(stepRuns(steps[limitedReviewIndex],"promote",{},true,false,"limited-staff-pilot"),true);
+const finalCapture=steps.find(s=>s.id==="finalize_capture");
+assert.equal(finalCapture["continue-on-error"],true,"failed final evidence must still reach rollback");
+assert.ok(steps.indexOf(finalCapture)<steps.indexOf(autoRestore),"final evidence must be checked before rollback decision");
+assert.equal(stepRuns(finalCapture,"promote",{promotion:"success",live_check:"success",pilot_after:"failure"},
+ true,false,"limited-staff-pilot"),false);
+assert.equal(stepRuns(finalCapture,"promote",{promotion:"success",live_check:"success",pilot_after:"success"},
+ true,false,"limited-staff-pilot"),true);
 assert.match(promoteWorkflow,/format\(' from \{0\}', inputs\.restore_run_id\)/u,"restore run must be bound to target promotion before any attempt");
 cases+=3;
 const finalScript=steps.find(s=>s.name==="Enforce the final result").run;
@@ -540,21 +616,25 @@ assert.match(finalScript,/HOSTING_READINESS_RESULT=SUCCESS[\s\S]*?exit 0/u);
 cases+=5;
 
 const guardScript=promoteSpec.jobs.guard.steps.find(s=>s.id==="release").run;
+assert.equal(promoteSpec.jobs.guard.steps.find(s=>s.id==="release").env.LKC_EVIDENCE_POLICY,
+ "${{ github.event_name == 'workflow_run' && 'source-provenance' || inputs.evidence_policy || 'source-provenance' }}",
+ "automatic Preview promotions must never select the limited policy");
+assert.match(guardScript,/hosting-limited-pilot\.mjs --guard-only/u);
 const shellPath=process.platform==="win32"?"C:/Program Files/Git/bin/bash.exe":"/bin/bash";
 const shellTemp=await mkdtemp(join(repoRoot,".hosting-guard-test-"));
 try{
  const baseEnvironment={
   ...process.env,GITHUB_EVENT_NAME:"workflow_dispatch",GITHUB_REF_NAME:"main",GITHUB_REPOSITORY:"Hanabo0930/Lip-Knots-Crew",
   GITHUB_RUN_ID:"777",GITHUB_RUN_ATTEMPT:"1",LKC_PROJECT_ID:projectId,LKC_REGION:"asia-northeast1",LKC_TARGETS:"staff,admin",
-  LKC_METADATA_ONLY:"false",
+  LKC_METADATA_ONLY:"false",LKC_EVIDENCE_POLICY:"source-provenance",LKC_LIMITED_EVIDENCE:"",
   LKC_REQUESTED_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",LKC_PREVIEW_RUN_ID:"",
-  TEST_MAIN_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",TEST_CI_RESULT:"1",TEST_PREVIEW_RESULT:"1",
+  TEST_MAIN_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",TEST_CI_RESULT:"1",TEST_PREVIEW_RESULT:"1",TEST_PREVIEW_ID:"321",
   NODE_EXE:process.execPath.replaceAll("\\","/"),
  };
  const stubs=[
   "set -euo pipefail",
   'git(){ case "$1" in fetch) return 0;; rev-parse) printf "%s\\n" "$TEST_MAIN_SHA";; *) return 91;; esac; }',
-  'gh(){ case "$*" in *"Release Candidate Checks"*) printf "%s\\n" "$TEST_CI_RESULT";; *"promote staging Hosting"*) printf "0\\n";; *"Staging Hosting Preview"*) printf "%s\\n" "$TEST_PREVIEW_RESULT";; *) return 92;; esac; }',
+  'gh(){ case "$*" in *"sort_by(.id)"*) printf "%s\\n" "$TEST_PREVIEW_ID";; *"[.name, .event"*) printf "Staging Hosting Preview\\tworkflow_run\\tsuccess\\tmain\\t%s\\n" "$TEST_MAIN_SHA";; *"Release Candidate Checks"*) printf "%s\\n" "$TEST_CI_RESULT";; *"promote staging Hosting"*) printf "0\\n";; *"Staging Hosting Preview"*) printf "%s\\n" "$TEST_PREVIEW_RESULT";; *) return 92;; esac; }',
   'node(){ "$NODE_EXE" "$@"; }',
  ].join("\n");
  const scenarios=[
@@ -569,11 +649,26 @@ try{
   ["failed CI",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",TEST_CI_RESULT:"0"},false],
   ["production",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",LKC_PROJECT_ID:"production"},false],
   ["other region",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",LKC_REGION:"us-central1"},false],
+  ["limited manual promote",{LKC_EVIDENCE_POLICY:"limited-staff-pilot",LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},true],
+  ["limited manual readiness",{LKC_EVIDENCE_POLICY:"limited-staff-pilot",LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:""},true],
+  ["limited automatic rejected",{LKC_EVIDENCE_POLICY:"limited-staff-pilot",GITHUB_EVENT_NAME:"workflow_run",LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
+  ["limited restore rejected",{LKC_EVIDENCE_POLICY:"limited-staff-pilot",LKC_OPERATION:"restore",LKC_CONFIRMATION:"RESTORE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:"123"},false],
+  ["limited metadata rejected",{LKC_EVIDENCE_POLICY:"limited-staff-pilot",LKC_METADATA_ONLY:"true",LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:""},false],
+  ["limited rerun rejected",{LKC_EVIDENCE_POLICY:"limited-staff-pilot",GITHUB_RUN_ATTEMPT:"2",LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
+  ["limited preview required",{LKC_EVIDENCE_POLICY:"limited-staff-pilot",TEST_PREVIEW_RESULT:"0",LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:""},false],
+  ["limited unique preview ID required",{LKC_EVIDENCE_POLICY:"limited-staff-pilot",TEST_PREVIEW_ID:"",LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
+  ["limited missing review input",{LKC_EVIDENCE_POLICY:"limited-staff-pilot",LKC_LIMITED_EVIDENCE:"",LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
+  ["strict rejects limited input",{LKC_LIMITED_EVIDENCE:"{}",LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
+  ["unknown policy rejected",{LKC_EVIDENCE_POLICY:"bypass",LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
  ];
  for(const [label,extra,expected] of scenarios){
   const output=join(shellTemp,label.replaceAll(" ","-")+".txt");
   const result=spawnSync(shellPath,["-c",stubs+"\n"+guardScript],{
-   cwd:repoRoot,encoding:"utf8",env:{...baseEnvironment,...extra,GITHUB_OUTPUT:output.replaceAll("\\","/")},maxBuffer:100000,
+   // This guard checks JSON presence only. The protected preflight validates
+   // the complete reviewed schema before any cloud access; {} never passes it.
+   cwd:repoRoot,encoding:"utf8",env:{...baseEnvironment,
+    LKC_LIMITED_EVIDENCE:extra.LKC_EVIDENCE_POLICY==="limited-staff-pilot"?"{}":"",
+    ...extra,GITHUB_OUTPUT:output.replaceAll("\\","/")},maxBuffer:100000,
   });
   assert.equal(result.status===0,expected,"actual guard shell: "+label+" "+result.stdout+" "+result.stderr);
   if(expected){const saved=await readFile(output,"utf8");assert.match(saved,new RegExp("operation="+extra.LKC_OPERATION));assert.match(saved,/should_promote=true/u);}
@@ -583,16 +678,50 @@ try{
   ["unknown",{promotion:"failure","promotion.rollback_allowed":"false"},"UNKNOWN_STOPPED",1],
   ["missing-result",{promotion:"failure"},"UNKNOWN_STOPPED",1],
   ["known-rollback",{promotion:"failure","promotion.rollback_allowed":"true",rollback:"success",rollback_check:"success"},"ROLLED_BACK",1],
-  ["known-success",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success"},"SUCCESS",0],
+  ["known-success",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success",finalize_capture:"success"},"SUCCESS",0],
+  ["missing-final-manifest",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success",finalize_capture:"failure",rollback:"success",rollback_check:"success"},"ROLLED_BACK",1],
  ]){
   const rendered=finalScript.replace(/\$\{\{ steps\.([a-z_]+)\.(outcome|outputs\.([a-z_]+)) \}\}/gu,
-   (_,id,field,key)=>values[key?id+"."+key:id]??"skipped");
+   (_,id,field,key)=>values[key?id+"."+key:id]??(id==="promotion_evidence"?"success":"skipped"));
   assert.doesNotMatch(rendered,/\$\{\{/u);
   const result=spawnSync(shellPath,["-c","set -euo pipefail\n"+rendered],{cwd:repoRoot,encoding:"utf8",
    env:{...baseEnvironment,LKC_OPERATION:"promote"},maxBuffer:10000});
   assert.equal(result.status,code,"actual final-result shell: "+label);assert.match(result.stdout,new RegExp("HOSTING_PROMOTION_RESULT="+marker));
   cases++;
  }
+ for(const [label,mode,values,marker,code] of [
+  ["preauth","readiness",{pilot_readiness:"success"},"HOSTING_LIMITED_RESULT=PREAUTH_READY",0],
+  ["preauth-failed","readiness",{pilot_readiness:"failure"},"HOSTING_LIMITED_RESULT=STOPPED_SAFELY",1],
+  ["trial","promote",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success",pilot_after:"success",finalize_capture:"success"},"HOSTING_LIMITED_RESULT=STAGING_TRIAL",0],
+  ["trial-api-drift","promote",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success",pilot_after:"failure",rollback:"success",rollback_check:"success"},"HOSTING_PROMOTION_RESULT=ROLLED_BACK",1],
+  ["trial-api-missing","promote",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success",pilot_after:"skipped",rollback:"failure",rollback_check:"skipped"},"HOSTING_PROMOTION_RESULT=ROLLBACK_FAILED",1],
+  ["trial-manifest-failed","promote",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success",pilot_after:"success",finalize_capture:"failure",rollback:"success",rollback_check:"success"},"HOSTING_PROMOTION_RESULT=ROLLED_BACK",1],
+ ]){
+  const rendered=finalScript.replace(/\$\{\{ steps\.([a-z_]+)\.(outcome|outputs\.([a-z_]+)) \}\}/gu,
+   (_,id,field,key)=>values[key?id+"."+key:id]??(id==="promotion_evidence"?"success":"skipped"));
+  assert.doesNotMatch(rendered,/\$\{\{/u);
+  const result=spawnSync(shellPath,["-c","set -euo pipefail\n"+rendered],{cwd:repoRoot,encoding:"utf8",
+   env:{...baseEnvironment,LKC_OPERATION:mode,LKC_EVIDENCE_POLICY:"limited-staff-pilot"},maxBuffer:10000});
+  assert.equal(result.status,code,"actual limited final-result shell: "+label+" "+result.stderr);
+  assert.ok(result.stdout.includes(marker),"actual limited final-result shell: "+label+" "+result.stdout);
+  assert.doesNotMatch(result.stdout,/STAFF_UI_ACCEPTED|HOSTING_STAFF_ACCEPTANCE=ACCEPTED|HOSTING_PROMOTION_RESULT=SUCCESS/u);
+  if(code===0)assert.match(result.stdout,/HOSTING_STAFF_ACCEPTANCE=UNVERIFIED/u);
+  cases++;
+ }
+ for(const policy of ["source-provenance","limited-staff-pilot"])
+  for(const recovery of ["success","failure","skipped"]){
+   const values={promotion_evidence:"failure",evidence_rollback:recovery,promotion:"success",
+    "promotion.rollback_allowed":"true",live_check:"success",pilot_after:"success",finalize_capture:"success"};
+   const rendered=finalScript.replace(/\$\{\{ steps\.([a-z_]+)\.(outcome|outputs\.([a-z_]+)) \}\}/gu,
+    (_,id,field,key)=>values[key?id+"."+key:id]??"skipped");
+   const result=spawnSync(shellPath,["-c","set -euo pipefail\n"+rendered],{cwd:repoRoot,encoding:"utf8",
+    env:{...baseEnvironment,LKC_OPERATION:"promote",LKC_EVIDENCE_POLICY:policy},maxBuffer:10000});
+   assert.equal(result.status,1,"evidence upload failure remains failed even after recovery");
+   assert.match(result.stdout,/HOSTING_EVIDENCE_RESULT=FAILED/u);
+   assert.ok(result.stdout.includes("HOSTING_EVIDENCE_RECOVERY="+recovery));
+   assert.doesNotMatch(result.stdout,/HOSTING_PROMOTION_RESULT=SUCCESS|HOSTING_LIMITED_RESULT=STAGING_TRIAL/u);
+   cases++;
+  }
  const realCli=resolve(repoRoot,"scripts/automation/restore-staging-hosting.mjs");
  const cli=spawnSync(process.execPath,[realCli,"--operation","restore","--confirmation","RESTORE_LKC_STAGING_HOSTING","--project",projectId,"--region","asia-northeast1"],{
   cwd:repoRoot,encoding:"utf8",env:{...baseEnvironment,GITHUB_ACTIONS:"false"},maxBuffer:100000,

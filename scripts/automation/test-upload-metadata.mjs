@@ -354,10 +354,8 @@ test("same filename/job/protected environment/pinned identity; current-main and 
     assert.equal(active.length, 1);
     assert.match(active[0].body, /uses: actions\/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38/u);
     assert.match(active[0].body, /node-version: "22"/u);
-    if (metadataOnly) {
-      assert.match(active[0].body, /package-manager-cache: false/u);
-      assert.doesNotMatch(active[0].body, /^\s+cache(?:-dependency-path)?:/mu);
-    } else assert.match(active[0].body, /cache: npm\s+cache-dependency-path: source\/package-lock\.json/u);
+    assert.match(active[0].body, /package-manager-cache: false/u);
+    assert.doesNotMatch(active[0].body, /^\s+cache(?:-dependency-path)?:/mu);
   }
 });
 

@@ -50,6 +50,11 @@ export class PromotionHistoryError extends Error {
 }
 function requireValue(value, code, runId) {if (!value) throw new PromotionHistoryError(code, runId);}
 function validId(id) {return Number.isSafeInteger(id) && id > 0 && decimal.test(String(id));}
+function jobTimestamp(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/u.test(value)) return NaN;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value.replace(/Z$/u, ".000Z") ? time : NaN;
+}
 function runOperation(run) {
   if (run.display_title === "promote staging Hosting") return "promote";
   if (/^restore staging Hosting from [1-9][0-9]{0,19}$/u.test(run.display_title ?? "")) return "restore";
@@ -88,6 +93,18 @@ export function proveNoHostingWrite(run, jobs) {
     if (job.name === "promote" && job.started_at === null
       && (steps === null || Array.isArray(steps) && steps.length === 0)
       && ["skipped", "cancelled"].includes(job.conclusion)) {
+      explicitStop = true; continue;
+    }
+    // GitHub can timestamp an environment-waiting job before assigning a runner.
+    // Accept that cancelled shape only with complete, matching no-runner evidence.
+    const started = jobTimestamp(job.started_at), completed = jobTimestamp(job.completed_at);
+    if (operation === "promote" && run.conclusion === "cancelled"
+      && job.name === "promote" && job.conclusion === "cancelled"
+      && job.head_sha === run.head_sha && job.run_attempt === 1
+      && Number.isFinite(started) && Number.isFinite(completed) && completed >= started
+      && job.runner_id === 0 && job.runner_name === ""
+      && job.runner_group_id === 0 && job.runner_group_name === ""
+      && Array.isArray(steps) && steps.length === 0) {
       explicitStop = true; continue;
     }
     requireValue(job.name === "promote" && Array.isArray(steps) && steps.length > 0,

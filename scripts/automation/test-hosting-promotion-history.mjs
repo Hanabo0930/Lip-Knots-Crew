@@ -79,6 +79,47 @@ await clear([{...baseRun, head_branch: "automation/ignored", conclusion: "skippe
   {100: [job({id: 1001, name: "guard", conclusion: "skipped", started_at: null, steps: []}), neverStarted]});
 await clear([{...baseRun, conclusion: "cancelled"}],
   {100: [job({id: 1001, name: "guard", conclusion: "success", steps: []}), neverStarted]});
+// Sanitized shape of a cancelled environment-waiting job: GitHub supplied a
+// started_at timestamp, but never assigned a runner or recorded a step.
+const cancelledWaitingRun = {...baseRun, event: "workflow_run", conclusion: "cancelled"};
+const cancelledWaitingJob = job({
+  conclusion: "cancelled", head_sha: oldSha, run_attempt: 1,
+  started_at: "2026-10-20T03:49:59Z", completed_at: "2026-10-21T00:18:41Z",
+  runner_id: 0, runner_name: "", runner_group_id: 0, runner_group_name: "", steps: [],
+});
+const waitingGuard = job({id: 1001, name: "guard", conclusion: "success", steps: []});
+const {result: cancelledWaiting} = await clear([cancelledWaitingRun], {100: [waitingGuard, cancelledWaitingJob]});
+assert.equal(cancelledWaiting.resolved[0].result, "NO_HOSTING_WRITE"); cases++;
+for (const overrides of [
+  {runner_id: undefined}, {runner_id: null}, {runner_id: "0"}, {runner_id: 1},
+  {runner_name: undefined}, {runner_name: null}, {runner_name: "runner"}, {runner_name: " "},
+  {runner_group_id: undefined}, {runner_group_id: null}, {runner_group_id: "0"}, {runner_group_id: 1},
+  {runner_group_name: undefined}, {runner_group_name: null}, {runner_group_name: "group"},
+  {steps: undefined}, {steps: null}, {steps: {}},
+  {started_at: undefined}, {started_at: "invalid"}, {started_at: "2026-02-30T03:49:59Z"},
+  {completed_at: undefined}, {completed_at: null}, {completed_at: "invalid"},
+  {completed_at: "2026-10-20T03:49:58Z"},
+  {head_sha: undefined}, {head_sha: sourceSha}, {run_attempt: undefined}, {run_attempt: 2},
+  {conclusion: "failure"}, {conclusion: "skipped"}, {name: "other"},
+]) {
+  await blocked([cancelledWaitingRun], {100: [waitingGuard, {...cancelledWaitingJob, ...overrides}]},
+    "HOSTING_PRIOR_WRITE_UNRESOLVED");
+}
+for (const overrides of [{conclusion: "failure"}, {display_title: "Old workflow title"},
+  {event: "workflow_dispatch", display_title: "restore staging Hosting from 90"}]) {
+  await blocked([{...cancelledWaitingRun, ...overrides}], {100: [waitingGuard, cancelledWaitingJob]},
+    "HOSTING_PRIOR_WRITE_UNRESOLVED");
+}
+await blocked([cancelledWaitingRun], {100: [waitingGuard, {...cancelledWaitingJob, steps: [step("Set up job")]}]},
+  "HOSTING_HISTORY_WRITE_STEPS_MISSING");
+await blocked([cancelledWaitingRun], {100: [waitingGuard, {...cancelledWaitingJob,
+  steps: [step("Promote the already-tested versions without rebuilding", "failure")]}]},
+  "HOSTING_PRIOR_WRITE_UNRESOLVED");
+await blocked([cancelledWaitingRun], {100: [waitingGuard, cancelledWaitingJob,
+  job({id: 1002, name: "unknown", steps: []})]}, "HOSTING_PRIOR_WRITE_UNRESOLVED");
+await blocked([cancelledWaitingRun], {100: [waitingGuard, cancelledWaitingJob,
+  job({id: 1002, steps: [step("Promote the already-tested versions without rebuilding", "failure")]})]},
+  "HOSTING_PRIOR_WRITE_UNRESOLVED");
 await clear([{...baseRun, display_title: "Old workflow title"}], {100: [neverStarted]});
 const {result: success} = await clear([{...baseRun, conclusion: "success"}], {100: [successJob]});
 assert.equal(success.resolved[0].result, "COMPLETED_SUCCESS"); cases++;

@@ -293,8 +293,7 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: source/package-lock.json
+          package-manager-cache: false
       - name: Set up Node for metadata only
         if: env.LKC_METADATA_ONLY == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6

@@ -43,7 +43,7 @@ display title `promote staging Hosting`、artifact `staging-hosting-promote-{SHA
 | 1 開発担当：隔離コピーの通常修正 | 実不具合を修正し、変更箇所の回帰と独立レビューを完了する。変更していない既存試験は下記条件で再利用。認可情報の取得やクラウド実行を開発試験へ混ぜない |
 | 2 運用担当：既存認可による読取を1回に束ねる | 指定UIDのAuth読取1件と、固定Staff/Adminのliveチャンネル各1件を取得。本文を保存せず、対象一致・権限状態・完全版IDだけを保護された証拠へ残す。未取得項目を真にしない |
 | 3 開発・運用担当：公開前条件をまとめて確定 | 工程1・2と並行して、追加費用なし、対象アカウント、選択した観測方式と保証範囲、全試行メール台帳、排他期間・復旧期限を確認する。本人観測のために自作ブラウザ実行器を増築しない |
-| 4 開発担当：正規PR/CI/Preview | Actions費用条件が揃えばpush/Draft PRへ進める。統合前に規定のHosting/API/Firestore費用条件を確認する。PRのHEADと統合後mainの新SHAそれぞれに必要なCIを取得し、同SHAの不要な再実行はしない。統合SHAのCI後の自動Previewと自動promoteの1連鎖を管理する |
+| 4 開発担当：正規PR/CI/Preview | Actions費用条件が揃えばpush/Draft PRへ進める。統合前には自動起動するActionsと匿名PreviewのHosting費用・staging限定・後続promoteの保護環境を確認する。本人ログインのAPI/Firestore費用・Auth証拠やlive反映の復旧証拠は、それぞれの実行前に確認する。PRのHEADと統合後mainの新SHAそれぞれに必要なCIを取得し、同SHAの不要な再実行はしない。統合SHAのCI後の自動Previewと自動promoteの1連鎖を管理する |
 | 5 本人・運用担当：限定観測 | 準備済み固定版、操作回数、副作用、停止条件、結果の意味を一括提示してから本人が1回操作する。技術受入を選ぶ場合は従来の通信境界を強制する。Preview認証非対応の具体的証拠がある場合だけ、旧2版を保全して通常の保護付きstaging trialへ進む |
 
 工程2・3の未完了だけを理由に、独立した開発や費用条件を満たすDraft PRまで止めない。
@@ -98,8 +98,13 @@ Hosting adapterへAuth lookup本文を載せる流用はせず、運用読取側
    新しい SHA は新しい正式 CI が必要。過去の SHA の成功は流用しない。
 2. Actions の現在の利用枠、保存 artifact を含む追加費用なしの条件を確認する。
    確認不能なら自動 CI を発火する push / PR の前で止める。独立ブランチでの実装・ローカル検証は続行できる。
-3. main 統合は自動 Preview を生成するため、統合前に Hosting の残量、配信・保持・rollback版の費用、
-   今回の限定 Functions 呼出しと Firestore 読取・ログ記録の費用条件まで確認する。
+3. main 統合は自動 Preview を生成するため、統合前に匿名 Preview が使う Hosting の残量・配信・保持と、
+   自動起動する Actions の artifact 保存を含む追加費用なしを確認する。
+   Hosting の Preview / promote は任意の npm cache を保存しない。復旧・照合に必要な artifact は残すため、
+   キャッシュ無効化だけで Actions 全体の費用確認済みとは扱わない。
+   本人ログインの限定 Functions 呼出し・Firestore 読取・ログ記録の費用と Auth 前提は、最初の送信・ログイン前に確認する。
+   旧 live 2版の完全ID・復旧可能性・backup/rollback の費用と排他期間は、live trial の前に確認する。
+   これらの後段条件を、匿名 Preview 作成の必須条件へ前倒ししない。既存の保護環境承認を省略しない。
    billing 変更、課金有効化、購入は行わず、必要な場合は本人判断へ返す。
 4. 固定された同一 main SHA の正式 CI と1回の自動 Preview、Preview の run / attempt /
    artifact と Staff / Admin の immutable version を照合する。

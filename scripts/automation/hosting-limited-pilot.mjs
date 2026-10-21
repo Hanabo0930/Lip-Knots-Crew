@@ -4,7 +4,7 @@
  * remain declarations: the protected reviewer must inspect their source records.
  */
 import {createHash} from "node:crypto";
-import {mkdir, readFile, writeFile} from "node:fs/promises";
+import {appendFile, mkdir, readFile, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {pathToFileURL} from "node:url";
 import {requireProtectedContext, validateHostingOperation} from "./hosting-operation-context.mjs";
@@ -15,6 +15,10 @@ const POLICY = "limited-staff-pilot";
 const SHA = /^[a-f0-9]{40}$/u, DIGEST = /^sha256:[a-f0-9]{64}$/u;
 const VERSION = /^[a-f0-9]{16}$/u, RUN = /^[1-9][0-9]{0,19}$/u;
 const MAX_BYTES = 48 * 1024, MAX_AGE = 24 * 60 * 60 * 1000;
+const MANUAL_METHOD = "OWNER_MANUAL_UI";
+const MANUAL_REPORT_FIELDS = ["requestBoundaryEnforced", "requestCountsEnforced", "apiCompatibility",
+  "technicalAcceptance", "claimsUnchanged", "serverSideEffects", "backendDeploymentUnchanged",
+  "protectedReviewDigest", "manualPlan", "manualPlanDigest"];
 export const PILOT_READ_SCOPE = Object.freeze([
   "emailIndex:fixed-recipient", "staffProfiles:fixed-staff",
   "jobs:company-assigned-upcoming-301", "jobs:company-assigned-history-51",
@@ -62,6 +66,26 @@ export function pilotEvidenceDigest(value) {
   return "sha256:" + createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 }
 
+function acceptanceMethod(value) {
+  const method = Object.hasOwn(value, "acceptanceMethod") ? value.acceptanceMethod : "CONTROLLED_BROWSER";
+  requireValue(["CONTROLLED_BROWSER", MANUAL_METHOD].includes(method), "PILOT_ACCEPTANCE_METHOD_REJECTED");
+  return method;
+}
+function validateManualPlan(plan) {
+  keys(plan, ["actor", "ownerIdentityConfirmed", "maximumSessions", "maximumAuthenticationAttempts",
+    "maximumMailAttempts", "initialScreen", "observationWindowSeconds", "windowMeaning",
+    "requestCountsEnforced", "secretsRetention", "onErrorOrUnknown", "sessionContext", "authenticationMode", "mailPolicy"]);
+  requireValue(plan.actor === "REVIEWED_OWNER" && plan.ownerIdentityConfirmed === true
+    && plan.maximumSessions === 1 && plan.maximumAuthenticationAttempts === 1 && plan.maximumMailAttempts === 1
+    && plan.initialScreen === "STAFF_HOME_ONLY" && Number.isSafeInteger(plan.observationWindowSeconds)
+    && plan.observationWindowSeconds > 0
+    && plan.windowMeaning === "HUMAN_OBSERVATION_ONLY" && plan.requestCountsEnforced === false
+    && plan.secretsRetention === "FORBIDDEN" && plan.onErrorOrUnknown === "STOP"
+    && plan.sessionContext === "FRESH_DEDICATED_CONTEXT" && plan.authenticationMode === "EXISTING_STAFF_EMAIL_CODE"
+    && plan.mailPolicy === "PILOT_LEDGER_SINGLE_ATTEMPT_NO_RESEND", "PILOT_MANUAL_PLAN_REJECTED");
+}
+const manualPlanDigest = (protectedReviewDigest, manualPlan) => pilotEvidenceDigest({protectedReviewDigest, manualPlan});
+
 export function validateEvidencePolicy({policy = "source-provenance", eventName, operation, metadataOnly = false, runAttempt = 1}) {
   requireValue(["source-provenance", POLICY].includes(policy), "EVIDENCE_POLICY_REJECTED");
   if (policy === POLICY) {
@@ -73,9 +97,11 @@ export function validateEvidencePolicy({policy = "source-provenance", eventName,
   return policy;
 }
 
-function validateReview(review, {operation, pilotId, createdAt, expiresAt}) {
-  keys(review, ["recordDigest", "cost", "account", "scope", "mail", "previewAuth", "recovery"]);
+function validateReview(review, {operation, pilotId, createdAt, expiresAt, method}) {
+  keys(review, ["recordDigest", "cost", "account", "scope", "mail", "previewAuth", "recovery",
+    ...(method === MANUAL_METHOD ? ["manualObservationPlan"] : [])]);
   evidenceReference(review.recordDigest);
+  if (method === MANUAL_METHOD) validateManualPlan(review.manualObservationPlan);
   const {cost, account, scope, mail, previewAuth} = review;
   keys(cost, ["actions", "hosting", "apiAndFirestore", "evidenceDigest"]);
   requireValue(cost.actions === "NO_ADDITIONAL_COST" && cost.hosting === "NO_ADDITIONAL_COST"
@@ -94,7 +120,7 @@ function validateReview(review, {operation, pilotId, createdAt, expiresAt}) {
   exactList(scope.functions, PILOT_FUNCTIONS, "PILOT_FUNCTION_SCOPE_REJECTED");
   exactList(scope.firestoreReads, PILOT_READ_SCOPE, "PILOT_READ_SCOPE_REJECTED");
   exactList(scope.allowedWrites, PILOT_WRITE_SCOPE, "PILOT_WRITE_SCOPE_REJECTED");
-  requireValue(scope.requestBoundaryEnforced === true && scope.admin === "SIGNED_OUT_INITIAL_SCREEN_ONLY"
+  requireValue(scope.requestBoundaryEnforced === (method !== MANUAL_METHOD) && scope.admin === "SIGNED_OUT_INITIAL_SCREEN_ONLY"
     && scope.authClaimsWrites === "FORBIDDEN" && scope.businessMutations === "FORBIDDEN"
     && scope.uploadAndStorage === "FORBIDDEN" && scope.transferPause === "UNOBSERVED_UNCHANGED"
     && scope.pushRegistration === "FORBIDDEN", "PILOT_SIDE_EFFECT_BOUNDARY_REQUIRED");
@@ -149,8 +175,11 @@ function validateFunctionPins(functions) {
 /** Validates supplied declarations, not the truth of their external source records. */
 export function validateLimitedPilotPreflight(evidence, {sourceSha, operation = "readiness", now = new Date().toISOString()} = {}) {
   requireValue(["readiness", "promote"].includes(operation), "LIMITED_PILOT_OPERATION_REJECTED");
+  requireValue(plain(evidence), "PILOT_FIELDS_REJECTED");
+  const method = acceptanceMethod(evidence);
   keys(evidence, ["schemaVersion", "policy", "projectId", "region", "sourceSha", "pilotId", "createdAt",
-    "expiresAt", "sourceAuthenticity", "submissionAcceptance", "review", "hosting", "functions"]);
+    "expiresAt", "sourceAuthenticity", "submissionAcceptance", "review", "hosting",
+    ...(method === MANUAL_METHOD ? [] : ["functions"])], ["acceptanceMethod"]);
   requireValue(evidence.schemaVersion === 1 && evidence.policy === POLICY, "PILOT_SCHEMA_REJECTED");
   requireValue(evidence.projectId === PROJECT && evidence.region === REGION, "PILOT_ENVIRONMENT_REJECTED");
   requireValue(typeof sourceSha === "string" && SHA.test(sourceSha) && evidence.sourceSha === sourceSha, "PILOT_SOURCE_SHA_MISMATCH");
@@ -168,11 +197,20 @@ export function validateLimitedPilotPreflight(evidence, {sourceSha, operation = 
   for (const label of ["staff", "admin"]) requireValue(
     evidence.hosting.previewVersions[label] !== evidence.hosting.previousVersions[label], "PILOT_VERSION_PAIR_REJECTED");
   validateReview(evidence.review, {operation, pilotId: evidence.pilotId,
-    createdAt: evidence.createdAt, expiresAt: evidence.expiresAt});
-  validateFunctionPins(evidence.functions);
+    createdAt: evidence.createdAt, expiresAt: evidence.expiresAt, method});
+  if (method !== MANUAL_METHOD) validateFunctionPins(evidence.functions);
   return Object.freeze({schemaVersion: 1, policy: POLICY, evidenceValidation: "VALID",
     evidenceDigest: pilotEvidenceDigest(evidence), sourceSha, pilotId: evidence.pilotId,
-    declarationsRequireProtectedReview: true, sourceAuthenticity: "UNVERIFIED", submissionAcceptance: "UNVERIFIED"});
+    declarationsRequireProtectedReview: true, sourceAuthenticity: "UNVERIFIED", submissionAcceptance: "UNVERIFIED",
+    ...(Object.hasOwn(evidence, "acceptanceMethod") ? {acceptanceMethod: method} : {}),
+    ...(method === MANUAL_METHOD ? {
+      requestBoundaryEnforced: false, requestCountsEnforced: false, apiCompatibility: "UNVERIFIED",
+      technicalAcceptance: "UNVERIFIED", claimsUnchanged: "UNVERIFIED", serverSideEffects: "UNVERIFIED",
+      backendDeploymentUnchanged: "UNVERIFIED",
+      protectedReviewDigest: evidence.review.recordDigest,
+      manualPlan: structuredClone(evidence.review.manualObservationPlan),
+      manualPlanDigest: manualPlanDigest(evidence.review.recordDigest, evidence.review.manualObservationPlan),
+    } : {})});
 }
 
 function validateSnapshot(snapshot, {sourceSha, now}) {
@@ -210,13 +248,19 @@ export function validateLimitedPilotEvidence({evidence, sourceSha, previewRunId,
     && pilotEvidenceDigest(previewVersions) === pilotEvidenceDigest(evidence.hosting.previewVersions)
     && pilotEvidenceDigest(previousVersions) === pilotEvidenceDigest(evidence.hosting.previousVersions),
   "PILOT_HOSTING_PIN_MISMATCH");
-  validateSnapshot(snapshot, {sourceSha, now});
-  requireValue(snapshot.observation.runId === currentRunId, "PILOT_METADATA_RUN_MISMATCH");
-  requireValue(pilotEvidenceDigest(snapshot.functions) === pilotEvidenceDigest(evidence.functions),
-    "PILOT_DEPLOYMENT_PIN_MISMATCH");
+  const manual = acceptanceMethod(evidence) === MANUAL_METHOD;
+  if (manual) {
+    requireValue(snapshot === undefined, "PILOT_MANUAL_METADATA_REJECTED");
+    requireValue(typeof currentRunId === "string" && RUN.test(currentRunId), "PILOT_REPORT_IDENTITY_REJECTED");
+  } else {
+    validateSnapshot(snapshot, {sourceSha, now});
+    requireValue(snapshot.observation.runId === currentRunId, "PILOT_METADATA_RUN_MISMATCH");
+    requireValue(pilotEvidenceDigest(snapshot.functions) === pilotEvidenceDigest(evidence.functions),
+      "PILOT_DEPLOYMENT_PIN_MISMATCH");
+  }
   return Object.freeze({...result, readinessState: "PREAUTH_READY",
     stagingTrialAuthorized: operation === "promote", authenticatedStaffAcceptance: "UNVERIFIED",
-    deploymentSnapshotDigest: pilotEvidenceDigest(snapshot.functions), observationRunId: currentRunId,
+    ...(!manual ? {deploymentSnapshotDigest: pilotEvidenceDigest(snapshot.functions)} : {}), observationRunId: currentRunId,
     hosting: structuredClone(evidence.hosting), accountDigest: evidence.review.account.identityDigest,
     mailAttemptsConsumed: evidence.review.mail.attempts.length,
     mailAttempts: structuredClone(evidence.review.mail.attempts),
@@ -251,12 +295,23 @@ export function validatePilotReport(report, {
     && allowedStates.every(state => ["PREAUTH_READY", "STAGING_TRIAL"].includes(state))
     && allowedStates.includes(report?.readinessState), "PILOT_PREAUTH_REPORT_REQUIRED");
   const trial = report.readinessState === "STAGING_TRIAL";
+  const method = acceptanceMethod(report);
   keys(report, ["schemaVersion", "policy", "evidenceValidation", "evidenceDigest", "sourceSha", "pilotId",
     "declarationsRequireProtectedReview", "sourceAuthenticity", "submissionAcceptance", "readinessState",
-    "stagingTrialAuthorized", "authenticatedStaffAcceptance", "deploymentSnapshotDigest", "observationRunId",
+    "stagingTrialAuthorized", "authenticatedStaffAcceptance", "observationRunId",
     "hosting", "accountDigest", "mailAttemptsConsumed", "mailAttempts", "mailRecipientDigest",
     "reviewedReadScopeDigest", "checkedAt", "expiresAt", "backupAndPreviewCleanupAuthorized", "adminAuthenticated",
-    ...(trial ? ["trialRecordedAt"] : [])]);
+    ...(trial ? ["trialRecordedAt"] : []),
+    ...(method === MANUAL_METHOD ? MANUAL_REPORT_FIELDS : ["deploymentSnapshotDigest"])], ["acceptanceMethod"]);
+  if (method === MANUAL_METHOD) {
+    validateManualPlan(report.manualPlan); evidenceReference(report.protectedReviewDigest);
+    evidenceReference(report.manualPlanDigest);
+    requireValue(report.manualPlanDigest === manualPlanDigest(report.protectedReviewDigest, report.manualPlan)
+      && report.requestBoundaryEnforced === false && report.requestCountsEnforced === false
+      && report.apiCompatibility === "UNVERIFIED" && report.technicalAcceptance === "UNVERIFIED"
+      && report.claimsUnchanged === "UNVERIFIED" && report.serverSideEffects === "UNVERIFIED"
+      && report.backendDeploymentUnchanged === "UNVERIFIED", "PILOT_MANUAL_REPORT_REJECTED");
+  }
   requireValue(report.schemaVersion === 1 && report.policy === POLICY && report.evidenceValidation === "VALID"
     && report.declarationsRequireProtectedReview === true
     && report.sourceAuthenticity === "UNVERIFIED" && report.submissionAcceptance === "UNVERIFIED"
@@ -267,7 +322,7 @@ export function validatePilotReport(report, {
     && typeof report.pilotId === "string" && /^[a-f0-9]{32}$/u.test(report.pilotId)
     && typeof report.observationRunId === "string" && RUN.test(report.observationRunId),
   "PILOT_REPORT_IDENTITY_REJECTED");
-  for (const field of ["evidenceDigest", "deploymentSnapshotDigest", "accountDigest",
+  for (const field of ["evidenceDigest", ...(method === MANUAL_METHOD ? [] : ["deploymentSnapshotDigest"]), "accountDigest",
     "mailRecipientDigest", "reviewedReadScopeDigest"]) evidenceReference(report[field]);
   requireValue(report.mailRecipientDigest === report.accountDigest, "PILOT_REPORT_IDENTITY_REJECTED");
   keys(report.hosting, ["previewRunId", "previewRunAttempt", "previewVersions", "previousVersions"]);
@@ -314,6 +369,7 @@ export function recordStagingTrial({report, manifest, currentRunId, now = new Da
 export function evaluateStaffAcceptance({report, observation, beforeSnapshot, afterSnapshot,
   now = new Date().toISOString()}) {
   validatePilotReport(report, {now});
+  requireValue(acceptanceMethod(report) === "CONTROLLED_BROWSER", "PILOT_CONTROLLED_BROWSER_REPORT_REQUIRED");
   const checkpoint = timestamp(report.readinessState === "STAGING_TRIAL" ? report.trialRecordedAt : report.checkedAt);
   keys(observation, ["sourceSha", "pilotId", "accountDigest", "evidenceDigest", "target", "capturedAt", "observationRunId",
     "versions", "authenticated", "staffRole", "adminAuthenticated", "claimsUnchanged",
@@ -369,6 +425,76 @@ export function evaluateStaffAcceptance({report, observation, beforeSnapshot, af
     backupAndPreviewCleanupAuthorized: false};
 }
 
+/** Owner declarations about one initial screen, never technical/API acceptance.
+ * The human observation window does not bound SDK calls, traffic or side effects.
+ * No browser, authentication, email or remote operation is performed here.
+ */
+export function evaluateOwnerManualObservation(input) {
+  keys(input, ["report", "observation"], ["now"]);
+  const {report, observation, now = new Date().toISOString()} = input;
+  validatePilotReport(report, {now});
+  requireValue(acceptanceMethod(report) === MANUAL_METHOD, "PILOT_OWNER_MANUAL_REPORT_REQUIRED");
+  keys(observation, ["sourceSha", "pilotId", "accountDigest", "evidenceDigest", "target", "versions",
+    "protectedReviewDigest", "manualPlanDigest", "sessionStartedAt", "startedAt", "capturedAt", "actor", "sessionsObserved",
+    "authenticationAttempts", "authentication", "screen", "renderMode", "displayedIdentityMatched", "targetConfirmed",
+    "errorsObserved", "unknownStateObserved", "adminAuthenticated", "actions", "secretsStored",
+    "sessionContext", "authenticationMode", "homeDisplay", "taskOpened", "mailAttemptsConsumed", "mailRecipientDigest", "mail"]);
+  evidenceReference(observation.evidenceDigest);
+  requireValue(observation.sourceSha === report.sourceSha && observation.pilotId === report.pilotId
+    && observation.accountDigest === report.accountDigest
+    && observation.protectedReviewDigest === report.protectedReviewDigest
+    && observation.manualPlanDigest === report.manualPlanDigest
+    && observation.mailRecipientDigest === report.mailRecipientDigest, "PILOT_MANUAL_BINDING_REJECTED");
+  versionPair(observation.versions);
+  requireValue(observation.target === (report.readinessState === "STAGING_TRIAL" ? "staging" : "preview")
+    && pilotEvidenceDigest(observation.versions) === pilotEvidenceDigest(report.hosting.previewVersions),
+  "PILOT_MANUAL_HOSTING_MISMATCH");
+  const checkpoint = timestamp(report.readinessState === "STAGING_TRIAL" ? report.trialRecordedAt : report.checkedAt);
+  // startedAt is the owner's declared start of screen observation after login
+  // completion. This interval is not a network timeout or an SDK attempt limit.
+  // sessionStartedAt precedes any mail/authentication action in the fresh context.
+  const sessionStarted = timestamp(observation.sessionStartedAt), started = timestamp(observation.startedAt);
+  const captured = timestamp(observation.capturedAt), current = timestamp(now);
+  requireValue(sessionStarted >= checkpoint && sessionStarted <= started && captured > started && captured <= current
+    && (captured - started) / 1000 <= report.manualPlan.observationWindowSeconds,
+  "PILOT_MANUAL_OBSERVATION_WINDOW_REJECTED");
+  keys(observation.homeDisplay, ["todo", "upcomingShifts"]);
+  requireValue(observation.homeDisplay.todo === "CONTENT_OR_EMPTY_STATE_VISIBLE"
+    && observation.homeDisplay.upcomingShifts === "CONTENT_OR_EMPTY_STATE_VISIBLE" && observation.taskOpened === false,
+  "PILOT_MANUAL_HOME_DISPLAY_REQUIRED");
+  requireValue(observation.actor === "REVIEWED_OWNER" && observation.sessionsObserved === 1
+    && observation.authenticationAttempts === 1 && observation.authentication === "OWNER_CONFIRMED_COMPLETED"
+    && observation.screen === "STAFF_HOME" && observation.renderMode === "LIVE_INITIAL_HOME"
+    && observation.displayedIdentityMatched === true && observation.targetConfirmed === true
+    && observation.errorsObserved === false && observation.unknownStateObserved === false
+    && observation.adminAuthenticated === false && observation.actions === "INITIAL_HOME_ONLY"
+    && observation.sessionContext === "FRESH_DEDICATED_CONTEXT" && observation.authenticationMode === "EXISTING_STAFF_EMAIL_CODE"
+    && observation.secretsStored === false, "PILOT_MANUAL_UI_OBSERVATION_REJECTED");
+  requireValue(Number.isInteger(observation.mailAttemptsConsumed)
+    && observation.mailAttemptsConsumed >= report.mailAttemptsConsumed && observation.mailAttemptsConsumed <= 1,
+  "PILOT_SINGLE_RECIPIENT_MAIL_LEDGER_REQUIRED");
+  const mail = observation.mail;
+  keys(mail, ["completeHistory", "recipientDigest", "attempts", "evidenceDigest"]);
+  evidenceReference(mail.evidenceDigest);
+  requireValue(mail.completeHistory === true && mail.recipientDigest === report.mailRecipientDigest
+    && Array.isArray(mail.attempts) && mail.attempts.length === observation.mailAttemptsConsumed,
+  "PILOT_SINGLE_RECIPIENT_MAIL_LEDGER_REQUIRED");
+  validateMailAttempts(mail.attempts);
+  requireValue(report.mailAttempts.every((attempt, index) =>
+    pilotEvidenceDigest(attempt) === pilotEvidenceDigest(mail.attempts[index])), "PILOT_MAIL_HISTORY_CHANGED");
+  requireValue(observation.mailAttemptsConsumed === 1 && mail.attempts[0]?.outcome === "SENT",
+    "PILOT_MANUAL_EMAIL_CODE_DELIVERY_REQUIRED");
+  return {...structuredClone(report), readinessState: "STAFF_MANUAL_UI_OBSERVED",
+    manualUiObservation: "OWNER_REPORTED_UI_ONLY", manualObservationDigest: observation.evidenceDigest,
+    manualObservationRecordedAt: now, homeDisplay: structuredClone(observation.homeDisplay), taskOpened: false,
+    mailAttemptsConsumed: observation.mailAttemptsConsumed,
+    mailAttempts: structuredClone(mail.attempts), authenticatedStaffAcceptance: "UNVERIFIED",
+    apiCompatibility: "UNVERIFIED", technicalAcceptance: "UNVERIFIED", claimsUnchanged: "UNVERIFIED", serverSideEffects: "UNVERIFIED",
+    backendDeploymentUnchanged: "UNVERIFIED",
+    requestBoundaryEnforced: false, requestCountsEnforced: false,
+    sourceAuthenticity: "UNVERIFIED", submissionAcceptance: "UNVERIFIED", backupAndPreviewCleanupAuthorized: false};
+}
+
 function runtimeContext() {
   requireProtectedContext();
   validateHostingOperation({operation: process.env.LKC_OPERATION, eventName: process.env.GITHUB_EVENT_NAME,
@@ -394,6 +520,19 @@ function parseRecord(text) {
 }
 async function saveJson(file, value) {await writeFile(file, JSON.stringify(value, null, 2) + "\n", {mode: 0o600, flag: "wx"});}
 async function loadJson(file) {return parseRecord(await readFile(file, "utf8"));}
+function emitAcceptanceMethod(report, emit) {
+  const method = acceptanceMethod(report);
+  emit("HOSTING_ACCEPTANCE_METHOD=" + method);
+  if (method === MANUAL_METHOD) {
+    emit("HOSTING_REQUEST_BOUNDARY_ENFORCED=false");
+    emit("HOSTING_REQUEST_COUNTS_ENFORCED=false");
+    emit("HOSTING_TECHNICAL_ACCEPTANCE=UNVERIFIED");
+    emit("HOSTING_API_COMPATIBILITY=UNVERIFIED");
+    emit("HOSTING_SERVER_SIDE_EFFECTS=UNVERIFIED");
+    emit("HOSTING_BACKEND_DEPLOYMENT_UNCHANGED=UNVERIFIED");
+    emit("HOSTING_MANUAL_OBSERVATION=NOT_PERFORMED");
+  }
+}
 
 export async function pilotMain({argv = process.argv.slice(2), emit = value => console.log(value)} = {}) {
   requireValue(argv.length === 1 && ["--guard-only", "--preflight-only", "--validate-review",
@@ -412,15 +551,21 @@ export async function pilotMain({argv = process.argv.slice(2), emit = value => c
   if (["--preflight-only", "--validate-review"].includes(argv[0])) {
     const evidence = parseRecord(process.env.LKC_LIMITED_EVIDENCE);
     delete process.env.LKC_LIMITED_EVIDENCE;
-    validateLimitedPilotPreflight(evidence, context);
+    const report = validateLimitedPilotPreflight(evidence, context);
     // The reviewed input is kept outside uploaded evidence; artifacts contain its
     // digest and a sanitized result. No source records or personal fields enter it.
     await saveJson(inputPath, evidence);
-    emit("HOSTING_LIMITED_REVIEW=VALID"); return 0;
+    if (argv[0] === "--validate-review" && process.env.GITHUB_OUTPUT) {
+      await appendFile(process.env.GITHUB_OUTPUT, "acceptance_method=" + acceptanceMethod(report) + "\n", "utf8");
+    }
+    emit("HOSTING_LIMITED_REVIEW=VALID"); emitAcceptanceMethod(report, emit); return 0;
   }
-  const before = await loadJson(path.join(evidenceDir, "pilot-metadata.json"));
   if (["--recheck", "--recheck-before-write"].includes(argv[0])) {
+    const evidence = await loadJson(inputPath);
+    const report = validateLimitedPilotPreflight(evidence, context);
+    requireValue(acceptanceMethod(report) !== MANUAL_METHOD, "PILOT_MANUAL_RECHECK_NOT_APPLICABLE");
     const beforeWrite = argv[0] === "--recheck-before-write";
+    const before = await loadJson(path.join(evidenceDir, "pilot-metadata.json"));
     const after = await loadJson(path.join(evidenceDir, beforeWrite ? "pilot-metadata-before-write.json" : "pilot-metadata-after.json"));
     const result = recheckPilotDeployment({...context, before, after});
     await saveJson(path.join(evidenceDir, beforeWrite ? "limited-pilot-before-write-recheck.json" : "limited-pilot-deployment-recheck.json"), result);
@@ -429,27 +574,35 @@ export async function pilotMain({argv = process.argv.slice(2), emit = value => c
   if (argv[0] === "--finalize") {
     const report = await loadJson(path.join(evidenceDir, "limited-pilot-evidence.json"));
     const manifest = await loadJson(path.join(evidenceDir, "restore-manifest.json"));
-    const recheck = await loadJson(path.join(evidenceDir, "limited-pilot-deployment-recheck.json"));
-    const after = await loadJson(path.join(evidenceDir, "pilot-metadata-after.json"));
-    const checked = recheckPilotDeployment({...context, before, after});
-    requireValue(recheck.deploymentUnchanged === true && recheck.sourceSha === checked.sourceSha
-      && recheck.observationRunId === checked.observationRunId
-      && recheck.beforeSnapshotDigest === checked.beforeSnapshotDigest
-      && recheck.afterSnapshotDigest === checked.afterSnapshotDigest
-      && checked.deploymentSnapshotDigest === report.deploymentSnapshotDigest,
-    "PILOT_DEPLOYMENT_RECHECK_REQUIRED");
-    await saveJson(path.join(evidenceDir, "limited-pilot-trial.json"), recordStagingTrial({...context, report, manifest}));
+    if (acceptanceMethod(report) !== MANUAL_METHOD) {
+      const before = await loadJson(path.join(evidenceDir, "pilot-metadata.json"));
+      const recheck = await loadJson(path.join(evidenceDir, "limited-pilot-deployment-recheck.json"));
+      const after = await loadJson(path.join(evidenceDir, "pilot-metadata-after.json"));
+      const checked = recheckPilotDeployment({...context, before, after});
+      requireValue(recheck.deploymentUnchanged === true && recheck.sourceSha === checked.sourceSha
+        && recheck.observationRunId === checked.observationRunId
+        && recheck.beforeSnapshotDigest === checked.beforeSnapshotDigest
+        && recheck.afterSnapshotDigest === checked.afterSnapshotDigest
+        && checked.deploymentSnapshotDigest === report.deploymentSnapshotDigest,
+      "PILOT_DEPLOYMENT_RECHECK_REQUIRED");
+    }
+    const trial = recordStagingTrial({...context, report, manifest});
+    await saveJson(path.join(evidenceDir, "limited-pilot-trial.json"), trial);
     emit("HOSTING_LIMITED_STATE=STAGING_TRIAL");
+    emitAcceptanceMethod(trial, emit);
     emit("HOSTING_STAFF_UI_ACCEPTED=false"); return 0;
   }
   const evidence = await loadJson(inputPath);
-  const result = validateLimitedPilotEvidence({...context, evidence, snapshot: before,
+  const snapshotInput = acceptanceMethod(evidence) === MANUAL_METHOD ? {} :
+    {snapshot: await loadJson(path.join(evidenceDir, "pilot-metadata.json"))};
+  const result = validateLimitedPilotEvidence({...context, evidence, ...snapshotInput,
     previewRunId: process.env.LKC_PREVIEW_RUN_ID,
     previewVersions: {staff: process.env.LKC_STAFF_VERSION, admin: process.env.LKC_ADMIN_VERSION},
     previousVersions: {staff: process.env.LKC_PREVIOUS_STAFF_VERSION, admin: process.env.LKC_PREVIOUS_ADMIN_VERSION}});
   await mkdir(evidenceDir, {recursive: true});
   await saveJson(path.join(evidenceDir, "limited-pilot-evidence.json"), result);
   emit("HOSTING_LIMITED_STATE=PREAUTH_READY");
+  emitAcceptanceMethod(result, emit);
   emit("HOSTING_STAFF_UI_ACCEPTED=false");
   emit("HOSTING_SOURCE_AUTHENTICITY=UNVERIFIED");
   emit("HOSTING_SUBMISSION_ACCEPTANCE=UNVERIFIED");

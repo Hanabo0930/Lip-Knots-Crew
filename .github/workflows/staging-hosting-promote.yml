@@ -312,6 +312,7 @@ jobs:
           LKC_CONFIRMATION: ${{ inputs.confirmation }}
         run: node scripts/automation/collect-upload-metadata.mjs --guard-only
       - name: Validate limited review and no additional cost before cloud access
+        id: pilot_review
         if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot'
         working-directory: source
         env:
@@ -421,11 +422,13 @@ jobs:
             --root . \
             --source-sha "$LKC_SOURCE_SHA" \
             --evidence "$LKC_EVIDENCE_DIR/api-readiness.json"
+      # Keep the historical step name for the fail-closed promotion-history reader.
       - name: Validate limited evidence against fresh pinned API metadata
         id: pilot_readiness
         if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot'
         working-directory: source
         env:
+          LKC_ACCEPTANCE_METHOD: ${{ steps.pilot_review.outputs.acceptance_method }}
           LKC_PILOT_METADATA_ACCESS_TOKEN: ${{ steps.hosting_auth.outputs.access_token }}
           LKC_LIMITED_EVIDENCE: ${{ inputs.limited_evidence }}
           LKC_STAFF_VERSION: ${{ steps.pilot_pins.outputs.staff_version }}
@@ -433,7 +436,11 @@ jobs:
           LKC_PREVIOUS_STAFF_VERSION: ${{ steps.pilot_pins.outputs.previous_staff_version }}
           LKC_PREVIOUS_ADMIN_VERSION: ${{ steps.pilot_pins.outputs.previous_admin_version }}
         run: |
-          node scripts/automation/collect-hosting-pilot-metadata.mjs
+          case "$LKC_ACCEPTANCE_METHOD" in
+            CONTROLLED_BROWSER) node scripts/automation/collect-hosting-pilot-metadata.mjs ;;
+            OWNER_MANUAL_UI) ;;
+            *) echo "HOSTING_LIMITED_RESULT=UNKNOWN_ACCEPTANCE_METHOD"; exit 1 ;;
+          esac
           node scripts/automation/hosting-limited-pilot.mjs --validate
           node scripts/automation/hosting-limited-workflow.mjs --verify-review-pins
       - name: Recheck current main before any live operation
@@ -485,15 +492,23 @@ jobs:
             --staff-site "${{ steps.hosting.outputs.staff_site }}" \
             --admin-site "${{ steps.hosting.outputs.admin_site }}" \
             --source-sha "$LKC_SOURCE_SHA" --evidence-dir "$LKC_EVIDENCE_DIR"
+      # OWNER_MANUAL_UI checks Hosting capture only; the historical name is retained.
       - name: Recheck limited trial capture and API revisions before live write
         if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' && env.LKC_OPERATION == 'promote'
         working-directory: source
         env:
+          LKC_ACCEPTANCE_METHOD: ${{ steps.pilot_review.outputs.acceptance_method }}
           LKC_PILOT_METADATA_ACCESS_TOKEN: ${{ steps.hosting_auth.outputs.access_token }}
         run: |
           node scripts/automation/hosting-limited-workflow.mjs --verify-capture
-          node scripts/automation/collect-hosting-pilot-metadata.mjs --before-write
-          node scripts/automation/hosting-limited-pilot.mjs --recheck-before-write
+          case "$LKC_ACCEPTANCE_METHOD" in
+            CONTROLLED_BROWSER)
+              node scripts/automation/collect-hosting-pilot-metadata.mjs --before-write
+              node scripts/automation/hosting-limited-pilot.mjs --recheck-before-write
+              ;;
+            OWNER_MANUAL_UI) ;;
+            *) echo "HOSTING_LIMITED_RESULT=UNKNOWN_ACCEPTANCE_METHOD"; exit 1 ;;
+          esac
       - name: Promote the already-tested versions without rebuilding
         if: env.LKC_OPERATION == 'promote'
         id: promotion
@@ -521,7 +536,7 @@ jobs:
             --evidence-dir "$LKC_EVIDENCE_DIR/live"
       - name: Recheck unchanged APIs after the limited trial
         id: pilot_after
-        if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' && env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success'
+        if: env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' && steps.pilot_review.outputs.acceptance_method == 'CONTROLLED_BROWSER' && env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success'
         continue-on-error: true
         working-directory: source
         env:
@@ -532,7 +547,12 @@ jobs:
       - name: Persist successful promotion manifest before channel cleanup
         id: finalize_capture
         continue-on-error: true
-        if: env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success' && (env.LKC_EVIDENCE_POLICY == 'source-provenance' || steps.pilot_after.outcome == 'success')
+        if: >-
+          env.LKC_OPERATION == 'promote' && steps.promotion.outcome == 'success' && steps.live_check.outcome == 'success' &&
+          (env.LKC_EVIDENCE_POLICY == 'source-provenance' ||
+          (env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' && steps.pilot_review.outcome == 'success' && steps.pilot_readiness.outcome == 'success' &&
+          ((steps.pilot_review.outputs.acceptance_method == 'OWNER_MANUAL_UI' && steps.pilot_after.outcome == 'skipped') ||
+          (steps.pilot_review.outputs.acceptance_method == 'CONTROLLED_BROWSER' && steps.pilot_after.outcome == 'success'))))
         working-directory: source
         run: |
           node scripts/automation/restore-staging-hosting.mjs \
@@ -553,7 +573,9 @@ jobs:
           (steps.promotion.outcome == 'failure' ||
           (steps.promotion.outcome == 'success' && (steps.live_check.outcome != 'success' ||
           steps.finalize_capture.outcome != 'success' ||
-          (env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' && steps.pilot_after.outcome != 'success'))))
+          (env.LKC_EVIDENCE_POLICY == 'limited-staff-pilot' &&
+          !((steps.pilot_review.outputs.acceptance_method == 'OWNER_MANUAL_UI' && steps.pilot_after.outcome == 'skipped') ||
+          (steps.pilot_review.outputs.acceptance_method == 'CONTROLLED_BROWSER' && steps.pilot_after.outcome == 'success'))))))
         working-directory: source
         run: |
           node scripts/automation/restore-staging-hosting.mjs \
@@ -683,6 +705,12 @@ jobs:
             echo "- Production touched: \`false\`"
             if [[ "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" ]]; then
               echo "- Staff authenticated acceptance: \`UNVERIFIED\`"
+              echo "- Observation method: \`${{ steps.pilot_review.outputs.acceptance_method }}\` (validated review)."
+              echo "- Owner manual observation is not executed by this workflow; its UI result is separate from technical acceptance."
+              echo "- Owner manual mode does not enforce request bodies, counts or browser termination deadlines; API compatibility and post-login claims remain unverified."
+              if [[ "${{ steps.pilot_review.outputs.acceptance_method }}" == "OWNER_MANUAL_UI" ]]; then
+                echo "- Backend deployment unchanged: \`UNVERIFIED\`; seven-Function metadata is reserved for technical acceptance."
+              fi
               echo "- Source authenticity / submission / Drive transfer: \`UNVERIFIED\`"
               echo "- Anonymous browser checks do not establish Staff acceptance."
               echo "- Trial backups and previews are retained; no acceptance cleanup performed."
@@ -704,6 +732,16 @@ jobs:
             echo "HOSTING_METADATA_RESULT=METADATA_COLLECTED"
             echo "HOSTING_PUBLICATION_AUTHORIZED=false"
             exit 0
+          fi
+          if [[ "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" ]]; then
+            if [[ "${{ steps.pilot_review.outcome }}" != "success" || "${{ steps.pilot_readiness.outcome }}" != "success" ]]; then
+              echo "HOSTING_LIMITED_RESULT=STOPPED_SAFELY"
+              exit 1
+            fi
+            case "${{ steps.pilot_review.outputs.acceptance_method }}" in
+              CONTROLLED_BROWSER|OWNER_MANUAL_UI) ;;
+              *) echo "HOSTING_LIMITED_RESULT=UNKNOWN_ACCEPTANCE_METHOD"; exit 1 ;;
+            esac
           fi
           if [[ "$LKC_OPERATION" == "readiness" ]]; then
             if [[ "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" ]]; then
@@ -740,7 +778,9 @@ jobs:
           fi
           if [[ "${{ steps.promotion.outcome }}" != "success" || "${{ steps.live_check.outcome }}" != "success" || \
                 "${{ steps.finalize_capture.outcome }}" != "success" || \
-                ( "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" && "${{ steps.pilot_after.outcome }}" != "success" ) ]]; then
+                ( "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" && \
+                  ! ( ( "${{ steps.pilot_review.outputs.acceptance_method }}" == "OWNER_MANUAL_UI" && "${{ steps.pilot_after.outcome }}" == "skipped" ) || \
+                      ( "${{ steps.pilot_review.outputs.acceptance_method }}" == "CONTROLLED_BROWSER" && "${{ steps.pilot_after.outcome }}" == "success" ) ) ) ]]; then
             if [[ "${{ steps.rollback.outcome }}" != "success" || "${{ steps.rollback_check.outcome }}" != "success" ]]; then
               echo "HOSTING_PROMOTION_RESULT=ROLLBACK_FAILED"
               exit 1

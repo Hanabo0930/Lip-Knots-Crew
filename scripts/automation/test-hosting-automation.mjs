@@ -40,6 +40,15 @@ import {
   validateRestoreOptions,
 } from "./restore-staging-hosting.mjs";
 
+// Keep the default full suite; --workflow-only omits the separate restore suite.
+const arguments_ = process.argv.slice(2);
+assert.ok(arguments_.every(value => !value.startsWith("-") || value === "--workflow-only"), "UNKNOWN_TEST_OPTION");
+assert.ok(arguments_.filter(value => value === "--workflow-only").length <= 1, "DUPLICATE_TEST_OPTION");
+const workflowOnly = arguments_.includes("--workflow-only");
+const pythonArguments = arguments_.filter(value => value !== "--workflow-only");
+assert.ok(pythonArguments.length <= 1 && (!workflowOnly || pythonArguments.length === 0), "TEST_ARGUMENTS_REJECTED");
+const pythonExecutable = pythonArguments[0] || "python3";
+
 let cases = 0;
 const projectId = "lip-knots-crew-staging";
 const staffSite = projectId;
@@ -505,7 +514,9 @@ assert.equal(promoteSpec.env.LKC_TARGETS,"staff,admin");
 assert.match(previewWorkflow,/--no-authorized-domains/u);
 assert.doesNotMatch(promoteWorkflow,/hosting:clone|hosting:channel:(?:create|delete)/u);
 const steps=promoteSpec.jobs.promote.steps;
+const reviewedControlled={pilot_review:"success",pilot_readiness:"success","pilot_review.acceptance_method":"CONTROLLED_BROWSER"};
 function stepRuns(step,mode,outcomes={},priorSuccess=true,metadataOnly=false,evidencePolicy="source-provenance"){
+  outcomes={...reviewedControlled,...outcomes};
   let expression=String(step.if??"true").trim().replace(/^\$\{\{|\}\}$/gu,"").trim();
   if(!expression.includes("always()")&&!priorSuccess)return false;
   expression=expression.replace(/env\.LKC_OPERATION/gu,JSON.stringify(mode))
@@ -514,7 +525,7 @@ function stepRuns(step,mode,outcomes={},priorSuccess=true,metadataOnly=false,evi
     .replace(/steps\.([a-z_]+)\.outcome/gu,(_,id)=>JSON.stringify(outcomes[id]??"skipped"))
     .replace(/steps\.([a-z_]+)\.outputs\.([a-z_]+)/gu,(_,id,key)=>JSON.stringify(outcomes[id+"."+key]??""))
     .replace(/always\(\)/gu,"true");
-  assert.match(expression,/^[a-z_\-\s()!&|='"]+$/u);
+  assert.match(expression,/^[A-Za-z_\-\s()!&|='"]+$/u);
   return Function("return ("+expression+");")();
 }
 const mutatingNames=[
@@ -610,6 +621,7 @@ assert.equal(stepRuns(cleanup,"promote",{promotion:"success",live_check:"success
 assert.equal(stepRuns(cleanup,"promote",{promotion:"success",live_check:"success",finalize_capture:"failure"}),false);
 const limitedReviewIndex=steps.findIndex(s=>s.name==="Validate limited review and no additional cost before cloud access");
 assert.ok(limitedReviewIndex>=0&&limitedReviewIndex<steps.findIndex(s=>s.id==="hosting_auth"));
+assert.equal(steps[limitedReviewIndex].id,"pilot_review","only the validated review may select the acceptance method");
 assert.match(steps[limitedReviewIndex].run,/hosting-limited-pilot\.mjs --validate-review/u);
 assert.equal(stepRuns(steps[limitedReviewIndex],"promote",{},true,false,"limited-staff-pilot"),true);
 const finalCapture=steps.find(s=>s.id==="finalize_capture");
@@ -619,6 +631,52 @@ assert.equal(stepRuns(finalCapture,"promote",{promotion:"success",live_check:"su
  true,false,"limited-staff-pilot"),false);
 assert.equal(stepRuns(finalCapture,"promote",{promotion:"success",live_check:"success",pilot_after:"success"},
  true,false,"limited-staff-pilot"),true);
+const pilotReadiness=steps.find(s=>s.id==="pilot_readiness");
+const pilotBefore=steps.find(s=>String(s.run).includes("hosting-limited-workflow.mjs --verify-capture"));
+const pilotAfter=steps.find(s=>s.id==="pilot_after");
+const verifySavedPair=steps.find(s=>s.name==="Recheck the saved live pair immediately before promotion");
+for(const step of [pilotReadiness,pilotBefore]){
+ assert.ok(step,"method-specific checks must remain present");
+ assert.equal(step.env.LKC_ACCEPTANCE_METHOD,"${{ steps.pilot_review.outputs.acceptance_method }}");
+ assert.doesNotMatch(step.env.LKC_ACCEPTANCE_METHOD,/inputs\./u,"raw dispatch inputs cannot select the method");
+ cases++;
+}
+assert.match(verifySavedPair.run,/--verify-capture/u);
+assert.match(pilotBefore.run,/hosting-limited-workflow\.mjs --verify-capture/u);
+for(const [method,after,expected] of [
+ ["OWNER_MANUAL_UI","skipped",true], ["OWNER_MANUAL_UI","success",false], ["OWNER_MANUAL_UI","failure",false],
+ ["CONTROLLED_BROWSER","success",true], ["CONTROLLED_BROWSER","skipped",false], ["CONTROLLED_BROWSER","failure",false],
+ ["UNKNOWN","success",false], ["","skipped",false], [undefined,"success",false],
+]){
+ const values={promotion:"success",live_check:"success",pilot_after:after,"pilot_review.acceptance_method":method};
+ assert.equal(stepRuns(finalCapture,"promote",values,true,false,"limited-staff-pilot"),expected,
+  "only a known method with its intended post-check outcome can finalize: "+String(method)+"/"+after);
+ assert.equal(stepRuns(pilotAfter,"promote",values,true,false,"limited-staff-pilot"),method==="CONTROLLED_BROWSER",
+  "only controlled browser acceptance may collect post-trial Function metadata");
+ assert.equal(stepRuns(autoRestore,"promote",{...values,"backup.ready":"true","promotion.rollback_allowed":"true",
+  finalize_capture:"success"},false,false,"limited-staff-pilot"),!expected,
+  "known publication with an invalid method/outcome requires recovery");
+ cases++;
+}
+for(const field of ["pilot_review","pilot_readiness"])
+ for(const outcome of ["failure","skipped",undefined]){
+  assert.equal(stepRuns(finalCapture,"promote",{promotion:"success",live_check:"success",pilot_after:"skipped",
+   "pilot_review.acceptance_method":"OWNER_MANUAL_UI",[field]:outcome},true,false,"limited-staff-pilot"),false,
+   "manual final evidence still requires successful "+field);
+  cases++;
+ }
+for(const method of ["CONTROLLED_BROWSER","OWNER_MANUAL_UI"]){
+ const values={"pilot_review.acceptance_method":method};
+ assert.equal(stepRuns(verifySavedPair,"promote",values,true,false,"limited-staff-pilot"),true);
+ assert.equal(stepRuns(pilotBefore,"promote",values,true,false,"limited-staff-pilot"),true);
+ assert.equal(stepRuns(pilotBefore,"readiness",values,true,false,"limited-staff-pilot"),false);
+ assert.equal(stepRuns(pilotReadiness,"readiness",values,true,false,"limited-staff-pilot"),true);
+ assert.equal(stepRuns(pilotReadiness,"promote",values,false,false,"limited-staff-pilot"),false,
+  "failed review cannot reach the method-specific readiness step");
+ cases++;
+}
+assert.equal(stepRuns(finalCapture,"promote",{promotion:"success",live_check:"success",pilot_after:"failure",
+ "pilot_review.acceptance_method":"UNKNOWN"}),true,"strict source-provenance finalization remains independent of limited-method metadata");
 assert.match(promoteWorkflow,/format\(' from \{0\}', inputs\.restore_run_id\)/u,"restore run must be bound to target promotion before any attempt");
 cases+=3;
 const finalScript=steps.find(s=>s.name==="Enforce the final result").run;
@@ -689,6 +747,33 @@ try{
   if(expected){const saved=await readFile(output,"utf8");assert.match(saved,new RegExp("operation="+extra.LKC_OPERATION));assert.match(saved,/should_promote=true/u);}
   cases++;
  }
+ // Exercise the workflow's existing shell cases with a recording node stub.
+ // No collector, Hosting reader or credential-bearing command is invoked.
+ const commandStub='node(){ printf "NODE_CALL=%s\\n" "$*"; }';
+ for(const method of ["CONTROLLED_BROWSER","OWNER_MANUAL_UI","UNKNOWN",""])
+  for(const [label,step,common,controlled] of [
+   ["readiness",pilotReadiness,["scripts/automation/hosting-limited-pilot.mjs --validate",
+    "scripts/automation/hosting-limited-workflow.mjs --verify-review-pins"],
+   ["scripts/automation/collect-hosting-pilot-metadata.mjs"]],
+   ["before-write",pilotBefore,["scripts/automation/hosting-limited-workflow.mjs --verify-capture"],
+   ["scripts/automation/collect-hosting-pilot-metadata.mjs --before-write",
+    "scripts/automation/hosting-limited-pilot.mjs --recheck-before-write"]],
+  ]){
+   assert.doesNotMatch(step.run,/\$\{\{/u,"method shell must use validated env, not interpolated raw inputs");
+   const result=spawnSync(shellPath,["-c","set -euo pipefail\n"+commandStub+"\n"+step.run],{
+    cwd:repoRoot,encoding:"utf8",env:{...baseEnvironment,LKC_ACCEPTANCE_METHOD:method},maxBuffer:10000});
+   const calls=result.stdout.split("\n").filter(line=>line.startsWith("NODE_CALL=")).map(line=>line.slice(10));
+   const known=["CONTROLLED_BROWSER","OWNER_MANUAL_UI"].includes(method);
+   assert.equal(result.status,known?0:1,"actual "+label+" shell: "+method+" "+result.stderr);
+   const expected=method==="CONTROLLED_BROWSER"
+    ? label==="readiness"?[...controlled,...common]:[...common,...controlled]
+    : method==="OWNER_MANUAL_UI"?common:label==="before-write"?common:[];
+   assert.deepEqual(calls,expected,"exact local command sequence: "+label+"/"+method);
+   if(method!=="CONTROLLED_BROWSER")assert.ok(calls.every(call=>!call.includes("collect-hosting-pilot-metadata")
+    && !call.includes("--recheck-before-write")),"manual and unknown methods cannot collect internal API metadata");
+   if(!known)assert.match(result.stdout,/HOSTING_LIMITED_RESULT=UNKNOWN_ACCEPTANCE_METHOD/u);
+   cases++;
+  }
  for(const [label,values,marker,code] of [
   ["unknown",{promotion:"failure","promotion.rollback_allowed":"false"},"UNKNOWN_STOPPED",1],
   ["missing-result",{promotion:"failure"},"UNKNOWN_STOPPED",1],
@@ -711,9 +796,18 @@ try{
   ["trial-api-drift","promote",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success",pilot_after:"failure",rollback:"success",rollback_check:"success"},"HOSTING_PROMOTION_RESULT=ROLLED_BACK",1],
   ["trial-api-missing","promote",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success",pilot_after:"skipped",rollback:"failure",rollback_check:"skipped"},"HOSTING_PROMOTION_RESULT=ROLLBACK_FAILED",1],
   ["trial-manifest-failed","promote",{promotion:"success","promotion.rollback_allowed":"true",live_check:"success",pilot_after:"success",finalize_capture:"failure",rollback:"success",rollback_check:"success"},"HOSTING_PROMOTION_RESULT=ROLLED_BACK",1],
+  ["manual-preauth","readiness",{"pilot_review.acceptance_method":"OWNER_MANUAL_UI"},"HOSTING_LIMITED_RESULT=PREAUTH_READY",0],
+  ["manual-trial","promote",{"pilot_review.acceptance_method":"OWNER_MANUAL_UI",promotion:"success","promotion.rollback_allowed":"true",live_check:"success",pilot_after:"skipped",finalize_capture:"success"},"HOSTING_LIMITED_RESULT=STAGING_TRIAL",0],
+  ["manual-unexpected-post-check","promote",{"pilot_review.acceptance_method":"OWNER_MANUAL_UI",promotion:"success","promotion.rollback_allowed":"true",live_check:"success",pilot_after:"success",finalize_capture:"success",rollback:"success",rollback_check:"success"},"HOSTING_PROMOTION_RESULT=ROLLED_BACK",1],
+  ["manual-manifest-failed","promote",{"pilot_review.acceptance_method":"OWNER_MANUAL_UI",promotion:"success","promotion.rollback_allowed":"true",live_check:"success",pilot_after:"skipped",finalize_capture:"failure",rollback:"success",rollback_check:"success"},"HOSTING_PROMOTION_RESULT=ROLLED_BACK",1],
+  ["manual-review-missing","readiness",{"pilot_review.acceptance_method":"OWNER_MANUAL_UI",pilot_review:undefined},"HOSTING_LIMITED_RESULT=STOPPED_SAFELY",1],
+  ["manual-readiness-failed","promote",{"pilot_review.acceptance_method":"OWNER_MANUAL_UI",pilot_readiness:"failure"},"HOSTING_LIMITED_RESULT=STOPPED_SAFELY",1],
+  ["unknown-method","readiness",{"pilot_review.acceptance_method":"UNKNOWN"},"HOSTING_LIMITED_RESULT=UNKNOWN_ACCEPTANCE_METHOD",1],
+  ["missing-method","readiness",{"pilot_review.acceptance_method":undefined},"HOSTING_LIMITED_RESULT=UNKNOWN_ACCEPTANCE_METHOD",1],
  ]){
+  const contextualValues={...reviewedControlled,...values};
   const rendered=finalScript.replace(/\$\{\{ steps\.([a-z_]+)\.(outcome|outputs\.([a-z_]+)) \}\}/gu,
-   (_,id,field,key)=>values[key?id+"."+key:id]??(id==="promotion_evidence"?"success":"skipped"));
+   (_,id,field,key)=>contextualValues[key?id+"."+key:id]??(id==="promotion_evidence"?"success":"skipped"));
   assert.doesNotMatch(rendered,/\$\{\{/u);
   const result=spawnSync(shellPath,["-c","set -euo pipefail\n"+rendered],{cwd:repoRoot,encoding:"utf8",
    env:{...baseEnvironment,LKC_OPERATION:mode,LKC_EVIDENCE_POLICY:"limited-staff-pilot"},maxBuffer:10000});
@@ -747,6 +841,6 @@ try{
  assert.ok(actual.startsWith(root+pathSep)&&actual.includes(".hosting-guard-test-"));
  await rm(actual,{recursive:true,force:true});
 }
-cases+=await runVersionRestoreTests({repoRoot,pythonExecutable:process.argv[2]||"python3"});
+if(!workflowOnly)cases+=await runVersionRestoreTests({repoRoot,pythonExecutable});
 
-console.log(`staging Hosting automation tests passed (${cases} cases)`);
+console.log(`staging Hosting automation tests passed (${cases} cases${workflowOnly?"; separate version-restore suite skipped":""})`);

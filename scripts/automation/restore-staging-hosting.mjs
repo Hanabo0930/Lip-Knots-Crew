@@ -461,8 +461,17 @@ export async function createHostingReader({projectId, cwd = process.cwd()}, {sdk
   const options = {project:projectId, nonInteractive:true, json:true, cwd};
   await command.prepare(options); await requireAuth(options);
   const client = new Client({urlPrefix:"https://firebasehosting.googleapis.com", apiVersion:"v1beta1"});
+  // Fresh options are required: the SDK mutates them. retryCodes alone does
+  // not disable its premature-close retry. These flags suppress normal logs;
+  // SDK fetch-exception logs still include request metadata/body. Keep this
+  // adapter limited to fixed Hosting payloads; never reuse it for Auth secrets.
+  const requestOptions = (queryParams) => ({
+    ...(queryParams ? {queryParams} : {}), retryCodes:[], retries:0,
+    redirect:"error", timeout:12000,
+    skipLog:{body:true, resBody:true, queryParams:true},
+  });
   async function get(resource, fields) {
-    return (await client.get(resource, {queryParams:{fields}, retryCodes:[], timeout:12000, skipLog:{body:true,response:true}})).body;
+    return (await client.get(resource, requestOptions({fields}))).body;
   }
   return {
     async channel(site, channel) {
@@ -471,15 +480,15 @@ export async function createHostingReader({projectId, cwd = process.cwd()}, {sdk
     },
     async release(site, channel, id) {
       requireValue(Object.values(hostingSites).includes(site) && (channel === "live" || rollbackChannelPattern.test(channel)) && hexVersion.test(id), "RELEASE_WRITE_REJECTED");
-      await client.post("projects/" + projectId + "/sites/" + site + "/channels/" + channel + "/releases", {}, {queryParams:{versionName:"sites/" + site + "/versions/" + id},retryCodes:[],timeout:12000,skipLog:{body:true,response:true}});
+      await client.post("projects/" + projectId + "/sites/" + site + "/channels/" + channel + "/releases", {}, requestOptions({versionName:"sites/" + site + "/versions/" + id}));
     },
     async createBackup(site, channel) {
       requireValue(Object.values(hostingSites).includes(site) && rollbackChannelPattern.test(channel), "BACKUP_WRITE_REJECTED");
-      await client.post("projects/" + projectId + "/sites/" + site + "/channels", {ttl:"86400s"}, {queryParams:{channelId:channel},retryCodes:[],timeout:12000,skipLog:{body:true,response:true}});
+      await client.post("projects/" + projectId + "/sites/" + site + "/channels", {ttl:"86400s"}, requestOptions({channelId:channel}));
     },
     async deleteTemporaryChannel(site, channel) {
       requireValue(Object.values(hostingSites).includes(site) && (rollbackChannelPattern.test(channel) || /^rc-[a-f0-9]{12}$/u.test(channel)), "CHANNEL_DELETE_REJECTED");
-      await client.delete("projects/" + projectId + "/sites/" + site + "/channels/" + channel,{retryCodes:[],timeout:12000,skipLog:{body:true,response:true}});
+      await client.delete("projects/" + projectId + "/sites/" + site + "/channels/" + channel,requestOptions());
     },
     async version(site, id) {
       requireValue(Object.values(hostingSites).includes(site) && hexVersion.test(id), "VERSION_READ_REJECTED");

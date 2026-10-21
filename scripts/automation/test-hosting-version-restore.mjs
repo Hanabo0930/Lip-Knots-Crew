@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {spawnSync} from "node:child_process";
+import {createRequire} from "node:module";
+import {Script, createContext} from "node:vm";
+import {URL, URLSearchParams} from "node:url";
 import {mkdtemp, rm, realpath, readFile, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {
@@ -62,7 +65,7 @@ const pilotReportFixture=()=>{
   backupAndPreviewCleanupAuthorized:false,adminAuthenticated:false};
 };
 
-export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3"}){
+export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3",sdkRepoRoot=repoRoot}){
  let cases=0;
  const test=async(name,fn)=>{try{await fn();cases++;}catch(e){throw new Error(name+": "+e.message,{cause:e});}};
  const reject=async(name,mutate,error)=>test(name,()=>{
@@ -569,6 +572,126 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
   assert.equal(calls.length,before);assert.ok(calls.every(c=>c[1].startsWith("projects/"+project+"/sites/")||c[1].startsWith("sites/"+project+"/versions/")));
   await assert.rejects(()=>createHostingReader({projectId:"production",cwd:repoRoot},{sdk}),/ENVIRONMENT_REJECTED/);
  });
+ cases+=await runHostingReaderSdkBoundaryTests({repoRoot,sdkRepoRoot});
  console.log(`Hosting version restore tests passed (${cases} cases; mocked Hosting/GitHub; 0 cloud calls)`);
+ return cases;
+}
+
+// Load trusted installed source, never its real auth/config/logger/transports.
+// This fixture is dependency isolation, not a sandbox for untrusted code.
+export async function runHostingReaderSdkBoundaryTests({repoRoot,sdkRepoRoot=repoRoot}){
+ const resolve=createRequire(path.join(sdkRepoRoot,"package.json"));
+ const apiPath=resolve.resolve("firebase-tools/lib/apiv2");
+ const resolveApi=createRequire(apiPath);
+ const sourcePaths={api:apiPath,retry:resolveApi.resolve("retry/lib/retry.js"),
+  operation:resolveApi.resolve("retry/lib/retry_operation.js")};
+ const sources=Object.fromEntries(await Promise.all(Object.entries(sourcePaths).map(async([key,file])=>[key,await readFile(file,"utf8")])));
+ const marker="SYNTHETIC_HOSTING_RESPONSE_SECRET_NEVER_LOG";
+ const deny=()=>{throw new Error("UNEXPECTED_SDK_FIXTURE_DEPENDENCY");};
+ const operations=[
+  ["channel","GET",api=>api.channel(project,"live")],
+  ["version","GET",api=>api.version(project,fixture().staff.previousVersion)],
+  ["backup","POST",api=>api.createBackup(project,"rb-123")],
+  ["release","POST",api=>api.release(project,"live",fixture().staff.previousVersion)],
+  ["delete","DELETE",api=>api.deleteTemporaryChannel(project,"rb-123")],
+ ];
+ let cases=0;
+ for(const scenario of ["success","http-error","reset","premature-close","redirect"]){
+  const calls=[],requests=[],logs=[],timers=new Set();
+  let retryTimers=0,prepareCalls=0,requireAuthCalls=0;
+  // Request timeout handles are inert. A regressed retry runs as a bounded
+  // microtask, so the test fails on extra attempts instead of hanging/sleeping.
+  const fakeSetTimeout=(fn,ms)=>{
+   const handle={cancelled:false,unref(){}};timers.add(handle);
+   if(ms!==12000){
+    assert.ok(++retryTimers<=3,"SDK_FIXTURE_RETRY_BOUND");
+    queueMicrotask(()=>{timers.delete(handle);if(!handle.cancelled)fn();});
+   }
+   return handle;
+  };
+  const fakeClearTimeout=handle=>{handle.cancelled=true;timers.delete(handle);};
+  class FirebaseError extends Error{
+   constructor(message,options={}){super(message);this.original=options.original;this.status=options.status;}
+  }
+  class NoIoAgent{}
+  class NoStream{}
+  class NoFormData{}
+  const load=(key,dependencies,extra={})=>{
+   const module={exports:{}};
+   const context=createContext({module,exports:module.exports,
+    require:name=>{if(!Object.hasOwn(dependencies,name))return deny();return dependencies[name];},
+    process:Object.freeze({env:Object.freeze({})}),console:Object.freeze({log:deny,error:deny,warn:deny}),
+    Error,Buffer,Headers,AbortController,setTimeout:fakeSetTimeout,clearTimeout:fakeClearTimeout,...extra},
+   {codeGeneration:{strings:false,wasm:false}});
+   new Script(sources[key],{filename:path.basename(sourcePaths[key])}).runInContext(context,{timeout:1000});
+   return module.exports;
+  };
+  const RetryOperation=load("operation",{});
+  const retry=load("retry",{"./retry_operation":RetryOperation});
+  const actualClient=load("api",{
+   url:{URL,URLSearchParams},stream:{Readable:NoStream},
+   undici:{request:deny,ProxyAgent:class{constructor(){deny();}}},
+   retry,http:{Agent:NoIoAgent},https:{Agent:NoIoAgent},util:{default:{inspect:deny}},
+   "./auth":{haveValidTokens:()=>false,loggedIn:()=>true,
+    getAccessToken:async()=>({access_token:"synthetic-fixture-token"})},
+   "./error":{FirebaseError},"./env":{detectAIAgent:()=>"unknown",isFirebaseMcp:()=>false},
+   "./logger":{logger:{debug:(...args)=>logs.push(args.map(String).join(" "))}},
+   "./responseToError":{responseToError:response=>new FirebaseError("SYNTHETIC_HTTP_ERROR",{status:response.statusCode})},
+   "./streamUtils":{streamToString:deny},"form-data":NoFormData,"../package.json":{version:"synthetic-fixture"},
+  },{fetch:async(url,options)=>{
+   assert.equal(new URL(url).origin,"https://firebasehosting.googleapis.com");
+   assert.equal(options.redirect,"error");
+   calls.push({url,method:options.method,body:options.body});
+   if(scenario==="reset")throw Object.assign(new Error("synthetic socket reset"),{code:"ECONNRESET"});
+   // A transport honoring redirect:error rejects without following Location.
+   if(scenario==="redirect")throw new Error("synthetic unexpected redirect");
+   return {status:scenario==="http-error"?403:200,text:async()=>{
+    if(scenario==="premature-close")throw Object.assign(new Error("synthetic premature close"),{code:"ERR_STREAM_PREMATURE_CLOSE"});
+    return JSON.stringify({marker});
+   }};
+  }}).Client;
+  const sdk={command:{prepare:async()=>{prepareCalls++;}},requireAuth:async()=>{requireAuthCalls++;},
+   Client:class extends actualClient{
+    request(options){
+     assert.equal(options.retries,0);assert.equal(options.redirect,"error");
+     assert.deepEqual(options.retryCodes,[]);assert.equal(options.timeout,12000);
+     assert.deepEqual(options.skipLog,{body:true,resBody:true,queryParams:true});
+     requests.push(options);
+     return super.request(options);
+    }
+   }};
+  const api=await createHostingReader({projectId:project,cwd:repoRoot},{sdk});
+  assert.equal(prepareCalls,1);assert.equal(requireAuthCalls,1);
+  for(const [name,method,invoke] of operations){
+   try{
+    const before=calls.length,logStart=logs.length;
+    if(scenario==="success")await invoke(api);else await assert.rejects(()=>invoke(api));
+    assert.equal(calls.length-before,1);assert.equal(calls.at(-1).method,method);
+    assert.equal(retryTimers,0);assert.equal(timers.size,0);
+    assert.ok(logs.every(line=>!line.includes(marker)),"response body appeared in SDK logs");
+    const requestLog=logs.slice(logStart).filter(line=>line.startsWith(">>> [apiv2][query]"));
+    assert.equal(requestLog.length,1);assert.ok(requestLog[0].endsWith(method==="DELETE"?"[none]":"[omitted]"));
+    if(method==="POST"){
+     const bodyLog=logs.slice(logStart).filter(line=>line.startsWith(">>> [apiv2][body]"));
+     assert.equal(bodyLog.length,1);assert.ok(bodyLog[0].endsWith("[omitted]"));
+    }
+    if(scenario==="success"||scenario==="http-error"){
+     const bodyLog=logs.slice(logStart).filter(line=>line.startsWith("<<< [apiv2][body]"));
+     assert.equal(bodyLog.length,1);assert.ok(bodyLog[0].endsWith("[omitted]"));
+    }
+    cases++;
+   }catch(error){throw new Error(`Hosting SDK ${name}/${scenario}: ${error.message}`,{cause:error});}
+  }
+  assert.equal(new Set(requests).size,operations.length);
+  assert.equal(new Set(requests.map(options=>options.skipLog)).size,operations.length);
+  assert.equal(new Set(requests.map(options=>options.retryCodes)).size,operations.length);
+  if(scenario==="success"){
+   const before=calls.length;
+   for(const invoke of [()=>api.channel("production","live"),()=>api.version(project,"../secret"),
+    ()=>api.createBackup(project,"live"),()=>api.release(project,"live","../secret"),
+    ()=>api.deleteTemporaryChannel(project,"live")])await assert.rejects(invoke);
+   assert.equal(calls.length,before);cases++;
+  }
+ }
  return cases;
 }

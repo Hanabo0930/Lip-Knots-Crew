@@ -1,6 +1,9 @@
 # Hosting 限定 Staff 受入
 
 2026-10-20 に承認された、Functions を変更しない限定的な画面・API互換確認の手順。
+2026-10-21 の本人承認により、本人による画面観測と技術的な受入を分ける経路を追加した。
+初回は専用 Staff のログイン、ホーム内の「今日やること」「次回シフト」の表示までとし、
+7 Functions の完全 metadata と前後の配備照合は技術受入へ分離する。
 既存の [Hosting 手順](STAGING_HOSTING_AUTOMATION.md) と [AGENTS.md](../../AGENTS.md)
 の保護環境・最新 main・正式 CI・固定版復旧条件を維持する。
 対象は `lip-knots-crew-staging` / `asia-northeast1` の Staff / Admin Hosting だけ。
@@ -9,14 +12,17 @@
 
 | 記録 | 意味 |
 | --- | --- |
-| `PREAUTH_READY` | 新しい同一 SHA の正式 CI / Preview、匿名初期画面、限定範囲の固定配備 metadata、および認証実施前の安全条件を確認した。Staff ログイン成功ではない |
+| `PREAUTH_READY` | 新しい同一 SHA の正式 CI / Preview、固定 Hosting 版、匿名初期画面、および選択した方式の認証前安全条件を確認した。技術受入方式だけは7関数の固定配備 metadata も必須。Staff ログイン成功ではない |
 | `STAGING_TRIAL` | Preview で認証できない具体的証拠があり、固定した旧 live 2版を保全したうえで Preview の検証済み2版を staging live へ反映した。Staff 受入は未完了 |
 | `STAFF_UI_ACCEPTED` | 固定された専用 Staff で認証し、許可した起動経路の応答と画面を実際に確認した。匿名 browser check の成功からは生成しない |
+| `STAFF_MANUAL_UI_OBSERVED` | 本人が固定版の専用 Staff ログイン、ホームのToDoと次回シフトの最新表示または正しい空表示を確認した。通信境界、API互換性、Functions配備不変、権限不変、内部副作用は未証明 |
 | `sourceAuthenticity: UNVERIFIED` | 配備ソース ZIP とリポジトリの一致は未証明。Function の ACTIVE / GEN2 / nodejs22、Build 成功、revision 固定から真正性を推測しない |
 | `submissionAcceptance: UNVERIFIED` | 提出・Storage 送信・Drive 転送・原本への書戻しは未実施。停止中とも正常とも判定しない |
 
-Preview で認証できる場合は `PREAUTH_READY → STAFF_UI_ACCEPTED`。
-具体的に認証非対応を確認した場合だけ `PREAUTH_READY → STAGING_TRIAL → STAFF_UI_ACCEPTED`。
+Preview で認証できる場合は `PREAUTH_READY` から選択した方式の結果へ進む。
+具体的に認証非対応を確認した場合だけ `STAGING_TRIAL` を経由する。
+技術受入の終点は `STAFF_UI_ACCEPTED`、本人観測の終点は `STAFF_MANUAL_UI_OBSERVED`。
+本人観測の成功を技術受入へ昇格させず、提出・Drive 転送を含むアプリ全体の完成とも扱わない。
 証拠不足・受入失敗はどの段階でも停止し、成功した前段階を後段階の成功として扱わない。
 
 `operation=promote`、workflow 名 `Staging Hosting Promote`、
@@ -26,6 +32,65 @@ display title `promote staging Hosting`、artifact `staging-hosting-promote-{SHA
 既定の `source-provenance` を変更しない。自動 Preview からの promote は既定経路のまま。
 `check-hosting-api-readiness.py` と `requireNoFeeSourcePath` の厳格経路はそのまま残す。
 限定結果を既存経路の `PASS` に変換しない。
+
+## 開発・運用読取・実受入を分けた進め方
+
+以下の1経路を使う。認可読取が止まっていても、独立した通常修正・レビューは進める。
+実受入の不足を埋める目的なく個別ブラウザハーネスを追加したり、同じ成功試験を繰り返したりしない。
+
+| 工程・担当 | 完了条件と次工程 |
+| --- | --- |
+| 1 開発担当：隔離コピーの通常修正 | 実不具合を修正し、変更箇所の回帰と独立レビューを完了する。変更していない既存試験は下記条件で再利用。認可情報の取得やクラウド実行を開発試験へ混ぜない |
+| 2 運用担当：既存認可による読取を1回に束ねる | 指定UIDのAuth読取1件と、固定Staff/Adminのliveチャンネル各1件を取得。本文を保存せず、対象一致・権限状態・完全版IDだけを保護された証拠へ残す。未取得項目を真にしない |
+| 3 開発・運用担当：公開前条件をまとめて確定 | 工程1・2と並行して、追加費用なし、対象アカウント、選択した観測方式と保証範囲、全試行メール台帳、排他期間・復旧期限を確認する。本人観測のために自作ブラウザ実行器を増築しない |
+| 4 開発担当：正規PR/CI/Preview | Actions費用条件が揃えばpush/Draft PRへ進める。統合前に規定のHosting/API/Firestore費用条件を確認する。PRのHEADと統合後mainの新SHAそれぞれに必要なCIを取得し、同SHAの不要な再実行はしない。統合SHAのCI後の自動Previewと自動promoteの1連鎖を管理する |
+| 5 本人・運用担当：限定観測 | 準備済み固定版、操作回数、副作用、停止条件、結果の意味を一括提示してから本人が1回操作する。技術受入を選ぶ場合は従来の通信境界を強制する。Preview認証非対応の具体的証拠がある場合だけ、旧2版を保全して通常の保護付きstaging trialへ進む |
+
+工程2・3の未完了だけを理由に、独立した開発や費用条件を満たすDraft PRまで止めない。
+実受入は全安全条件が成立するまで開始しない。各工程の許可範囲が別途限定されている場合はその範囲を守る。
+
+既存結果を再利用するには、対象source/dependency/入力fixture/検証方法と、関連するruntime・
+実行環境・保護条件が同じで、保存された
+exit・結果・digestを確認できることが必要。失敗・未実行・結果不明を再利用で成功に変えない。
+コード変更で影響する試験だけをローカルで実行し、変更箇所・再利用範囲をレビューへ渡す。
+新しいSHAの正式CIは別条件なので、この再利用規則で省略しない。
+
+最小の運用読取は次の3件。対象projectは常に `lip-knots-crew-staging`。
+
+- Auth：保護記録に固定されたUID1件の `getUser()` 相当の通常読取。
+  UID/宛先一致、emailVerified、disabled=false、余分なkeyのないStaff claimsを判定する。
+  `accounts:lookup` はPOSTだが読取であり、ユーザー一覧export・認証試行・bootstrapは不要。
+  応答には秘密情報を含み得るため、未加工応答や例外全体を表示・保存しない。
+- Hosting：`projects/lip-knots-crew-staging/sites/lip-knots-crew-staging/channels/live` と
+  `projects/lip-knots-crew-staging/sites/lip-knots-crew-staging-admin/channels/live`。
+  `name,release(version(name,status))` を読み、完全な版名と `FINALIZED` を照合する。
+  UIの短IDやテストfixtureの版IDを現在のlive証拠へ転用しない。
+
+この3件だけではemailIndex/profileとの実対応、Admin一覧除外、非production環境値、費用、
+backup期限は証明できない。既存記録で成立する項目を消し込み、残る対象だけを運用担当へ渡す。
+既存 `operation=readiness` はCI/Preview等を要する後段の確認であり、この初期3読取を得るために
+起動しない。Functions metadata collectorもAuthやlive版の代替にはならない。
+
+既存認可済み読取接続が無い場合、本人に必要なのは、既に権限を持つ管理端末・管理担当で
+上記3読取を1回実施できる場所の確認と、判定結果の受け渡しだけ。
+新規key・token貼付・権限追加・ログインやADC作成を要求しない。
+既存認可が無ければその工程を停止し、開発工程だけを続ける。
+既知の認証DBアクセス拒否を別手段や別保存場所から読み直して解消したことにしない。
+
+技術受入の実行場所は、通常のsandbox付きブラウザ起動、送信前のbody/対象照合、
+未知通信拒否、並列要求を含む回数・期限、Service Worker等の遮断、秘密非保存と終了確認を
+現在の保護のまま提供できる既存環境に限定する。正規ブラウザの目視操作だけでは代替できない。
+自作C launcher/pipeは方式の一例で、正式条件そのものではない。
+利用可能な環境で必須機能が成立しなければ、足りない提供機能を明示して運用担当へ返す。
+本人観測にはこの自動実行器を要求しない。本人が操作する通常ブラウザの画面観測は、
+通信境界を強制した技術受入の代替ではなく、下記の明示された別方式である。
+どちらの方式でも、匿名確認や合成試験だけで認証前提の成立や実認証の成功を記録しない。
+
+Hosting adapterのSDK設定は、`retryCodes: []` に加えて `retries: 0` でtransport再試行を止め、
+redirectを拒否する。結果不明の書込を自動再送しない。応答本文の通常debugログ抑止には
+installed SDKが参照する `skipLog.resBody` を使う。
+SDKの通信例外には別のログ経路があるため、この設定だけで秘密非保存を保証したことにはならない。
+Hosting adapterへAuth lookup本文を載せる流用はせず、運用読取側で秘匿と再試行なしを別途確認する。
 
 ## 着手・公開前に確認する証拠
 
@@ -47,8 +112,10 @@ display title `promote staging Hosting`、artifact `staging-hosting-promote-{SHA
 7. `lkc-staging-hosting` の通常保護環境を通す。承認 API が拒否されたら保護を変更しない。
    再評価は関連する新証拠があり、未実行を確認できた場合だけ1回。結果不明の操作を再送しない。
 
-固定 metadata は API ごとの name / project / region / state / runtime / entry point /
+技術受入方式の固定 metadata は API ごとの name / project / region / state / runtime / entry point /
 service / revision / traffic と取得時刻を照合し、受入前後で同一配備を再確認する。
+7関数の完全情報、前後 GET、10分以内の snapshot 鮮度はこの技術受入の追加条件であり、
+原 AGENTS の初回本人画面確認条件ではない。本人方式には要求せず、Functions 配備不変を未証明と記録する。
 既存 `collect-upload-metadata` の既定2関数はアップロード経路の診断であり、
 Staff 起動 API や実ログインを証明しない。その既定仕様は変更しない。
 限定 metadata でもソース ZIP・環境変数全文・Secret・IAM policy 全文を出力しない。
@@ -70,14 +137,17 @@ validator は `retainUntil` を記録作成から24時間以内、受入期限�
 
 `limited_evidence` は48KiB以内の JSON。正確な構造は
 [`validateLimitedPilotPreflight`](../../scripts/automation/hosting-limited-pilot.mjs) とそのテストで管理する。
-費用・専用対象・既存 claims・通信境界・メール全試行台帳・Preview 認証可否・復旧と排他期間の
+費用・専用対象・既存 claims・観測方式（技術受入では通信境界）・メール全試行台帳・Preview 認証可否・復旧と排他期間の
 保護された原記録を reviewer が確認し、各 `evidenceDigest` を固定する。
 Boolean や digest の形式が合うだけでは事実の証明にならない。合成テスト fixture を実行用の証拠にしない。
 
 原記録、氏名、アドレス、トークン、リンクは入力に入れない。review JSON は runner 一時領域へ保存し、
-artifact には正規化した metadata、Hosting version pin、証拠 digest と判定だけを残す。
-7関数の metadata は GET のみで取得し、`createUploadSession` / `finalizeStagedUpload` の実行や
-source ZIP の取得を行わない。反映直前・直後にも配備固定を再確認する。
+artifact には Hosting version pin、証拠 digest と判定を残す。技術受入方式だけは正規化 metadata も残す。
+技術受入方式の7関数 metadata は GET のみで取得し、反映直前・直後にも配備固定を再確認する。
+本人方式は `functions` / snapshot / deployment digest を入力や結果へ作らず、collector と API recheck を実行しない。
+検証済み `acceptance_method` で分岐し、方式不明や検証失敗を `skipped` の成功へ読み替えない。
+本人方式でも書込直前の Hosting 版、capture、期限、run の確認と正規 manifest・復旧条件は維持する。
+どちらも `createUploadSession` / `finalizeStagedUpload` の実行や source ZIP の取得は行わない。
 限定 trial は backup 作成/固定と各 live release の POST 直前にも report を読み直し、
 期限・run/SHA・対象versionを照合する。途中で期限切れなら残りの反映を止める。
 結果が既知の部分反映を旧版へ戻す処理は、期限切れを理由に妨げない。
@@ -96,8 +166,11 @@ workflow の `limited-pilot-evidence.json` は前提証拠の検査結果、
 `limited-pilot-trial.json` は反映完了・Staff受入未完了の記録。
 `evaluateStaffAcceptance` は別途取得した実認証観測・期限・前後 snapshot を評価する純粋関数であり、
 メール送信や実ブラウザ操作を自動実行しない。
-report は全必須属性・型・未証明状態を再検査する。Staff の実観測とその前の metadata snapshot は、
+本人観測には別の `evaluateOwnerManualObservation` を使う。これも記録の照合だけを行い、
+ログイン・メール・証拠のクラウド保存は実行しない。本人観測を既存の API 成功欄へ代入しない。
+report は方式別の必須属性・型・未証明状態を再検査する。Staff の実観測は、
 Preview なら `checkedAt`、staging なら `trialRecordedAt` 以後でなければ受入できない。
+技術受入方式では前 metadata snapshot にもこの順序を要求する。
 trial より前に得たログイン結果を staging 受入へ流用しない。
 
 ## メール送信前に固定する対象
@@ -147,7 +220,8 @@ metadata 取得だけでは応答契約やサーバー内部の副作用は検�
 | `getPushStatus({})` | 対象 Staff profile と companyId / uid / active に絞った pushTokens を読取り。20件ずつ走査し、表示対象20件に達するまでページングするため総読取数を20件と仮定しない |
 
 主経路は `bootstrapSession → getMyTasks + assigned jobs → registerDeviceSession /
-open jobs / getPushStatus`。後半3つは非同期で開始されるため、画面だけ先に見えても完了扱いしない。
+open jobs / getPushStatus`。後半3つは非同期で開始されるため、画面だけ先に見えても技術受入完了にはしない。
+この7関数の列挙は本人方式でも想定する起動範囲と副作用の説明であり、各 API の実行や metadata 取得の達成表ではない。
 `getPushStatus` は一時エラー時に最大3回試行する。
 visibility change は heartbeat に加え push 状態（60秒抑制）と業務一覧（30秒抑制）を再読する。
 Service Worker も画面復帰時に更新確認する。通知 listener は起動するが、
@@ -157,13 +231,13 @@ Service Worker も画面復帰時に更新確認する。通知 listener は起�
 production runtime では productionControls を読む。staging project 名だけで runtime 設定を推測せず、
 既存の限定された安全証拠で非 production を確認する。値を変更して試験を進めない。
 
-## 認証ブラウザの実行境界
+## 技術受入の認証ブラウザ境界
 
 既存 `hosting-browser-check.mjs` は空の browser context で匿名初期画面を検査する。
 認証・メール送信・端末登録の試験機ではない。その JSON やスクリーンショットを
 `STAFF_UI_ACCEPTED` の根拠に流用しない。
 
-認証を始める前に、別途、次の境界を実際に強制・観測できる試験セッションを用意する。
+技術受入方式では、認証を始める前に、次の境界を実際に強制・観測できる試験セッションを用意する。
 準備したつもりのチェック欄だけで実通信の確認を置き換えない。
 
 1. Staff と Admin は別の空の browser context。既存の Auth / localStorage / IndexedDB /
@@ -189,11 +263,71 @@ production runtime では productionControls を読む。staging project 名だ�
 7. Admin は既存セッションのない初期画面だけ。ログインボタン、メールリンク、
    Auth state 移植を使わない。Admin 側で認証済み状態や callable が観測されたら失敗とする。
 
-上記は受入実施の前提であり、この文書や純粋 validator がブラウザの通信を遮断したり、
+上記は技術受入実施の前提であり、この文書や純粋 validator がブラウザの通信を遮断したり、
 サーバー内部書込を自動監視したりするわけではない。
 その実行器/手順の証拠が欠ければ認証試験は未実施のまま残す。
 ホスト名単位の allowlist、ページを開いて目視するだけ、Functions metadata だけでは不足する。
 端末とログイン以外の書込が発生した疑いがあれば試験を停止し、証跡と不確実性を報告する。
+
+## 本人による限定画面観測
+
+本人が通常ブラウザで操作する経路は `acceptanceMethod: OWNER_MANUAL_UI` を明示する。
+省略時は従来の技術受入方式であり、通信境界の証明不足から自動で本人方式へ切り替えない。
+本人方式の `review.scope.requestBoundaryEnforced` は **false** とし、前提判定でも偽の true を要求しない。
+この差は操作主体と保証範囲の違いを表す。Functions、権限、認証設定、Production、転送停止値の
+変更、業務書込、追加費用を許可する例外ではない。
+
+費用・専用 Staff / Auth / claims / emailIndex / profile の照合、限定読取と許容書込の範囲、
+全試行で1通の台帳、非 production 設定、最新 SHA の CI / Preview、必要時の復旧と排他期間は
+技術受入と共通の必須条件として保持する。本人ログインをこれらの事前読取の代用にしない。
+本人方式の計画 `review.manualObservationPlan` と承認の保護記録を固定し、1端末・新しい試験用
+ブラウザ環境・既存 Staff のメールコード認証1回・1セッション・初期ホームだけ・再送/再読込なし・
+秘密非保存を確認する。`observationWindowSeconds` は事前に合意した有限の短い観測時間を秒単位で固定する。
+これは本人が認証完了を確認した後のホーム観測開始 `startedAt` から終了 `capturedAt` までであり、
+メール待ち時間を含む通信の強制停止期限ではない。前提証拠と復旧の期限は別途守る。
+一律300秒上限や観測後10分以内の提出を要件にせず、事前計画・review・trial・復旧の期限で判定する。
+これは人の操作計画であり、通信回数、SDK のリトライ、listener、Functions 内部の読取数を
+強制する装置ではない。費用確認でも「1画面だから API 1回」「pushTokens は20件まで」と推測しない。
+
+本人への実施案内は、次の一式が揃ってから1回にまとめる。
+
+- 実際に準備済みの固定版と正確な Staff URL、Preview または staging の区別、観測期限。
+  ローカル候補、未配備最新版、古い live 画面を最新版として渡さない。
+- 専用対象の事前照合、未消費のメール枠または当該固定 origin で利用可能と確認された既存1通、
+  観測計画、副作用、停止時の連絡先と復旧担当。メールの消費状態が不明なら開始しない。
+- 操作はログイン画面と初期ホームの2画面に限定する。本人に console / HAR / token の取得を依頼しない。
+  Admin の未ログイン初期画面は固定版の既存匿名検査で確認し、本人の Admin ログインは不要。
+
+本人の操作は以下の4手順。これは開始依頼ではなく、前提成立後に渡す手順である。
+
+1. 指定された Staff の固定 URL を新しい試験用ブラウザ環境で開く。
+2. 事前照合した専用アドレスを入力し、「ログインメールを送る」を1回だけ押す。
+   既存1通を使う計画ならこの送信を省略する。別担当からの追加送信も行わない。
+3. 届いたコードを同じ Staff 画面へ入力し、「確認コードでログイン」を1回だけ押す。
+   メールリンクを重ねて開かず、期限切れ・配送不明・エラー時は再送/再認証せず終了する。
+4. 初期ホーム上部のアドレスが専用対象と一致すること、「今日やること」と「次回シフト」の
+   最新データまたは正しい空表示、エラーの有無を一度確認して終了する。
+   ToDo・「シフトを開く」・「募集案件を見る」は押さず、画面の表示だけを確認する。
+   計画時間を超えて待たない。氏名・案件本文・コード・リンクを含めず、結果と開始/終了時刻だけを担当へ伝える。
+
+UI が再読込や再送を勧めてもこの観測では実行しない。応募・提出・画像選択・通知許可・端末取消・
+管理操作は行わない。表示エラー、古いキャッシュ、デモ、想定外の対象/画面は観測成功にしない。
+ログイン後は一覧読取、端末登録、heartbeat、listener 等が自動で動く。
+タブを閉じる操作も全通信の即時停止を証明するものではなく、本人の操作回数と通信回数を混同しない。
+
+本人観測の結果は固定した本人計画、Hosting 版、対象の保護記録、メール台帳に結び付ける。
+`sessionStartedAt` は当該セッションの送信/認証開始より前、かつ `checkedAt` / `trialRecordedAt` 以後とし、
+その後の home 観測開始 `startedAt`、終了 `capturedAt` の順序を照合する。
+既にログインした画面だけを後から観測し、認証前確認を済ませたことにしない。
+前後 metadata の run ID・snapshot・digest は本人方式には不要で、技術受入にのみ残す。
+本人記録の `homeDisplay` はToDoと次回シフトの表示または正しい空表示、`taskOpened:false` は
+タスクを開いていない申告を表す。API応答検査や通信制御の代用にはならない。
+同一 workflow 内の本人待機、前後 metadata のための readiness 再実行、自作ブラウザ実行器は要求しない。
+`STAFF_MANUAL_UI_OBSERVED` でも技術的な認証受入・API互換・通信境界・事後のclaims不変・
+内部副作用と `backendDeploymentUnchanged` は未証明として残す。
+見えたことを全API成功や許容範囲外書込の不存在へ読み替えない。
+不審な書込や想定外操作の報告があれば停止し、成功観測を記録しない。
+本人観測の記録は技術受入の入力や再観測の許可にはならない。技術受入には別途その前提証拠が必要。
 
 ## Preview から staging trial へ進める条件
 
@@ -223,10 +357,12 @@ staging trial に必要なのは次の全て。
 
 ## 受入、保全、復旧
 
-Staff 認証済み・対象 scope 一致・最新一覧の表示・起動 API の実応答・端末記録の範囲内更新を確認し、
+技術受入では Staff 認証済み・対象 scope 一致・最新一覧の表示・起動 API の実応答・端末記録の範囲内更新を確認し、
 受入前後の Function revision と Hosting version が変わっていない場合だけ `STAFF_UI_ACCEPTED` とする。
 旧キャッシュ表示や一部 API 失敗を成功にしない。端末記録のための Auth refresh は権限設定変更の許可ではない。
 `sourceAuthenticity` と `submissionAcceptance` は、この結果でも `UNVERIFIED` を維持する。
+本人方式では前節の観測だけを `STAFF_MANUAL_UI_OBSERVED` として記録する。
+どちらの結果もバックアップ自動削除の許可や、次の認証・業務操作の許可を追加しない。
 
 受入前に rollback / Preview channel を削除しない。必要な保持期限内に受入できない場合も、
 継続の安全条件を未確認のまま放置せず、固定旧版への復旧を判断する。
@@ -234,9 +370,10 @@ Staff 認証済み・対象 scope 一致・最新一覧の表示・起動 API �
 対象 channel を再照合した別の安全な操作として扱う。
 
 反映または事後 browser check 失敗は既存の両サイト自動復旧を使う。
-配備再検査・manifest 確定・artifact 保存の失敗も、反映結果が既知の場合は同一 run 内で両サイトを復旧する。
+技術受入方式の配備再検査、両方式の manifest 確定・artifact 保存の失敗も、
+反映結果が既知の場合は同一 run 内で両サイトを復旧する。
 不明な反映結果には推測で復旧を重ねず停止する。artifact 保存失敗時は復旧結果を run ログでも確認する。
-後続の Staff 受入が失敗した場合は、保存済みの成功 promotion run の正規 manifest を使う
+後続の Staff 受入または本人観測が失敗した場合は、保存済みの成功 promotion run の正規 manifest を使う
 既存 `operation=restore` 経路で両方を復旧する。別版へ上書きしていた場合や
 run / attempt / SHA / digest / live version が一致しない場合は停止する。
 失敗した workflow を成功に書き換えたり、復旧の identity / digest 検査を弱めたりしない。
@@ -249,7 +386,7 @@ loginLinkRateLimits / loginGatewayTokens / loginInviteDeliveries / deviceSession
 ## 報告
 
 変更ファイル、ローカル検証、commit / PR / 正式 CI、Preview / promote / restore の run と SHA、
-公開の有無、証拠上の現在段階、メール試行回数、未検証項目、残る阻害と具体的な次操作を記載する。
+公開の有無、観測方式と証拠上の現在段階、メール試行回数、未検証項目、残る阻害と具体的な次操作を記載する。
 実データ・メール・login / device 記録の操作がなければ明記する。
 操作が拒否・待機・結果不明なら、対象、理由、既に完了した範囲を分けて記録する。
 旧 main の成功やローカル合成テストを、新 SHA の正式 CI / 実ログイン受入に置き換えない。

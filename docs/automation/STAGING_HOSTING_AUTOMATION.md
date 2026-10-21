@@ -5,6 +5,13 @@
 Remove Cloud Shell and local Cursor from routine Staff/Admin Hosting releases
 while preserving a deliberate human approval before live staging changes.
 
+The default `evidence_policy=source-provenance` retains the strict deployed-source
+gate. The explicitly reviewed `limited-staff-pilot` policy follows
+[the limited Staff acceptance procedure](LIMITED_STAFF_HOSTING_ACCEPTANCE.md).
+It records an unauthenticated staging trial separately from Staff acceptance and
+retains backup/preview channels until acceptance; the normal cleanup sequence
+below does not apply to that policy.
+
 ## Fixed release path
 
 1. A pull request is approved and merged to `main`.

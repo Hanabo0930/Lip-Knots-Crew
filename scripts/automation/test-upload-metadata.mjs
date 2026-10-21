@@ -14,6 +14,7 @@ const publicEnv = {
   GITHUB_REF: "refs/heads/main", GITHUB_REF_NAME: "main", GITHUB_JOB: "promote",
   GITHUB_WORKFLOW_REF: "Hanabo0930/Lip-Knots-Crew/.github/workflows/staging-hosting-promote.yml@refs/heads/main",
   GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_RUN_ATTEMPT: "1", GITHUB_RUN_ID: "12345",
+  GITHUB_SHA: "a".repeat(40),
   LKC_OPERATION: "readiness", LKC_METADATA_ONLY: "true", LKC_SOURCE_SHA: "a".repeat(40),
   LKC_CONFIRMATION: "CHECK_LKC_STAGING_HOSTING_READINESS", LKC_PROJECT_ID: PROJECT, LKC_REGION: REGION,
 };
@@ -278,8 +279,19 @@ function scriptedBody(block) {
 
 function validateDecisionShell(script) {
   assert(!/`|\$\(/u.test(script));
-  assert(script.split("\n").every(line => /^(?:\s*|\s*if \[\[ .* \]\]; then|\s*else|\s*fi|\s*echo "[A-Za-z0-9_=.-]+"|\s*exit [01])$/u.test(line)),
+  const logicalLines = script.replace(/\\\r?\n\s*/gu, " ").split("\n");
+  assert(logicalLines.every(line => /^(?:\s*|\s*if \[\[ .* \]\]; then|\s*else|\s*fi|\s*echo "[A-Za-z0-9_=.-]+"|\s*exit [01])$/u.test(line)),
     "Decision script contains a non-decision command");
+}
+
+function metadataDecisionPrefix(script) {
+  const policyGuard = "node scripts/automation/hosting-limited-pilot.mjs --guard-only\n";
+  assert(script.startsWith(policyGuard), "Evidence policy must be checked before the metadata-only branch");
+  // The real policy CLI is exercised by test-hosting-automation.mjs. Keep this
+  // Linux/Windows decision-only fixture incapable of executing arbitrary Node.
+  const prefix = script.slice(policyGuard.length, script.indexOf("\nnode scripts/automation/restore-staging-hosting.mjs"));
+  assert(prefix.endsWith("fi"));
+  return prefix;
 }
 
 function runDecisionShell(script, operation, metadataOnly) {
@@ -290,7 +302,7 @@ function runDecisionShell(script, operation, metadataOnly) {
   const executable = "/bin/bash";
   const result = spawnSync(executable, ["--noprofile", "--norc", "-c", script], {
     encoding: "utf8", timeout: 5000,
-    env: {LKC_OPERATION: operation, LKC_METADATA_ONLY: String(metadataOnly)},
+    env: {LKC_OPERATION: operation, LKC_METADATA_ONLY: String(metadataOnly), LKC_EVIDENCE_POLICY: "source-provenance"},
   });
   assert.ifError(result.error);
   assert.equal(result.signal, null);
@@ -301,7 +313,7 @@ function runDecisionShell(script, operation, metadataOnly) {
 test("metadata-only workflow graph cannot reach Hosting/Storage/build/deploy side effects", () => {
   const blocks = stepBlocks(workflow);
   assert(blocks.length > 25, "Workflow parser must cover the full job");
-  const steps = Object.fromEntries(["backup", "promotion", "live_check", "rollback", "manual_restore", "manual_restore_check"]
+  const steps = Object.fromEntries(["backup", "promotion", "live_check", "rollback", "manual_restore", "manual_restore_check", "evidence_rollback"]
     .map(name => [name, {outcome: "success", outputs: {ready: "true", rollback_allowed: "true", attempted: "true"}}]));
   const allowed = new Set(["Require the deliberate live-staging enable switch", "Checkout current main",
     "Require current main, canonical CI and exact scope", "Prepare evidence directory",
@@ -309,7 +321,7 @@ test("metadata-only workflow graph cannot reach Hosting/Storage/build/deploy sid
     "Validate protected metadata-only scope before authentication", "Authenticate for limited metadata GETs",
     "Collect only upload Function and referenced Build metadata", "Upload promotion and rollback evidence",
     "Publish promotion summary", "Enforce the final result"]);
-  for (const block of blocks) if (evaluate(condition(block), {env: {LKC_OPERATION: "readiness", LKC_METADATA_ONLY: "true"}, steps})) {
+  for (const block of blocks) if (evaluate(condition(block), {env: {LKC_OPERATION: "readiness", LKC_METADATA_ONLY: "true", LKC_EVIDENCE_POLICY: "source-provenance"}, steps})) {
     assert(allowed.has(block.name), `Unexpected reachable step: ${block.name}`);
     assert(!/npx firebase|npm run build|setup-gcloud|--backup|--promote-capture|--restore-capture|--cleanup/u.test(block.body), block.name);
   }
@@ -342,10 +354,8 @@ test("same filename/job/protected environment/pinned identity; current-main and 
     assert.equal(active.length, 1);
     assert.match(active[0].body, /uses: actions\/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38/u);
     assert.match(active[0].body, /node-version: "22"/u);
-    if (metadataOnly) {
-      assert.match(active[0].body, /package-manager-cache: false/u);
-      assert.doesNotMatch(active[0].body, /^\s+cache(?:-dependency-path)?:/mu);
-    } else assert.match(active[0].body, /cache: npm\s+cache-dependency-path: source\/package-lock\.json/u);
+    assert.match(active[0].body, /package-manager-cache: false/u);
+    assert.doesNotMatch(active[0].body, /^\s+cache(?:-dependency-path)?:/mu);
   }
 });
 
@@ -359,20 +369,29 @@ test("metadata-only queue is separate and serial; promote group is unchanged, no
   assert.equal(group({operation: "readiness", metadata_only: false}), "lkc-staging-hosting-promote");
   assert.equal(group({operation: "promote", metadata_only: false}), "lkc-staging-hosting-promote");
   assert.equal(group({operation: "restore", metadata_only: false}), "lkc-staging-hosting-promote");
+  assert.equal(group({operation: "readiness", metadata_only: true, evidence_policy: "source-provenance"}), "lkc-staging-hosting-metadata-readiness");
+  assert.equal(group({operation: "readiness", metadata_only: true, evidence_policy: "limited-staff-pilot"}), "lkc-staging-hosting-promote");
   assert(!/gh run cancel|pending_deployments.*POST|cancel-in-progress: true/u.test(workflow));
 });
 
 test("metadata mode graph excludes side effects under success, failure, cancelled and always", () => {
   const blocks = stepBlocks(workflow.slice(workflow.indexOf("\n  promote:")));
-  const steps = Object.fromEntries(["backup", "promotion", "live_check", "rollback", "manual_restore", "manual_restore_check"]
+  const steps = Object.fromEntries(["backup", "promotion", "live_check", "rollback", "manual_restore", "manual_restore_check", "evidence_rollback"]
     .map(name => [name, {outcome: "success", outputs: {ready: "true", rollback_allowed: "true", attempted: "true"}}]));
-  const context = {env: {LKC_OPERATION: "readiness", LKC_METADATA_ONLY: "true"}, steps};
+  const context = {env: {LKC_OPERATION: "readiness", LKC_METADATA_ONLY: "true", LKC_EVIDENCE_POLICY: "source-provenance"}, steps};
   const forbidden = ["Set up Node", "Install locked automation dependencies", "Authenticate with the short-lived staging identity",
     "Discover the two allowlisted Hosting sites", "Set up Google Cloud CLI for read-only API verification",
     "Verify deployed upload APIs before any live Hosting change", "Back up both current live channels",
     "Promote the already-tested versions without rebuilding", "Restore both previous live versions on any failure",
     "Verify both live staging apps after rollback", "Remove temporary channels after a successful promotion",
-    "Restore the exact pair from successful promotion evidence"];
+    "Restore the exact pair from successful promotion evidence",
+    "Validate limited review and no additional cost before cloud access",
+    "Pin limited trial preview and previous live versions",
+    "Validate limited evidence against fresh pinned API metadata",
+    "Recheck limited trial capture and API revisions before live write",
+    "Recheck unchanged APIs after the limited trial",
+    "Restore the trial if durable promotion evidence failed",
+    "Check both apps after evidence failure recovery"];
   for (const status of ["success", "failure", "cancelled"]) {
     const reached = blocks.filter(block => shouldRun(block, context, status)).map(block => block.name);
     for (const name of forbidden) assert(!reached.includes(name), `${status}: reached ${name}`);
@@ -396,7 +415,7 @@ test("failed prerequisite/auth/collection skips later default steps but retains 
     "Collect only upload Function and referenced Build metadata", null]) {
     let status = "success", collectionCalls = 0;
     const reached = [], io = transport(fixtures(), () => failedName === "Collect only upload Function and referenced Build metadata" ? {status: 403} : undefined);
-    const context = {env: {LKC_OPERATION: "readiness", LKC_METADATA_ONLY: "true"}, steps: new Proxy({}, {
+    const context = {env: {LKC_OPERATION: "readiness", LKC_METADATA_ONLY: "true", LKC_EVIDENCE_POLICY: "source-provenance"}, steps: new Proxy({}, {
       get: () => ({outcome: "skipped", outputs: {}}),
     })};
     for (const block of blocks) {
@@ -429,7 +448,9 @@ test("decision-only shell fixtures validate without invoking the denied Bash run
       expression.includes("outputs.rollback_allowed") ? "true" : outcome));
   }
   const guard = scriptedBody(blocks.find(block => block.name === "Require current main, canonical CI and exact scope"));
-  validateDecisionShell(guard.slice(0, guard.indexOf("\nnode scripts/automation/restore-staging-hosting.mjs")));
+  validateDecisionShell(metadataDecisionPrefix(guard));
+  assert.throws(() => validateDecisionShell("node scripts/automation/hosting-limited-pilot.mjs --guard-only"),
+    /non-decision command/u,"the decision fixture must still reject Node execution");
 });
 
 test("actual final-result shell distinguishes metadata collection from readiness/publication across 24 cases", shellCoverage, () => {
@@ -437,7 +458,8 @@ test("actual final-result shell distinguishes metadata collection from readiness
   for (const metadataOnly of [true, false]) for (const operation of ["readiness", "promote", "restore"])
     for (const outcome of ["success", "failure", "skipped", "cancelled"]) {
       const rendered = script.replace(/\$\{\{\s*(steps\.[^}]+?)\s*\}\}/gu, (_, expression) =>
-        expression.includes("outputs.rollback_allowed") ? "true" : outcome);
+        expression === "steps.promotion_evidence.outcome" ? "success" :
+          expression.includes("outputs.rollback_allowed") ? "true" : outcome);
       assert(!rendered.includes("${{"));
       const result = runDecisionShell(rendered, operation, metadataOnly);
       if (metadataOnly) {
@@ -452,10 +474,22 @@ test("actual final-result shell distinguishes metadata collection from readiness
     }
 });
 
+test("failed durable evidence never reports metadata-only success", shellCoverage, () => {
+  const script = scriptedBody(stepBlocks(workflow).find(block => block.name === "Enforce the final result"));
+  for (const operation of ["readiness", "promote", "restore"]) {
+    const rendered = script.replace(/\$\{\{\s*(steps\.[^}]+?)\s*\}\}/gu, (_, expression) =>
+      expression === "steps.promotion_evidence.outcome" ? "failure" :
+        expression.includes("outputs.rollback_allowed") ? "true" : "success");
+    const result = runDecisionShell(rendered, operation, true);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /HOSTING_EVIDENCE_RESULT=FAILED/u);
+    assert.doesNotMatch(result.stdout, /METADATA_COLLECTED|HOSTING_READINESS_RESULT=SUCCESS|HOSTING_PROMOTION_RESULT=SUCCESS/u);
+  }
+});
+
 test("actual guard shell rejects metadata-only with promote/restore before authentication across six cases", shellCoverage, () => {
   const script = scriptedBody(stepBlocks(workflow).find(block => block.name === "Require current main, canonical CI and exact scope"));
-  const prefix = script.slice(0, script.indexOf("\nnode scripts/automation/restore-staging-hosting.mjs"));
-  assert(prefix.endsWith("fi"));
+  const prefix = metadataDecisionPrefix(script);
   for (const metadataOnly of [true, false]) for (const operation of ["readiness", "promote", "restore"]) {
     const result = runDecisionShell(prefix, operation, metadataOnly);
     assert.equal(result.status, metadataOnly && operation !== "readiness" ? 1 : 0);

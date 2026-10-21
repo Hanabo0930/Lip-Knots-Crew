@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {spawnSync} from "node:child_process";
+import {createRequire} from "node:module";
+import {Script, createContext} from "node:vm";
+import {URL, URLSearchParams} from "node:url";
 import {mkdtemp, rm, realpath, readFile, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {
@@ -8,7 +11,7 @@ import {
   loadVerifiedPromotionManifest, planVersionRestore, readManifestArchive, releaseHostingVersion,
   requireCurrentMain, restoreVersionPair, validateHostingOperation, validatePromotionEvidence,
   promotionManifestDigest, requireRestoreRetrySafety, validateRestoreRetryEvidence, requireNoFeeSourcePath, requireKnownPromotionResult, loadKnownPromotionResult,
-  verifyCapturedLive,
+  verifyCapturedLive, requireCurrentPilotMutationReview,
 } from "./restore-staging-hosting.mjs";
 
 const project="lip-knots-crew-staging", region="asia-northeast1", repository="Hanabo0930/Lip-Knots-Crew";
@@ -41,13 +44,28 @@ const evidence=m=>{
  const blob=Buffer.from("synthetic artifact");
  return {repository,restoreRunId:m.promotionRunId,manifest:m,blob,
  run:{id:Number(m.promotionRunId),repository:{full_name:repository},name:"Staging Hosting Promote",
- path:".github/workflows/staging-hosting-promote.yml",display_title:"promote staging Hosting",
+ workflow_id:320632310,path:".github/workflows/staging-hosting-promote.yml",display_title:"promote staging Hosting",
  head_branch:"main",head_sha:sha,status:"completed",conclusion:"success",event:"workflow_run",run_attempt:1},
+ workflow:{id:320632310,name:"Staging Hosting Promote",path:".github/workflows/staging-hosting-promote.yml"},
  artifact:{id:123,size_in_bytes:blob.length,name:"staging-hosting-promote-"+sha,expired:false,
  workflow_run:{id:Number(m.promotionRunId),head_sha:sha},digest:"sha256:"+createHash("sha256").update(blob).digest("hex")}};
 };
+const pilotReportFixture=()=>{
+ const m=fixture(),digest="sha256:"+"a".repeat(64);
+ return {schemaVersion:1,policy:"limited-staff-pilot",evidenceValidation:"VALID",evidenceDigest:digest,
+  sourceSha:sha,pilotId:"a".repeat(32),declarationsRequireProtectedReview:true,
+  sourceAuthenticity:"UNVERIFIED",submissionAcceptance:"UNVERIFIED",readinessState:"PREAUTH_READY",
+  stagingTrialAuthorized:true,authenticatedStaffAcceptance:"UNVERIFIED",deploymentSnapshotDigest:digest,
+  observationRunId:m.promotionRunId,
+  hosting:{previewRunId:"123456788",previewRunAttempt:1,
+   previewVersions:{staff:m.staff.promotedVersion,admin:m.admin.promotedVersion},
+   previousVersions:{staff:m.staff.previousVersion,admin:m.admin.previousVersion}},
+  accountDigest:digest,mailAttemptsConsumed:0,mailAttempts:[],mailRecipientDigest:digest,
+  reviewedReadScopeDigest:digest,checkedAt:"2026-10-20T12:00:00.000Z",expiresAt:"2026-10-20T12:00:10.000Z",
+  backupAndPreviewCleanupAuthorized:false,adminAuthenticated:false};
+};
 
-export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3"}){
+export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3",sdkRepoRoot=repoRoot}){
  let cases=0;
  const test=async(name,fn)=>{try{await fn();cases++;}catch(e){throw new Error(name+": "+e.message,{cause:e});}};
  const reject=async(name,mutate,error)=>test(name,()=>{
@@ -87,12 +105,25 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
  await test("non-main blocked",()=>assert.throws(()=>validateHostingOperation({operation:"readiness",confirmation:"CHECK_LKC_STAGING_HOSTING_READINESS",eventName:"workflow_dispatch",projectId:project,region,sourceRef:"branch"}),/ENVIRONMENT_REJECTED/));
  await test("unknown operation",()=>assert.throws(()=>validateHostingOperation({operation:"deploy",confirmation:"x",eventName:"workflow_dispatch",projectId:project,region,sourceRef:"main"}),/OPERATION_REJECTED/));
  await test("valid provenance",()=>{const e=evidence(fixture());assert.equal(validatePromotionEvidence(e),e.manifest);});
+ await test("run-name is accepted only with separately resolved canonical workflow",()=>{
+  const e=evidence(fixture());e.run.name=e.run.display_title;
+  assert.equal(validatePromotionEvidence(e),e.manifest);
+ });
  for(const [name,mutate,error] of [
   ["foreign repository",e=>{e.repository="other/repo";},"REPOSITORY_REJECTED"],
   ["pending run",e=>{e.run.status="pending";},"PROMOTION_EVIDENCE_REJECTED"],
   ["failed run",e=>{e.run.conclusion="failure";},"PROMOTION_EVIDENCE_REJECTED"],
   ["readiness run",e=>{e.run.display_title="readiness staging Hosting";},"PROMOTION_EVIDENCE_REJECTED"],
   ["foreign workflow",e=>{e.run.path=".github/workflows/other.yml";},"PROMOTION_EVIDENCE_REJECTED"],
+  ["unknown run name",e=>{e.run.name="other staging Hosting";},"PROMOTION_EVIDENCE_REJECTED"],
+  ["missing workflow ID",e=>{delete e.run.workflow_id;},"PROMOTION_WORKFLOW_ID_REJECTED"],
+  ["string workflow ID",e=>{e.run.workflow_id="320632310";},"PROMOTION_WORKFLOW_ID_REJECTED"],
+  ["unsafe workflow ID",e=>{e.run.workflow_id=Number.MAX_SAFE_INTEGER+1;},"PROMOTION_WORKFLOW_ID_REJECTED"],
+  ["missing workflow definition",e=>{delete e.workflow;},"PROMOTION_WORKFLOW_IDENTITY_REJECTED"],
+  ["other workflow ID",e=>{e.workflow.id++;},"PROMOTION_WORKFLOW_IDENTITY_REJECTED"],
+  ["other workflow definition name",e=>{e.workflow.name="Staging Hosting Preview";},"PROMOTION_WORKFLOW_IDENTITY_REJECTED"],
+  ["run-name cannot stand in for definition name",e=>{e.workflow.name="promote staging Hosting";},"PROMOTION_WORKFLOW_IDENTITY_REJECTED"],
+  ["other workflow definition path",e=>{e.workflow.path=".github/workflows/other.yml";},"PROMOTION_WORKFLOW_IDENTITY_REJECTED"],
   ["foreign branch",e=>{e.run.head_branch="automation/x";},"PROMOTION_EVIDENCE_REJECTED"],
   ["changed source",e=>{e.manifest.sourceSha="1".repeat(40);},"MANIFEST_PROVENANCE_REJECTED"],
   ["different attempt",e=>{e.manifest.runAttempt=2;},"MANIFEST_PROVENANCE_REJECTED"],
@@ -102,24 +133,48 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
  ])await test(name,()=>{const e=evidence(fixture());mutate(e);assert.throws(()=>validatePromotionEvidence(e),new RegExp(error));});
  await test("verified loader uses exact run and artifact",async()=>{
   const e=evidence(fixture()),calls=[];
-  const result=await loadVerifiedPromotionManifest(e,{github:async(args,encoding)=>{calls.push(args[0]);if(args[0].endsWith("/zip")){assert.equal(encoding,null);return e.blob;}return JSON.stringify(args[0].includes("/artifacts?")?{total_count:1,artifacts:[e.artifact]}:e.run);},archiveReader:(blob,digest)=>readManifestArchive(blob,digest,()=>e.manifest)});
-  assert.deepEqual(result,e.manifest);assert.equal(calls.length,3);
+  e.run.name=e.run.display_title;
+  const result=await loadVerifiedPromotionManifest(e,{github:async(args,encoding)=>{
+   calls.push(args[0]);if(args[0].endsWith("/zip")){assert.equal(encoding,null);return e.blob;}
+   return JSON.stringify(args[0].includes("/actions/workflows/")?e.workflow:args[0].includes("/artifacts?")?{total_count:1,artifacts:[e.artifact]}:e.run);
+  },archiveReader:(blob,digest)=>readManifestArchive(blob,digest,()=>e.manifest)});
+  assert.deepEqual(result,e.manifest);
+  assert.deepEqual(calls,[
+   "/repos/"+repository+"/actions/runs/"+e.restoreRunId,
+   "/repos/"+repository+"/actions/workflows/"+e.run.workflow_id,
+   "/repos/"+repository+"/actions/runs/"+e.restoreRunId+"/artifacts?per_page=100",
+   "/repos/"+repository+"/actions/artifacts/"+e.artifact.id+"/zip",
+  ]);
+ });
+ await test("loader rejects unbound definition before artifact access",async()=>{
+  for(const mutation of [e=>{e.workflow.id++;},e=>{e.workflow.name="other";},e=>{e.workflow.path=".github/workflows/other.yml";}]){
+   const e=evidence(fixture()),calls=[];e.run.name=e.run.display_title;mutation(e);
+   await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async(args)=>{
+    calls.push(args[0]);return JSON.stringify(calls.length===1?e.run:e.workflow);
+   }}),/PROMOTION_WORKFLOW_IDENTITY_REJECTED/);
+   assert.equal(calls.length,2);
+  }
+ });
+ await test("loader rejects invalid workflow ID before definition lookup",async()=>{
+  const e=evidence(fixture());e.run.workflow_id="../../other";let calls=0;
+  await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async()=>{calls++;return JSON.stringify(e.run);}}),/PROMOTION_WORKFLOW_ID_REJECTED/);
+  assert.equal(calls,1);
  });
  await test("loader rejects duplicate artifacts without download",async()=>{
   const e=evidence(fixture()),calls=[];
-  await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async(args)=>{calls.push(args[0]);return JSON.stringify(calls.length===1?e.run:{total_count:2,artifacts:[e.artifact,e.artifact]});}}),/ARTIFACT_NOT_UNIQUE/);
-  assert.equal(calls.length,2);
+  await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async(args)=>{calls.push(args[0]);return JSON.stringify(calls.length===1?e.run:calls.length===2?e.workflow:{total_count:2,artifacts:[e.artifact,e.artifact]});}}),/ARTIFACT_NOT_UNIQUE/);
+  assert.equal(calls.length,3);
  });
  await test("loader rejects incomplete artifact page",async()=>{
   const e=evidence(fixture());let calls=0;
-  await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async()=>JSON.stringify(++calls===1?e.run:{total_count:101,artifacts:[e.artifact]})}),/ARTIFACT_LIST_INCOMPLETE/);
+  await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async()=>JSON.stringify(++calls===1?e.run:calls===2?e.workflow:{total_count:101,artifacts:[e.artifact]})}),/ARTIFACT_LIST_INCOMPLETE/);
  });
  await test("loader rejects missing entries and oversized artifact before download",async()=>{
   for(const scenario of ["missing","oversized"]){
    const e=evidence(fixture());let calls=0;
    if(scenario==="oversized")e.artifact.size_in_bytes=9*1024*1024;
-   await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async()=>JSON.stringify(++calls===1?e.run:{total_count:scenario==="missing"?2:1,artifacts:[e.artifact]})}),scenario==="missing"?/ARTIFACT_LIST_INCOMPLETE/:/ARTIFACT_PROVENANCE_REJECTED/);
-   assert.equal(calls,2);
+   await assert.rejects(()=>loadVerifiedPromotionManifest(e,{github:async()=>JSON.stringify(++calls===1?e.run:calls===2?e.workflow:{total_count:scenario==="missing"?2:1,artifacts:[e.artifact]})}),scenario==="missing"?/ARTIFACT_LIST_INCOMPLETE/:/ARTIFACT_PROVENANCE_REJECTED/);
+   assert.equal(calls,3);
   }
  });
  await test("digest mismatch prevents decode",()=>{
@@ -377,6 +432,111 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
    await assert.rejects(()=>backupCurrentPair({...options,promotionRunId:m.promotionRunId,rollbackChannel:"rb-"+m.promotionRunId},broken),/VERSION_NOT_FINALIZED/);
    assert.equal(model.calls.length,writes);
   });
+  const pilotOptions={...options,promotionRunId:fixture().promotionRunId,rollbackChannel:"rb-"+fixture().promotionRunId,
+   evidencePolicy:"limited-staff-pilot",runAttempt:1,
+   mutation:{kind:"backup",siteId:project,previousVersion:fixture().staff.previousVersion}};
+  await test("strict mutation path never consumes limited evidence",async()=>{
+   await requireCurrentPilotMutationReview({}, {read:()=>assert.fail("strict path read limited evidence")});
+   await requireCurrentPilotMutationReview({...pilotOptions,evidencePolicy:"source-provenance"},
+    {read:()=>assert.fail("strict path read limited evidence")});
+  });
+  await test("limited mutation requires fresh current-run authorized report",async()=>{
+   const report=pilotReportFixture();
+   const check=doc=>requireCurrentPilotMutationReview(pilotOptions,{
+    read:async()=>JSON.stringify(doc),now:()=>"2026-10-20T12:00:01.000Z"});
+   await check(report);
+   for(const mutate of [
+    r=>{r.sourceSha="b".repeat(40);},r=>{r.observationRunId="999";},
+    r=>{r.stagingTrialAuthorized=false;},r=>{r.expiresAt="2026-10-20T12:00:01.000Z";},
+    r=>{r.sourceAuthenticity="VERIFIED";},r=>{r.extra=true;},
+   ]){
+    const changed=structuredClone(report);mutate(changed);
+    await assert.rejects(()=>check(changed));
+   }
+   await assert.rejects(()=>requireCurrentPilotMutationReview(pilotOptions,{
+    read:async()=>"broken JSON",now:()=>"2026-10-20T12:00:01.000Z"}),/PILOT_MUTATION_REPORT_REJECTED/);
+   for(const mutation of [
+    {kind:"backup",siteId:project,previousVersion:"0".repeat(16)},
+    {kind:"backup",siteId:"production",previousVersion:fixture().staff.previousVersion},
+    {kind:"delete",siteId:project,previousVersion:fixture().staff.previousVersion},
+   ])await assert.rejects(()=>requireCurrentPilotMutationReview({...pilotOptions,mutation},{
+    read:async()=>JSON.stringify(report),now:()=>"2026-10-20T12:00:01.000Z",
+   }),/PILOT_MUTATION_VERSION_MISMATCH/);
+  });
+  for(const expireAt of [1,2,3,4,5])await test("review rechecked before each backup POST boundary "+expireAt,async()=>{
+   const m=fixture(),model=statefulReader(m),report=pilotReportFixture();
+   model.state.staff=m.staff.previousVersion;model.state.admin=m.admin.previousVersion;
+   let checks=0;
+   const authorizeMutation=mutation=>requireCurrentPilotMutationReview({...pilotOptions,mutation},{
+    read:async()=>JSON.stringify(report),
+    now:()=>++checks>=expireAt?"2026-10-20T12:00:10.000Z":"2026-10-20T12:00:01.000Z",
+   });
+   const run=()=>backupCurrentPair(pilotOptions,model.reader,{authorizeMutation});
+   if(expireAt<=4)await assert.rejects(run,/PILOT_REVIEW_EXPIRED_OR_FUTURE/);
+   else await run();
+   assert.equal(checks,Math.min(expireAt,4));
+   assert.equal(model.calls.length,Math.min(expireAt-1,4),"no create/release POST after review expiry");
+  });
+  await test("review expiring during final live GET blocks POST with known non-write outcome",async()=>{
+   const m=fixture(),model=statefulReader(m),report=pilotReportFixture();
+   let now="2026-10-20T12:00:01.000Z",checks=0;
+   const reader={...model.reader,channel:async(...args)=>{
+    const result=await model.reader.channel(...args);now="2026-10-20T12:00:10.000Z";return result;
+   }};
+   const result=await releaseHostingVersion({projectId:project,source:project+"@"+m.staff.previousVersion,
+    target:project+":live",expectedLiveVersion:m.staff.promotedVersion,
+    authorizeMutation:mutation=>requireCurrentPilotMutationReview({...pilotOptions,mutation},{
+     read:async()=>{checks++;return JSON.stringify(report);},now:()=>now,
+    })},{reader});
+   assert.equal(result.code,1);assert.equal(result.outcome,"not-attempted");
+   assert.equal(checks,1);assert.deepEqual(model.calls,[]);
+  });
+  await test("expiry between live sites preserves known partial result and permits rollback",async()=>{
+   const m=fixture(),model=statefulReader(m),report=pilotReportFixture();
+   model.state.staff=m.staff.previousVersion;model.state.admin=m.admin.previousVersion;
+   const execution={...m,...Object.fromEntries(["staff","admin"].map(label=>[label,{
+    ...m[label],previousVersion:m[label].promotedVersion,promotedVersion:m[label].previousVersion,
+   }]))};
+   const evidenceDir=path.join(temp,"expiry-partial-promotion"),liveOptions={...pilotOptions,currentRunId:undefined,evidenceDir,mode:"promotion"};
+   let now="2026-10-20T12:00:01.000Z",checks=0;
+   const reader={...model.reader,release:async(...args)=>{
+    await model.reader.release(...args);now="2026-10-20T12:00:10.000Z";
+   }};
+   const result=await restoreVersionPair(execution,liveOptions,{reader,
+    executor:req=>releaseHostingVersion(req,{reader}),
+    authorizeMutation:mutation=>requireCurrentPilotMutationReview({...liveOptions,mutation,capture:{...m,promotionResult:"prepared"}},{
+     read:async()=>{checks++;return JSON.stringify(report);},now:()=>now,
+    })});
+   assert.equal(result.success,false);assert.equal(result.retryAllowed,true);
+   assert.equal(result.attempts[0].outcome,"applied");assert.equal(result.attempts[1].outcome,"not-attempted");
+   assert.equal(checks,2);assert.equal(model.calls.length,1);
+   await loadKnownPromotionResult(m,evidenceDir);
+   const restored=await restoreVersionPair(m,{...liveOptions,mode:"restore"},{
+    reader,executor:req=>releaseHostingVersion(req,{reader}),
+   });
+   assert.equal(restored.success,true);assert.equal(checks,2,"rollback must not recheck expired trial authorization");
+   assert.equal(model.state.staff,m.staff.previousVersion);assert.equal(model.state.admin,m.admin.previousVersion);
+  });
+  await test("live review gate binds the entire current capture and actual release",async()=>{
+   const m=fixture(),report=pilotReportFixture();
+   const context={...pilotOptions,capture:{...m,promotionResult:"prepared"},
+    mutation:{kind:"promote",siteId:project,previousVersion:m.staff.previousVersion,promotedVersion:m.staff.promotedVersion}};
+   const io={read:async()=>JSON.stringify(report),now:()=>"2026-10-20T12:00:01.000Z"};
+   await requireCurrentPilotMutationReview(context,io);
+   for(const mutate of [
+    o=>{o.capture.admin.promotedVersion="0".repeat(16);},
+    o=>{o.capture.staff.previousVersion="0".repeat(16);},
+    o=>{o.capture.sourceSha="0".repeat(40);},
+    o=>{o.capture.promotionRunId="888";},
+    o=>{o.capture.runAttempt=2;},
+    o=>{o.capture.promotionResult="success";},
+    o=>{o.mutation.promotedVersion="0".repeat(16);},
+    o=>{o.mutation.previousVersion="0".repeat(16);},
+   ]){
+    const changed=structuredClone(context);mutate(changed);
+    await assert.rejects(()=>requireCurrentPilotMutationReview(changed,io),/PILOT_MUTATION_(?:CAPTURE|VERSION)_MISMATCH/);
+   }
+  });
   await test("capture and finalization require exact pair",async()=>{
    const m=fixture(),model=statefulReader(m);model.state.staff=m.staff.previousVersion;model.state.admin=m.admin.previousVersion;
    const captureOptions={...options,sourceSha:sha,promotionRunId:m.promotionRunId,runAttempt:1,rollbackChannel:"rb-"+m.promotionRunId,previewChannel:"rc-"+sha.slice(0,12)};
@@ -412,6 +572,126 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
   assert.equal(calls.length,before);assert.ok(calls.every(c=>c[1].startsWith("projects/"+project+"/sites/")||c[1].startsWith("sites/"+project+"/versions/")));
   await assert.rejects(()=>createHostingReader({projectId:"production",cwd:repoRoot},{sdk}),/ENVIRONMENT_REJECTED/);
  });
+ cases+=await runHostingReaderSdkBoundaryTests({repoRoot,sdkRepoRoot});
  console.log(`Hosting version restore tests passed (${cases} cases; mocked Hosting/GitHub; 0 cloud calls)`);
+ return cases;
+}
+
+// Load trusted installed source, never its real auth/config/logger/transports.
+// This fixture is dependency isolation, not a sandbox for untrusted code.
+export async function runHostingReaderSdkBoundaryTests({repoRoot,sdkRepoRoot=repoRoot}){
+ const resolve=createRequire(path.join(sdkRepoRoot,"package.json"));
+ const apiPath=resolve.resolve("firebase-tools/lib/apiv2");
+ const resolveApi=createRequire(apiPath);
+ const sourcePaths={api:apiPath,retry:resolveApi.resolve("retry/lib/retry.js"),
+  operation:resolveApi.resolve("retry/lib/retry_operation.js")};
+ const sources=Object.fromEntries(await Promise.all(Object.entries(sourcePaths).map(async([key,file])=>[key,await readFile(file,"utf8")])));
+ const marker="SYNTHETIC_HOSTING_RESPONSE_SECRET_NEVER_LOG";
+ const deny=()=>{throw new Error("UNEXPECTED_SDK_FIXTURE_DEPENDENCY");};
+ const operations=[
+  ["channel","GET",api=>api.channel(project,"live")],
+  ["version","GET",api=>api.version(project,fixture().staff.previousVersion)],
+  ["backup","POST",api=>api.createBackup(project,"rb-123")],
+  ["release","POST",api=>api.release(project,"live",fixture().staff.previousVersion)],
+  ["delete","DELETE",api=>api.deleteTemporaryChannel(project,"rb-123")],
+ ];
+ let cases=0;
+ for(const scenario of ["success","http-error","reset","premature-close","redirect"]){
+  const calls=[],requests=[],logs=[],timers=new Set();
+  let retryTimers=0,prepareCalls=0,requireAuthCalls=0;
+  // Request timeout handles are inert. A regressed retry runs as a bounded
+  // microtask, so the test fails on extra attempts instead of hanging/sleeping.
+  const fakeSetTimeout=(fn,ms)=>{
+   const handle={cancelled:false,unref(){}};timers.add(handle);
+   if(ms!==12000){
+    assert.ok(++retryTimers<=3,"SDK_FIXTURE_RETRY_BOUND");
+    queueMicrotask(()=>{timers.delete(handle);if(!handle.cancelled)fn();});
+   }
+   return handle;
+  };
+  const fakeClearTimeout=handle=>{handle.cancelled=true;timers.delete(handle);};
+  class FirebaseError extends Error{
+   constructor(message,options={}){super(message);this.original=options.original;this.status=options.status;}
+  }
+  class NoIoAgent{}
+  class NoStream{}
+  class NoFormData{}
+  const load=(key,dependencies,extra={})=>{
+   const module={exports:{}};
+   const context=createContext({module,exports:module.exports,
+    require:name=>{if(!Object.hasOwn(dependencies,name))return deny();return dependencies[name];},
+    process:Object.freeze({env:Object.freeze({})}),console:Object.freeze({log:deny,error:deny,warn:deny}),
+    Error,Buffer,Headers,AbortController,setTimeout:fakeSetTimeout,clearTimeout:fakeClearTimeout,...extra},
+   {codeGeneration:{strings:false,wasm:false}});
+   new Script(sources[key],{filename:path.basename(sourcePaths[key])}).runInContext(context,{timeout:1000});
+   return module.exports;
+  };
+  const RetryOperation=load("operation",{});
+  const retry=load("retry",{"./retry_operation":RetryOperation});
+  const actualClient=load("api",{
+   url:{URL,URLSearchParams},stream:{Readable:NoStream},
+   undici:{request:deny,ProxyAgent:class{constructor(){deny();}}},
+   retry,http:{Agent:NoIoAgent},https:{Agent:NoIoAgent},util:{default:{inspect:deny}},
+   "./auth":{haveValidTokens:()=>false,loggedIn:()=>true,
+    getAccessToken:async()=>({access_token:"synthetic-fixture-token"})},
+   "./error":{FirebaseError},"./env":{detectAIAgent:()=>"unknown",isFirebaseMcp:()=>false},
+   "./logger":{logger:{debug:(...args)=>logs.push(args.map(String).join(" "))}},
+   "./responseToError":{responseToError:response=>new FirebaseError("SYNTHETIC_HTTP_ERROR",{status:response.statusCode})},
+   "./streamUtils":{streamToString:deny},"form-data":NoFormData,"../package.json":{version:"synthetic-fixture"},
+  },{fetch:async(url,options)=>{
+   assert.equal(new URL(url).origin,"https://firebasehosting.googleapis.com");
+   assert.equal(options.redirect,"error");
+   calls.push({url,method:options.method,body:options.body});
+   if(scenario==="reset")throw Object.assign(new Error("synthetic socket reset"),{code:"ECONNRESET"});
+   // A transport honoring redirect:error rejects without following Location.
+   if(scenario==="redirect")throw new Error("synthetic unexpected redirect");
+   return {status:scenario==="http-error"?403:200,text:async()=>{
+    if(scenario==="premature-close")throw Object.assign(new Error("synthetic premature close"),{code:"ERR_STREAM_PREMATURE_CLOSE"});
+    return JSON.stringify({marker});
+   }};
+  }}).Client;
+  const sdk={command:{prepare:async()=>{prepareCalls++;}},requireAuth:async()=>{requireAuthCalls++;},
+   Client:class extends actualClient{
+    request(options){
+     assert.equal(options.retries,0);assert.equal(options.redirect,"error");
+     assert.deepEqual(options.retryCodes,[]);assert.equal(options.timeout,12000);
+     assert.deepEqual(options.skipLog,{body:true,resBody:true,queryParams:true});
+     requests.push(options);
+     return super.request(options);
+    }
+   }};
+  const api=await createHostingReader({projectId:project,cwd:repoRoot},{sdk});
+  assert.equal(prepareCalls,1);assert.equal(requireAuthCalls,1);
+  for(const [name,method,invoke] of operations){
+   try{
+    const before=calls.length,logStart=logs.length;
+    if(scenario==="success")await invoke(api);else await assert.rejects(()=>invoke(api));
+    assert.equal(calls.length-before,1);assert.equal(calls.at(-1).method,method);
+    assert.equal(retryTimers,0);assert.equal(timers.size,0);
+    assert.ok(logs.every(line=>!line.includes(marker)),"response body appeared in SDK logs");
+    const requestLog=logs.slice(logStart).filter(line=>line.startsWith(">>> [apiv2][query]"));
+    assert.equal(requestLog.length,1);assert.ok(requestLog[0].endsWith(method==="DELETE"?"[none]":"[omitted]"));
+    if(method==="POST"){
+     const bodyLog=logs.slice(logStart).filter(line=>line.startsWith(">>> [apiv2][body]"));
+     assert.equal(bodyLog.length,1);assert.ok(bodyLog[0].endsWith("[omitted]"));
+    }
+    if(scenario==="success"||scenario==="http-error"){
+     const bodyLog=logs.slice(logStart).filter(line=>line.startsWith("<<< [apiv2][body]"));
+     assert.equal(bodyLog.length,1);assert.ok(bodyLog[0].endsWith("[omitted]"));
+    }
+    cases++;
+   }catch(error){throw new Error(`Hosting SDK ${name}/${scenario}: ${error.message}`,{cause:error});}
+  }
+  assert.equal(new Set(requests).size,operations.length);
+  assert.equal(new Set(requests.map(options=>options.skipLog)).size,operations.length);
+  assert.equal(new Set(requests.map(options=>options.retryCodes)).size,operations.length);
+  if(scenario==="success"){
+   const before=calls.length;
+   for(const invoke of [()=>api.channel("production","live"),()=>api.version(project,"../secret"),
+    ()=>api.createBackup(project,"live"),()=>api.release(project,"live","../secret"),
+    ()=>api.deleteTemporaryChannel(project,"live")])await assert.rejects(invoke);
+   assert.equal(calls.length,before);cases++;
+  }
+ }
  return cases;
 }

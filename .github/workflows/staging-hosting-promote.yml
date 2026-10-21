@@ -738,10 +738,10 @@ jobs:
               echo "HOSTING_LIMITED_RESULT=STOPPED_SAFELY"
               exit 1
             fi
-            case "${{ steps.pilot_review.outputs.acceptance_method }}" in
-              CONTROLLED_BROWSER|OWNER_MANUAL_UI) ;;
-              *) echo "HOSTING_LIMITED_RESULT=UNKNOWN_ACCEPTANCE_METHOD"; exit 1 ;;
-            esac
+            if [[ "${{ steps.pilot_review.outputs.acceptance_method }}" != "CONTROLLED_BROWSER" && "${{ steps.pilot_review.outputs.acceptance_method }}" != "OWNER_MANUAL_UI" ]]; then
+              echo "HOSTING_LIMITED_RESULT=UNKNOWN_ACCEPTANCE_METHOD"
+              exit 1
+            fi
           fi
           if [[ "$LKC_OPERATION" == "readiness" ]]; then
             if [[ "$LKC_EVIDENCE_POLICY" == "limited-staff-pilot" ]]; then

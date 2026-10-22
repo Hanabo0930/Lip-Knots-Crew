@@ -253,10 +253,10 @@ const receiptEnd=app.indexOf('      },{setMessage:value',receiptStart);
 assert.ok(receiptStart>=0&&receiptEnd>receiptStart);
 for(const scenario of ['success','cleanup-failure','receipt-unavailable','auth-changed']){
  const events=[];
- const state={draftKey:'owner/job',typeLabel:'報告書',jobId:'job',data:{submissionId:'sent-id'},currentType:'report',currentRequestId:'',skipNextDraftSaveRef:{current:false},
- attempt:{clientRequestId:'synthetic-attempt'},clearSubmissionAttempt:async()=>events.push('clear-attempt'),
+ const state={draftKey:'owner/job',typeLabel:'報告書',jobId:'job',data:{submissionId:'sent-id',files:[{uploadRequired:true}]},currentType:'report',currentRequestId:'',skipNextDraftSaveRef:{current:false},
+ attempt:{clientRequestId:'synthetic-attempt'},clearSubmissionAttempt:async()=>{events.push('clear-attempt');return true;},
  markDraftSubmitted:()=>{events.push('receipt');return scenario!=='receipt-unavailable';},setFiles:files=>events.push(['files',files.length]),setSubmissionConfirmed:value=>events.push(['confirmed',value]),
- setDraftCleanup:value=>events.push(['cleanup',value]),showSubmissionMessage:()=>events.push('message'),pollSubmissionProcessing:(...args)=>events.push(['poll',...args]),
+ setDraftCleanup:value=>{state.cleanupValue=typeof value==='function'?value(state.cleanupValue):value;events.push(['cleanup',state.cleanupValue]);},showSubmissionMessage:()=>events.push('message'),pollSubmissionProcessing:(...args)=>events.push(['poll',...args]),
  clearDraft:async()=>{events.push('clear');if(scenario!=='success'&&scenario!=='auth-changed')throw new Error('disk');},isCurrentUpload:()=>scenario!=='auth-changed',
  };
  runInNewContext(ts.transpileModule(`async function finish(){${app.slice(receiptStart,receiptEnd)}}`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,state);

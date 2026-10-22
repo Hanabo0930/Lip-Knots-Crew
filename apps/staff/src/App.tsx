@@ -252,7 +252,7 @@ export default function App(){
   const [submissionType,setSubmissionType]=useState<SubmissionType>("report"); const [requestId,setRequestId]=useState("");
   const [submissionConfirmed,setSubmissionConfirmed]=useState(false);
   const [submissionMessage,setSubmissionMessage]=useState("" );
-  const [draftCleanup,setDraftCleanup]=useState<{key:string;durable:boolean;attempt?:SubmissionAttempt}|null>(null);
+  const [draftCleanup,setDraftCleanup]=useState<{key:string;durable:boolean;attempt?:SubmissionAttempt;draftCleared?:boolean}|null>(null);
   const [files,setFiles]=useState<File[]>([]); const [uploadState,setUploadState]=useState<Record<string,string>>({});
   const [draftHydrating,setDraftHydrating]=useState(false);
   const [deviceSessionId,setDeviceSessionId]=useState(""); const [devices,setDevices]=useState<DeviceSession[]>([]); const [showDevices,setShowDevices]=useState(false);
@@ -443,7 +443,7 @@ export default function App(){
   }
 
   function isSubmissionActionPending(){
-    return draftHydratingRef.current||isPending("submission-refresh")||isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("task-job")||isPending("uploadSubmission")||processingSubmission;
+    return draftHydratingRef.current||isPending("submission-refresh")||isPending("shift-action")||isPending("submission-context")||isPending("submission-files")||isPending("task-job")||isPending("uploadSubmission")||isPending("draft-cleanup")||processingSubmission;
   }
 
   useEffect(()=>{
@@ -1578,6 +1578,7 @@ export default function App(){
 
   async function uploadSubmission(){
     if(!files.length||!submissionConfirmed||isSubmissionActionPending())return;
+    if(draftCleanup?.key===draftKey){showSubmissionMessage("送信済みファイルの端末記録が残っています。新しい提出の前に「端末の後片付けを再試行」を押してください。");return;}
     if(files.some(file=>file.size<=0||file.size>MAX_SUBMISSION_FILE_SIZE)){showSubmissionMessage("空のファイルまたは50MBを超えるファイルは送信できません。選び直してください。");return;}
     const assignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id):undefined;
     if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");return;}
@@ -1642,19 +1643,24 @@ export default function App(){
         }
         if(!isCurrentUpload())return;
         const durable=markDraftSubmitted(draftKey);
-        if(durable)await clearSubmissionAttempt(attempt);
+        const attemptCleared=durable&&await clearSubmissionAttempt(attempt);
         if(!isCurrentUpload())return;
         skipNextDraftSaveRef.current=true;
         setFiles([]);
         setSubmissionConfirmed(false);
-        setDraftCleanup({key:draftKey,durable,attempt});
-        showSubmissionMessage(`${typeLabel}を送信しました。Drive転送を処理中です…`);
+        const cleanupTarget={key:draftKey,durable,attempt};
+        setDraftCleanup(cleanupTarget);
+        showSubmissionMessage(data.files.every(target=>!target.uploadRequired)
+          ? `${typeLabel}は受付済みです。再アップロードせず、Drive転送の状況を確認しています…`
+          : `${typeLabel}を送信しました。Drive転送を処理中です…`);
         void pollSubmissionProcessing(jobId,data.submissionId,currentType,currentRequestId);
         try{
           await clearDraft(draftKey);
-          await clearSubmissionAttempt(attempt);
           if(!isCurrentUpload())return;
-          setDraftCleanup(null);
+          const receiptCleanup={...cleanupTarget,draftCleared:true};
+          setDraftCleanup(current=>current===cleanupTarget?receiptCleanup:current);
+          const cleared=attemptCleared||await clearSubmissionAttempt(attempt);
+          if(isCurrentUpload()&&cleared)setDraftCleanup(current=>current===receiptCleanup?null:current);
         }catch{
           // 送信済み。端末の後片付け失敗をアップロード失敗として扱わない。
         }
@@ -1668,9 +1674,15 @@ export default function App(){
     const authVersion=authLoadVersionRef.current;
     try{
       await run("draft-cleanup",async()=>{
-        await clearDraft(target.key);
-        if(target.attempt){const {clearSubmissionAttempt}=await loadSubmissionAttempt();await clearSubmissionAttempt(target.attempt);}
-        if(authVersion===authLoadVersionRef.current)setDraftCleanup(current=>current===target?null:current);
+        const receiptCleanup=target.draftCleared?target:{...target,draftCleared:true};
+        if(!target.draftCleared){
+          await clearDraft(target.key);
+          if(authVersion!==authLoadVersionRef.current)return;
+          setDraftCleanup(current=>current===target?receiptCleanup:current);
+        }
+        let cleared=true;
+        if(target.attempt){const {clearSubmissionAttempt}=await loadSubmissionAttempt();if(authVersion!==authLoadVersionRef.current)return;cleared=await clearSubmissionAttempt(target.attempt);}
+        if(authVersion===authLoadVersionRef.current&&cleared)setDraftCleanup(current=>current===receiptCleanup?null:current);
       });
     }catch{ /* 警告を残して、後から同じ操作を再試行できるようにする。 */ }
   }
@@ -1978,6 +1990,7 @@ export default function App(){
   const pushActionPending=isPending("push-action:"+authLoadVersionRef.current);
   const loginActionPending=isLoginActionPending();
   const submissionEditPending=isSubmissionActionPending();
+  const submissionCleanupPending=draftCleanup?.key===draftKey;
   const submissionReadiness=selectedAssignedJob?submissionReadinessMessage(selectedAssignedJob):null;
   const singleFileResubmission=Boolean(requestId&&resubmissionDetail?.request.scope!=="submission");
   const resubmissionSendBlocked=Boolean(requestId&&(resubmissionDetail?.request.id!==requestId||resubmissionDetail.request.jobId!==selectedJob?.id||resubmissionDetail.request.type!==submissionType||resubmissionDetail.request.status!=="open"));
@@ -1990,7 +2003,7 @@ export default function App(){
   return <main className="app-shell">
     <header><img src="/logo.png" alt=""/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button ref={accountMenuToggleRef} className="ghost account-menu-toggle" onClick={toggleAccountMenu} aria-expanded={showAccountMenu} aria-controls="account-menu" disabled={isPending("logout")||deviceActionPending}>{showAccountMenu?"閉じる":"メニュー"}</button>}</header>
     {showAccountMenu&&<section id="account-menu" className="panel account-menu-panel"><div className="section-heading"><div><h2>アカウント</h2><p>状態確認・端末管理・ログアウトはこちらです。</p></div></div><div className="account-menu-actions"><button className="secondary" onClick={()=>{setShowAccountMenu(false);void openQuickDiagnostics();}} disabled={isDiagnosticsPending()||isPending("logout")||deviceActionPending} aria-busy={isDiagnosticsPending()}>{isDiagnosticsPending()?"診断中…":"状態確認"}</button><button className="secondary" onClick={()=>{setShowAccountMenu(false);void loadDevices();}} disabled={deviceActionPending||isPending("logout")}>{deviceActionPending?"処理中…":"端末管理"}</button><button className="ghost logout-button" onClick={()=>{if(!deviceActionPending)void requestLogout();}} aria-disabled={isPending("logout")||deviceActionPending} aria-busy={isPending("logout")}>{isPending("logout")?"ログアウト中…":"ログアウト"}</button></div></section>}
-    {draftCleanup&&<section className="panel" role="status"><strong>ファイルの送信は済んでいます</strong><p>端末の下書きの後片付けを確認しています。同じファイルを送り直す必要はありません。{!draftCleanup.durable&&"端末に送信済みの記録も保存できませんでした。画面を閉じた後は、再送する前に提出履歴を確認してください。"}</p><button className="secondary" onClick={()=>void retryDraftCleanup()} disabled={isPending("draft-cleanup")||isPending("uploadSubmission")} aria-busy={isPending("draft-cleanup")}>{isPending("draft-cleanup")?"確認中…":"端末の後片付けを再試行"}</button></section>}
+    {draftCleanup&&<section className="panel" role="status"><strong>ファイルの送信は済んでいます</strong><p>端末の下書き・受付記録の後片付けが完了していません。同じファイルを送り直す必要はありません。新しい提出の前に、下のボタンで後片付けを再試行してください。{!draftCleanup.durable&&"端末に送信済みの記録も保存できませんでした。画面を閉じた後は、再送する前に提出履歴を確認してください。"}</p><button className="secondary" onClick={()=>void retryDraftCleanup()} disabled={isPending("draft-cleanup")||isPending("uploadSubmission")} aria-busy={isPending("draft-cleanup")}>{isPending("draft-cleanup")?"確認中…":"端末の後片付けを再試行"}</button></section>}
     {message&&<div className={messageClassName(message)} role={currentMessageTone==="error"?"alert":"status"}><span>{message}</span>{currentMessageTone!=="working"&&<button className="message-dismiss" onClick={()=>setMessage("")} aria-label="お知らせを閉じる">閉じる</button>}</div>}
     {showDevices&&<section className="panel device-panel" aria-busy={deviceActionPending}><div className="section-heading"><div><h2 ref={deviceHeadingRef} tabIndex={-1}>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="secondary" onClick={()=>void loadDevices()} disabled={deviceActionPending}>再読込</button><button className="ghost" onClick={()=>{setShowDevices(false);accountMenuToggleRef.current?.focus();}} disabled={deviceActionPending}>閉じる</button></div><div className="device-list">{!deviceActionPending&&deviceListUncertain&&<p className="device-list-uncertain" role="status">{devices.length?"端末一覧の更新を確認できません。表示中の情報は前回の内容です。":"端末一覧を確認できません。"}「再読込」で最新の状態を確認してください。</p>}{deviceActionPending&&!pendingDeviceId&&<div className="empty compact" role="status">端末情報を読み込んでいます…</div>}{devices.map((device,index)=><div className="device-row" key={device.id} role="group" aria-label={`端末 ${index+1}件目: ${device.label?.trim()||device.platform?.trim()||"端末"}`}><div><strong>{index+1}. {device.label?.trim()||device.platform?.trim()||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===true?"利用中":device.active===false?"ログアウト済み":"利用状況未確認"}</small></div><button className="secondary" aria-label={`${index+1}件目の端末をログアウト`} disabled={device.active===false||deviceActionPending} onClick={()=>void revokeDevice(device.id)}>{pendingDeviceId===device.id?"ログアウト中…":"ログアウト"}</button></div>)}{!deviceActionPending&&!devices.length&&<EmptyAction title="端末情報がありません" body="通信状態を確認して、最新の端末情報をもう一度読み込んでください。" action="もう一度読み込む" onAction={()=>void loadDevices()}/>}</div></section>}
     {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite" aria-busy={isDiagnosticsPending()}><div className="section-heading"><div><h2 ref={diagnosticHeadingRef} tabIndex={-1}>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading" role="status">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id} role="group" aria-label={`${check.label}: ${check.level==="pass"?"正常":check.level==="warn"?"要確認":"エラー"}`}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}{diagnosticReport&&<details className="diagnostic-copy-text"><summary>共有用の文章を表示</summary><p>自動コピーが使えない場合は、下の文章を選択してコピーしてください。</p><textarea aria-label="診断結果の共有用文章" readOnly rows={8} value={formatDiagnosticReport(diagnosticReport)}/></details>}<div className="diagnostic-actions">{diagnosticReport&&<><button onClick={()=>void shareDiagnostics()} disabled={isPending("diagnostic-export:"+authLoadVersionRef.current)}>結果を共有</button><button className="secondary" onClick={()=>void copyDiagnostics()} disabled={isPending("diagnostic-export:"+authLoadVersionRef.current)}>コピー</button></>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isDiagnosticsPending()}>{isDiagnosticsPending()?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>{closeDiagnostics();accountMenuToggleRef.current?.focus();}}>閉じる</button></div></section>}
@@ -2043,7 +2056,7 @@ export default function App(){
       {submissionType==="sales_floor"&&<><p id="client-submission-help" className="muted">{submissionReadiness??"クライアントへ直接提出した場合は、ここで提出済みを記録してください。"}</p><button className="secondary" onClick={()=>{if(!submissionEditPending&&!submissionReadiness)void setClientSubmitted(selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted!==true);}} aria-describedby="client-submission-help" aria-disabled={submissionEditPending||Boolean(submissionReadiness)} aria-busy={shiftActionPending}>{pendingShiftAction==="clientSubmitted"?"更新中…":selectedAssignedJob.submissionStatus?.salesFloor?.clientSubmitted===true?"クライアント提出を解除":"クライアントへ提出済み"}</button></>}
       <div className="upload-box"><span className="submission-step-label">3. 写真・PDFを選ぶ</span><div className="file-picker-actions"><label className="file-picker-button camera">📷 カメラで撮影<input className="file-picker-input" type="file" accept="image/*" capture="environment" disabled={submissionEditPending||resubmissionSendBlocked} onChange={e=>{addSubmissionFiles(Array.from(e.target.files??[]));e.currentTarget.value="";}}/></label><label className="file-picker-button library">🖼️ 写真・PDFを選ぶ<input className="file-picker-input" type="file" multiple={!singleFileResubmission} accept="image/*,.pdf" disabled={submissionEditPending||resubmissionSendBlocked} onChange={e=>{addSubmissionFiles(Array.from(e.target.files??[]));e.currentTarget.value="";}}/></label></div><small>{singleFileResubmission?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB。選択後も追加できます。`}</small></div>
       {files.length>0&&<><div className="file-list-toolbar"><div><strong>選択中：{files.length}件</strong><small>送信前に画像を確認してください</small></div><button className="ghost" onClick={()=>void clearSubmissionFiles()} disabled={submissionEditPending} aria-busy={isPending("submission-files")}>{isPending("submission-files")?"解除中…":"すべて解除"}</button></div><div className="file-list">{files.map((file,index)=><SelectedSubmissionFile key={fileStateKey(file)} file={file} position={index+1} status={uploadState[fileStateKey(file)]??"選択中・未送信"} disabled={submissionEditPending} onRemove={()=>removeSubmissionFile(file)}/>)}</div></>}
-      <label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} disabled={submissionEditPending||resubmissionSendBlocked} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><p id="submission-send-help" className="muted" role="status">{submissionReadiness?submissionReadiness:resubmissionSendBlocked?"再提出できる依頼を確認できません。「提出情報を再読み込み」で最新の状態を確認してください。":submissionEditPending?"処理が終わるまでお待ちください。":!files.length?"送信する写真・PDFを選んでください。":!submissionConfirmed?"選択したファイルと提出種類を確認し、上の確認欄にチェックしてください。":"送信する準備ができました。下のボタンで送信してください。"}</p><button aria-describedby="submission-send-help" className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||submissionEditPending||resubmissionSendBlocked||Boolean(submissionReadiness)} aria-busy={submissionEditPending}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?(singleFileResubmission?"この画像を再送する":"ファイルを再提出する"):`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className={`${messageClassName(submissionMessage)} submission-message`} role={messageTone(submissionMessage)==="error"?"alert":"status"}>{submissionMessage}</div>}
+      <label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} disabled={submissionEditPending||resubmissionSendBlocked} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><p id="submission-send-help" className="muted" role="status">{submissionCleanupPending?"送信済みファイルの端末記録が残っています。「端末の後片付けを再試行」で確認してから、新しい提出へ進んでください。":submissionReadiness?submissionReadiness:resubmissionSendBlocked?"再提出できる依頼を確認できません。「提出情報を再読み込み」で最新の状態を確認してください。":submissionEditPending?"処理が終わるまでお待ちください。":!files.length?"送信する写真・PDFを選んでください。":!submissionConfirmed?"選択したファイルと提出種類を確認し、上の確認欄にチェックしてください。":"送信する準備ができました。下のボタンで送信してください。"}</p><button aria-describedby="submission-send-help" className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||submissionEditPending||resubmissionSendBlocked||submissionCleanupPending||Boolean(submissionReadiness)} aria-busy={submissionEditPending}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?(singleFileResubmission?"この画像を再送する":"ファイルを再提出する"):`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className={`${messageClassName(submissionMessage)} submission-message`} role={messageTone(submissionMessage)==="error"?"alert":"status"}>{submissionMessage}</div>}
       <hr/><h3>提出履歴</h3><button className="secondary" onClick={()=>void refreshSubmissionInformation()} disabled={submissionEditPending} aria-busy={isPending("submission-refresh")}>{isPending("submission-refresh")?"再読み込み中…":"提出情報を再読み込み"}</button><SubmissionProcessingRecovery key={draftKey} submissions={submissionHistory} disabled={submissionEditPending||submissionHistoryStatus!=="ready"||!functions} onCheck={recheckSubmissionProcessing}/>{submissionHistoryStatus==="loading"?<div className="history-loading" role="status">提出履歴を読み込んでいます。完了するまでお待ちください。</div>:submissionHistoryStatus==="error"?<div className="empty history-error" role="alert">提出履歴を読み込めませんでした。「提出情報を再読み込み」で再試行してください。</div>:<SubmissionHistoryFiles files={submissionHistory.flatMap(group=>group.files)} hasMissingFiles={submissionHistory.some(group=>!group.files.length)} onRefreshPreview={refreshFilePreview}/>}
     </section>}
     {view==="contact"&&<section className="panel contact-panel"><h2 ref={contactHeadingRef} tabIndex={-1}>連絡先</h2><p>業務に関する連絡はこちらから行えます。</p><p role="status" aria-label="コピー状態">{isPending("text-copy")?"コピーしています。完了するまでお待ちください。":""}</p><div className="contact-actions"><a className="contact-button" href={`mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(CONTACT_EMAIL_SUBJECT)}`}>メールを送る</a><a className="contact-button" href={`tel:${CONTACT_PHONE}`}>電話をかける</a><a className="contact-button" href={CONTACT_FORM_URL} target="_blank" rel="noreferrer">お問い合わせフォームを開く</a></div><div className="contact-details"><strong>受付：平日 9:00〜18:00</strong><span>電話：<a href={`tel:${CONTACT_PHONE}`}>{CONTACT_PHONE_LABEL}</a></span><span>メール：<a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a></span></div><div className="contact-actions"><button className="secondary" disabled={isPending("text-copy")} onClick={()=>void copyDisplayText("メールアドレス",CONTACT_EMAIL)}>メールアドレスをコピー</button><button className="secondary" disabled={isPending("text-copy")} onClick={()=>void copyDisplayText("電話番号",CONTACT_PHONE_LABEL)}>電話番号をコピー</button></div><details className="contact-copy-text"><summary>連絡先を選択してコピー</summary><p>自動コピーが使えない場合は、下の連絡先を選択してコピーしてください。</p><label>メールアドレス<input aria-label="手動コピー用メールアドレス" readOnly value={CONTACT_EMAIL}/></label><label>電話番号<input aria-label="手動コピー用電話番号" readOnly value={CONTACT_PHONE_LABEL}/></label></details>{selectedAssignedJob?<><h3>連絡するシフト</h3><p>コピー前に日付と店舗を確認してください。</p><textarea aria-label="連絡するシフト" readOnly rows={3} value={contactShiftText}/>{!hasCompleteContactShift(selectedAssignedJob)&&<p className="contact-shift-incomplete" role="status">未確認の項目があります。「別のシフトを選ぶ」からシフト画面を開き、「シフトを更新」で確認してください。改善しない場合は、上の連絡先へ確認できる情報を伝えてください。</p>}<div className="contact-actions"><button className="secondary" disabled={isPending("text-copy")} onClick={()=>void copyDisplayText("シフト情報",contactShiftText)}>シフト情報をコピー</button><button className="secondary" onClick={()=>navigate("shifts")}>別のシフトを選ぶ</button></div></>:<button className="secondary" onClick={()=>navigate("shifts")}>連絡するシフトを選ぶ</button>}</section>}

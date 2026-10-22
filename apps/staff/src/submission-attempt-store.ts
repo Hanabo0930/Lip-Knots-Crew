@@ -31,11 +31,19 @@ export async function prepareSubmissionAttempt(
     } catch { throw failure(); }
   });
 }
-export async function clearSubmissionAttempt(attempt: SubmissionAttempt): Promise<void> {
+// True means this exact receipt is confirmed absent; a newer valid receipt is preserved.
+export async function clearSubmissionAttempt(attempt: SubmissionAttempt): Promise<boolean> {
   try {
-    await navigator.locks.request(attempt.storageKey, { mode: "exclusive" }, () => {
-      const saved = JSON.parse(localStorage.getItem(attempt.storageKey) ?? "null");
-      if (saved?.clientRequestId === attempt.clientRequestId) localStorage.removeItem(attempt.storageKey);
+    return await navigator.locks.request(attempt.storageKey, { mode: "exclusive" }, () => {
+      const raw = localStorage.getItem(attempt.storageKey);
+      if (raw === null) return true;
+      const saved = JSON.parse(raw);
+      if (saved?.version !== 1 || typeof saved.clientRequestId !== "string" ||
+        !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(saved.clientRequestId) ||
+        (saved.expectedRevision !== undefined && (!Number.isSafeInteger(saved.expectedRevision) || saved.expectedRevision < 0))) return false;
+      if (saved.clientRequestId !== attempt.clientRequestId) return true;
+      localStorage.removeItem(attempt.storageKey);
+      return localStorage.getItem(attempt.storageKey) === null;
     });
-  } catch { /* 後片付け失敗時は同じ受付を保持し、二重提出よりも履歴の確認を優先する。 */ }
+  } catch { return false; }
 }

@@ -255,6 +255,7 @@ for(const scenario of ['success','cleanup-failure','receipt-unavailable','auth-c
  const events=[];
  const state={draftKey:'owner/job',typeLabel:'報告書',jobId:'job',data:{submissionId:'sent-id',files:[{uploadRequired:true}]},currentType:'report',currentRequestId:'',skipNextDraftSaveRef:{current:false},
  attempt:{clientRequestId:'synthetic-attempt'},clearSubmissionAttempt:async()=>{events.push('clear-attempt');return true;},
+ saveSubmittedBinding:async()=>true,finishSubmittedBindings:async()=>true,hasStoredDraft:async()=>false,confirmDraftCleanupComplete:async()=>true,
  markDraftSubmitted:()=>{events.push('receipt');return scenario!=='receipt-unavailable';},setFiles:files=>events.push(['files',files.length]),setSubmissionConfirmed:value=>events.push(['confirmed',value]),
  setDraftCleanup:value=>{state.cleanupValue=typeof value==='function'?value(state.cleanupValue):value;events.push(['cleanup',state.cleanupValue]);},showSubmissionMessage:()=>events.push('message'),pollSubmissionProcessing:(...args)=>events.push(['poll',...args]),
  clearDraft:async()=>{events.push('clear');if(scenario!=='success'&&scenario!=='auth-changed')throw new Error('disk');},isCurrentUpload:()=>scenario!=='auth-changed',

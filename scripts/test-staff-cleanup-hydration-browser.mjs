@@ -16,6 +16,7 @@ assert.ok(saveStart>0&&saveEnd>saveStart);
 const compile=s=>ts.transpileModule(s,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
 const runtime=`import * as attemptStore from '/attempt.js';
 import * as draftStore from '/draft.js';
+import {hasSubmittedBindings,saveSubmittedBinding,finishSubmittedBindings} from '/submitted-binding-store';
 import {runWithConcurrency} from '/concurrency.js';
 window.makeFiles=()=>[new File(['one'],'one.png',{type:'image/png',lastModified:1}),new File(['two'],'two.pdf',{type:'application/pdf',lastModified:2})];
 window.makeFixture=(key='company/user/job/report')=>{
@@ -28,7 +29,7 @@ window.makeFixture=(key='company/user/job/report')=>{
  const setSubmissionConfirmed=v=>submissionConfirmed=v,setSubmissionMessage=()=>{},showSubmissionMessage=m=>state.messages.push(m);
  const setFiles=v=>files=v,setDraftCleanup=v=>draftCleanup=typeof v==='function'?v(draftCleanup):v,setDraftHydrating=v=>draftHydrating=v;
  const setUploadState=v=>state.status=typeof v==='function'?v(state.status):v;
- const {saveDraft,loadDraft,clearDraft,markDraftSubmitted,getSubmittedDraftReceipt}=draftStore;
+ const {saveDraft,loadDraft,clearDraft,markDraftSubmitted,getSubmittedDraftReceipt,hasStoredDraft,confirmDraftCleanupComplete}=draftStore;
  const pollSubmissionProcessing=async(...args)=>state.processing.push(args);
  const run=async(_key,fn,options)=>{pending=true;try{await fn();}catch(e){options?.setMessage?.(e.message);throw e;}finally{pending=false;}};
  const httpsCallable=(_api,name)=>{if(name!=='createUploadSession')throw Error('Unexpected synthetic API');return payload=>window.fixtureSession(payload);};
@@ -39,7 +40,7 @@ window.makeFixture=(key='company/user/job/report')=>{
  return {uploadSubmission,retryDraftCleanup,hydrate,queueDraftSave,save:()=>saveDraft(draftKey,files),select:variant=>{files=variant?[new File([variant],'selected-'+variant+'.png',{type:'image/png'})]:window.makeFiles();submissionConfirmed=true;},snapshot:()=>({cleanup:draftCleanup,files:files.map(f=>f.name),confirmed:submissionConfirmed,draftHydrating,messages:state.messages,processing:state.processing}),switchAccount:()=>{authLoadVersionRef.current++;draftCleanup={key:'other-owner/job',durable:true};files=[new File(['other'],'other.png')];}};
 };
 window.draftStore=draftStore;window.attemptStore=attemptStore;window.ready=true;`;
-const modules={'/fixture.js':compile(runtime),'/attempt.js':compile(fs.readFileSync('apps/staff/src/submission-attempt-store.ts','utf8')),'/draft.js':compile(fs.readFileSync('apps/staff/src/draft-store.ts','utf8')),'/concurrency.js':compile(fs.readFileSync('apps/staff/src/concurrency.ts','utf8'))};
+const modules={'/submitted-binding-store':compile(fs.readFileSync('apps/staff/src/submitted-binding-store.ts','utf8')),'/submission-attempt-store':compile(fs.readFileSync('apps/staff/src/submission-attempt-store.ts','utf8')),'/fixture.js':compile(runtime),'/attempt.js':compile(fs.readFileSync('apps/staff/src/submission-attempt-store.ts','utf8')),'/draft.js':compile(fs.readFileSync('apps/staff/src/draft-store.ts','utf8')),'/concurrency.js':compile(fs.readFileSync('apps/staff/src/concurrency.ts','utf8'))};
 const server=createServer((req,res)=>{res.setHeader('Content-Type',modules[req.url]?'text/javascript':'text/html');res.end(modules[req.url]??'<!doctype html><meta charset="utf-8"><title>Synthetic cleanup hydration</title><script type="module" src="/fixture.js"></script>');});
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const origin=`http://127.0.0.1:${server.address().port}`;

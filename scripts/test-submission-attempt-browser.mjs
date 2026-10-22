@@ -35,3 +35,4 @@ assert.deepEqual(errors,[]);console.log(JSON.stringify({passed:true,evidence,sco
 }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}
 
 await import("./test-staff-cleanup-hydration-browser.mjs");
+await import("./test-submitted-binding-browser.mjs");

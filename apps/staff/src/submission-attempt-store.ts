@@ -32,7 +32,7 @@ export async function prepareSubmissionAttempt(
   });
 }
 // True means this exact receipt is confirmed absent; a newer valid receipt is preserved.
-export async function clearSubmissionAttempt(attempt: SubmissionAttempt, isCurrent: () => boolean = () => true): Promise<boolean> {
+export async function clearSubmissionAttempt(attempt: Pick<SubmissionAttempt, "clientRequestId" | "storageKey">, isCurrent: () => boolean = () => true): Promise<boolean> {
   try {
     return await navigator.locks.request(attempt.storageKey, { mode: "exclusive" }, () => {
       if (!isCurrent()) return false;

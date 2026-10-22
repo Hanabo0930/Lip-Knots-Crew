@@ -6,11 +6,15 @@ source bytes, starts a Build, or changes a Function. Missing inputs remain STOP.
 
 ## Trust and activation boundary
 
-The existing `lkc-staging-hosting` protected job maps the independently reviewed
+The existing `lkc-staging-hosting` protected job maps, in each verifier step after
+the environment is available, the independently reviewed
 environment variable `LKC_STAGING_SOURCE_EVIDENCE_SHA256` to
 `LKC_APPROVED_SOURCE_EVIDENCE_SHA256`. It must be 64 lowercase hex characters
 computed over the exact UTF-8 `bundle.json` bytes. It is not a workflow-dispatch
-input, a CLI option, or a field accepted from the bundle.
+input, a CLI option, or a field accepted from the bundle. Reserve this variable
+for the protected environment; do not create an organization/repository variable
+with the same name. The protected reviewer must verify its provenance as part
+of the independent review, not accept a caller-selected checksum.
 
 **A checksum chosen by the bundle producer does not establish authenticity.**
 Before provisioning the independent pin, the protected reviewer must inspect
@@ -81,7 +85,8 @@ SUCCESS, and its resolved Storage source must be identical. The hash map must
 contain exactly this GCS archive (full gs URI, with or without generation in the
 key); unknown forms STOP. The resolved generation is always required. Exactly
 one canonical base64 SHA256 is required and must equal the actual retained ZIP
-bytes. MD5 alone, image digests, unrelated map entries and inconsistent hashes
+bytes. Any additional MD5/SHA512 must also match those bytes. MD5 alone, image
+digests, unrelated map entries and inconsistent hashes
 do not establish source identity.
 
 `expectedInventory` must equal `expected_files()` from the exact approved

@@ -174,7 +174,7 @@ def build_record(document, name, source_uri, observed, readiness):
     entries = hashes[key]["fileHash"]
     need(type(entries) is list and 1 <= len(entries) <= 3, "SOURCE_BUILD_HASH_REJECTED")
     seen = set()
-    digest = None
+    digests = {}
     for item in entries:
         keys(item, ["type", "value"])
         kind = item["type"]
@@ -187,10 +187,9 @@ def build_record(document, name, source_uri, observed, readiness):
             raise EvidenceError("SOURCE_BUILD_HASH_REJECTED") from None
         need(len(raw) == {"MD5": 16, "SHA256": 32, "SHA512": 64}[kind]
              and base64.b64encode(raw).decode() == item["value"], "SOURCE_BUILD_HASH_REJECTED")
-        if kind == "SHA256":
-            digest = raw.hex()
-    need(digest is not None, "SOURCE_BUILD_SHA256_REQUIRED")
-    return digest
+        digests[kind.lower()] = raw.hex()
+    need("sha256" in digests, "SOURCE_BUILD_SHA256_REQUIRED")
+    return digests
 
 
 def load_bundle(directory, approved_digest, source_sha, readiness, now=None):
@@ -255,9 +254,10 @@ def load_bundle(directory, approved_digest, source_sha, readiness, now=None):
         need(type(name) is str and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}\.zip", name)
              and name not in names, "SOURCE_ARCHIVE_PATH_REJECTED")
         names.add(name)
-        need(sha(entry["sha256"]) == source_hashes[uri], "SOURCE_ARCHIVE_BUILD_HASH_MISMATCH")
+        need(sha(entry["sha256"]) == source_hashes[uri]["sha256"], "SOURCE_ARCHIVE_BUILD_HASH_MISMATCH")
         blob = regular_read(pathlib.Path(directory) / name, MAX_ARCHIVE)
-        need(hashlib.sha256(blob).hexdigest() == source_hashes[uri], "SOURCE_ARCHIVE_BYTES_MISMATCH")
+        need(all(hashlib.new(kind, blob).hexdigest() == digest
+                 for kind, digest in source_hashes[uri].items()), "SOURCE_ARCHIVE_BYTES_MISMATCH")
         readiness.verify_archive(blob, inventory)
         blobs[uri] = blob
     return bundle, pins, blobs

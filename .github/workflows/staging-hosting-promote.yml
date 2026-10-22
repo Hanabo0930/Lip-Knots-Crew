@@ -252,9 +252,6 @@ jobs:
       LKC_EVIDENCE_POLICY: ${{ needs.guard.outputs.evidence_policy }}
       LKC_PREVIEW_RUN_ID: ${{ needs.guard.outputs.preview_run_id }}
       LKC_CONFIRMATION: ${{ github.event_name == 'workflow_run' && 'PROMOTE_LKC_STAGING_HOSTING' || inputs.confirmation }}
-      # Independent reviewer pin; never accept this value from workflow inputs or the bundle.
-      # No source acquisition is performed. Missing preplaced bundle/pin remains STOP.
-      LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
       LKC_GCP_WORKLOAD_IDENTITY_PROVIDER: projects/740154137290/locations/global/workloadIdentityPools/lkc-github-staging/providers/lkc-main-workflows
       LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT: lkc-gh-staging-deploy@lip-knots-crew-staging.iam.gserviceaccount.com
     steps:
@@ -287,6 +284,9 @@ jobs:
         id: no_fee_source
         if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'
         working-directory: source
+        # Resolve the independently reviewed pin after the protected environment is available.
+        env:
+          LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
         run: |
           node scripts/automation/restore-staging-hosting.mjs \
             --no-fee-source-guard --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
@@ -415,6 +415,9 @@ jobs:
         id: readiness
         if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'
         working-directory: source
+        # Resolve the independently reviewed pin after the protected environment is available.
+        env:
+          LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
         run: |
           npm run build -w @lkc/functions
           python3 scripts/automation/check-hosting-api-readiness.py \

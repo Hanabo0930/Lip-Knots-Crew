@@ -234,6 +234,22 @@ class SourceEvidenceTests(unittest.TestCase):
         self.reject(lambda b: hashes(b)[self.uri]["fileHash"][0].update(
             value=base64.b64encode(b"x" * 32).decode()), "BUILD_HASH_MISMATCH")
 
+    def test_all_supplementary_build_hashes_must_match_retained_bytes(self):
+        b = copy.deepcopy(self.bundle)
+        hashes = b["observations"]["builds"]["records"][BUILD]["sourceProvenance"]["fileHashes"][self.uri]["fileHash"]
+        for kind in ["MD5", "SHA512"]:
+            hashes.append({"type": kind, "value": base64.b64encode(
+                hashlib.new(kind.lower(), self.blob).digest()).decode()})
+        self.assertEqual(self.verify(b)["status"], "PASS")
+        for index in [1, 2]:
+            with self.subTest(kind=hashes[index]["type"]):
+                changed = copy.deepcopy(b)
+                record = changed["observations"]["builds"]["records"][BUILD]["sourceProvenance"]["fileHashes"][self.uri]["fileHash"][index]
+                record["value"] = base64.b64encode(hashlib.new(
+                    record["type"].lower(), b"different retained bytes").digest()).decode()
+                with self.assertRaisesRegex(e.EvidenceError, "BYTES_MISMATCH"):
+                    self.verify(changed)
+
     def test_hash_key_without_generation_requires_matching_resolved_generation(self):
         b = copy.deepcopy(self.bundle)
         hashes = b["observations"]["builds"]["records"][BUILD]["sourceProvenance"]["fileHashes"]
@@ -317,7 +333,14 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root / "preflight.json").read_text())["status"], "STOPPED")
     def test_workflow_preserves_trust_and_mutation_boundaries(self):
         workflow = (ROOT / ".github/workflows/staging-hosting-promote.yml").read_text("utf-8")
-        self.assertIn("LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}", workflow)
+        binding = "          LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}"
+        self.assertEqual(workflow.count(binding), 2)
+        job = workflow[workflow.index("  promote:"):]
+        self.assertNotIn("LKC_APPROVED_SOURCE_EVIDENCE_SHA256", job[:job.index("    steps:")])
+        for name in ["Stop source verification unless a no-fee path is established", "Verify deployed upload APIs before any live Hosting change"]:
+            start = workflow.index("      - name: " + name)
+            end = workflow.index("\n      - name:", start + 1)
+            self.assertIn("        env:\n" + binding, workflow[start:end])
         self.assertNotIn("inputs.source_evidence", workflow)
         self.assertNotIn("setup-gcloud", workflow)
         self.assertLess(workflow.index("--no-fee-source-guard"),

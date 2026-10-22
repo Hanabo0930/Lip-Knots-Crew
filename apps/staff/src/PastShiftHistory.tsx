@@ -23,7 +23,7 @@ export function PastShiftHistoryView<T extends PastShiftRecord & ShiftCardJob>({
     <label className="past-shift-year">表示する勤務日の年
       <select value={state.years.length ? state.year : ""} onChange={event => onYear(Number(event.target.value))}
         disabled={!state.years.length} aria-describedby="past-shift-year-help">
-        {!state.years.length && <option value="">年を確認中</option>}
+        {!state.years.length && <option value="">{state.status === "error" ? "年を取得できません" : "年を確認中"}</option>}
         {state.years.map(year => <option key={year} value={year}>{year}年</option>)}
       </select>
     </label>

@@ -32,8 +32,8 @@ const hasSubmittedBindings=async(key:string)=>(await loadSubmittedBindings()).ha
 const saveSubmittedBinding=async(key:string,attempt:Pick<SubmissionAttempt,"clientRequestId"|"storageKey">,isCurrent:()=>boolean)=>{
   try{return await (await loadSubmittedBindings()).saveSubmittedBinding(key,attempt,isCurrent);}catch{return false;}
 };
-const finishSubmittedBindings=async(key:string,isCurrent:()=>boolean,hasStoredDraft:()=>Promise<boolean>)=>{
-  try{return await (await loadSubmittedBindings()).finishSubmittedBindings(key,isCurrent,hasStoredDraft);}catch{return false;}
+const finishSubmittedBindings=async(key:string,isCurrent:()=>boolean,hasStoredDraft:()=>Promise<boolean>,requiredAttempt?:Pick<SubmissionAttempt,"clientRequestId"|"storageKey">)=>{
+  try{return await (await loadSubmittedBindings()).finishSubmittedBindings(key,isCurrent,hasStoredDraft,requiredAttempt);}catch{return false;}
 };
 import { submissionDraftKey } from "./submission-draft-key";
 import {
@@ -1702,7 +1702,7 @@ export default function App(){
           if(!isCurrentUpload())return;
           const receiptCleanup={...cleanupTarget,draftCleared:true,recovered:true};
           setDraftCleanup(current=>current===cleanupTarget?receiptCleanup:current);
-          const finished=await finishSubmittedBindings(draftKey,isCurrentUpload,()=>hasStoredDraft(draftKey));
+          const finished=await finishSubmittedBindings(draftKey,isCurrentUpload,()=>hasStoredDraft(draftKey),attempt);
           if(finished&&await confirmDraftCleanupComplete(draftKey,isCurrentUpload)&&isCurrentUpload())setDraftCleanup(current=>current===receiptCleanup?null:current);
         }catch{
           // 送信済み。端末の後片付け失敗をアップロード失敗として扱わない。
@@ -1718,7 +1718,7 @@ export default function App(){
     try{
       await run("draft-cleanup",async()=>{
         const {retrySubmittedCleanup}=await loadSubmittedBindings();
-        await retrySubmittedCleanup(target,isCurrent,setDraftCleanup,{markDraftSubmitted,saveSubmittedBinding,loadSubmissionAttempt,clearDraft,finishSubmittedBindings,hasStoredDraft,confirmDraftCleanupComplete});
+        await retrySubmittedCleanup(target,isCurrent,setDraftCleanup,{saveSubmittedBinding,finishSubmittedBindings,hasStoredDraft,confirmDraftCleanupComplete});
       });
     }catch{
       if(isCurrent())setDraftCleanup(current=>current===target?{...current,unverified:true}:current);

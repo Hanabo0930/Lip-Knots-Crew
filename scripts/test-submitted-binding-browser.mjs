@@ -117,7 +117,7 @@ try{
   assert.equal(requests.length,0);assert.equal(uploads.length,0);assert.deepEqual(await storage(page),{});
  });
 
- for(const mode of ['aux-throw','aux-noop','aux-mismatch','marker-throw','marker-noop'])await scenario(mode+': save uncertainty retains receipt; current-session retry never resends',async({open,requests,uploads})=>{
+ for(const mode of ['aux-throw','aux-noop','aux-mismatch','marker-throw','marker-noop'])await scenario(mode+': save uncertainty retains receipt; manual retry keeps unknown shared state',async({open,requests,uploads})=>{
   const page=await open();await page.evaluate(async({mode,auxPrefix,marker})=>{
    window.f=makeFixture();await f.save();const set=Storage.prototype.setItem;window.restoreSet=()=>Storage.prototype.setItem=set;
    Storage.prototype.setItem=function(k,v){if(mode.startsWith('aux')?k.startsWith(auxPrefix):k===marker){if(mode.endsWith('throw'))throw new DOMException('Synthetic write failure','QuotaExceededError');if(mode.endsWith('mismatch'))return set.call(this,k,'{}');return;}return set.call(this,k,v);};
@@ -127,8 +127,8 @@ try{
   const receipt=pendingView.cleanup.attempt;assert.equal(JSON.parse((await storage(page))[receipt.storageKey]).clientRequestId,receipt.clientRequestId);
   await page.evaluate(()=>restoreSet());
   await page.evaluate(()=>f.retryDraftCleanup());
-  if(mode==='aux-mismatch')assert.ok((await view(page)).cleanup,'Malformed durable metadata is not overwritten');
-  else assert.equal((await view(page)).cleanup,null);
+  assert.ok((await view(page)).cleanup?.unverified,'Restored storage access does not prove ownership of the shared marker');
+  assert.equal(JSON.parse((await storage(page))[receipt.storageKey]).clientRequestId,receipt.clientRequestId);
   assert.equal(requests.length,1);assert.equal(uploads.length,1);
  });
 
@@ -154,6 +154,7 @@ try{
   await failReceiptRemoval(old);await old.evaluate(()=>f.uploadSubmission());
   const before=await storage(page);assert.equal(before[marker],'1');assert.equal(bindings(before).length,1);
   const b=(await view(old)).cleanup.attempt;assert.equal(JSON.parse(before[b.storageKey]).clientRequestId,b.clientRequestId);
+  await page.evaluate(async()=>{restoreRemove();await f.retryDraftCleanup();});assert.ok((await view(page)).cleanup?.unverified,'Same-screen old ID cannot authorize B shared-state cleanup');assert.deepEqual(await storage(page),before);
   await reload(page);await page.evaluate(()=>f.retryDraftCleanup());assert.ok((await view(page)).cleanup?.unverified);assert.deepEqual(await storage(page),before);
   assert.equal(await page.evaluate(async key=>{try{await draftStore.clearDraft(key);return false;}catch{return true;}},key),true);
   assert.equal(await page.evaluate(async key=>{try{await draftStore.saveDraft(key,[new File(['C'],'C.png')]);return false;}catch{return true;}},key),true);
@@ -180,16 +181,16 @@ try{
   assert.equal(requests.length,1);assert.equal(uploads.length,1);
  });
 
- await scenario('auxiliary disappears after receipt cleanup: same-session shared cleanup remains blocked',async({open,requests,uploads})=>{
+ await scenario('auxiliary disappears while pending: same-session identity cannot release shared cleanup',async({open,requests,uploads})=>{
   const page=await open();await pending(page);
-  await page.evaluate(async auxPrefix=>{restoreRemove();const remove=Storage.prototype.removeItem;Storage.prototype.removeItem=function(k){remove.call(this,k);if(k.startsWith('lkc.submissionAttempt.v1:'))for(const aux of Object.keys(localStorage).filter(k=>k.startsWith(auxPrefix)))remove.call(this,aux);};await f.retryDraftCleanup();},auxPrefix);
+  await page.evaluate(async auxPrefix=>{restoreRemove();for(const aux of Object.keys(localStorage).filter(k=>k.startsWith(auxPrefix)))localStorage.removeItem(aux);await f.retryDraftCleanup();},auxPrefix);
   assert.ok((await view(page)).cleanup);assert.equal((await storage(page))[marker],'1');assert.equal(await page.evaluate(key=>draftStore.hasStoredDraft(key),key),true);
   assert.equal(requests.length,1);assert.equal(uploads.length,1);
  });
 
  // Real legacy cleanup races with an already-started B upload. It removes the shared
  // marker/draft but cannot see B's auxiliary record. Only the latter is recoverable.
- async function boundedSetup({open,control}){
+ async function boundedSetup({open,control,keepPage=false}){
   const page=await open();await page.evaluate(async()=>{window.f=makeFixture();f.select('B');await f.save();});
   await failReceiptRemoval(page);control.pauseName='selected-B.png';await page.evaluate(()=>{window.upload=f.uploadSubmission();});
   for(let tries=0;!control.waiting&&tries<1000;tries++)await new Promise(resolve=>setTimeout(resolve,5));
@@ -200,7 +201,7 @@ try{
   control.release();await page.evaluate(()=>upload);const b=(await view(page)).cleanup.attempt;assert.ok((await view(page)).cleanup.bindingSaved);
   await locker.evaluate(()=>releaseLock());await old.evaluate(()=>retry);assert.equal((await view(old)).cleanup,null);
   assert.equal((await storage(page))[marker],undefined);assert.equal(await page.evaluate(key=>draftStore.hasStoredDraft(key),key),false);
-  await reload(page);assert.ok((await view(page)).cleanup?.recovered);return {page,b,locker};
+  if(keepPage)await page.evaluate(()=>restoreRemove());else{await reload(page);assert.ok((await view(page)).cleanup?.recovered);}return {page,b,locker};
  }
  await scenario('actual old-tab race -> reload -> exact receipt/auxiliary cleanup -> intentional new B',async env=>{
   const {page,b}=await boundedSetup(env),beforeRequests=env.requests.length,beforeUploads=env.uploads.length;
@@ -208,6 +209,23 @@ try{
   await page.evaluate(()=>f.retryDraftCleanup());assert.equal((await view(page)).cleanup,null);assert.deepEqual(await storage(page),{});
   assert.equal(env.requests.length,beforeRequests);assert.equal(env.uploads.length,beforeUploads);
   await page.evaluate(async()=>{restoreShared();f.select('B');await f.uploadSubmission();});assert.equal(env.requests.length,beforeRequests+1);assert.equal(env.uploads.length,beforeUploads+1);assert.notEqual(env.requests.at(-1).clientRequestId,b.clientRequestId);
+ });
+
+ await scenario('same-screen retry recovers exact receipt/aux only after actual old-tab shared cleanup',async env=>{
+  const {page}=await boundedSetup({...env,keepPage:true}),counts=[env.requests.length,env.uploads.length];
+  await page.evaluate(()=>f.retryDraftCleanup());assert.equal((await view(page)).cleanup,null);assert.deepEqual(await storage(page),{});
+  assert.deepEqual([env.requests.length,env.uploads.length],counts);
+ });
+ await scenario('known receipt binding disappears but another binding remains: do not accept another operation as its cleanup',async env=>{
+  const {page,b}=await boundedSetup({...env,keepPage:true}),counts=[env.requests.length,env.uploads.length];
+  await page.evaluate(({auxPrefix,key})=>{
+   const old=Object.keys(localStorage).find(k=>k.startsWith(auxPrefix));const binding=JSON.parse(localStorage.getItem(old)),id=crypto.randomUUID();
+   // Explicit synthetic corruption fixture: a different valid-shaped binding is not proof for B.
+   const receipt='lkc.submissionAttempt.v1:'+'e'.repeat(64);localStorage.setItem(receipt,JSON.stringify({version:1,clientRequestId:id}));
+   localStorage.setItem(auxPrefix+binding.draftScopeSha256+':'+id,JSON.stringify({...binding,clientRequestId:id,receiptStorageKey:receipt}));localStorage.removeItem(old);
+  },{auxPrefix,key});
+  const before=await storage(page);await page.evaluate(()=>f.retryDraftCleanup());assert.ok((await view(page)).cleanup?.unverified);assert.deepEqual(await storage(page),before);
+  assert.equal(JSON.parse(before[b.storageKey]).clientRequestId,b.clientRequestId);assert.deepEqual([env.requests.length,env.uploads.length],counts);
  });
 
  for(const mode of ['newer-receipt','receipt-noop','aux-noop','account-switch','old-marker-reappears','other-owner'])await scenario(mode+': bounded recovery preserves newer/foreign/uncertain state',async env=>{
@@ -232,5 +250,5 @@ try{
   assert.deepEqual([env.requests.length,env.uploads.length],counts);
  });
  assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
- console.log(JSON.stringify({passed:true,cases,scope:'Actual current App handlers, hydration and stores; frozen 0be40aa legacy handlers/stores; real localStorage/IndexedDB/Web Locks; synthetic API/uploads only',limitation:'Only exact receipt and auxiliary cleanup is recoverable after reload when shared marker and draft are absent. Unknown shared state and malformed/missing evidence remain blocked. No forced old-tab update or automatic resend.'}));
+ console.log(JSON.stringify({passed:true,cases,scope:'Actual current App handlers, hydration and stores; frozen 0be40aa legacy handlers/stores; real localStorage/IndexedDB/Web Locks; synthetic API/uploads only',limitation:'On manual retry, exact receipt and auxiliary cleanup is recoverable only when shared marker and draft are absent, with or without reload. Unknown shared state and malformed/missing evidence remain blocked. No forced old-tab update or automatic resend.'}));
 }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}

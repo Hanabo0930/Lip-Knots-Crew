@@ -84,6 +84,7 @@ export async function canClearBoundDraft(key: string, attempt?: ReceiptIdentity)
 // No legacy-marker or IndexedDB writes. Missing evidence is not successful cleanup.
 export async function finishSubmittedBindings(
   key: string, isCurrent: () => boolean, hasStoredDraft: () => Promise<boolean>,
+  requiredAttempt?: ReceiptIdentity,
 ): Promise<boolean> {
   try {
     const scope = await scopeFor(key);
@@ -91,6 +92,8 @@ export async function finishSubmittedBindings(
     return await navigator.locks.request(PREFIX + scope, { mode: "exclusive" }, async () => {
       const original = entriesFor(scope);
       if (!original.length) return false;
+      if (requiredAttempt && !original.some(entry => entry.binding.clientRequestId === requiredAttempt.clientRequestId &&
+        entry.binding.receiptStorageKey === requiredAttempt.storageKey)) return false;
       let remaining = original;
       const unchanged = () => {
         if (!isCurrent() || localStorage.getItem(markerKey(key)) !== null) return false;
@@ -123,10 +126,7 @@ export type SubmittedCleanupState = {
   attemptCleared?: boolean; unverified?: boolean; bindingSaved?: boolean; recovered?: boolean; uncertain?: boolean;
 };
 type CleanupPorts = {
-  markDraftSubmitted: (key: string) => boolean;
   saveSubmittedBinding: typeof saveSubmittedBinding;
-  loadSubmissionAttempt: () => Promise<{ clearSubmissionAttempt: (attempt: ReceiptIdentity, isCurrent?: () => boolean) => Promise<boolean> }>;
-  clearDraft: (key: string, attempt?: ReceiptIdentity, isCurrent?: () => boolean) => Promise<void>;
   finishSubmittedBindings: typeof finishSubmittedBindings;
   hasStoredDraft: (key: string) => Promise<boolean>;
   confirmDraftCleanupComplete: (key: string, isCurrent: () => boolean) => Promise<boolean>;
@@ -141,38 +141,24 @@ export async function retrySubmittedCleanup(
 ): Promise<void> {
   if (!isCurrent()) return;
   let target = initial;
-  const {markDraftSubmitted,saveSubmittedBinding,loadSubmissionAttempt,clearDraft,finishSubmittedBindings,hasStoredDraft,confirmDraftCleanupComplete}=ports;
+  const {saveSubmittedBinding,finishSubmittedBindings,hasStoredDraft,confirmDraftCleanupComplete}=ports;
     const advance=(next:typeof target)=>{
       const previous=target;
       setDraftCleanup(current=>current===previous?next:current);
       target=next;
     };
   try{
-        if(!target.recovered){
-          // Only this running session's completed-upload identity permits the existing shared cleanup.
-          if(!target.attempt&&!target.attemptCleared){advance({...target,unverified:true});return;}
-          if(!target.bindingSaved){
-            if(!isCurrent()||!target.attempt)return;
-            if(!target.durable&&!markDraftSubmitted(target.key))return;
-            const saved=await saveSubmittedBinding(target.key,target.attempt,isCurrent);
-            if(!isCurrent()||!saved)return;
-            advance({...target,durable:true,bindingSaved:true});
-          }
-          if(!target.attemptCleared){
-            const {clearSubmissionAttempt}=await loadSubmissionAttempt();
-            if(!isCurrent()||!target.attempt)return;
-            const cleared=await clearSubmissionAttempt(target.attempt,isCurrent);
-            if(!isCurrent()||!cleared)return;
-            advance({...target,attemptCleared:true,unverified:false});
-          }
-          if(!target.draftCleared){
-            await clearDraft(target.key,target.attempt,isCurrent);
-            if(!isCurrent())return;
-          }
-          advance({...target,draftCleared:true,recovered:true});
+        if(!target.bindingSaved&&target.attempt){
+          // This identity still proves which upload completed, but not who owns a later shared marker.
+          // Save only its auxiliary record; never recreate or remove a shared marker on retry.
+          const saved=await saveSubmittedBinding(target.key,target.attempt,isCurrent);
+          if(!isCurrent())return;
+          if(!saved){advance({...target,recovered:true,unverified:true});return;}
+          advance({...target,durable:true,bindingSaved:true});
         }
-        // Recovered records never authorize legacy-marker or shared-draft deletion.
-        const finished=await finishSubmittedBindings(target.key,isCurrent,()=>hasStoredDraft(target.key));
+        advance({...target,recovered:true});
+        // A manual retry never owns shared state, even when this screen remembers an exact old ID.
+        const finished=await finishSubmittedBindings(target.key,isCurrent,()=>hasStoredDraft(target.key),target.attempt);
         if(!isCurrent())return;
         if(!finished||!await confirmDraftCleanupComplete(target.key,isCurrent)){
           advance({...target,unverified:true});return;

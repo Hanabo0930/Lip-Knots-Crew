@@ -86,19 +86,18 @@ try{
   const original=await page.evaluate(()=>f.snapshot().cleanup?.attempt);assert.ok(original);
   const submittedWrites=writes.length;
   if(mode==='same-session'){
-   await page.evaluate(async()=>{restoreRemove();await f.retryDraftCleanup();});assert.equal((await page.evaluate(()=>f.snapshot())).cleanup,null);
+   await page.evaluate(async()=>{restoreRemove();await f.retryDraftCleanup();});assert.ok((await page.evaluate(()=>f.snapshot())).cleanup?.unverified);
    assert.equal(requests.length,beforeRequests+1);assert.equal(writes.length,submittedWrites);
-   await page.evaluate(async()=>{f.select();await f.uploadSubmission();});assert.notEqual(requests[beforeRequests+1].clientRequestId,sentId);assert.equal(writes.length,beforeWrites+4);
-   cases.push('known exact receipt in the current session: cleanup-only retry succeeds and intentional same-file submit gets a new receipt');
+   await page.evaluate(async()=>{f.select();await f.uploadSubmission();});assert.equal(requests.length,beforeRequests+1);assert.equal(writes.length,submittedWrites);
+   assert.equal(await page.evaluate(key=>localStorage.getItem(key),'lkc-submitted-draft:company/user/job/report'),'1');
+   cases.push('same-session exact identity does not prove ownership of retained shared state; retry and new submit stay blocked without transfer');
   }else if(mode==='account-switch'){
    await page.evaluate(()=>restoreRemove());
    const other=await page.evaluate(()=>attemptStore.prepareSubmissionAttempt('other-owner/job',makeFiles(),makeFiles().map(f=>f.type)));
-   await page.evaluate(async key=>{window.held=navigator.locks.request(key,{mode:'exclusive'},async()=>{window.lockHeld=true;await new Promise(resolve=>window.releaseLock=resolve);});},original.storageKey);
-   await page.waitForFunction(()=>window.lockHeld);await page.evaluate(()=>{window.retry=f.retryDraftCleanup();});await page.waitForFunction(async()=> (await navigator.locks.query()).pending.length===1);
-   await page.evaluate(async()=>{f.switchAccount();releaseLock();await retry;});const view=await page.evaluate(()=>f.snapshot());assert.equal(view.cleanup.key,'other-owner/job');assert.deepEqual(view.files,['other.png']);
+   await page.evaluate(async()=>{const retry=f.retryDraftCleanup();f.switchAccount();await retry;});const view=await page.evaluate(()=>f.snapshot());assert.equal(view.cleanup.key,'other-owner/job');assert.deepEqual(view.files,['other.png']);
    for(const attempt of [other,original])assert.equal(await page.evaluate(key=>JSON.parse(localStorage.getItem(key)).clientRequestId,attempt.storageKey),attempt.clientRequestId);
    assert.equal(requests.length,beforeRequests+1);assert.equal(writes.length,submittedWrites);
-   cases.push('account switch while exact-receipt cleanup waits for the real Web Lock preserves both receipts and the newer view');
+   cases.push('account switch during lazy cleanup entry preserves both receipts and the newer view');
   }else{
    await page.reload();await page.waitForFunction(()=>window.ready);await page.evaluate(()=>{window.f=window.makeFixture();f.hydrate();});await page.waitForFunction(()=>!f.snapshot().draftHydrating);
    const before=await page.evaluate(()=>Object.fromEntries(Object.entries(localStorage)));
@@ -112,5 +111,5 @@ try{
   await context.close();
  }
  assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
- console.log(JSON.stringify({passed:true,cases,scope:'actual App upload, save debounce and hydration; real IndexedDB/localStorage/Web Locks; fresh local Chromium with synthetic API/Storage only',limitation:'The legacy submitted marker does not bind the sent files to their receipt. A reload without the exact in-memory identity remains unverified; this is a safety stop, not recovered submission acceptance.'}));
+ console.log(JSON.stringify({passed:true,cases,scope:'actual App upload, save debounce and hydration; real IndexedDB/localStorage/Web Locks; fresh local Chromium with synthetic API/Storage only',limitation:'The legacy submitted marker does not identify its current owner. Retained shared state stays blocked on manual retry even with an in-memory receipt; this is a safety stop, not general recovered-submission acceptance.'}));
 }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}

@@ -79,15 +79,6 @@ export async function loadDraft(key: string): Promise<File[]> {
   return draftFiles(records);
 }
 
-// Submitted files remain hidden from the form, but can identify their pending receipt.
-export async function loadSubmittedDraft(key: string): Promise<File[]> {
-  await waitForDraftMutation(key);
-  if (!isSubmittedDraft(key)) throw new Error("送信済みの端末記録を確認できません。");
-  const records = await readDraftRecords(key);
-  if (!isSubmittedDraft(key) || !records.length) throw new Error("元の提出ファイルを端末で確認できません。");
-  return draftFiles(records);
-}
-
 async function readDraftRecords(key: string): Promise<DraftFile[]> {
   const db = await openDb();
   let records: DraftFile[];
@@ -127,7 +118,7 @@ export function clearDraft(key: string): Promise<void> {
           if (localStorage.getItem(receiptKey(key)) !== null) throw new Error("送信済み印の削除を確認できません。");
         }
         catch (error) {
-          // Keep the original file identity recoverable if the durable marker remains.
+          // Preserve the saved draft if removing its durable marker fails.
           if (retained.length && localStorage.getItem(receiptKey(key)) === "1") {
             await tx(db, "readwrite", (store) => store.put(retained, key));
           }

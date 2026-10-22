@@ -19,7 +19,7 @@ const loadUploadStorage=()=>import("./upload-storage");
 const loadSubmissionAttempt=()=>import("./submission-attempt-store");
 import type { SubmissionAttempt } from "./submission-attempt-store";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, firebaseApp } from "./firebase";
-import { clearDraft, loadDraft, saveDraft, markDraftSubmitted, getSubmittedDraftReceipt, loadSubmittedDraft } from "./draft-store";
+import { clearDraft, loadDraft, saveDraft, markDraftSubmitted, getSubmittedDraftReceipt } from "./draft-store";
 import { submissionDraftKey } from "./submission-draft-key";
 import {
   clearBusinessSnapshot,
@@ -1614,7 +1614,7 @@ export default function App(){
         try { r=await httpsCallable(activeFunctions,"createUploadSession")({clientRequestId:attempt.clientRequestId,...(attempt.expectedRevision!==undefined?{expectedRevision:attempt.expectedRevision}:{}),jobId,type:currentType,purpose,resubmissionRequestId:currentRequestId||undefined,files:files.map((f,index)=>({originalName:f.name,contentType:submissionFileContentType(f),size:f.size,contentSha256:attempt.contentHashes[index]}))}); }
         catch(error){
           const details=(error as {details?:{reason?:unknown;accepted?:unknown;clientRequestId?:unknown;expectedRevision?:unknown}})?.details;
-          if(isCurrentUpload()&&details?.reason==="case_mail_submission_changed"&&details.accepted===false&&details.clientRequestId===attempt.clientRequestId&&details.expectedRevision===(attempt.expectedRevision??null))await clearSubmissionAttempt(attempt);
+          if(isCurrentUpload()&&details?.reason==="case_mail_submission_changed"&&details.accepted===false&&details.clientRequestId===attempt.clientRequestId&&details.expectedRevision===(attempt.expectedRevision??null))await clearSubmissionAttempt(attempt,isCurrentUpload);
           throw error;
         }
         if(!isCurrentUpload())return;
@@ -1643,7 +1643,7 @@ export default function App(){
         }
         if(!isCurrentUpload())return;
         const durable=markDraftSubmitted(draftKey);
-        const attemptCleared=durable&&await clearSubmissionAttempt(attempt);
+        const attemptCleared=durable&&await clearSubmissionAttempt(attempt,isCurrentUpload);
         if(!isCurrentUpload())return;
         skipNextDraftSaveRef.current=true;
         setFiles([]);
@@ -1680,23 +1680,16 @@ export default function App(){
     };
     try{
       await run("draft-cleanup",async()=>{
+        // The submitted marker alone cannot bind a saved draft to the files actually sent.
+        if(!target.attempt&&!target.attemptCleared){advance({...target,unverified:true});return;}
         if(!target.durable){
           if(!markDraftSubmitted(target.key))return;
           advance({...target,durable:true});
         }
-        if(!target.attempt&&!target.attemptCleared){
-          const {findSubmissionAttempt}=await loadSubmissionAttempt();
-          if(!isCurrent())return;
-          const originalFiles=await loadSubmittedDraft(target.key);
-          if(!isCurrent())return;
-          const attempt=await findSubmissionAttempt(target.key,originalFiles,originalFiles.map(submissionFileContentType),isCurrent);
-          if(!isCurrent())return;
-          advance({...target,attempt:attempt??undefined,attemptCleared:attempt===null,unverified:false});
-        }
         if(!target.attemptCleared){
           const {clearSubmissionAttempt}=await loadSubmissionAttempt();
           if(!isCurrent()||!target.attempt)return;
-          const cleared=await clearSubmissionAttempt(target.attempt);
+          const cleared=await clearSubmissionAttempt(target.attempt,isCurrent);
           if(!isCurrent()||!cleared)return;
           advance({...target,attemptCleared:true,unverified:false});
         }

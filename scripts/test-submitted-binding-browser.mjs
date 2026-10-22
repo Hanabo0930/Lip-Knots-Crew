@@ -13,6 +13,7 @@ function between(start,end,includeEnd=false){
  return app.slice(a,b+(includeEnd?end.length:0));
 }
 const current={
+ bindingLoaders:between('const loadSubmittedBindings=','import { submissionDraftKey }'),
  uploadAndRetry:between('  async function uploadSubmission()','  async function loadSubmissionHistory('),
  hydration:between('  useEffect(()=>{\n    setSubmissionConfirmed(false);','  },[draftKey]);',true),
  draftSave:between('  const draftSavePaused=','  useEffect(()=>{ if(!pushEnabled)'),
@@ -27,9 +28,9 @@ function runtime(source,old=false){
  return compile(`
  import * as attemptStore from '${prefix}/attempt.js';
  import * as draftStore from '${prefix}/draft.js';
- import * as bindingStore from '/submitted-binding-store';
  import {runWithConcurrency} from '/concurrency.js';
- const {hasSubmittedBindings,saveSubmittedBinding,finishSubmittedBindings}=bindingStore;
+ ${old?'':source.bindingLoaders}
+ const bindingStore={saveSubmittedBinding:async(...args)=>(await import('/submitted-binding-store')).saveSubmittedBinding(...args)};
  window.makeFixture=(key=${JSON.stringify(key)})=>{
   let files=[new File(['A'],'selected-A.png',{type:'image/png',lastModified:1})],draftCleanup=null,submissionConfirmed=true,pending=false,draftHydrating=false;
   const state={messages:[],processing:[],status:{}};let draftSaveCleanup;const previewContextRef={current:key};const setMessage=m=>state.messages.push(m);
@@ -102,6 +103,13 @@ try{
   assert.deepEqual(Object.keys(JSON.parse(entry[1])).sort(),['clientRequestId','draftScopeSha256','receiptStorageKey','version']);
   assert.deepEqual(saved.filter(([k])=>k===marker).map(([,v])=>v),['1']);
   assert.equal((await view(page)).cleanup,null);assert.deepEqual(await storage(page),{});assert.equal(requests.length,1);assert.equal(uploads.length,1);
+ });
+
+ await scenario('binding module unavailable: hydration and submit stay uncertain without requests or storage changes',async({open,requests,uploads})=>{
+  const page=await open();await page.route('**/submitted-binding-store',route=>route.abort());
+  await hydrate(page);assert.ok((await view(page)).cleanup?.uncertain);assert.deepEqual(await storage(page),{});
+  await page.evaluate(async()=>{window.f=makeFixture();await f.uploadSubmission();});assert.ok((await view(page)).cleanup?.uncertain);
+  assert.equal(requests.length,0);assert.equal(uploads.length,0);assert.deepEqual(await storage(page),{});
  });
 
  for(const mode of ['aux-throw','aux-noop','aux-mismatch','marker-throw','marker-noop'])await scenario(mode+': save uncertainty retains receipt; current-session retry never resends',async({open,requests,uploads})=>{

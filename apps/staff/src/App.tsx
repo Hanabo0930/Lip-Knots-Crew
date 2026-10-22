@@ -20,7 +20,14 @@ const loadSubmissionAttempt=()=>import("./submission-attempt-store");
 import type { SubmissionAttempt } from "./submission-attempt-store";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, firebaseApp } from "./firebase";
 import { clearDraft, loadDraft, saveDraft, markDraftSubmitted, getSubmittedDraftReceipt, hasStoredDraft, confirmDraftCleanupComplete } from "./draft-store";
-import { hasSubmittedBindings, saveSubmittedBinding, finishSubmittedBindings } from "./submitted-binding-store";
+const loadSubmittedBindings=()=>import("./submitted-binding-store");
+const hasSubmittedBindings=async(key:string)=>(await loadSubmittedBindings()).hasSubmittedBindings(key);
+const saveSubmittedBinding=async(key:string,attempt:SubmissionAttempt,isCurrent:()=>boolean)=>{
+  try{return await (await loadSubmittedBindings()).saveSubmittedBinding(key,attempt,isCurrent);}catch{return false;}
+};
+const finishSubmittedBindings=async(key:string,isCurrent:()=>boolean,hasStoredDraft:()=>Promise<boolean>)=>{
+  try{return await (await loadSubmittedBindings()).finishSubmittedBindings(key,isCurrent,hasStoredDraft);}catch{return false;}
+};
 import { submissionDraftKey } from "./submission-draft-key";
 import {
   clearBusinessSnapshot,

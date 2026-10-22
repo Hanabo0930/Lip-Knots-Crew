@@ -1,5 +1,9 @@
-import { canClearBoundDraft, hasSubmittedBindings } from "./submitted-binding-store";
 import type { SubmissionAttempt } from "./submission-attempt-store";
+
+const loadSubmittedBindings = () => import("./submitted-binding-store");
+const hasSubmittedBindings = async (key: string) => (await loadSubmittedBindings()).hasSubmittedBindings(key);
+const canClearBoundDraft = async (key: string, attempt?: Pick<SubmissionAttempt, "clientRequestId" | "storageKey">) =>
+  (await loadSubmittedBindings()).canClearBoundDraft(key, attempt);
 
 export type DraftFile = {
   id: string;

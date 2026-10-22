@@ -252,6 +252,9 @@ jobs:
       LKC_EVIDENCE_POLICY: ${{ needs.guard.outputs.evidence_policy }}
       LKC_PREVIEW_RUN_ID: ${{ needs.guard.outputs.preview_run_id }}
       LKC_CONFIRMATION: ${{ github.event_name == 'workflow_run' && 'PROMOTE_LKC_STAGING_HOSTING' || inputs.confirmation }}
+      # Independent reviewer pin; never accept this value from workflow inputs or the bundle.
+      # No source acquisition is performed. Missing preplaced bundle/pin remains STOP.
+      LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
       LKC_GCP_WORKLOAD_IDENTITY_PROVIDER: projects/740154137290/locations/global/workloadIdentityPools/lkc-github-staging/providers/lkc-main-workflows
       LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT: lkc-gh-staging-deploy@lip-knots-crew-staging.iam.gserviceaccount.com
     steps:
@@ -408,9 +411,6 @@ jobs:
             --admin-url "${{ steps.channel.outputs.admin_url }}" \
             --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
             --evidence-dir "$LKC_EVIDENCE_DIR/preview"
-      - name: Set up Google Cloud CLI for read-only API verification
-        if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       - name: Verify deployed upload APIs before any live Hosting change
         id: readiness
         if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'

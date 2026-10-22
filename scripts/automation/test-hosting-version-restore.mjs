@@ -313,6 +313,7 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
    const evidence=JSON.parse(await readFile(path.join(temp,"api-readiness.json"),"utf8"));
    assert.equal(evidence.externalApiInvoked,false);assert.equal(evidence.deployedSourceVerified,false);assert.equal(evidence.status,"STOPPED");
   });
+  cases += await runSourceEvidenceGuardTests(temp);
 
   for(const visible of [false,true])await test("unknown promotion cannot rollback or resend even when visible="+visible,async()=>{
    const m=fixture(),execution={...m,staff:{...m.staff,previousVersion:m.staff.promotedVersion,promotedVersion:m.staff.previousVersion},
@@ -692,6 +693,38 @@ export async function runHostingReaderSdkBoundaryTests({repoRoot,sdkRepoRoot=rep
     ()=>api.deleteTemporaryChannel(project,"live")])await assert.rejects(invoke);
    assert.equal(calls.length,before);cases++;
   }
+ }
+ return cases;
+}
+/** Offline boundary tests; the subprocess and protected context are synthetic. */
+export async function runSourceEvidenceGuardTests(temp) {
+ const values={GITHUB_ACTIONS:"true",GITHUB_REPOSITORY:repository,GITHUB_REF:"refs/heads/main",
+  GITHUB_JOB:"promote",GITHUB_WORKFLOW_REF:repository+"/.github/workflows/staging-hosting-promote.yml@refs/heads/main",
+  LKC_APPROVED_SOURCE_EVIDENCE_SHA256:"a".repeat(64)};
+ const previous=Object.fromEntries(Object.keys(values).map(k=>[k,process.env[k]]));
+ const options={projectId:project,region,sourceSha:sha,evidenceDir:temp};
+ let cases=0;
+ try{
+  Object.assign(process.env,values);
+  let calls=0;
+  const run=(command,args,settings)=>{
+   calls++;assert.equal(command,"python3");
+   assert.equal(args[0],"scripts/automation/check-hosting-api-readiness.py");
+   assert.ok(args.includes("--preflight"));assert.ok(args.includes(sha));
+   assert.ok(!args.includes(values.LKC_APPROVED_SOURCE_EVIDENCE_SHA256));
+   assert.deepEqual(settings.stdio,["ignore","pipe","pipe"]);
+   return {status:0};
+  };
+  await requireNoFeeSourcePath(options,{run});assert.equal(calls,1);cases++;
+  for(const result of [{status:1,stderr:"SYNTHETIC_DO_NOT_ECHO"},{status:null,error:new Error("SYNTHETIC_DO_NOT_ECHO")}]){
+   await assert.rejects(()=>requireNoFeeSourcePath(options,{run:()=>result}),e=>
+    e.message==="SOURCE_EVIDENCE_PREFLIGHT_FAILED"&&!e.message.includes("DO_NOT_ECHO"));cases++;
+  }
+  process.env.GITHUB_REF="refs/heads/untrusted";
+  await assert.rejects(()=>requireNoFeeSourcePath(options,{run:()=>{throw new Error("MUST_NOT_EXECUTE");}}),
+   /PROTECTED_WORKFLOW_CONTEXT_REQUIRED/);cases++;
+ }finally{
+  for(const [key,value]of Object.entries(previous)){if(value===undefined)delete process.env[key];else process.env[key]=value;}
  }
  return cases;
 }

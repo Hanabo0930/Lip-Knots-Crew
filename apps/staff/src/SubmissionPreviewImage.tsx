@@ -17,8 +17,14 @@ type Props = {
   className?: string;
 };
 
-export default function SubmissionPreviewImage({ file, onRefreshPreview, className = "history-preview" }: Props) {
-  const [loadState, setLoadState] = useState<"idle" | "loading" | "loaded" | "error">("idle");
+export default function SubmissionPreviewImage(props: Props) {
+  const { file } = props;
+  // Replace state in the same commit as the file, before any passive effect.
+  return <SubmissionPreviewContent key={JSON.stringify([file.submissionId, file.id, file.previewUrl, file.contentType])} {...props}/>;
+}
+
+function SubmissionPreviewContent({ file, onRefreshPreview, className = "history-preview" }: Props) {
+  const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">(file.previewUrl ? "loading" : "error");
   const [src, setSrc] = useState<string | null>(file.previewUrl);
   const [refreshing, setRefreshing] = useState(false);
   const refreshVersion = useRef(0);
@@ -26,15 +32,9 @@ export default function SubmissionPreviewImage({ file, onRefreshPreview, classNa
   const previewContainerRef = useRef<HTMLDivElement>(null);
   const restorePreviewFocus = useRef(false);
 
-  useEffect(() => {
-    restorePreviewFocus.current = false;
-    refreshVersion.current += 1;
-    refreshPending.current = false;
-    setRefreshing(false);
-    setSrc(file.previewUrl);
-    setLoadState(file.previewUrl ? "loading" : "error");
-    return () => { refreshVersion.current += 1; };
-  }, [file.previewUrl, file.id, file.submissionId]);
+  // Identity changes remount this component. Do not reset loading in a passive
+  // effect: a cached image can finish loading before that effect runs.
+  useEffect(() => () => { refreshVersion.current += 1; }, []);
 
   useEffect(() => {
     if (!restorePreviewFocus.current) return;
@@ -94,7 +94,7 @@ export default function SubmissionPreviewImage({ file, onRefreshPreview, classNa
 
   return (
     <div ref={previewContainerRef} tabIndex={-1} role="group" aria-label={previewLabel} className={`${className} preview-frame`}>
-      {(loadState === "loading" || loadState === "idle") && <div className="preview-skeleton" aria-hidden="true" />}
+      {loadState === "loading" && <div className="preview-skeleton" aria-hidden="true" />}
       {loadState === "error" ? (
         <div className="preview-error">
           <p>画像を読み込めませんでした</p>

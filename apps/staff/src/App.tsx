@@ -168,18 +168,20 @@ function submissionFileContentType(file:File){return file.type.startsWith("image
 function fileStateKey(file:File){return `${file.name}_${file.lastModified}_${file.size}`;}
 function formatFileSize(size:number){if(size<1024)return`${size} B`;if(size<1024*1024)return`${(size/1024).toFixed(1)} KB`;return`${(size/(1024*1024)).toFixed(1)} MB`;}
 function SelectedSubmissionFile({file,position,status,disabled,onRemove}:{file:File;position:number;status:string;disabled:boolean;onRemove:()=>void}){
-  const [previewUrl,setPreviewUrl]=useState("");
+  const [preview,setPreview]=useState<{file:File;url:string;failed:boolean}|null>(null);
+  const previewUrl=preview?.file===file?preview.url:"";
+  const previewFailed=preview?.file===file&&preview.failed;
   const isImage=file.type.startsWith("image/");
   const isPdf=file.type==="application/pdf"||file.name.toLowerCase().endsWith(".pdf");
   useEffect(()=>{
-    if(!isImage&&!isPdf){setPreviewUrl("");return;}
+    if(!isImage&&!isPdf){setPreview(null);return;}
     const url=URL.createObjectURL(isPdf&&!isImage&&file.type!=="application/pdf"?new Blob([file],{type:"application/pdf"}):file);
-    setPreviewUrl(url);
+    setPreview({file,url,failed:false});
     return()=>URL.revokeObjectURL(url);
   },[file,isImage,isPdf]);
   return <div className="selected-file-row" role="group" aria-label={`${position}件目: ${file.name}`}>
-    <div className="selected-file-preview">{previewUrl&&isImage?<img src={previewUrl} loading="lazy" decoding="async" alt={`${file.name}の送信前確認`}/>:<span>{isPdf?"PDF":"FILE"}</span>}</div>
-    <div className="file-copy"><span>{position}. {file.name}</span><small>{formatFileSize(file.size)}</small><em>{status}</em>{previewUrl&&isImage&&<SubmissionImageViewer src={previewUrl} name={file.name} className="secondary"/>}{previewUrl&&isPdf&&!isImage&&<a className="pdf-open-link" href={previewUrl} target="_blank" rel="noopener noreferrer" aria-label={`${file.name}を送信前に別タブで開く`}>PDFを確認（別タブ）</a>}</div>
+    <div className="selected-file-preview">{previewUrl&&isImage&&!previewFailed?<img key={previewUrl} src={previewUrl} loading="lazy" decoding="async" alt={`${file.name}の送信前確認`} onError={()=>setPreview(current=>current?.file===file&&current.url===previewUrl?{...current,failed:true}:current)}/>:<span>{previewFailed?"画像":isPdf?"PDF":"FILE"}</span>}</div>
+    <div className="file-copy"><span>{position}. {file.name}</span><small>{formatFileSize(file.size)}</small><em>{status}</em>{previewFailed&&<p className="selected-file-preview-error" role="status">画像のプレビューを表示できません。選択したファイルは保持しています。別の画像にする場合は「外す」で選択を解除してから、写真・PDFを選び直してください。</p>}{previewUrl&&isImage&&!previewFailed&&<SubmissionImageViewer src={previewUrl} name={file.name} className="secondary"/>}{previewUrl&&isPdf&&!isImage&&<a className="pdf-open-link" href={previewUrl} target="_blank" rel="noopener noreferrer" aria-label={`${file.name}を送信前に別タブで開く`}>PDFを確認（別タブ）</a>}</div>
     <button className="file-remove" onClick={onRemove} disabled={disabled} aria-label={`${position}件目のファイルを外す`}>外す</button>
   </div>;
 }

@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';import fs from 'node:fs';import {createServer}from'node:http';import ts from'typescript';import{chromium}from'@playwright/test';
+import assert from 'node:assert/strict';import fs from 'node:fs';import {createServer}from'node:http';import ts from'typescript';import{chromium}from'playwright';
 const module=ts.transpileModule(fs.readFileSync('apps/staff/src/submission-attempt-store.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
 const html='<!doctype html><meta charset="utf-8"><title>提出記録の合成試験</title><script type="module">window.attemptStore=await import("/attempt.js");window.ready=true;</script>';
 const server=createServer((req,res)=>{res.setHeader('Content-Type',req.url==='/attempt.js'?'text/javascript':'text/html');res.end(req.url==='/attempt.js'?module:html);});
@@ -11,5 +11,27 @@ await pages[0].evaluate(async key=>{window.holder=navigator.locks.request(key,{m
 await pages[1].evaluate(a=>{window.cleanupDone=false;window.cleanup=window.attemptStore.clearSubmissionAttempt(a).then(()=>window.cleanupDone=true);},a);await pages[1].waitForFunction(async()=> (await navigator.locks.query()).pending.length===1);assert.equal(await pages[1].evaluate(()=>window.cleanupDone),false);
 const replacement=await pages[0].evaluate(key=>{const id=crypto.randomUUID();localStorage.setItem(key,JSON.stringify({version:1,clientRequestId:id}));window.release();return id;},a.storageKey);await pages[1].waitForFunction(()=>window.cleanupDone);assert.equal((await prepare(pages[1])).clientRequestId,replacement);evidence.push('cleanup waits for lock and preserves a newer receipt');
 const active=await prepare(pages[1]);await pages[1].evaluate(a=>window.attemptStore.clearSubmissionAttempt(a),active);assert.notEqual((await prepare(pages[0])).clientRequestId,replacement);evidence.push('completed cleanup permits an intentional next upload');const maximum=await pages[0].evaluate(async()=>{const bytes=new Uint8Array(50*1024*1024);bytes[0]=1;bytes[bytes.length-1]=2;const blob=new Blob([bytes],{type:'image/png'});const files=Array.from({length:20},(_,i)=>new File([blob],'synthetic-'+i+'.png',{type:'image/png'}));const started=performance.now();const attempt=await window.attemptStore.prepareSubmissionAttempt('synthetic-max-size',files,files.map(f=>f.type));await window.attemptStore.clearSubmissionAttempt(attempt);return {files:files.length,totalLogicalBytes:files.reduce((sum,f)=>sum+f.size,0),hashes:attempt.contentHashes.length,allHashesMatch:attempt.contentHashes.every(hash=>hash===attempt.contentHashes[0]&&/^[a-f0-9]{64}$/.test(hash)),elapsedMs:Math.round(performance.now()-started)};});assert.equal(maximum.files,20);assert.equal(maximum.totalLogicalBytes,20*50*1024*1024);assert.equal(maximum.hashes,20);assert.equal(maximum.allHashesMatch,true);evidence.push({actualContentHashBoundary:maximum,limitation:'Shared synthetic Blob; actual 20 × 50MiB hash reads only. Not full upload, physical-phone memory or network acceptance.'});
+const failedCleanup=await prepare(pages[0],'synthetic-cleanup-failure');
+const failedOutcome=await pages[0].evaluate(async attempt=>{
+ const original=Storage.prototype.removeItem;
+ Storage.prototype.removeItem=function(key){if(key===attempt.storageKey)throw new DOMException('Synthetic denied cleanup','SecurityError');return original.call(this,key);};
+ try{return await window.attemptStore.clearSubmissionAttempt(attempt);}finally{Storage.prototype.removeItem=original;}
+},failedCleanup);
+assert.equal(failedOutcome,false);
+await pages[0].reload();await pages[0].waitForFunction(()=>window.ready);
+const reloaded=await prepare(pages[0],'synthetic-cleanup-failure');
+assert.equal(reloaded.clientRequestId,failedCleanup.clientRequestId);
+const noOpOutcome=await pages[0].evaluate(async attempt=>{
+ const original=Storage.prototype.removeItem;
+ Storage.prototype.removeItem=function(key){if(key!==attempt.storageKey)return original.call(this,key);};
+ try{return await window.attemptStore.clearSubmissionAttempt(attempt);}finally{Storage.prototype.removeItem=original;}
+},reloaded);
+assert.equal(noOpOutcome,false);
+assert.equal((await prepare(pages[1],'synthetic-cleanup-failure')).clientRequestId,failedCleanup.clientRequestId);
+assert.equal(await pages[0].evaluate(attempt=>window.attemptStore.clearSubmissionAttempt(attempt),reloaded),true);
+assert.notEqual((await prepare(pages[1],'synthetic-cleanup-failure')).clientRequestId,failedCleanup.clientRequestId);
+evidence.push('real storage cleanup failure/no-op remains unconfirmed across reload and two tabs; verified deletion allows a deliberate new receipt');
 assert.deepEqual(errors,[]);console.log(JSON.stringify({passed:true,evidence,scope:'local Chromium, actual WebCrypto/localStorage/Web Locks, synthetic files; no external requests or physical-device acceptance'},null,2));
 }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}
+
+await import("./test-staff-cleanup-hydration-browser.mjs");

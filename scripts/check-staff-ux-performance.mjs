@@ -624,7 +624,7 @@ assert.match(
 
 assert.match(
   app,
-  /function isSubmissionActionPending\(\)\{[\s\S]*draftHydratingRef\.current\|\|isPending\("submission-refresh"\)\|\|isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("task-job"\)\|\|isPending\("uploadSubmission"\)\|\|processingSubmission[\s\S]*function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isSubmissionActionPending\(\)\|\|resubmissionSendBlocked\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;/u,
+  /function isSubmissionActionPending\(\)\{[\s\S]*draftHydratingRef\.current\|\|isPending\("submission-refresh"\)\|\|isPending\("shift-action"\)\|\|isPending\("submission-context"\)\|\|isPending\("submission-files"\)\|\|isPending\("task-job"\)\|\|isPending\("uploadSubmission"\)\|\|isPending\("draft-cleanup"\)\|\|processingSubmission[\s\S]*function removeSubmissionFile\(target:File\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;[\s\S]*function addSubmissionFiles\(selected:File\[\]\)\{[\s\S]*if\(isSubmissionActionPending\(\)\|\|resubmissionSendBlocked\)return;[\s\S]*async function clearSubmissionFiles\(\)\{[\s\S]*if\(isSubmissionActionPending\(\)\)return;/u,
   "Submission file mutations must synchronously stop while draft hydration or another submission action is active.",
 );
 

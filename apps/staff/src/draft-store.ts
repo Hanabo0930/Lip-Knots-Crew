@@ -74,6 +74,12 @@ export async function loadDraft(key: string): Promise<File[]> {
   if (isSubmittedDraft(key)) return [];
   await waitForDraftMutation(key);
   if (isSubmittedDraft(key)) return [];
+  const records = await readDraftRecords(key);
+  if (isSubmittedDraft(key)) return [];
+  return draftFiles(records);
+}
+
+async function readDraftRecords(key: string): Promise<DraftFile[]> {
   const db = await openDb();
   let records: DraftFile[];
   try {
@@ -89,7 +95,10 @@ export async function loadDraft(key: string): Promise<File[]> {
   } finally {
     db.close();
   }
-  if (isSubmittedDraft(key)) return [];
+  return records;
+}
+
+function draftFiles(records: DraftFile[]): File[] {
   return records.map((record) => new File([record.blob], record.name, {
     type: record.type, lastModified: record.lastModified,
   }));
@@ -98,12 +107,23 @@ export async function loadDraft(key: string): Promise<File[]> {
 export function clearDraft(key: string): Promise<void> {
   const receiptVersion = submittedDrafts.get(key);
   return enqueueDraftMutation(key, async () => {
+    const retained = isSubmittedDraft(key) ? await readDraftRecords(key) : [];
     const db = await openDb();
     try {
       await tx(db, "readwrite", (store) => store.delete(key));
       if (submittedDrafts.get(key) === receiptVersion && isSubmittedDraft(key)) {
         // 消去できた後にだけ送信済み印を外す。失敗時は再試行できる状態を保つ。
-        localStorage.removeItem(receiptKey(key));
+        try {
+          localStorage.removeItem(receiptKey(key));
+          if (localStorage.getItem(receiptKey(key)) !== null) throw new Error("送信済み印の削除を確認できません。");
+        }
+        catch (error) {
+          // Preserve the saved draft if removing its durable marker fails.
+          if (retained.length && localStorage.getItem(receiptKey(key)) === "1") {
+            await tx(db, "readwrite", (store) => store.put(retained, key));
+          }
+          throw error;
+        }
         submittedDrafts.delete(key);
       }
     } finally {

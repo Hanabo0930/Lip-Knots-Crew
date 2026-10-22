@@ -12,7 +12,7 @@ await test('lost browser cleanup keeps receipt when durable submitted marker is 
 await test('completed existing uploads reach processing view without another Storage write',async()=>{const f=fixture();f.state.loseResponse=true;await f.ctx.uploadSubmission();f.uploaded.add('submission-0/0');f.uploaded.add('submission-0/1');await f.ctx.uploadSubmission();assert.equal(f.state.storageWrites.length,0);assert.equal(f.state.marked,1);assert.equal(f.state.files.length,0);});
 await test('an older server response without matching operation ID cannot upload blindly',async()=>{const f=fixture();f.ctx.httpsCallable=()=>async()=>({data:{submissionId:'old',files:[{storagePath:'old/0'},{storagePath:'old/1'}]}});await f.ctx.uploadSubmission();assert.equal(f.state.files,f.original);assert.equal(f.state.storageWrites.length,0);assert.equal(f.state.marked,0);assert.equal(f.rows.size,1);assert.match(f.state.messages.at(-1),/送信先/);});
 await test('account switch during receipt cleanup cannot clear the new account view',async()=>{const f=fixture(),load=f.ctx.loadSubmissionAttempt;f.ctx.loadSubmissionAttempt=async()=>{const module=await load();return {...module,clearSubmissionAttempt:async attempt=>{const cleared=await module.clearSubmissionAttempt(attempt);f.ctx.authLoadVersionRef.current++;return cleared;}};};await f.ctx.uploadSubmission();assert.equal(f.state.files,f.original);assert.equal(f.state.cleanup,0);assert.equal(f.state.messages.length,0);});
-await test('retry of post-submit cleanup clears retained operation without uploading again',async()=>{const f=fixture();f.state.failReceiptStorage=true;f.state.failCleanup=true;await f.ctx.uploadSubmission();assert.equal(f.rows.size,1);assert.ok(f.state.cleanupRecord.attempt);await f.ctx.retryDraftCleanup();assert.equal(f.rows.size,1);assert.ok(f.state.cleanupRecord);f.state.failCleanup=false;await f.ctx.retryDraftCleanup();assert.equal(f.rows.size,0);assert.equal(f.state.cleanupRecord,null);assert.equal(f.state.storageWrites.length,2);assert.equal(f.state.cleanup,1);});
+await test('retry of post-submit cleanup clears retained operation without uploading again',async()=>{const f=fixture();f.state.failReceiptStorage=true;f.state.failCleanup=true;await f.ctx.uploadSubmission();assert.equal(f.rows.size,1);assert.ok(f.state.cleanupRecord.attempt);await f.ctx.retryDraftCleanup();assert.equal(f.rows.size,1);assert.ok(f.state.cleanupRecord);f.state.failCleanup=false;f.state.failReceiptStorage=false;await f.ctx.retryDraftCleanup();assert.equal(f.rows.size,0);assert.equal(f.state.cleanupRecord,null);assert.equal(f.state.storageWrites.length,2);assert.equal(f.state.cleanup,1);});
 
 for(const scope of ['file','submission',undefined])await test('resubmission upload honors explicit scope '+String(scope),async()=>{const f=fixture();f.ctx.requestId='request-a';f.ctx.resubmissionDetail={request:{id:'request-a',jobId:f.ctx.selectedJob.id,type:'report',status:'open',...(scope?{scope}:{})}};await f.ctx.uploadSubmission();if(scope==='submission'){assert.equal(f.state.storageWrites.length,2);assert.equal(f.state.files.length,0);assert.equal(f.state.payloads[0].purpose,'replacement');assert.equal(f.state.payloads[0].resubmissionRequestId,'request-a');}else{assert.equal(f.state.storageWrites.length,0);assert.equal(f.state.payloads.length,0);assert.equal(f.state.files,f.original);assert.match(f.state.messages.at(-1),/1ファイル/);}});
 
@@ -23,15 +23,15 @@ for(const durable of [true,false])await test('receipt cleanup failure stays visi
  const f=fixture();f.state.failReceiptRemove=true;f.state.failReceiptStorage=!durable;
  await f.ctx.uploadSubmission();
  assert.equal(f.state.files.length,0);assert.equal(f.state.confirmed,false);
- assert.equal(f.rows.size,1);assert.ok(f.state.cleanupRecord.attempt);assert.equal(f.state.cleanupRecord.draftCleared,true);
+ assert.equal(f.rows.size,1);assert.ok(f.state.cleanupRecord.attempt);assert.equal(Boolean(f.state.cleanupRecord.draftCleared),false);
  assert.equal(f.state.processing.length,1);assert.match(f.state.messages.at(-1),/送信しました/);
  assert.equal(f.state.storageWrites.length,2);const originalId=f.state.payloads[0].clientRequestId;
  f.ctx.files=f.original;f.state.files=f.original;f.ctx.submissionConfirmed=true;
  await f.ctx.uploadSubmission();assert.equal(f.state.payloads.length,1);assert.equal(f.state.files,f.original);
  assert.match(f.state.messages.at(-1),/端末の後片付けを再試行/);
  await f.ctx.retryDraftCleanup();assert.equal(f.rows.size,1);assert.ok(f.state.cleanupRecord);
- assert.equal(f.state.cleanup,1,'Retry must not delete a newer draft after the original was cleared');
- f.state.failReceiptRemove=false;await f.ctx.retryDraftCleanup();
+ assert.equal(f.state.cleanup,0,'Retain the original draft until its receipt is confirmed absent');
+ f.state.failReceiptRemove=false;f.state.failReceiptStorage=false;await f.ctx.retryDraftCleanup();
  assert.equal(f.rows.size,0);assert.equal(f.state.cleanupRecord,null);assert.equal(f.state.cleanup,1);
  assert.equal(f.state.payloads.length,1);assert.equal(f.state.storageWrites.length,2);assert.equal(f.state.files,f.original);
  await f.ctx.uploadSubmission();assert.equal(f.receipts.size,2);assert.notEqual(f.state.payloads[1].clientRequestId,originalId);

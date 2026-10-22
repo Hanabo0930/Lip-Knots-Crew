@@ -50,4 +50,26 @@ for(const [count,size]of [[21,1],[1,50*1024*1024+1],[1,0],[0,1]])await test('inv
 await test('mail revision stays fixed across reload and newer displayed job',async()=>{const f=fixture(),args=['owner/mail',[file()],['image/png'],()=>true];const a=await f.prepareSubmissionAttempt(...args,5),b=await f.prepareSubmissionAttempt(...args,6);assert.equal(a.expectedRevision,5);assert.equal(b.expectedRevision,5);assert.equal(a.clientRequestId,b.clientRequestId);await f.clearSubmissionAttempt(a);const c=await f.prepareSubmissionAttempt(...args,6);assert.equal(c.expectedRevision,6);assert.notEqual(a.clientRequestId,c.clientRequestId);});
 await test('legacy local attempt does not silently adopt a mail revision',async()=>{const f=fixture(),args=['owner/mail',[file()],['image/png'],()=>true],a=await f.prepareSubmissionAttempt(...args),b=await f.prepareSubmissionAttempt(...args,5);assert.equal(b.expectedRevision,undefined);assert.equal(a.clientRequestId,b.clientRequestId);});
 for(const invalid of [-1,1.5,'5',null])await test('invalid mail revision '+invalid,async()=>{const f=fixture();await assert.rejects(f.prepareSubmissionAttempt('owner/mail',[file()],['image/png'],()=>true,invalid));assert.equal(f.state.rows.size,0);});
+await test('recovery reads the exact existing draft receipt without reserving or rewriting it',async()=>{
+ const f=fixture(),files=[file()],a=await f.prepareSubmissionAttempt('owner/job',files,['image/png'],()=>true,7);
+ const before=Array.from(f.state.rows);f.ctx.localStorage.setItem=()=>assert.fail('Recovery must not reserve or rewrite');
+ const found=await f.findSubmissionAttempt('owner/job',files,['image/png']);
+ assert.equal(found.clientRequestId,a.clientRequestId);assert.equal(found.expectedRevision,7);assert.deepEqual(Array.from(f.state.rows),before);
+ assert.equal(await f.findSubmissionAttempt('other/job',files,['image/png']),null);assert.deepEqual(Array.from(f.state.rows),before);
+});
+await test('an exact saved draft with no receipt is confirmed without creating a new one',async()=>{
+ const f=fixture();f.ctx.localStorage.setItem=()=>assert.fail('Absent recovery must not create');
+ assert.equal(await f.findSubmissionAttempt('owner/job',[file()],['image/png']),null);assert.equal(f.state.rows.size,0);
+});
+for(const mode of ['read','malformed','lock'])await test('recovery uncertainty cannot become confirmed absence: '+mode,async()=>{
+ const f=fixture(),files=[file()],a=await f.prepareSubmissionAttempt('owner/job',files,['image/png']);
+ if(mode==='read')f.state.failRead=true;
+ if(mode==='malformed')f.state.rows.set(a.storageKey,'{}');
+ if(mode==='lock')f.ctx.navigator.locks.request=async()=>{throw Error('synthetic lock failure');};
+ await assert.rejects(f.findSubmissionAttempt('owner/job',files,['image/png']));assert.equal(f.state.rows.size,1);
+});
+await test('account change during recovery cannot read or reserve another receipt',async()=>{
+ const f=fixture();let current=true;const original=file(),delayed={name:original.name,size:original.size,arrayBuffer:async()=>{current=false;return original.arrayBuffer();}};
+ await assert.rejects(f.findSubmissionAttempt('owner/job',[delayed],['image/png'],()=>current));assert.equal(f.state.rows.size,0);
+});
 const passed=results.filter(r=>r.passed).length;console.log(JSON.stringify({passed,total:results.length,results,scope:'actual browser store module with Node WebCrypto, File and synthetic localStorage/Web Locks'},null,2));process.exitCode=passed===results.length?0:1;

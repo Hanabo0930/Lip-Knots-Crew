@@ -3,11 +3,10 @@ const failure = () => new Error("提出の再試行記録を保存できませ�
 async function digest(value: BufferSource): Promise<string> {
   return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", value)), byte => byte.toString(16).padStart(2, "0")).join("");
 }
-export async function prepareSubmissionAttempt(
-  draftKey: string, files: File[], contentTypes: string[], isCurrent: () => boolean = () => true, expectedRevision?: number
-): Promise<SubmissionAttempt> {
+async function identifySubmissionAttempt(
+  draftKey: string, files: File[], contentTypes: string[], isCurrent: () => boolean
+): Promise<{ storageKey: string; contentHashes: string[] }> {
   if (!draftKey || !files.length || files.length > 20 || contentTypes.length !== files.length || !crypto.subtle || !navigator.locks) throw failure();
-  if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) throw failure();
   const contentHashes: string[] = [];
   for (const file of files) {
     if (!isCurrent()) throw new Error("ログイン状態が変わったため送信を中止しました。");
@@ -17,17 +16,42 @@ export async function prepareSubmissionAttempt(
   }
   const fingerprint = await digest(new TextEncoder().encode(JSON.stringify([draftKey, files.map((file, index) => [file.name, file.size, contentTypes[index], contentHashes[index]])])));
   const storageKey = "lkc.submissionAttempt.v1:" + fingerprint;
+  return { storageKey, contentHashes };
+}
+function readAttempt(raw: string, storageKey: string, contentHashes: string[]): SubmissionAttempt {
+  const value = JSON.parse(raw);
+  if (value?.version !== 1 || typeof value.clientRequestId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value.clientRequestId)) throw failure();
+  if (value.expectedRevision !== undefined && (!Number.isSafeInteger(value.expectedRevision) || value.expectedRevision < 0)) throw failure();
+  return { clientRequestId: value.clientRequestId, storageKey, contentHashes, ...(value.expectedRevision !== undefined ? { expectedRevision: value.expectedRevision } : {}) };
+}
+// Recover only an existing receipt for the exact saved draft; never reserve a new intent.
+export async function findSubmissionAttempt(
+  draftKey: string, files: File[], contentTypes: string[], isCurrent: () => boolean = () => true
+): Promise<SubmissionAttempt | null> {
+  const { storageKey, contentHashes } = await identifySubmissionAttempt(draftKey, files, contentTypes, isCurrent);
+  return navigator.locks.request(storageKey, { mode: "exclusive" }, () => {
+    if (!isCurrent()) throw failure();
+    try {
+      const raw = localStorage.getItem(storageKey);
+      return raw === null ? null : readAttempt(raw, storageKey, contentHashes);
+    } catch { throw failure(); }
+  });
+}
+export async function prepareSubmissionAttempt(
+  draftKey: string, files: File[], contentTypes: string[], isCurrent: () => boolean = () => true, expectedRevision?: number
+): Promise<SubmissionAttempt> {
+  if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) throw failure();
+  const { storageKey, contentHashes } = await identifySubmissionAttempt(draftKey, files, contentTypes, isCurrent);
   return navigator.locks.request(storageKey, { mode: "exclusive" }, () => {
     if (!isCurrent()) throw new Error("ログイン状態が変わったため送信を中止しました。");
     try {
       const existing = localStorage.getItem(storageKey);
       const value = existing === null ? { version: 1, clientRequestId: crypto.randomUUID(), ...(expectedRevision !== undefined ? { expectedRevision } : {}) } : JSON.parse(existing);
-      if (value?.version !== 1 || typeof value.clientRequestId !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value.clientRequestId)) throw failure();
-      if (value.expectedRevision !== undefined && (!Number.isSafeInteger(value.expectedRevision) || value.expectedRevision < 0)) throw failure();
       const encoded = JSON.stringify(value);
+      const attempt = readAttempt(encoded, storageKey, contentHashes);
       localStorage.setItem(storageKey, encoded);
       if (localStorage.getItem(storageKey) !== encoded) throw failure();
-      return { clientRequestId: value.clientRequestId, storageKey, contentHashes, ...(value.expectedRevision !== undefined ? { expectedRevision: value.expectedRevision } : {}) };
+      return attempt;
     } catch { throw failure(); }
   });
 }

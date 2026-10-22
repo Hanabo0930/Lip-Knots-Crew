@@ -33,3 +33,5 @@ assert.notEqual((await prepare(pages[1],'synthetic-cleanup-failure')).clientRequ
 evidence.push('real storage cleanup failure/no-op remains unconfirmed across reload and two tabs; verified deletion allows a deliberate new receipt');
 assert.deepEqual(errors,[]);console.log(JSON.stringify({passed:true,evidence,scope:'local Chromium, actual WebCrypto/localStorage/Web Locks, synthetic files; no external requests or physical-device acceptance'},null,2));
 }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}
+
+await import("./test-staff-cleanup-hydration-browser.mjs");

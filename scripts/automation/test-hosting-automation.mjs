@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {createRequire} from "node:module";
 import {spawnSync} from "node:child_process";
 import {runVersionRestoreTests} from "./test-hosting-version-restore.mjs";
+import {runChannelMetadataTests} from "./test-hosting-channel.mjs";
 import { readFileSync } from "node:fs";
 import {
   mkdtemp,
@@ -392,6 +393,8 @@ assert.throws(
   /NOT_UNIQUELY_RESOLVED/u,
 );
 cases += 1;
+
+cases += await runChannelMetadataTests({ repoRoot });
 
 assert.equal(
   validateTargetUrl(`https://${staffSite}.web.app`, [staffSite, adminSite]),

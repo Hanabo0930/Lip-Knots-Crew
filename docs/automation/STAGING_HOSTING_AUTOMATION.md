@@ -75,6 +75,9 @@ if automatic discovery stops safely.
 Preview artifacts retain:
 
 - Firebase channel deployment JSON;
+- `channel-metadata.json`, normalized from Staff/Admin `hosting:channel:list`:
+  the exact site/channel resource, preview URL, expiry time/status, full version
+  resource name, version status, and `versionConfirmed`;
 - Staff/Admin screenshots;
 - browser result JSON with HTTP status, root mount, navigation duration, page
   errors, fatal console errors, and static-resource failures.
@@ -82,3 +85,11 @@ Preview artifacts retain:
 Promotion artifacts additionally retain backup, promotion, live-check, and
 rollback evidence. Configuration values, tokens, credentials, complete IAM
 policies, email addresses, and application data are not written to evidence.
+
+Channel metadata retains only these allowlisted fields, not the raw list
+responses. Missing version names stay `null` with `versionConfirmed=false`;
+short IDs are never expanded. Only a full version name for the selected site
+with status `FINALIZED` sets `versionConfirmed=true`. Expiry is reported
+separately as `ACTIVE`, `EXPIRED`, or `UNCONFIRMED` (missing expiry). These are
+observations at capture time, not approval or source-provenance evidence.
+The promotion, pilot, backup, and recovery requirements remain unchanged.

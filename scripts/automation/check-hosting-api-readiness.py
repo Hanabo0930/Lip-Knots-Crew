@@ -115,7 +115,9 @@ def main():
     parser.add_argument("--root", type=pathlib.Path, default=pathlib.Path("."))
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--evidence", type=pathlib.Path, required=True)
-    parser.add_argument("--preflight", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--preflight", action="store_true")
+    mode.add_argument("--mutation-guard", action="store_true")
     args = parser.parse_args()
     evidence = source_evidence_module()
     try:
@@ -125,9 +127,18 @@ def main():
                                      expected_files=expected_files, subprocess=subprocess)
         result = evidence.verify_bundle(args.root.resolve(), args.source_sha, directory, approved,
                                         validators, preflight=args.preflight)
+        if args.mutation_guard:
+            result = evidence.require_current_acceptance(args.evidence.absolute(), result)
+        elif not args.preflight:
+            result = evidence.bind_acceptance(result)
     except (ReadinessError, evidence.EvidenceError, OSError, ValueError, TypeError, AttributeError, RecursionError) as error:
         code = str(error) if isinstance(error, (ReadinessError, evidence.EvidenceError)) else "READINESS_INPUT_INVALID"
         result = {"status": "STOPPED", "reason": code}
+    if args.mutation_guard:
+        # Read-only revalidation: never overwrite/renew the accepted receipt.
+        # This bounded, non-secret result is checked again immediately before POST.
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["status"] == "PASS" else 1
     args.evidence.parent.mkdir(parents=True, exist_ok=True)
     args.evidence.write_text(json.dumps(result, indent=2) + "\n", "utf-8")
     print("HOSTING_API_READINESS=" + result["status"])

@@ -314,6 +314,7 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
    assert.equal(evidence.externalApiInvoked,false);assert.equal(evidence.deployedSourceVerified,false);assert.equal(evidence.status,"STOPPED");
   });
   cases += await runSourceEvidenceGuardTests(temp);
+  cases += await runSourceEvidenceMutationTests(temp);
 
   for(const visible of [false,true])await test("unknown promotion cannot rollback or resend even when visible="+visible,async()=>{
    const m=fixture(),execution={...m,staff:{...m.staff,previousVersion:m.staff.promotedVersion,promotedVersion:m.staff.previousVersion},
@@ -437,9 +438,8 @@ export async function runVersionRestoreTests({repoRoot,pythonExecutable="python3
    evidencePolicy:"limited-staff-pilot",runAttempt:1,
    mutation:{kind:"backup",siteId:project,previousVersion:fixture().staff.previousVersion}};
   await test("strict mutation path never consumes limited evidence",async()=>{
-   await requireCurrentPilotMutationReview({}, {read:()=>assert.fail("strict path read limited evidence")});
-   await requireCurrentPilotMutationReview({...pilotOptions,evidencePolicy:"source-provenance"},
-    {read:()=>assert.fail("strict path read limited evidence")});
+   await assert.rejects(()=>requireCurrentPilotMutationReview({},
+    {read:()=>assert.fail("strict path read limited evidence")}),/ENVIRONMENT_REJECTED/);
   });
   await test("limited mutation requires fresh current-run authorized report",async()=>{
    const report=pilotReportFixture();
@@ -696,6 +696,93 @@ export async function runHostingReaderSdkBoundaryTests({repoRoot,sdkRepoRoot=rep
  }
  return cases;
 }
+/** Synthetic acceptance from the offline Python verifier; no cloud calls. */
+export async function runSourceEvidenceMutationTests(temp) {
+ const m=fixture(),pin="a".repeat(64),before="2026-10-22T06:09:59.000Z",deadline="2026-10-22T06:10:00.000Z";
+ const values={GITHUB_ACTIONS:"true",GITHUB_REPOSITORY:repository,GITHUB_REF:"refs/heads/main",
+  GITHUB_REF_NAME:"main",GITHUB_JOB:"promote",GITHUB_WORKFLOW_REF:repository+"/.github/workflows/staging-hosting-promote.yml@refs/heads/main",
+  GITHUB_RUN_ID:m.promotionRunId,GITHUB_RUN_ATTEMPT:"1",LKC_APPROVED_SOURCE_EVIDENCE_SHA256:pin};
+ const previous=Object.fromEntries(Object.keys(values).map(k=>[k,process.env[k]]));
+ const scope=await mkdtemp(path.join(temp,"source-deadline-"));
+ const options={projectId:project,region,staffSite:project,adminSite:project+"-admin",sourceSha:sha,
+  promotionRunId:m.promotionRunId,runAttempt:1,evidencePolicy:"source-provenance",evidenceDir:scope,
+  rollbackChannel:"rb-"+m.promotionRunId};
+ const acceptance={status:"PASS",sourceSha:sha,evidenceDigest:pin,runId:m.promotionRunId,runAttempt:1,expiresAt:deadline};
+ let cases=0;
+ const run=(_command,args,settings)=>{
+  assert.equal(_command,"python3");assert.ok(args.includes("--mutation-guard"));assert.ok(!args.includes("--preflight"));
+  assert.ok(args.includes(path.join(options.evidenceDir,"api-readiness.json")));
+  assert.deepEqual(settings.stdio,["ignore","pipe","pipe"]);
+  return {status:0,stdout:JSON.stringify(acceptance)};
+ };
+ try {
+  Object.assign(process.env,values);
+  const check=(io={})=>requireCurrentPilotMutationReview(options,{run,now:()=>before,...io});
+  await check();cases++;
+  for(const change of [{status:"CONSISTENT"},{sourceSha:"b".repeat(40)},{evidenceDigest:"0".repeat(64)},
+   {runId:"987654321"},{runAttempt:2},{extra:true}]) {
+   await assert.rejects(()=>check({run:()=>({status:0,stdout:JSON.stringify({...acceptance,...change})})}),
+    /SOURCE_MUTATION_RECEIPT_MISMATCH/);cases++;
+  }
+  for(const result of [{status:1,stderr:"SYNTHETIC_DO_NOT_ECHO"},
+   {status:null,error:new Error("SYNTHETIC_DO_NOT_ECHO")},{status:0,stdout:"SYNTHETIC_DO_NOT_ECHO"}]) {
+   await assert.rejects(()=>check({run:()=>result}),error=>
+    /SOURCE_MUTATION_/u.test(error.message)&&!error.message.includes("DO_NOT_ECHO"));cases++;
+  }
+  await assert.rejects(()=>requireCurrentPilotMutationReview({...options,promotionRunId:"987654321"},
+   {run:()=>assert.fail("cross-run verifier must not execute")}),/SOURCE_MUTATION_CONTEXT_REJECTED/);cases++;
+  // The accepted readiness was at 06:09:59; each of the four backup POSTs
+  // must independently stop at 06:10:00, including the very first write.
+  for(const expireAt of [1,2,3,4,5]) {
+   const model=statefulReader(m);model.state.staff=m.staff.previousVersion;model.state.admin=m.admin.previousVersion;
+   let checks=0;
+   const authorizeMutation=mutation=>requireCurrentPilotMutationReview({...options,mutation},{
+    run:(...args)=>{checks++;return run(...args);},now:()=>checks>=expireAt?deadline:before,
+   });
+   const backup=()=>backupCurrentPair(options,model.reader,{authorizeMutation});
+   if(expireAt<=4)await assert.rejects(backup,/SOURCE_MUTATION_EVIDENCE_EXPIRED/);else await backup();
+   assert.equal(checks,Math.min(expireAt,4));assert.equal(model.calls.length,Math.min(expireAt-1,4));cases++;
+  }
+  // The verifier can finish before the deadline and the JS process resume after it.
+  let current=before;
+  await assert.rejects(()=>check({run:(...args)=>{const result=run(...args);current=deadline;return result;},
+   now:()=>current}),/SOURCE_MUTATION_EVIDENCE_EXPIRED/);cases++;
+  for(const expireBeforeFirst of [true,false]) {
+   const model=statefulReader(m);model.state.staff=m.staff.previousVersion;model.state.admin=m.admin.previousVersion;
+   const execution={...m,...Object.fromEntries(["staff","admin"].map(label=>[label,{
+    ...m[label],previousVersion:m[label].promotedVersion,promotedVersion:m[label].previousVersion,
+   }]))};
+   const evidenceDir=path.join(scope,"promotion-"+expireBeforeFirst);
+   const liveOptions={...options,evidenceDir,mode:"promotion"};
+   let now=expireBeforeFirst?deadline:before,checks=0;
+   const reader={...model.reader,release:async(...args)=>{await model.reader.release(...args);now=deadline;}};
+   const result=await restoreVersionPair(execution,liveOptions,{reader,
+    executor:req=>releaseHostingVersion(req,{reader}),
+    authorizeMutation:mutation=>requireCurrentPilotMutationReview({...liveOptions,mutation,capture:{...m,promotionResult:"prepared"}},{
+     run:(_command,args)=>{checks++;assert.ok(args.includes("--mutation-guard"));
+      assert.ok(args.includes(path.join(evidenceDir,"api-readiness.json")));return {status:0,stdout:JSON.stringify(acceptance)};},
+     now:()=>now,
+    })});
+   assert.equal(result.success,false);assert.equal(result.finalPairKnown,true);assert.equal(result.retryAllowed,true);
+   assert.equal(result.attempts[0].outcome,expireBeforeFirst?"not-attempted":"applied");
+   assert.equal(result.attempts[1].outcome,"not-attempted");assert.equal(model.calls.length,expireBeforeFirst?0:1);
+   await loadKnownPromotionResult(m,evidenceDir);
+   const checked=checks;
+   const restored=await restoreVersionPair(m,{...liveOptions,mode:"restore"},{
+    reader,executor:req=>releaseHostingVersion(req,{reader}),
+   });
+   assert.equal(restored.success,true);assert.equal(checks,checked,"expired source evidence must not block rollback");
+   assert.equal(model.state.staff,m.staff.previousVersion);assert.equal(model.state.admin,m.admin.previousVersion);cases++;
+  }
+ } finally {
+  for(const [key,value] of Object.entries(previous)){if(value===undefined)delete process.env[key];else process.env[key]=value;}
+  const actual=await realpath(scope),parent=await realpath(temp);
+  assert.ok(actual.startsWith(parent+path.sep)&&path.basename(actual).startsWith("source-deadline-"));
+  await rm(actual,{recursive:true,force:true});
+ }
+ return cases;
+}
+
 /** Offline boundary tests; the subprocess and protected context are synthetic. */
 export async function runSourceEvidenceGuardTests(temp) {
  const values={GITHUB_ACTIONS:"true",GITHUB_REPOSITORY:repository,GITHUB_REF:"refs/heads/main",

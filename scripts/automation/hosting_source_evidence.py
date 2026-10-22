@@ -95,6 +95,7 @@ def protected_context(source_sha, env=None):
          and env.get("GITHUB_REF_NAME") == "main"
          and env.get("GITHUB_JOB") == "promote"
          and env.get("GITHUB_WORKFLOW_REF") == WORKFLOW
+         and re.fullmatch(r"[1-9][0-9]{0,19}", env.get("GITHUB_RUN_ID", ""))
          and env.get("GITHUB_RUN_ATTEMPT") == "1",
          "PROTECTED_WORKFLOW_CONTEXT_REQUIRED")
     operation = env.get("LKC_OPERATION")
@@ -291,3 +292,41 @@ def verify_bundle(root, source_sha, directory, approved_digest, readiness, *, pr
             "observationEndsAt": bundle["observations"]["after"]["capturedAt"],
             "expiresAt": bundle["expiresAt"], "externalApiInvoked": False,
             "hostingPromotionAuthorized": False, "authenticatedStaffAcceptance": "UNVERIFIED"}
+
+
+def bind_acceptance(result, env=None, now=None):
+    """Bind a freshly verified result to this protected execution, not a caller flag."""
+    env = os.environ if env is None else env
+    need(result.get("status") == "PASS", "SOURCE_ACCEPTANCE_REQUIRED")
+    protected_context(result["sourceSha"], env)
+    need(result["evidenceDigest"] == env["LKC_APPROVED_SOURCE_EVIDENCE_SHA256"],
+         "SOURCE_ACCEPTANCE_PIN_MISMATCH")
+    checked = now or dt.datetime.now(dt.timezone.utc)
+    need(timestamp(result["observationEndsAt"]) <= checked < timestamp(result["expiresAt"]),
+         "SOURCE_ACCEPTANCE_EXPIRED_OR_FUTURE")
+    return {**result, "checkedAt": checked.isoformat().replace("+00:00", "Z"),
+            "acceptanceRun": {"repository": env["GITHUB_REPOSITORY"],
+                              "workflowRef": env["GITHUB_WORKFLOW_REF"],
+                              "runId": env["GITHUB_RUN_ID"], "runAttempt": 1}}
+
+
+def require_current_acceptance(file, fresh_result, env=None, now=None):
+    # The caller has just revalidated the pinned bundle, archive bytes and local
+    # inventory. The old PASS receipt alone is never sufficient for a write.
+    expected = bind_acceptance(fresh_result, env, now)
+    raw = regular_read(pathlib.Path(file), MAX_JSON)
+    try:
+        saved = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
+    except (UnicodeError, ValueError):
+        raise EvidenceError("SOURCE_ACCEPTANCE_RECEIPT_REJECTED") from None
+    keys(saved, expected.keys())
+    need(json.dumps({k: v for k, v in saved.items() if k != "checkedAt"}, sort_keys=True)
+         == json.dumps({k: v for k, v in expected.items() if k != "checkedAt"}, sort_keys=True),
+         "SOURCE_ACCEPTANCE_RECEIPT_MISMATCH")
+    need(timestamp(expected["observationEndsAt"]) <= timestamp(saved["checkedAt"])
+         <= timestamp(expected["checkedAt"]) < timestamp(expected["expiresAt"]),
+         "SOURCE_ACCEPTANCE_EXPIRED_OR_FUTURE")
+    return {"status": "PASS", "sourceSha": expected["sourceSha"],
+            "evidenceDigest": expected["evidenceDigest"],
+            "runId": expected["acceptanceRun"]["runId"], "runAttempt": 1,
+            "expiresAt": expected["expiresAt"]}

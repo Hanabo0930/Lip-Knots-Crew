@@ -1,6 +1,7 @@
 """Synthetic fixtures only: no real observation, source archive, credential or API."""
 import base64
 import copy
+import contextlib
 import datetime as dt
 import hashlib
 import importlib.util
@@ -87,6 +88,7 @@ class SourceEvidenceTests(unittest.TestCase):
             "GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "Hanabo0930/Lip-Knots-Crew",
             "GITHUB_REF": "refs/heads/main", "GITHUB_REF_NAME": "main", "GITHUB_JOB": "promote",
             "GITHUB_WORKFLOW_REF": e.WORKFLOW, "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_RUN_ID": "123456789",
             "GITHUB_EVENT_NAME": "workflow_dispatch", "LKC_OPERATION": "readiness",
             "LKC_CONFIRMATION": "CHECK_LKC_STAGING_HOSTING_READINESS",
             "LKC_PROJECT_ID": g.PROJECT, "LKC_REGION": g.REGION, "LKC_EVIDENCE_POLICY": "source-provenance",
@@ -104,7 +106,7 @@ class SourceEvidenceTests(unittest.TestCase):
         with patch.object(socket, "create_connection", side_effect=AssertionError("NETWORK_FORBIDDEN")), \
              patch.object(g.subprocess, "run", side_effect=AssertionError("SUBPROCESS_FORBIDDEN")), \
              patch.object(g.subprocess, "check_output", return_value=SHA.encode()) as git:
-            result = e.verify_bundle(self.root, SHA, self.bundle_dir, approved, g, now=NOW, **kwargs)
+            result = e.verify_bundle(self.root, SHA, self.bundle_dir, approved, g, now=kwargs.pop("now", NOW), **kwargs)
             if kwargs.get("preflight"):
                 git.assert_not_called()
             else:
@@ -162,6 +164,7 @@ class SourceEvidenceTests(unittest.TestCase):
             ("GITHUB_REF", "refs/heads/feature"), ("GITHUB_JOB", "other"),
             ("GITHUB_WORKFLOW_REF", e.WORKFLOW.replace("@refs/heads/main", "@refs/heads/feature")),
             ("GITHUB_RUN_ATTEMPT", "2"), ("LKC_OPERATION", "restore"), ("LKC_METADATA_ONLY", "true"),
+            ("GITHUB_RUN_ID", ""), ("GITHUB_RUN_ID", "../123"),
             ("LKC_EVIDENCE_POLICY", "limited-staff-pilot"), ("LKC_PROJECT_ID", "other"),
             ("LKC_REGION", "us-central1"), ("LKC_CONFIRMATION", "wrong"),
             ("LKC_SOURCE_SHA", "b" * 40), ("RUNNER_TEMP", "relative"),
@@ -334,10 +337,11 @@ class SourceEvidenceTests(unittest.TestCase):
     def test_workflow_preserves_trust_and_mutation_boundaries(self):
         workflow = (ROOT / ".github/workflows/staging-hosting-promote.yml").read_text("utf-8")
         binding = "          LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}"
-        self.assertEqual(workflow.count(binding), 2)
+        self.assertEqual(workflow.count(binding), 4)
         job = workflow[workflow.index("  promote:"):]
         self.assertNotIn("LKC_APPROVED_SOURCE_EVIDENCE_SHA256", job[:job.index("    steps:")])
-        for name in ["Stop source verification unless a no-fee path is established", "Verify deployed upload APIs before any live Hosting change"]:
+        for name in ["Stop source verification unless a no-fee path is established", "Verify deployed upload APIs before any live Hosting change",
+                     "Back up both current live channels", "Promote the already-tested versions without rebuilding"]:
             start = workflow.index("      - name: " + name)
             end = workflow.index("\n      - name:", start + 1)
             self.assertIn("        env:\n" + binding, workflow[start:end])
@@ -350,6 +354,84 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertIn("environment: lkc-staging-hosting", workflow)
         self.assertIn("Validate limited evidence against fresh pinned API metadata", workflow)
         self.assertIn("Recheck limited trial capture and API revisions before live write", workflow)
+
+    def test_acceptance_receipt_binds_pin_source_run_and_fixed_deadline(self):
+        fresh = self.verify()
+        env = {**self.env, "LKC_APPROVED_SOURCE_EVIDENCE_SHA256": fresh["evidenceDigest"]}
+        receipt = e.bind_acceptance(fresh, env, NOW)
+        file = self.root / "api-readiness.json"
+        file.write_bytes(json.dumps(receipt).encode())
+        accepted = e.require_current_acceptance(file, fresh, env, NOW + dt.timedelta(seconds=1))
+        self.assertEqual(accepted["runId"], env["GITHUB_RUN_ID"])
+        self.assertEqual(accepted["expiresAt"], self.bundle["expiresAt"])
+        mutations = [
+            lambda r: r.update(sourceSha="b" * 40),
+            lambda r: r.update(evidenceDigest="0" * 64),
+            lambda r: r.update(expiresAt="2026-10-22T06:11:00Z"),
+            lambda r: r.update(checkedAt="2026-10-22T06:09:59Z"),
+            lambda r: r.update(status="CONSISTENT"),
+            lambda r: r.update(verified=True),
+            lambda r: r["acceptanceRun"].update(runId="987654321"),
+            lambda r: r["acceptanceRun"].update(runAttempt=2),
+            lambda r: r["acceptanceRun"].update(runAttempt=True),
+            lambda r: r.update(externalApiInvoked=0),
+            lambda r: r["acceptanceRun"].update(workflowRef="other/workflow"),
+            lambda r: r.pop("acceptanceRun"),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                changed = copy.deepcopy(receipt)
+                mutate(changed)
+                file.write_bytes(json.dumps(changed).encode())
+                with self.assertRaises(e.EvidenceError):
+                    e.require_current_acceptance(file, fresh, env, NOW)
+
+    def test_acceptance_expires_after_readiness_without_renewal(self):
+        before = e.timestamp("2026-10-22T06:09:59Z")
+        deadline = e.timestamp(self.bundle["expiresAt"])
+        fresh = self.verify(now=before)
+        env = {**self.env, "LKC_APPROVED_SOURCE_EVIDENCE_SHA256": fresh["evidenceDigest"]}
+        file = self.root / "api-readiness.json"
+        raw = json.dumps(e.bind_acceptance(fresh, env, before)).encode()
+        file.write_bytes(raw)
+        e.require_current_acceptance(file, fresh, env, before)
+        for now in [deadline, deadline + dt.timedelta(seconds=1)]:
+            with self.subTest(now=now), self.assertRaisesRegex(e.EvidenceError, "EXPIRED"):
+                e.require_current_acceptance(file, fresh, env, now)
+            with self.assertRaisesRegex(e.EvidenceError, "STALE"):
+                self.verify(now=now)
+        self.assertEqual(file.read_bytes(), raw)
+
+    def test_mutation_cli_revalidates_local_proof_and_never_rewrites_receipt(self):
+        clock = [NOW]
+        class Clock(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock[0]
+        env = {**self.env, "LKC_APPROVED_SOURCE_EVIDENCE_SHA256": self.save()}
+        file = self.root / "api-readiness.json"
+        argv = ["readiness", "--root", str(self.root), "--source-sha", SHA, "--evidence", str(file)]
+        def invoke(mutation=False):
+            output = io.StringIO()
+            with patch.object(sys, "argv", argv + (["--mutation-guard"] if mutation else [])), contextlib.redirect_stdout(output):
+                return g.main(), output.getvalue()
+        with patch.dict(os.environ, env), patch.object(e.dt, "datetime", Clock), \
+             patch.object(g, "source_evidence_module", return_value=e), \
+             patch.object(g.subprocess, "check_output", return_value=SHA.encode()), \
+             patch.object(g.subprocess, "run", side_effect=AssertionError("NO_NETWORK_FALLBACK")):
+            self.assertEqual(invoke()[0], 0)
+            raw = file.read_bytes()
+            status, output = invoke(True)
+            self.assertEqual(status, 0)
+            self.assertEqual(json.loads(output)["expiresAt"], self.bundle["expiresAt"])
+            with patch.dict(os.environ, {"GITHUB_RUN_ID": "987654321"}):
+                self.assertNotEqual(invoke(True)[0], 0)
+            clock[0] = e.timestamp(self.bundle["expiresAt"])
+            self.assertNotEqual(invoke(True)[0], 0)
+            clock[0] = NOW
+            (self.bundle_dir / "synthetic-source.zip").write_bytes(self.blob + b"tampered")
+            self.assertNotEqual(invoke(True)[0], 0)
+            self.assertEqual(file.read_bytes(), raw, "mutation checks must never renew or replace readiness evidence")
 
 
 if __name__ == "__main__":

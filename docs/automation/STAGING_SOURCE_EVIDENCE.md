@@ -114,6 +114,18 @@ the source comparison. `hostingPromotionAuthorized=false` and
 replace live version pins, backups/recovery, limited-pilot Auth/account review,
 current-main checks, or protected environment approval.
 
+The accepted readiness receipt also binds `checkedAt` and `acceptanceRun`
+(repository, workflow, run ID and attempt) to the source SHA, independent digest
+and pinned expiry. Before **each** backup channel creation/release and live
+promotion POST, `--mutation-guard` revalidates the retained bundle, archive bytes
+and inventory locally, then compares the complete accepted receipt against that
+fresh result and the current protected run. A saved PASS alone is insufficient.
+The Node POST hook checks the returned deadline again after the verifier exits.
+Missing, changed, cross-run or expired evidence blocks that write, including
+expiry between the two sites. Mutation checks never renew or overwrite the
+readiness receipt. Rollback bypasses this new-write gate; the existing known
+promotion-result and pinned-version recovery conditions still apply.
+
 The old implicit `gcloud functions describe` / `gcloud storage cat` defaults
 and the now-unused setup-gcloud step are removed. The isolated `check()`
 validator requires explicit test/adapter readers and is not the release CLI.
@@ -127,6 +139,8 @@ records, deployment drift, wrong Build/generation/hash, archive tampering,
 incomplete inventory, secret/extra/duplicate fields, filesystem boundaries,
 CLI rejection and preserved workflow guards. The existing Node restore suite
 also tests preflight subprocess success/failure and untrusted contexts.
+Fake-clock mutation tests cover expiry after readiness, all four backup POSTs,
+the verifier-to-POST boundary, and between live sites, followed by rollback.
 Windows uses a simulated hard-link stat boundary where the sandbox denies
 link creation; standard Linux CI tests a real hard link.
 

@@ -466,6 +466,8 @@ jobs:
         if: env.LKC_OPERATION == 'promote'
         id: backup
         working-directory: source
+        env:
+          LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
         run: |
           node scripts/automation/restore-staging-hosting.mjs \
             --backup --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
@@ -517,6 +519,7 @@ jobs:
         continue-on-error: true
         working-directory: source
         env:
+          LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
           GH_TOKEN: ${{ github.token }}
         run: |
           node scripts/automation/restore-staging-hosting.mjs \

@@ -428,12 +428,43 @@ function validateRuntime({projectId, region, staffSite, adminSite, evidenceDir})
   requireValue(staffSite === hostingSites.staff && adminSite === hostingSites.admin, "SITE_PAIR_REJECTED");
   requireValue(path.isAbsolute(evidenceDir), "EVIDENCE_DIRECTORY_MUST_BE_ABSOLUTE");
 }
+export async function requireCurrentSourceMutationReview(options, {
+  run = spawnSync, now = () => new Date().toISOString(),
+} = {}) {
+  validateRuntime(options);
+  requireProtectedContext();
+  requireValue(sourceShaPattern.test(options.sourceSha ?? "") && decimalId.test(options.promotionRunId ?? "")
+    && options.promotionRunId === process.env.GITHUB_RUN_ID && options.runAttempt === 1
+    && process.env.GITHUB_RUN_ATTEMPT === "1", "SOURCE_MUTATION_CONTEXT_REJECTED");
+  const pin = process.env.LKC_APPROVED_SOURCE_EVIDENCE_SHA256;
+  requireValue(/^[a-f0-9]{64}$/u.test(pin ?? ""), "SOURCE_MUTATION_PIN_REQUIRED");
+  const result = run("python3", ["scripts/automation/check-hosting-api-readiness.py",
+    "--root", ".", "--source-sha", options.sourceSha, "--mutation-guard",
+    "--evidence", path.join(options.evidenceDir,"api-readiness.json")],
+  {encoding:"utf8", timeout:30000, stdio:["ignore","pipe","pipe"]});
+  requireValue(result.status === 0 && !result.error, "SOURCE_MUTATION_REVALIDATION_FAILED");
+  let accepted;
+  try {
+    requireValue(typeof result.stdout === "string" && Buffer.byteLength(result.stdout) <= 8192,
+      "SOURCE_MUTATION_RECEIPT_REJECTED");
+    accepted = JSON.parse(result.stdout);
+  } catch { throw new Error("SOURCE_MUTATION_RECEIPT_REJECTED"); }
+  requireValue(accepted && Object.keys(accepted).sort().join(",")
+    === "evidenceDigest,expiresAt,runAttempt,runId,sourceSha,status"
+    && accepted.status === "PASS" && accepted.sourceSha === options.sourceSha && accepted.evidenceDigest === pin
+    && accepted.runId === options.promotionRunId && accepted.runAttempt === 1,
+  "SOURCE_MUTATION_RECEIPT_MISMATCH");
+  // Recheck after the synchronous verifier, directly at each existing POST hook.
+  const deadline = Date.parse(accepted.expiresAt), current = Date.parse(now());
+  requireValue(Number.isFinite(deadline) && Number.isFinite(current) && current < deadline,
+    "SOURCE_MUTATION_EVIDENCE_EXPIRED");
+}
 export async function requireCurrentPilotMutationReview(options, {
-  read = readFile, now = () => new Date().toISOString(),
+  read = readFile, run = spawnSync, now = () => new Date().toISOString(),
 } = {}) {
   const policy = options.evidencePolicy ?? "source-provenance";
   requireValue(["source-provenance", "limited-staff-pilot"].includes(policy), "EVIDENCE_POLICY_REJECTED");
-  if (policy === "source-provenance") return;
+  if (policy === "source-provenance") return requireCurrentSourceMutationReview(options, {run, now});
   validateRuntime(options);
   requireValue(sourceShaPattern.test(options.sourceSha ?? "") && decimalId.test(options.promotionRunId ?? "")
     && options.runAttempt === 1, "PILOT_MUTATION_CONTEXT_REJECTED");

@@ -398,13 +398,24 @@ async function writeAttemptEvidence(file, result) {
   await writeFile(temporary,JSON.stringify(result,null,2)+"\n",{mode:0o600});
   await rename(temporary,file);
 }
-export async function requireNoFeeSourcePath({projectId,region,sourceSha,evidenceDir}) {
+export async function requireNoFeeSourcePath({projectId,region,sourceSha,evidenceDir}, {run = spawnSync} = {}) {
   requireValue(projectId===allowedProjectId&&region===allowedRegion,"ENVIRONMENT_REJECTED");
   requireValue(typeof sourceSha==="string"&&sourceShaPattern.test(sourceSha),"SOURCE_SHA_REJECTED");
   requireValue(path.isAbsolute(evidenceDir),"EVIDENCE_DIRECTORY_MUST_BE_ABSOLUTE");
-  // GCS read-only source download is not automatically free, especially outside
-  // the Free Tier US regions. No paid-read override flag is provided.
+  // A reviewed pin is supplied only by the protected environment. Missing
+  // retained evidence never falls back to GCS, gcloud, or a caller trust flag.
   await mkdir(evidenceDir,{recursive:true});
+  if (process.env.LKC_APPROVED_SOURCE_EVIDENCE_SHA256) {
+    requireProtectedContext();
+    const result = run("python3", ["scripts/automation/check-hosting-api-readiness.py",
+      "--root", ".", "--source-sha", sourceSha, "--preflight",
+      "--evidence", path.join(evidenceDir,"source-evidence-preflight.json")],
+    {encoding:"utf8", timeout:30000, stdio:["ignore","pipe","pipe"]});
+    // Never relay arbitrary subprocess output or record contents to Actions logs.
+    requireValue(result.status === 0 && !result.error, "SOURCE_EVIDENCE_PREFLIGHT_FAILED");
+    console.log("HOSTING_SOURCE_EVIDENCE_PREFLIGHT=PASS");
+    return;
+  }
   await writeAttemptEvidence(path.join(evidenceDir,"api-readiness.json"),{
     status:"STOPPED",reason:"VERIFIED_NO_FEE_SOURCE_PATH_REQUIRED",sourceSha,
     externalApiInvoked:false,deployedSourceVerified:false,
@@ -417,12 +428,43 @@ function validateRuntime({projectId, region, staffSite, adminSite, evidenceDir})
   requireValue(staffSite === hostingSites.staff && adminSite === hostingSites.admin, "SITE_PAIR_REJECTED");
   requireValue(path.isAbsolute(evidenceDir), "EVIDENCE_DIRECTORY_MUST_BE_ABSOLUTE");
 }
+export async function requireCurrentSourceMutationReview(options, {
+  run = spawnSync, now = () => new Date().toISOString(),
+} = {}) {
+  validateRuntime(options);
+  requireProtectedContext();
+  requireValue(sourceShaPattern.test(options.sourceSha ?? "") && decimalId.test(options.promotionRunId ?? "")
+    && options.promotionRunId === process.env.GITHUB_RUN_ID && options.runAttempt === 1
+    && process.env.GITHUB_RUN_ATTEMPT === "1", "SOURCE_MUTATION_CONTEXT_REJECTED");
+  const pin = process.env.LKC_APPROVED_SOURCE_EVIDENCE_SHA256;
+  requireValue(/^[a-f0-9]{64}$/u.test(pin ?? ""), "SOURCE_MUTATION_PIN_REQUIRED");
+  const result = run("python3", ["scripts/automation/check-hosting-api-readiness.py",
+    "--root", ".", "--source-sha", options.sourceSha, "--mutation-guard",
+    "--evidence", path.join(options.evidenceDir,"api-readiness.json")],
+  {encoding:"utf8", timeout:30000, stdio:["ignore","pipe","pipe"]});
+  requireValue(result.status === 0 && !result.error, "SOURCE_MUTATION_REVALIDATION_FAILED");
+  let accepted;
+  try {
+    requireValue(typeof result.stdout === "string" && Buffer.byteLength(result.stdout) <= 8192,
+      "SOURCE_MUTATION_RECEIPT_REJECTED");
+    accepted = JSON.parse(result.stdout);
+  } catch { throw new Error("SOURCE_MUTATION_RECEIPT_REJECTED"); }
+  requireValue(accepted && Object.keys(accepted).sort().join(",")
+    === "evidenceDigest,expiresAt,runAttempt,runId,sourceSha,status"
+    && accepted.status === "PASS" && accepted.sourceSha === options.sourceSha && accepted.evidenceDigest === pin
+    && accepted.runId === options.promotionRunId && accepted.runAttempt === 1,
+  "SOURCE_MUTATION_RECEIPT_MISMATCH");
+  // Recheck after the synchronous verifier, directly at each existing POST hook.
+  const deadline = Date.parse(accepted.expiresAt), current = Date.parse(now());
+  requireValue(Number.isFinite(deadline) && Number.isFinite(current) && current < deadline,
+    "SOURCE_MUTATION_EVIDENCE_EXPIRED");
+}
 export async function requireCurrentPilotMutationReview(options, {
-  read = readFile, now = () => new Date().toISOString(),
+  read = readFile, run = spawnSync, now = () => new Date().toISOString(),
 } = {}) {
   const policy = options.evidencePolicy ?? "source-provenance";
   requireValue(["source-provenance", "limited-staff-pilot"].includes(policy), "EVIDENCE_POLICY_REJECTED");
-  if (policy === "source-provenance") return;
+  if (policy === "source-provenance") return requireCurrentSourceMutationReview(options, {run, now});
   validateRuntime(options);
   requireValue(sourceShaPattern.test(options.sourceSha ?? "") && decimalId.test(options.promotionRunId ?? "")
     && options.runAttempt === 1, "PILOT_MUTATION_CONTEXT_REJECTED");

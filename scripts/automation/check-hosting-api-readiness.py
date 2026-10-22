@@ -1,14 +1,13 @@
 """Hosting昇格前の読取専用検査。実行失敗・情報不足は必ず停止する。"""
 import argparse
 import hashlib
+import importlib.util
 import io
 import json
 import pathlib
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 import zipfile
 
 PROJECT = "lip-knots-crew-staging"
@@ -83,35 +82,9 @@ def verify_archive(blob, expected):
     except (zipfile.BadZipFile, KeyError, RuntimeError):
         raise ReadinessError("ARCHIVE_UNREADABLE") from None
 
-def gcloud_command(*arguments):
-    executable = shutil.which("gcloud")
-    require(executable is not None, "GCLOUD_NOT_FOUND")
-    return [executable, *arguments]
-
-def read_json(command):
-    try:
-        result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
-        return json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        raise ReadinessError("READ_ONLY_METADATA_FAILED") from None
-
-def describe(function):
-    # 環境変数・Secret・IAMを取得/保存しない。
-    fields = "name,environment,state,buildConfig.entryPoint,buildConfig.runtime,buildConfig.sourceProvenance,serviceConfig.service,serviceConfig.revision,serviceConfig.allTrafficOnLatestRevision"
-    return read_json(gcloud_command("functions", "describe", function, "--gen2", f"--project={PROJECT}", f"--region={REGION}", f"--format=json({fields})"))
-
-def read_archive(uri):
-    # ZIPは一時ファイルだけに保持し、展開しない。環境ファイルは読み出さない。
-    try:
-        with tempfile.TemporaryFile() as stream:
-            subprocess.run(gcloud_command("storage", "cat", uri), check=True, stdout=stream, stderr=subprocess.DEVNULL, timeout=120)
-            require(stream.tell() <= MAX_ARCHIVE, "ARCHIVE_TOO_LARGE")
-            stream.seek(0)
-            return stream.read(MAX_ARCHIVE + 1)
-    except (OSError, subprocess.SubprocessError):
-        raise ReadinessError("READ_ONLY_SOURCE_FAILED") from None
-
-def check(root, source_sha, describe_fn=describe, download_fn=read_archive):
+def check(root, source_sha, describe_fn=None, download_fn=None):
+    # Isolated validator adapter only. Release CLI requires reviewed evidence.
+    require(describe_fn is not None and download_fn is not None, "VERIFIED_EVIDENCE_INPUT_REQUIRED")
     require(bool(re.fullmatch(r"[a-f0-9]{40}", source_sha)), "SOURCE_SHA_REQUIRED")
     try:
         head = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
@@ -130,21 +103,46 @@ def check(root, source_sha, describe_fn=describe, download_fn=read_archive):
     # 情報は最小限。ソースZIP・環境変数・メタデータ全文を証跡へ残さない。
     return {"status": "PASS", "sourceSha": source_sha, "functions": [{"name": f, "revision": before[f]["revision"]} for f in REQUIRED], "verifiedFileCount": len(expected), "caseMailEnabled": False}
 
+def source_evidence_module():
+    spec = importlib.util.spec_from_file_location("hosting_source_evidence", pathlib.Path(__file__).with_name("hosting_source_evidence.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=pathlib.Path, default=pathlib.Path("."))
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--evidence", type=pathlib.Path, required=True)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--preflight", action="store_true")
+    mode.add_argument("--mutation-guard", action="store_true")
     args = parser.parse_args()
+    evidence = source_evidence_module()
     try:
-        result = check(args.root.resolve(), args.source_sha)
-    except (ReadinessError, OSError, ValueError, TypeError, AttributeError) as error:
-        code = str(error) if isinstance(error, ReadinessError) else "READINESS_INPUT_INVALID"
+        directory, approved = evidence.protected_context(args.source_sha)
+        from types import SimpleNamespace
+        validators = SimpleNamespace(BUCKET=BUCKET, identify=identify, verify_archive=verify_archive,
+                                     expected_files=expected_files, subprocess=subprocess)
+        result = evidence.verify_bundle(args.root.resolve(), args.source_sha, directory, approved,
+                                        validators, preflight=args.preflight)
+        if args.mutation_guard:
+            result = evidence.require_current_acceptance(args.evidence.absolute(), result)
+        elif not args.preflight:
+            result = evidence.bind_acceptance(result)
+    except (ReadinessError, evidence.EvidenceError, OSError, ValueError, TypeError, AttributeError, RecursionError) as error:
+        code = str(error) if isinstance(error, (ReadinessError, evidence.EvidenceError)) else "READINESS_INPUT_INVALID"
         result = {"status": "STOPPED", "reason": code}
+    if args.mutation_guard:
+        # Read-only revalidation: never overwrite/renew the accepted receipt.
+        # This bounded, non-secret result is checked again immediately before POST.
+        print(json.dumps(result, separators=(",", ":")))
+        return 0 if result["status"] == "PASS" else 1
     args.evidence.parent.mkdir(parents=True, exist_ok=True)
     args.evidence.write_text(json.dumps(result, indent=2) + "\n", "utf-8")
     print("HOSTING_API_READINESS=" + result["status"])
-    if result["status"] != "PASS":
+    if result["status"] != ("PREFLIGHT_READY" if args.preflight else "PASS"):
         print("HOSTING_API_READINESS_ERROR=" + result["reason"])
         return 1
     return 0

@@ -284,6 +284,9 @@ jobs:
         id: no_fee_source
         if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'
         working-directory: source
+        # Resolve the independently reviewed pin after the protected environment is available.
+        env:
+          LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
         run: |
           node scripts/automation/restore-staging-hosting.mjs \
             --no-fee-source-guard --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
@@ -408,13 +411,13 @@ jobs:
             --admin-url "${{ steps.channel.outputs.admin_url }}" \
             --allowed-sites "${{ steps.hosting.outputs.staff_site }},${{ steps.hosting.outputs.admin_site }}" \
             --evidence-dir "$LKC_EVIDENCE_DIR/preview"
-      - name: Set up Google Cloud CLI for read-only API verification
-        if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       - name: Verify deployed upload APIs before any live Hosting change
         id: readiness
         if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'
         working-directory: source
+        # Resolve the independently reviewed pin after the protected environment is available.
+        env:
+          LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
         run: |
           npm run build -w @lkc/functions
           python3 scripts/automation/check-hosting-api-readiness.py \
@@ -463,6 +466,8 @@ jobs:
         if: env.LKC_OPERATION == 'promote'
         id: backup
         working-directory: source
+        env:
+          LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
         run: |
           node scripts/automation/restore-staging-hosting.mjs \
             --backup --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
@@ -514,6 +519,7 @@ jobs:
         continue-on-error: true
         working-directory: source
         env:
+          LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
           GH_TOKEN: ${{ github.token }}
         run: |
           node scripts/automation/restore-staging-hosting.mjs \

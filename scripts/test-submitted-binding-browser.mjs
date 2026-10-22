@@ -13,6 +13,7 @@ function between(start,end,includeEnd=false){
  return app.slice(a,b+(includeEnd?end.length:0));
 }
 const current={
+ draftLoaders:between('const loadDraftStore=','const loadSubmittedBindings='),
  bindingLoaders:between('const loadSubmittedBindings=','import { submissionDraftKey }'),
  uploadAndRetry:between('  async function uploadSubmission()','  async function loadSubmissionHistory('),
  hydration:between('  useEffect(()=>{\n    setSubmissionConfirmed(false);','  },[draftKey]);',true),
@@ -27,7 +28,9 @@ function runtime(source,old=false){
  const prefix=old?'/legacy':'';
  return compile(`
  import * as attemptStore from '${prefix}/attempt.js';
- import * as draftStore from '${prefix}/draft.js';
+ ${old?"import * as draftStore from '/legacy/draft.js';":`import {markDraftSubmitted,getSubmittedDraftReceipt} from '/submitted-marker-store';
+ ${source.draftLoaders}
+ const draftStore={markDraftSubmitted,getSubmittedDraftReceipt,clearDraft,loadDraft,saveDraft,hasStoredDraft,confirmDraftCleanupComplete};`}
  import {runWithConcurrency} from '/concurrency.js';
  ${old?'':source.bindingLoaders}
  const bindingStore={saveSubmittedBinding:async(...args)=>(await import('/submitted-binding-store')).saveSubmittedBinding(...args)};
@@ -55,6 +58,8 @@ function runtime(source,old=false){
 }
 const modules={
  '/fixture.js':runtime(current),'/legacy/fixture.js':runtime(legacy,true),
+ '/submitted-marker-store':compile(fs.readFileSync('apps/staff/src/submitted-marker-store.ts','utf8')),
+ '/draft-store':compile(current.draftStore),
  '/draft.js':compile(current.draftStore),'/attempt.js':compile(current.attemptStore),
  '/legacy/draft.js':compile(legacy.draftStore),'/legacy/attempt.js':compile(legacy.attemptStore),
  '/submitted-binding-store':compile(fs.readFileSync('apps/staff/src/submitted-binding-store.ts','utf8')),

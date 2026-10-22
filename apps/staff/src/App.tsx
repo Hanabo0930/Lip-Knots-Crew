@@ -20,7 +20,13 @@ const loadSubmissionAttempt=()=>import("./submission-attempt-store");
 import type { SubmissionAttempt } from "./submission-attempt-store";
 import type { SubmittedCleanupState } from "./submitted-binding-store";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, firebaseApp } from "./firebase";
-import { clearDraft, loadDraft, saveDraft, markDraftSubmitted, getSubmittedDraftReceipt, hasStoredDraft, confirmDraftCleanupComplete } from "./draft-store";
+import { markDraftSubmitted, getSubmittedDraftReceipt } from "./submitted-marker-store";
+const loadDraftStore=()=>import("./draft-store");
+const clearDraft:typeof import("./draft-store").clearDraft=async(...args)=>(await loadDraftStore()).clearDraft(...args);
+const loadDraft:typeof import("./draft-store").loadDraft=async(...args)=>(await loadDraftStore()).loadDraft(...args);
+const saveDraft:typeof import("./draft-store").saveDraft=async(...args)=>(await loadDraftStore()).saveDraft(...args);
+const hasStoredDraft:typeof import("./draft-store").hasStoredDraft=async(...args)=>(await loadDraftStore()).hasStoredDraft(...args);
+const confirmDraftCleanupComplete:typeof import("./draft-store").confirmDraftCleanupComplete=async(...args)=>(await loadDraftStore()).confirmDraftCleanupComplete(...args);
 const loadSubmittedBindings=()=>import("./submitted-binding-store");
 const hasSubmittedBindings=async(key:string)=>(await loadSubmittedBindings()).hasSubmittedBindings(key);
 const saveSubmittedBinding=async(key:string,attempt:Pick<SubmissionAttempt,"clientRequestId"|"storageKey">,isCurrent:()=>boolean)=>{

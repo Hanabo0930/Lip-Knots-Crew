@@ -207,10 +207,59 @@ await test("First-page and additional-page failures recover without dropping loa
   assert.equal(x.state().rows.length, 55); assert.equal(x.state().error, "");
 });
 await test("Year-discovery error is distinct from zero records and retry remains available", async () => {
+  records = [row("old", "2024-01-01"), row("current", "2026-01-01")];
   fail = () => true; const x = instance(); await x.control.initialize();
   assert.equal(x.state().status, "error"); assert.equal(x.state().years.length, 0);
-  assert.match(html(x.state()), /もう一度読み込む/);
-  fail = null; x.control.retry(); await tick(); assert.equal(x.state().status, "ready");
+  const failed = html(x.state());
+  assert.match(failed, /<select[^>]* disabled=""/);
+  assert.match(failed, /<option[^>]*>年を取得できません<\/option>/);
+  assert.match(failed, /role="alert"/); assert.ok(failed.includes(x.state().error));
+  assert.match(failed, /<button[^>]*>もう一度読み込む<\/button>/);
+  assert.doesNotMatch(failed, /年を確認中|年のシフトを読み込んでいます|表示できる過去のシフトはありません/);
+  fail = null; gate = deferred(q => lower(q) === undefined); x.control.retry();
+  const retrying = html(x.state()), pendingReads = queries.length;
+  assert.equal(x.state().status, "loading");
+  assert.match(retrying, /<option[^>]*>年を確認中<\/option>/);
+  assert.match(retrying, /<button[^>]* disabled=""/);
+  assert.doesNotMatch(retrying, /年を取得できません|role="alert"/);
+  x.control.retry(); assert.equal(queries.length, pendingReads, "Pending retry must not duplicate discovery");
+  gate.release(); await tick(); gate = null;
+  assert.equal(x.state().status, "ready");
+  assert.equal(JSON.stringify(x.state().years), "[2026,2025,2024]");
+  assert.equal(x.state().rows[0].id, "current");
+  const recovered = html(x.state());
+  assert.match(recovered, /<option[^>]*>2026年<\/option>/);
+  assert.match(recovered, /<option[^>]*>2024年<\/option>/);
+  assert.doesNotMatch(recovered, /<select[^>]* disabled|年を確認中|年を取得できません|role="alert"/);
+});
+await test("Disposed discovery cannot replace the current success or failure feedback", async () => {
+  for (const staleFails of [false, true]) {
+    const held = deferred(() => true), states = [], publish = state => states.push(state);
+    const retired = core.createPastShiftHistory(scope, {
+      oldest: async () => {
+        await held.promise;
+        if (staleFails) throw Error("synthetic old discovery failure");
+        return row("old", "2024-01-01");
+      },
+      page: async () => { assert.fail("Disposed discovery must not start a page read"); },
+    }, publish);
+    const oldRequest = retired.initialize(); retired.dispose();
+    const current = core.createPastShiftHistory(scope, {
+      oldest: async () => {
+        if (!staleFails) throw Error("synthetic current discovery failure");
+        return row("current", "2026-01-01");
+      },
+      page: async () => [{ row: row("current", "2026-01-01"), cursor: "current" }],
+    }, publish);
+    await current.initialize();
+    const count = states.length, before = html(states.at(-1));
+    assert.equal(states.at(-1).status, staleFails ? "ready" : "error");
+    assert.match(before, staleFails ? /<option[^>]*>2026年<\/option>/ : /<option[^>]*>年を取得できません<\/option>/);
+    held.release(); await oldRequest;
+    assert.equal(states.length, count, "Old discovery must not publish into the current view");
+    assert.equal(html(states.at(-1)), before);
+    current.dispose();
+  }
 });
 await test("Foreign owner, wrong year, duplicate and malformed returned rows fail closed", async () => {
   for (const bad of [

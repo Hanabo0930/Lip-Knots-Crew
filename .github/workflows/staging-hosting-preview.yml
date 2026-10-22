@@ -162,6 +162,7 @@ jobs:
             --admin-site "${{ steps.hosting.outputs.admin_site }}" \
             --staff-channels-json "$RUNNER_TEMP/lkc-staff-channels.json" \
             --admin-channels-json "$RUNNER_TEMP/lkc-admin-channels.json" \
+            --evidence-dir "$LKC_EVIDENCE_DIR" \
             --github-output "$GITHUB_OUTPUT"
       - name: Prefer the HTTPS Ubuntu package mirror
         run: |

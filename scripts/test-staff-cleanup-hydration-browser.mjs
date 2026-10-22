@@ -17,6 +17,7 @@ const compile=s=>ts.transpileModule(s,{compilerOptions:{target:ts.ScriptTarget.E
 const runtime=`import * as attemptStore from '/attempt.js';
 import * as draftStore from '/draft.js';
 import {hasSubmittedBindings,saveSubmittedBinding,finishSubmittedBindings} from '/submitted-binding-store';
+const loadSubmittedBindings=()=>import('/submitted-binding-store');
 import {runWithConcurrency} from '/concurrency.js';
 window.makeFiles=()=>[new File(['one'],'one.png',{type:'image/png',lastModified:1}),new File(['two'],'two.pdf',{type:'application/pdf',lastModified:2})];
 window.makeFixture=(key='company/user/job/report')=>{

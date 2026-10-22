@@ -18,11 +18,12 @@ import { httpsCallable } from "firebase/functions";
 const loadUploadStorage=()=>import("./upload-storage");
 const loadSubmissionAttempt=()=>import("./submission-attempt-store");
 import type { SubmissionAttempt } from "./submission-attempt-store";
+import type { SubmittedCleanupState } from "./submitted-binding-store";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, firebaseApp } from "./firebase";
 import { clearDraft, loadDraft, saveDraft, markDraftSubmitted, getSubmittedDraftReceipt, hasStoredDraft, confirmDraftCleanupComplete } from "./draft-store";
 const loadSubmittedBindings=()=>import("./submitted-binding-store");
 const hasSubmittedBindings=async(key:string)=>(await loadSubmittedBindings()).hasSubmittedBindings(key);
-const saveSubmittedBinding=async(key:string,attempt:SubmissionAttempt,isCurrent:()=>boolean)=>{
+const saveSubmittedBinding=async(key:string,attempt:Pick<SubmissionAttempt,"clientRequestId"|"storageKey">,isCurrent:()=>boolean)=>{
   try{return await (await loadSubmittedBindings()).saveSubmittedBinding(key,attempt,isCurrent);}catch{return false;}
 };
 const finishSubmittedBindings=async(key:string,isCurrent:()=>boolean,hasStoredDraft:()=>Promise<boolean>)=>{
@@ -260,7 +261,7 @@ export default function App(){
   const [submissionType,setSubmissionType]=useState<SubmissionType>("report"); const [requestId,setRequestId]=useState("");
   const [submissionConfirmed,setSubmissionConfirmed]=useState(false);
   const [submissionMessage,setSubmissionMessage]=useState("" );
-  const [draftCleanup,setDraftCleanup]=useState<{key:string;durable:boolean;attempt?:SubmissionAttempt;draftCleared?:boolean;attemptCleared?:boolean;unverified?:boolean;bindingSaved?:boolean;recovered?:boolean;uncertain?:boolean}|null>(null);
+  const [draftCleanup,setDraftCleanup]=useState<SubmittedCleanupState|null>(null);
   const [files,setFiles]=useState<File[]>([]); const [uploadState,setUploadState]=useState<Record<string,string>>({});
   const [draftHydrating,setDraftHydrating]=useState(false);
   const [deviceSessionId,setDeviceSessionId]=useState(""); const [devices,setDevices]=useState<DeviceSession[]>([]); const [showDevices,setShowDevices]=useState(false);
@@ -1706,51 +1707,18 @@ export default function App(){
 
   async function retryDraftCleanup(){
     if(!draftCleanup||isPending("draft-cleanup")||isPending("uploadSubmission"))return;
-    let target=draftCleanup;
-    const authVersion=authLoadVersionRef.current;
+    const target=draftCleanup,authVersion=authLoadVersionRef.current;
     const isCurrent=()=>authVersion===authLoadVersionRef.current;
-    const advance=(next:typeof target)=>{
-      const previous=target;
-      setDraftCleanup(current=>current===previous?next:current);
-      target=next;
-    };
     try{
       await run("draft-cleanup",async()=>{
-        if(!target.recovered){
-          // Only this running session's completed-upload identity permits the existing shared cleanup.
-          if(!target.attempt&&!target.attemptCleared){advance({...target,unverified:true});return;}
-          if(!target.bindingSaved){
-            if(!isCurrent()||!target.attempt)return;
-            if(!target.durable&&!markDraftSubmitted(target.key))return;
-            const saved=await saveSubmittedBinding(target.key,target.attempt,isCurrent);
-            if(!isCurrent()||!saved)return;
-            advance({...target,durable:true,bindingSaved:true});
-          }
-          if(!target.attemptCleared){
-            const {clearSubmissionAttempt}=await loadSubmissionAttempt();
-            if(!isCurrent()||!target.attempt)return;
-            const cleared=await clearSubmissionAttempt(target.attempt,isCurrent);
-            if(!isCurrent()||!cleared)return;
-            advance({...target,attemptCleared:true,unverified:false});
-          }
-          if(!target.draftCleared){
-            await clearDraft(target.key,target.attempt,isCurrent);
-            if(!isCurrent())return;
-          }
-          advance({...target,draftCleared:true,recovered:true});
-        }
-        // Recovered records never authorize legacy-marker or shared-draft deletion.
-        const finished=await finishSubmittedBindings(target.key,isCurrent,()=>hasStoredDraft(target.key));
-        if(!isCurrent())return;
-        if(!finished||!await confirmDraftCleanupComplete(target.key,isCurrent)){
-          advance({...target,unverified:true});return;
-        }
-        if(isCurrent())setDraftCleanup(current=>current===target?null:current);
+        const {retrySubmittedCleanup}=await loadSubmittedBindings();
+        await retrySubmittedCleanup(target,isCurrent,setDraftCleanup,{markDraftSubmitted,saveSubmittedBinding,loadSubmissionAttempt,clearDraft,finishSubmittedBindings,hasStoredDraft,confirmDraftCleanupComplete});
       });
     }catch{
       if(isCurrent())setDraftCleanup(current=>current===target?{...current,unverified:true}:current);
     }
   }
+
   async function loadSubmissionHistory(jobId:string,type:SubmissionType,authLoadVersion=authLoadVersionRef.current):Promise<boolean>{
     if(authLoadVersion!==authLoadVersionRef.current)return false;
     const version=++submissionHistoryVersionRef.current;

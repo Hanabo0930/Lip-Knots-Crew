@@ -117,3 +117,69 @@ export async function finishSubmittedBindings(
     });
   } catch { return false; }
 }
+
+export type SubmittedCleanupState = {
+  key: string; durable: boolean; attempt?: SubmissionAttempt; draftCleared?: boolean;
+  attemptCleared?: boolean; unverified?: boolean; bindingSaved?: boolean; recovered?: boolean; uncertain?: boolean;
+};
+type CleanupPorts = {
+  markDraftSubmitted: (key: string) => boolean;
+  saveSubmittedBinding: typeof saveSubmittedBinding;
+  loadSubmissionAttempt: () => Promise<{ clearSubmissionAttempt: (attempt: ReceiptIdentity, isCurrent?: () => boolean) => Promise<boolean> }>;
+  clearDraft: (key: string, attempt?: ReceiptIdentity, isCurrent?: () => boolean) => Promise<void>;
+  finishSubmittedBindings: typeof finishSubmittedBindings;
+  hasStoredDraft: (key: string) => Promise<boolean>;
+  confirmDraftCleanupComplete: (key: string, isCurrent: () => boolean) => Promise<boolean>;
+};
+
+// Kept with the on-demand verifier so startup does not include cleanup orchestration.
+// The ports are the existing stores; this function never initiates upload or an API call.
+export async function retrySubmittedCleanup(
+  initial: SubmittedCleanupState, isCurrent: () => boolean,
+  setDraftCleanup: (update: (current: SubmittedCleanupState | null) => SubmittedCleanupState | null) => void,
+  ports: CleanupPorts,
+): Promise<void> {
+  if (!isCurrent()) return;
+  let target = initial;
+  const {markDraftSubmitted,saveSubmittedBinding,loadSubmissionAttempt,clearDraft,finishSubmittedBindings,hasStoredDraft,confirmDraftCleanupComplete}=ports;
+    const advance=(next:typeof target)=>{
+      const previous=target;
+      setDraftCleanup(current=>current===previous?next:current);
+      target=next;
+    };
+  try{
+        if(!target.recovered){
+          // Only this running session's completed-upload identity permits the existing shared cleanup.
+          if(!target.attempt&&!target.attemptCleared){advance({...target,unverified:true});return;}
+          if(!target.bindingSaved){
+            if(!isCurrent()||!target.attempt)return;
+            if(!target.durable&&!markDraftSubmitted(target.key))return;
+            const saved=await saveSubmittedBinding(target.key,target.attempt,isCurrent);
+            if(!isCurrent()||!saved)return;
+            advance({...target,durable:true,bindingSaved:true});
+          }
+          if(!target.attemptCleared){
+            const {clearSubmissionAttempt}=await loadSubmissionAttempt();
+            if(!isCurrent()||!target.attempt)return;
+            const cleared=await clearSubmissionAttempt(target.attempt,isCurrent);
+            if(!isCurrent()||!cleared)return;
+            advance({...target,attemptCleared:true,unverified:false});
+          }
+          if(!target.draftCleared){
+            await clearDraft(target.key,target.attempt,isCurrent);
+            if(!isCurrent())return;
+          }
+          advance({...target,draftCleared:true,recovered:true});
+        }
+        // Recovered records never authorize legacy-marker or shared-draft deletion.
+        const finished=await finishSubmittedBindings(target.key,isCurrent,()=>hasStoredDraft(target.key));
+        if(!isCurrent())return;
+        if(!finished||!await confirmDraftCleanupComplete(target.key,isCurrent)){
+          advance({...target,unverified:true});return;
+        }
+        if(isCurrent())setDraftCleanup(current=>current===target?null:current);
+  }catch(error){
+    if(isCurrent())setDraftCleanup(current=>current===target?{...current,unverified:true}:current);
+    throw error;
+  }
+}

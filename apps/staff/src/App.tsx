@@ -8,7 +8,7 @@ import {useShiftNotificationRoute} from "./useShiftNotificationRoute";
 import PastShiftHistory from "./PastShiftHistory";
 import { firestorePastShiftReader } from "./past-shift-reader";
 import ShiftJobCards,{shiftDateLabel,shiftTextLabel,shiftPage} from './ShiftJobCards';
-import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import {
   getIdTokenResult, isSignInWithEmailLink, onAuthStateChanged,
   signInWithEmailLink, signOut, User,
@@ -669,6 +669,7 @@ export default function App(){
     }).catch(()=>{if(active)setMessage("メールのリンクでログインできませんでした。メールに記載された確認コードを入力するか、「ログインメールを送る」から送り直してください。");}).finally(()=>{if(active)setEmailLinkPending(false);});
     return()=>{active=false;};
   },[]);
+  const refreshVisibleBusinessData=useEffectEvent(refreshBusinessData);
   useEffect(()=>{
     if(!user||!deviceSessionId||!functions||!db||!auth)return;
     const activeAuth=auth;
@@ -700,7 +701,7 @@ export default function App(){
     const stopWatching=watchDeviceSession(deviceSessionId,()=>handleRevoked("この端末はログアウトされました。"));
     void heartbeat();
     const interval=window.setInterval(()=>void heartbeat(),DEVICE_HEARTBEAT_INTERVAL_MS);
-    const handleVisibility=()=>{if(document.visibilityState==="visible"){void heartbeat();void refreshPushStatus(false);void refreshBusinessData(false);}};
+    const handleVisibility=()=>{if(document.visibilityState==="visible"){void heartbeat();void refreshPushStatus(false);void refreshVisibleBusinessData(false);}};
     document.addEventListener("visibilitychange",handleVisibility);
     return()=>{
       stopped=true;

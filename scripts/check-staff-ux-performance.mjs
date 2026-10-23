@@ -202,7 +202,12 @@ assert.match(
 );
 assert.match(
   app,
-  /visibilityState==="visible"[\s\S]*refreshBusinessData\(false\)/u,
+  /const refreshVisibleBusinessData=useEffectEvent\(refreshBusinessData\)/u,
+  "Visibility refresh must read the current render's business state.",
+);
+assert.match(
+  app,
+  /visibilityState==="visible"[\s\S]*refreshVisibleBusinessData\(false\)/u,
   "Returning to the app must refresh business data automatically.",
 );
 assert.match(

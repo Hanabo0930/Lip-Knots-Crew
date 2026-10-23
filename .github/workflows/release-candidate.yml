@@ -62,6 +62,7 @@ jobs:
           node scripts/test-case-mail-entry-readiness.mjs
           node scripts/test-admin-import-snapshot.mjs
           node scripts/test-submission-attempt-browser.mjs
+          node scripts/test-staff-visibility-refresh-browser.mjs
           node scripts/test-native-creation-retry-browser.mjs release-evidence/ci-native-creation-browser
           node scripts/test-admin-comparison-pages.mjs
           node scripts/test-case-mail-review-browser.mjs release-evidence/ci-mail-review --resolve-only

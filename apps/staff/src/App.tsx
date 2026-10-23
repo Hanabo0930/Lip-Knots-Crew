@@ -5,7 +5,7 @@ import {type ApplicationAttempt,applicationAttemptOwner,loadSavedApplicationAtte
 import {DeviceStorageError} from "./StartupBoundary";
 import {resubmissionNotificationId,readResubmissionNotification} from "./resubmission-notification";
 import {useShiftNotificationRoute} from "./useShiftNotificationRoute";
-import PastShiftHistory from "./PastShiftHistory";
+import PastShiftHistory from "./PastShiftHistoryEntry";
 import { firestorePastShiftReader } from "./past-shift-reader";
 import ShiftJobCards,{shiftDateLabel,shiftTextLabel,shiftPage} from './ShiftJobCards';
 import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";

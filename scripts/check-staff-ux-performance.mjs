@@ -157,12 +157,12 @@ assert.match(
 );
 assert.match(
   app,
-  /const hydratedDraftKeyRef=useRef\(""\);[\s\S]*const draftHydratingRef=useRef\(false\);[\s\S]*const skipNextDraftSaveRef=useRef\(false\);[\s\S]*hydratedDraftKeyRef\.current="";[\s\S]*draftHydratingRef\.current=Boolean\(draftKey\);[\s\S]*let active=true;[\s\S]*return loadDraft\(draftKey\);[\s\S]*\}\)\(\)\.then\(draftFiles=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(draftFiles\);[\s\S]*hydratedDraftKeyRef\.current=draftKey;[\s\S]*draftHydratingRef\.current=false;[\s\S]*catch\(\(\)=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(\[\]\);[\s\S]*draftHydratingRef\.current=false;[\s\S]*return\(\)=>\{active=false;\};[\s\S]*if\(!draftKey\|\|draftHydrating\|\|hydratedDraftKeyRef\.current!==draftKey\|\|draftSavePaused\)return;[\s\S]*if\(skipNextDraftSaveRef\.current\)\{skipNextDraftSaveRef\.current=false;return;\}/u,
+  /const hydratedDraftKeyRef=useRef\(""\);[\s\S]*const draftHydratingRef=useRef\(false\);[\s\S]*const skipNextDraftSaveRef=useRef\(false\);[\s\S]*hydratedDraftKeyRef\.current="";[\s\S]*draftHydratingRef\.current=Boolean\(draftKey\);[\s\S]*let active=true;[\s\S]*const isCurrent=\(\)=>active&&authVersion===authLoadVersionRef\.current&&previewContextRef\.current===draftKey;[\s\S]*readSubmissionDraft\(draftKey,isCurrent\)\)\.then\(snapshot=>\{[\s\S]*if\(!isCurrent\(\)\)return;[\s\S]*setFiles\(snapshot.files\);[\s\S]*hydratedDraftKeyRef\.current=draftKey;[\s\S]*draftHydratingRef\.current=false;[\s\S]*catch\(error=>\{[\s\S]*if\(!isCurrent\(\)\)return;[\s\S]*setFiles\(\[\]\);[\s\S]*draftHydratingRef\.current=false;[\s\S]*return\(\)=>\{active=false;\};[\s\S]*if\(!draftKey\|\|draftHydrating\|\|hydratedDraftKeyRef\.current!==draftKey\|\|draftSavePaused\)return;[\s\S]*if\(skipNextDraftSaveRef\.current\)\{skipNextDraftSaveRef\.current=false;return;\}/u,
   "Submission drafts must ignore stale loads, clear stale files on failure, and never save before hydration.",
 );
 assert.match(
   app,
-  /saveDraft\(draftKey,files\)\.catch\(\(\)=>\{\s*if\(active&&hydratedDraftKeyRef\.current===draftKey\)showSubmissionMessage\("下書きを保存できませんでした/u,
+  /saveDraft\(draftKey,files,\(\)=>authVersion===authLoadVersionRef\.current\)\.catch\(\(\)=>\{\s*if\(active&&hydratedDraftKeyRef\.current===draftKey\)showSubmissionMessage\("下書きを保存できませんでした/u,
   "Draft persistence failures must be handled without an unhandled rejection or a silent data-loss state.",
 );
 assert.match(
@@ -653,7 +653,7 @@ assert.match(
 
 assert.match(
   app,
-  /async function clearSubmissionFiles\(\)\{[\s\S]*await run\("submission-files"[\s\S]*await clearDraft\(draftKey\)[\s\S]*aria-busy=\{isPending\("submission-files"\)\}[\s\S]*isPending\("submission-files"\)\?"解除中…":"すべて解除"/u,
+  /async function clearSubmissionFiles\(\)\{[\s\S]*await run\("submission-files"[\s\S]*await clearDraft\(draftKey,undefined,isCurrentClear\)[\s\S]*aria-busy=\{isPending\("submission-files"\)\}[\s\S]*isPending\("submission-files"\)\?"解除中…":"すべて解除"/u,
   "Clearing all submission files must block duplicate taps and keep visible progress until the saved draft is removed.",
 );
 
@@ -665,7 +665,7 @@ assert.match(
 
 assert.match(
   app,
-  /async function uploadSubmission\(\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const isCurrentUpload=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*createUploadSession[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*state_changed[\s\S]*if\(isCurrentUpload\(\)\)setUploadState[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*await clearDraft\(draftKey,attempt,isCurrentUpload\);[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*setMessage:value=>\{if\(isCurrentUpload\(\)\)showSubmissionMessage\(value\);\}[\s\S]*catch\{return;\}/u,
+  /async function uploadSubmission\(\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const isCurrentUpload=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*createUploadSession[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*state_changed[\s\S]*if\(isCurrentUpload\(\)\)setUploadState[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*await clearDraft\(draftKey,attempt,isCurrentUpload,lease\);[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*setMessage:value=>\{if\(isCurrentUpload\(\)\)showSubmissionMessage\("送信エラー："\+value\);\}[\s\S]*catch\{return;\}/u,
   "Submission preparation, progress, completion, and errors must remain pinned to the account that started the upload.",
 );
 

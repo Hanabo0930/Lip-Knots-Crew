@@ -1,3 +1,5 @@
+import {isSubmissionAttemptKey, submissionAttemptPrefix, submittedBindingPrefix, submittedMarkerKey} from "./submission-namespace";
+import {isStoredSubmissionAttempt} from "./submission-attempt-store";
 import type { SubmissionAttempt } from "./submission-attempt-store";
 
 type ReceiptIdentity = Pick<SubmissionAttempt, "clientRequestId" | "storageKey">;
@@ -8,10 +10,9 @@ type SubmittedBinding = {
   draftScopeSha256: string;
 };
 type Entry = { key: string; raw: string; binding: SubmittedBinding };
-const PREFIX = "lkc.submittedDraftBinding.v2:";
+const PREFIX = submittedBindingPrefix;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
-const RECEIPT_KEY = /^lkc\.submissionAttempt\.v1:[a-f0-9]{64}$/;
-const markerKey = (key: string) => "lkc-submitted-draft:" + key;
+const markerKey = submittedMarkerKey;
 const uncertain = () => new Error("端末の提出記録を確認できません。再送せず、提出履歴と端末の保存設定を確認してください。");
 
 async function scopeFor(key: string): Promise<string> {
@@ -35,7 +36,7 @@ function entriesFor(scope: string): Entry[] {
     const value = JSON.parse(raw) as SubmittedBinding;
     if (!value || Object.keys(value).sort().join(",") !== "clientRequestId,draftScopeSha256,receiptStorageKey,version" ||
       value.version !== 2 || typeof value.clientRequestId !== "string" || !UUID.test(value.clientRequestId) ||
-      typeof value.receiptStorageKey !== "string" || !RECEIPT_KEY.test(value.receiptStorageKey) ||
+      typeof value.receiptStorageKey !== "string" || (!isSubmissionAttemptKey(value.receiptStorageKey) || !value.receiptStorageKey.startsWith(submissionAttemptPrefix + scope + ":")) ||
       value.draftScopeSha256 !== scope || key !== PREFIX + scope + ":" + value.clientRequestId) throw uncertain();
     return { key, raw, binding: value };
   });
@@ -46,18 +47,23 @@ function receiptMatchesOrAbsent(binding: SubmittedBinding): boolean {
   const raw = localStorage.getItem(binding.receiptStorageKey);
   if (raw === null) return true;
   const saved = JSON.parse(raw);
-  return saved?.version === 1 && saved.clientRequestId === binding.clientRequestId &&
-    (saved.expectedRevision === undefined || (Number.isSafeInteger(saved.expectedRevision) && saved.expectedRevision >= 0));
+  return isStoredSubmissionAttempt(saved) && saved.clientRequestId === binding.clientRequestId;
 }
 export async function hasSubmittedBindings(key: string): Promise<boolean> {
   return entriesFor(await scopeFor(key)).length > 0;
+}
+
+export async function readSubmittedBindingIdentity(key: string): Promise<ReceiptIdentity | null> {
+  const entries = entriesFor(await scopeFor(key));
+  if (entries.length !== 1 || !receiptMatchesOrAbsent(entries[0].binding)) return null;
+  return {clientRequestId: entries[0].binding.clientRequestId, storageKey: entries[0].binding.receiptStorageKey};
 }
 
 // Called only with the current completed upload's identity, never with saved draft files.
 export async function saveSubmittedBinding(key: string, attempt: ReceiptIdentity, isCurrent: () => boolean): Promise<boolean> {
   try {
     const scope = await scopeFor(key);
-    if (!UUID.test(attempt.clientRequestId) || !RECEIPT_KEY.test(attempt.storageKey) || !navigator.locks) return false;
+    if (!UUID.test(attempt.clientRequestId) || (!isSubmissionAttemptKey(attempt.storageKey) || !attempt.storageKey.startsWith(submissionAttemptPrefix + scope + ":")) || !navigator.locks) return false;
     const binding: SubmittedBinding = { version: 2, clientRequestId: attempt.clientRequestId, receiptStorageKey: attempt.storageKey, draftScopeSha256: scope };
     const storageKey = PREFIX + scope + ":" + binding.clientRequestId;
     const raw = JSON.stringify(binding);
@@ -124,6 +130,7 @@ export async function finishSubmittedBindings(
 export type SubmittedCleanupState = {
   key: string; durable: boolean; attempt?: SubmissionAttempt; draftCleared?: boolean;
   attemptCleared?: boolean; unverified?: boolean; bindingSaved?: boolean; recovered?: boolean; uncertain?: boolean;
+  busy?: boolean; // Transient UI read contention only; never persisted as submission evidence.
 };
 type CleanupPorts = {
   saveSubmittedBinding: typeof saveSubmittedBinding;

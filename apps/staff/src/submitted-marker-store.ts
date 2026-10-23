@@ -1,6 +1,7 @@
+import {submittedMarkerKey as receiptKey} from "./submission-namespace";
 // Shared synchronous marker state for the app and the on-demand IndexedDB store.
 export const submittedDrafts = new Map<string, number>();
-export const receiptKey = (key: string) => `lkc-submitted-draft:${key}`;
+export {submittedMarkerKey as receiptKey} from "./submission-namespace";
 
 export function getSubmittedDraftReceipt(key: string): { durable: boolean } | null {
   try { if (localStorage.getItem(receiptKey(key)) === "1") return { durable: true }; } catch { /* メモリの記録を確認する。 */ }

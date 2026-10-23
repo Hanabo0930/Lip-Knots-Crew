@@ -21,7 +21,7 @@ const browser=await chromium.launch({headless:true}),results=[],external=[],erro
 const file={name:'synthetic-boundary.pdf',mimeType:'application/pdf',buffer:Buffer.from('%PDF-1.4\nSynthetic boundary only\n%%EOF')};
 const poll=async(fn,label)=>{const end=Date.now()+8000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,20));}throw Error(label);};
 const send=p=>p.getByRole('button',{name:'報告書を送信する',exact:true});
-const receipt=p=>p.evaluate(()=>Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('lkc.submissionAttempt.v1:'))));
+const receipt=p=>p.evaluate(()=>Object.fromEntries(Object.entries(localStorage).filter(([k])=>k.startsWith('lkc.submit.g2:attempt.v1:'))));
 const taskReads=p=>p.evaluate(()=>window.__fixture.entered.filter(n=>n==='getMyTasks').length);
 const visibility=(p,{advance=0,visible=true,patch={}}={})=>p.evaluate(({advance,visible,patch})=>{
  window.__fixture.patchJob(patch);

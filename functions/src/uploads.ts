@@ -1,3 +1,4 @@
+import {assertSubmissionAcceptanceContext} from "./submission-acceptance-context";
 import { assertSubmissionFile, assertSubmissionFileIdentity, assertSubmissionOwner, assertReplacementRequest, assertSubmissionReadiness, caseMailSubmissionContext, assertCaseMailSubmissionRevision, assertCaseMailSubmissionCurrent } from "./submission-integrity";
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
@@ -23,6 +24,7 @@ import { createSubmissionDeadlinePolicy } from "./submission-deadline-policy";
 const CreateSchema = z.object({
   clientRequestId: z.string().uuid().optional(),
   expectedRevision: z.number().int().nonnegative().optional(),
+  expectedDateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   jobId: z.string().min(1),
   type: z.enum(["report", "sales_floor"]),
   purpose: z.enum(["initial", "additional", "replacement"]).default("initial"),
@@ -83,7 +85,9 @@ export const createUploadSession = onCall(async (request) => {
             parent.jobId !== input.jobId || parent.type !== input.type || parent.purpose !== input.purpose ||
             (parent.resubmissionRequestId ?? null) !== (input.resubmissionRequestId ?? null) ||
             parent.requestFingerprint !== fingerprint || parent.totalFiles !== fileRecords.length ||
-            parent.acceptedDateKey !== job.dateKey || parent.acceptedAssignmentRevision !== (job.revision ?? 0)) {
+            parent.acceptedDateKey !== job.dateKey || parent.acceptedAssignmentRevision !== (job.revision ?? 0) ||
+            (input.expectedDateKey !== undefined && input.expectedDateKey !== parent.acceptedDateKey) ||
+            (input.expectedRevision !== undefined && input.expectedRevision !== parent.acceptedAssignmentRevision)) {
           throw new HttpsError("failed-precondition", "同じ受付番号の提出内容または担当情報が変わっています。提出履歴を確認してください。");
         }
         const stored = [];
@@ -105,14 +109,19 @@ export const createUploadSession = onCall(async (request) => {
         throw new HttpsError("failed-precondition", "提出する案件の日付と版を確認できません。");
       }
     }
-    try { assertCaseMailSubmissionRevision(job, input.expectedRevision); }
+    // Only a transaction that observed this exact ID absent may report non-acceptance.
+    // Existing IDs return above; never turn an uncertain/accepted retry into a new request.
+    try { assertSubmissionAcceptanceContext(job, input); }
     catch (error) {
-      if (error instanceof HttpsError && (error.details as { reason?: unknown } | undefined)?.reason === "case_mail_submission_changed" && input.clientRequestId) {
-        throw new HttpsError(error.code, error.message, { reason: "case_mail_submission_changed", accepted: false,
-          clientRequestId: input.clientRequestId, expectedRevision: input.expectedRevision ?? null });
+      if (error instanceof HttpsError && input.clientRequestId) {
+        throw new HttpsError(error.code, error.message, {reason: "submission_context_changed", accepted: false,
+          clientRequestId: input.clientRequestId, jobId: input.jobId, type: input.type, purpose: input.purpose,
+          resubmissionRequestId: input.resubmissionRequestId ?? null,
+          expectedDateKey: input.expectedDateKey ?? null, expectedRevision: input.expectedRevision ?? null});
       }
       throw error;
     }
+    assertCaseMailSubmissionRevision(job, input.expectedRevision);
     let resubmission: FirebaseFirestore.DocumentData | null = null;
     if (input.resubmissionRequestId) {
       const requestSnap = await tx.get(db.collection("resubmissionRequests").doc(input.resubmissionRequestId));

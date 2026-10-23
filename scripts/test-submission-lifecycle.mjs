@@ -94,7 +94,7 @@ function harness(sourceFiles=null,compiledFiles=null){
   records.set('jobs/synthetic-job',{companyId:'synthetic-company',assignedStaffId:'synthetic-staff',status:'assigned',dateKey:'2026-09-20',storeName:'Synthetic Store',clientName:'Synthetic Client'});
   records.set('staffProfiles/synthetic-staff',{companyId:'synthetic-company',displayName:'Synthetic Staff'});
   records.set('companies/synthetic-company/settings/drive',{rootFolderId:'synthetic-root'});
-  h.start=(count=1,patch={})=>h.uploads.createUploadSession({auth:h.staff,data:{jobId:'synthetic-job',type:'report',files:Array.from({length:count},(_,i)=>({originalName:`synthetic-${i}.png`,contentType:'image/png',size:100})),...patch}});
+  h.start=(count=1,patch={})=>h.uploads.createUploadSession({auth:h.staff,data:{jobId:'synthetic-job',type:'report',expectedDateKey:records.get('jobs/'+(patch.jobId??'synthetic-job'))?.dateKey,expectedRevision:records.get('jobs/'+(patch.jobId??'synthetic-job'))?.revision??0,files:Array.from({length:count},(_,i)=>({originalName:`synthetic-${i}.png`,contentType:'image/png',size:100})),...patch}});
   h.finish=(file,patch={})=>h.uploads.finalizeStagedUpload({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:1,md5Hash:'AAAAAAAAAAAAAAAAAAAAAA==',...patch}});
   h.state=id=>h.views.getSubmissionProcessingStatus({auth:h.staff,data:{jobId:'synthetic-job',submissionId:id}});
   h.list=name=>[...records].filter(([k])=>k.startsWith(name+'/')&&!k.slice(name.length+1).includes('/')).map(([k,v])=>({id:k.split('/').at(-1),...v}));
@@ -860,7 +860,7 @@ async function mailSubmissionHarness(){
  const h=harness();h.records.clear();for(const [key,value] of m.records)h.records.set(key,copy(value));
  h.staff=m.staffAuth;h.admin=m.auth;h.jobId=m.jobId;h.job=()=>h.records.get('jobs/'+h.jobId);h.mail=m;
  h.records.set('companies/'+h.job().companyId+'/settings/drive',{rootFolderId:'synthetic-root'});
- h.start=(count=1,patch={})=>h.uploads.createUploadSession({auth:h.staff,data:{jobId:h.jobId,type:'report',expectedRevision:h.job().revision,files:Array.from({length:count},(_,i)=>({originalName:'synthetic-'+i+'.png',contentType:'image/png',size:100})),...patch}});
+ h.start=(count=1,patch={})=>h.uploads.createUploadSession({auth:h.staff,data:{jobId:h.jobId,type:'report',expectedRevision:h.job().revision,expectedDateKey:h.job().dateKey,files:Array.from({length:count},(_,i)=>({originalName:'synthetic-'+i+'.png',contentType:'image/png',size:100})),...patch}});
  h.state=id=>h.views.getSubmissionProcessingStatus({auth:h.staff,data:{jobId:h.jobId,submissionId:id}});
  h.createRequest=(patch={})=>h.requests.createResubmissionRequest({auth:h.admin,data:{jobId:h.jobId,type:'report',expectedRevision:h.job().revision,reasons:['その他'],...patch}});
  h.patch=data=>h.updateRecord('jobs/'+h.jobId,data);

@@ -1,3 +1,4 @@
+import {submissionDraftDatabase} from "./submission-namespace";
 import { submittedDrafts, receiptKey, isSubmittedDraft } from "./submitted-marker-store";
 export { getSubmittedDraftReceipt, markDraftSubmitted } from "./submitted-marker-store";
 import type { SubmissionAttempt } from "./submission-attempt-store";
@@ -16,7 +17,7 @@ export type DraftFile = {
   blob: Blob;
 };
 
-const DB_NAME = "lkc-submission-drafts";
+const DB_NAME = submissionDraftDatabase;
 const STORE = "drafts";
 const draftMutations = new Map<string, Promise<void>>();
 function enqueueDraftMutation(key: string, mutation: () => Promise<void>): Promise<void> {
@@ -44,7 +45,8 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-export function saveDraft(key: string, files: File[]): Promise<void> {
+export function saveDraft(key: string, files: File[], isCurrent: () => boolean = () => true): Promise<void> {
+  if (!isCurrent()) return Promise.reject(new Error("ログイン状態が変わりました。"));
   if (isSubmittedDraft(key)) return Promise.reject(new Error("送信済み下書きの後片付けを先に再試行してください。"));
   const records: DraftFile[] = files.map((file) => ({
     id: crypto.randomUUID(), name: file.name, type: file.type,
@@ -54,7 +56,7 @@ export function saveDraft(key: string, files: File[]): Promise<void> {
     if (isSubmittedDraft(key) || await hasSubmittedBindings(key)) throw new Error("送信済み下書きは保存し直しません。" );
     const db = await openDb();
     try {
-      if (isSubmittedDraft(key) || await hasSubmittedBindings(key)) throw new Error("送信済み下書きは保存し直しません。");
+      if (isSubmittedDraft(key) || await hasSubmittedBindings(key) || !isCurrent()) throw new Error("送信済み下書きは保存し直しません。");
       await tx(db, "readwrite", (store) => store.put(records, key));
     } finally {
       db.close();
@@ -106,6 +108,14 @@ async function readDraftRecords(key: string): Promise<DraftFile[]> {
   return records;
 }
 
+// Only the local cooperative adapter uses this; never infer an operation ID from files.
+export async function readStoredDraftFiles(key: string): Promise<File[]> {
+  await waitForDraftMutation(key);
+  const records = await readDraftRecords(key);
+  if (!Array.isArray(records)) throw new Error("下書きの保存状態を確認できません。");
+  return draftFiles(records);
+}
+
 function draftFiles(records: DraftFile[]): File[] {
   return records.map((record) => new File([record.blob], record.name, {
     type: record.type, lastModified: record.lastModified,
@@ -119,7 +129,7 @@ export function clearDraft(key: string, knownAttempt?: Pick<SubmissionAttempt, "
     const retained = isSubmittedDraft(key) ? await readDraftRecords(key) : [];
     const db = await openDb();
     try {
-      if (!isCurrent() || !await canClearBoundDraft(key, knownAttempt)) throw new Error("提出記録を照合できないため下書きを保持しています。");
+      if (!isCurrent() || !await canClearBoundDraft(key, knownAttempt) || !isCurrent()) throw new Error("提出記録を照合できないため下書きを保持しています。");
       await tx(db, "readwrite", (store) => store.delete(key));
       if (!isCurrent()) throw new Error("ログイン状態が変わったため後片付けを中止しました。");
       if (submittedDrafts.get(key) === receiptVersion && isSubmittedDraft(key)) {
@@ -130,7 +140,7 @@ export function clearDraft(key: string, knownAttempt?: Pick<SubmissionAttempt, "
         }
         catch (error) {
           // Preserve the saved draft if removing its durable marker fails.
-          if (retained.length && localStorage.getItem(receiptKey(key)) === "1") {
+          if (isCurrent() && retained.length && localStorage.getItem(receiptKey(key)) === "1") {
             await tx(db, "readwrite", (store) => store.put(retained, key));
           }
           throw error;

@@ -248,12 +248,12 @@ console.log('Future shifts passed: 1000 historical jobs do not hide today/tomorr
 assert.match(app,/isPending\("task-job"\)\|\|isPending\("uploadSubmission"\)/);
 
 // 転送が済んだ後は、端末の後片付け失敗でも完了確認を開始して再送用ファイルを残さない。
-const receiptStart=app.indexOf('        const durable=markDraftSubmitted(draftKey);');
-const receiptEnd=app.indexOf('      },{setMessage:value',receiptStart);
+const receiptStart=app.indexOf('        const durable=await markDraftSubmitted(draftKey,isCurrentUpload,lease);');
+const receiptEnd=app.indexOf('      }),{setMessage:value',receiptStart);
 assert.ok(receiptStart>=0&&receiptEnd>receiptStart);
 for(const scenario of ['success','cleanup-failure','receipt-unavailable','auth-changed']){
  const events=[];
- const state={draftKey:'owner/job',typeLabel:'報告書',jobId:'job',data:{submissionId:'sent-id',files:[{uploadRequired:true}]},currentType:'report',currentRequestId:'',skipNextDraftSaveRef:{current:false},
+ const state={lease:{},draftKey:'owner/job',typeLabel:'報告書',jobId:'job',data:{submissionId:'sent-id',files:[{uploadRequired:true}]},currentType:'report',currentRequestId:'',skipNextDraftSaveRef:{current:false},
  attempt:{clientRequestId:'synthetic-attempt'},clearSubmissionAttempt:async()=>{events.push('clear-attempt');return true;},
  saveSubmittedBinding:async()=>true,finishSubmittedBindings:async()=>true,hasStoredDraft:async()=>false,confirmDraftCleanupComplete:async()=>true,
  markDraftSubmitted:()=>{events.push('receipt');return scenario!=='receipt-unavailable';},setFiles:files=>events.push(['files',files.length]),setSubmissionConfirmed:value=>events.push(['confirmed',value]),
@@ -309,7 +309,7 @@ for(const requestId of ['', 'request']){const result=selectFiles([photo('empty.p
 console.log('Empty files rejected at selection and restored-draft upload; valid existing selection preserved.');
 
 {
- const helperStart=app.indexOf('function submissionFileContentType('),helperEnd=app.indexOf('function fileStateKey(',helperStart);const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const code=ts.transpileModule(app.slice(helperStart,helperEnd)+app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ const helperSource=readFileSync('apps/staff/src/submission-file-content-type.ts','utf8').replace('export function','function');const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const code=ts.transpileModule(helperSource+app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const [name,type,expected] of [['report.pdf','','application/pdf'],['REPORT.PDF','application/octet-stream','application/pdf'],['report.pdf','application/pdf','application/pdf'],['photo.jpg','image/jpeg','image/jpeg'],['photo.pdf','image/png','image/png']]){
   const file=photo(name,100,type),job={id:'job'};const state={requests:[],metadata:[],messages:[]};const ctx={...submissionAttemptBoundary,files:[file],submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],submissionType:'report',requestId:'',firebaseConfigured:true,functions:{},firebaseApp:{},loadUploadStorage:async()=>({getClientStorage:()=>({}),ref:(...args)=>ctx.ref(...args),uploadBytesResumable:(...args)=>ctx.uploadBytesResumable(...args)}),authLoadVersionRef:{current:1},UPLOAD_CONCURRENCY:3,setSubmissionMessage:()=>{},showSubmissionMessage:m=>state.messages.push(m),setUploadState:()=>{},fileStateKey:f=>f.name,run:async(_key,fn,options)=>{try{await fn()}catch(error){options.setMessage(error.message);throw error}},httpsCallable:()=>async payload=>{state.requests.push(payload);return {data:{submissionId:'synthetic',clientRequestId:syntheticSubmissionRequestId,files:[{storagePath:'synthetic/path',uploadRequired:true}]}}},runWithConcurrency:async(items,_limit,fn)=>{for(const item of items)await fn(item)},ref:(_storage,path)=>path,uploadBytesResumable:(_target,_file,metadata)=>{state.metadata.push(metadata);return {on:(_event,_progress,reject)=>reject(Error('synthetic stop after metadata capture'))}}};runInNewContext(code,ctx);await ctx.uploadSubmission();assert.equal(state.requests[0].files[0].contentType,expected);assert.equal(state.metadata[0].contentType,expected);assert.equal(state.messages.length,1);
  }
@@ -317,7 +317,7 @@ console.log('Empty files rejected at selection and restored-draft upload; valid 
 console.log('Submission MIME parity: 5 PDF/image cases use identical session and Storage metadata; synthetic transport only.');
 
 {
- const helperStart=app.indexOf('function submissionFileContentType('),helperEnd=app.indexOf('function fileStateKey(',helperStart);const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const code=ts.transpileModule(app.slice(helperStart,helperEnd)+app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ const helperSource=readFileSync('apps/staff/src/submission-file-content-type.ts','utf8').replace('export function','function');const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const code=ts.transpileModule(helperSource+app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  const invalid=[null,{}, {submissionId:3,files:[]},{submissionId:' ',files:[]},{submissionId:'id'}, {submissionId:'id',files:{}},{submissionId:'id',files:[]}, {submissionId:'id',files:[null,null]}, {submissionId:'id',files:[{storagePath:''},{storagePath:'p'}]}, {submissionId:'id',files:[{storagePath:1},{storagePath:'p'}]}, {submissionId:'id',files:[{storagePath:' '},{storagePath:'p'}]}, {submissionId:'id',files:[{storagePath:'same'},{storagePath:'same'}]}];
  for(const data of invalid){const files=[photo('a.pdf'),photo('b.pdf')],job={id:'job'},messages=[];let started=0;const ctx={...submissionAttemptBoundary,files,submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],submissionType:'report',requestId:'',firebaseConfigured:true,functions:{},firebaseApp:{},loadUploadStorage:async()=>({getClientStorage:()=>({}),ref:(...args)=>ctx.ref(...args),uploadBytesResumable:(...args)=>ctx.uploadBytesResumable(...args)}),authLoadVersionRef:{current:1},setSubmissionMessage:()=>{},showSubmissionMessage:m=>messages.push(m),run:async(_key,fn,options)=>{try{await fn()}catch(error){options.setMessage(error.message);throw error}},httpsCallable:()=>async()=>({data}),setUploadState:()=>started++,runWithConcurrency:()=>started++};runInNewContext(code,ctx);await ctx.uploadSubmission();assert.equal(started,0);assert.equal(ctx.files,files);assert.equal(ctx.submissionConfirmed,true);assert.match(messages[0],/送信先を正しく準備できませんでした/);}
 }
@@ -534,7 +534,7 @@ console.log('Calendar validity: six real dates and fifteen invalid dates/types; 
 }
 
 {
- const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const helperStart=app.indexOf('function submissionFileContentType('),helperEnd=app.indexOf('function fileStateKey(',helperStart);const code=ts.transpileModule(app.slice(helperStart,helperEnd)+app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const helperSource=readFileSync('apps/staff/src/submission-file-content-type.ts','utf8').replace('export function','function');const code=ts.transpileModule(helperSource+app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const missing of ['functions','storage','both']){
   const job={id:'job'},files=[photo('retained.pdf')],messages=[];let starts=0;
   const ctx={...submissionAttemptBoundary,files,submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],requestId:'',submissionType:'report',firebaseConfigured:true,functions:missing==='storage'?{}:null,firebaseApp:missing==='functions'?{}:null,loadUploadStorage:async()=>({getClientStorage:()=>({})}),setSubmissionMessage:()=>{},showSubmissionMessage:m=>messages.push(m),authLoadVersionRef:{current:1},run:async(_key,fn)=>fn(),httpsCallable:()=>async()=>{starts++;throw Error('synthetic stop before upload');}};

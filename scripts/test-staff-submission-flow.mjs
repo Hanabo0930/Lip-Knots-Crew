@@ -352,7 +352,7 @@ window.loginFixture={calls:[],pending:[],signIns:0};
 const firebaseConfigured=true,functions={},auth={},authPersistenceReady=Promise.resolve();
 const httpsCallable=()=>input=>new Promise((resolve,reject)=>{window.loginFixture.calls.push(input);window.loginFixture.pending.push({resolve,reject});});
 const isSignInWithEmailLink=()=>true,signInWithEmailLink=async()=>{window.loginFixture.signIns++;};
-${section(app,'function messageTone(','function submissionFileContentType(')}
+${section(app,'function messageTone(','function fileStateKey(')}
 function Fixture(){
  const [loginCode,setLoginCode]=React.useState(''),[email,setEmail]=React.useState(''),[message,setMessage]=React.useState('');
  window.loginFixture.setMessage=setMessage;

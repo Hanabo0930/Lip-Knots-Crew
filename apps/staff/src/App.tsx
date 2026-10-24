@@ -8,7 +8,7 @@ import {useShiftNotificationRoute} from "./useShiftNotificationRoute";
 import PastShiftHistory from "./PastShiftHistoryEntry";
 import { firestorePastShiftReader } from "./past-shift-reader";
 import ShiftJobCards,{shiftDateLabel,shiftTextLabel,shiftPage} from './ShiftJobCards';
-import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import {
   getIdTokenResult, isSignInWithEmailLink, onAuthStateChanged,
   signInWithEmailLink, signOut, User,
@@ -16,10 +16,29 @@ import {
 import { collection, doc, getDocFromServer, getDocs, getDocsFromServer, limit, onSnapshot, orderBy, query, where, startAfter, QueryDocumentSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 const loadUploadStorage=()=>import("./upload-storage");
-const loadSubmissionAttempt=()=>import("./submission-attempt-store");
+const loadSubmissionAttempt=()=>import("./cooperative-submission-store");
 import type { SubmissionAttempt } from "./submission-attempt-store";
+import type { SubmittedCleanupState } from "./submitted-binding-store";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, firebaseApp } from "./firebase";
-import { clearDraft, loadDraft, saveDraft, markDraftSubmitted, getSubmittedDraftReceipt } from "./draft-store";
+import { getSubmittedDraftReceipt } from "./submitted-marker-store";
+import {SubmissionContextBusyError} from "./submission-context-error";
+import type {SubmissionContextLease} from "./submission-context-lock";
+import {submissionFileContentType} from "./submission-file-content-type";
+const loadDraftStore=()=>import("./cooperative-submission-store");
+const markDraftSubmitted:typeof import("./cooperative-submission-store").markDraftSubmitted=async(...args)=>(await loadDraftStore()).markDraftSubmitted(...args);
+const clearDraft:typeof import("./cooperative-submission-store").clearDraft=async(...args)=>(await loadDraftStore()).clearDraft(...args);
+const loadDraft:typeof import("./cooperative-submission-store").loadDraft=async(...args)=>(await loadDraftStore()).loadDraft(...args);
+const saveDraft:typeof import("./cooperative-submission-store").saveDraft=async(...args)=>(await loadDraftStore()).saveDraft(...args);
+const hasStoredDraft:typeof import("./cooperative-submission-store").hasStoredDraft=async(...args)=>(await loadDraftStore()).hasStoredDraft(...args);
+const confirmDraftCleanupComplete:typeof import("./cooperative-submission-store").confirmDraftCleanupComplete=async(...args)=>(await loadDraftStore()).confirmDraftCleanupComplete(...args);
+const loadSubmittedBindings=()=>import("./cooperative-submission-store");
+const hasSubmittedBindings=async(key:string,lease?:SubmissionContextLease)=>(await loadSubmittedBindings()).hasSubmittedBindings(key,lease);
+const saveSubmittedBinding=async(key:string,attempt:Pick<SubmissionAttempt,"clientRequestId"|"storageKey">,isCurrent:()=>boolean,lease?:SubmissionContextLease)=>{
+  try{return await (await loadSubmittedBindings()).saveSubmittedBinding(key,attempt,isCurrent,lease);}catch{return false;}
+};
+const finishSubmittedBindings=async(key:string,isCurrent:()=>boolean,hasStoredDraft:()=>Promise<boolean>,requiredAttempt?:Pick<SubmissionAttempt,"clientRequestId"|"storageKey">,lease?:SubmissionContextLease)=>{
+  try{return await (await loadSubmittedBindings()).finishSubmittedBindings(key,isCurrent,hasStoredDraft,requiredAttempt,lease);}catch{return false;}
+};
 import { submissionDraftKey } from "./submission-draft-key";
 import {
   clearBusinessSnapshot,
@@ -164,7 +183,7 @@ function submissionSummary(job:Job){const sales=job.submissionStatus?.salesFloor
 function prepSummary(job:Job){if(caseMailPreparationHeld(job))return"受信内容・勤務条件を確認中";if(job.preContactNeedsReview===true)return"事前連絡の再確認が必要";if(job.sourceMissing===true)return"取込元の案件を確認中";if(job.applicationUnconfirmed===true)return"応募受付済み・シフト表の担当確認待ち";if(job.assignmentUnresolved===true)return"担当者の照合待ち";const items=job.netPrint?.items??[];if(!Array.isArray(items))return"印刷情報を確認できません";const printed=items.filter(item=>validNetPrintTarget(items,item)&&item.printed===true).length;if(typeof job.materialStatus==="string"&&job.materialStatus.trim())return items.length?`${job.materialStatus} / 印刷済み ${printed}/${items.length}件`:job.materialStatus;if(!items.length)return"資料番号待ち";return printed===items.length?`準備完了（${printed}/${items.length}件）`:`準備中（${printed}/${items.length}件印刷済み）`;}
 function messageTone(value:string){if(/自動で再確認|前回の業務データ|一時的に混み合|一時停止/u.test(value))return"warning";if(/できません|読み込めません|失敗|エラー|拒否|見つかりません|必要です/u.test(value))return"error";if(/受付済み|未確認/u.test(value))return"warning";if(/処理中|確認しています|読み込|送信中|転送中|待って/u.test(value))return"working";return"success";}
 function messageClassName(value:string){return `message ${messageTone(value)}`;}
-function submissionFileContentType(file:File){return file.type.startsWith("image/")||file.type==="application/pdf"?file.type:file.name.toLowerCase().endsWith(".pdf")?"application/pdf":file.type||"application/octet-stream";}
+
 function fileStateKey(file:File){return `${file.name}_${file.lastModified}_${file.size}`;}
 function formatFileSize(size:number){if(size<1024)return`${size} B`;if(size<1024*1024)return`${(size/1024).toFixed(1)} KB`;return`${(size/(1024*1024)).toFixed(1)} MB`;}
 function SelectedSubmissionFile({file,position,status,disabled,onRemove}:{file:File;position:number;status:string;disabled:boolean;onRemove:()=>void}){
@@ -250,9 +269,9 @@ export default function App(){
     setArrivalTime(typeof savedTime==="string"&&/^([01]?\d|2[0-3]):[0-5]\d$/.test(savedTime)?savedTime.padStart(5,"0"):"");
   },[user?.uid,companyId,staffId,selectedJob?.id,selectedJob?.dateKey,selectedJob?.preContact?.temperature,selectedJob?.preContact?.arrivalTime]);
   const [submissionType,setSubmissionType]=useState<SubmissionType>("report"); const [requestId,setRequestId]=useState("");
-  const [submissionConfirmed,setSubmissionConfirmed]=useState(false);
+  const [confirmedSubmissionContext,setConfirmedSubmissionContext]=useState("");
   const [submissionMessage,setSubmissionMessage]=useState("" );
-  const [draftCleanup,setDraftCleanup]=useState<{key:string;durable:boolean;attempt?:SubmissionAttempt;draftCleared?:boolean;attemptCleared?:boolean;unverified?:boolean}|null>(null);
+  const [draftCleanup,setDraftCleanup]=useState<SubmittedCleanupState|null>(null);
   const [files,setFiles]=useState<File[]>([]); const [uploadState,setUploadState]=useState<Record<string,string>>({});
   const [draftHydrating,setDraftHydrating]=useState(false);
   const [deviceSessionId,setDeviceSessionId]=useState(""); const [devices,setDevices]=useState<DeviceSession[]>([]); const [showDevices,setShowDevices]=useState(false);
@@ -366,6 +385,10 @@ export default function App(){
   useEffect(()=>{const upcomingIndex=upcomingShifts.findIndex(job=>job.id===selectedJob?.id);if(upcomingIndex>=0)setUpcomingPage(Math.floor(upcomingIndex/50));},[selectedJob?.id,shiftFocusRequest]);
   const draftOwner=firebaseConfigured?(user&&companyId?JSON.stringify([companyId,user.uid]):""):"demo";
   const draftKey=selectedAssignedJob?submissionDraftKey(draftOwner,selectedAssignedJob.id,submissionType,requestId):"";
+  const submissionConfirmationContext=JSON.stringify([draftKey,selectedJob?.dateKey,selectedJob?.revision??0]);
+  const submissionConfirmed=confirmedSubmissionContext===submissionConfirmationContext;
+  const setSubmissionConfirmed=(confirmed:boolean)=>setConfirmedSubmissionContext(confirmed?submissionConfirmationContext:"");
+  useEffect(()=>setConfirmedSubmissionContext(""),[submissionConfirmationContext]);
   const submissionHistoryVersionRef=useRef(0);
   const resubmissionDetailVersionRef=useRef(0);
   const submissionContextVersionRef=useRef(0);
@@ -378,28 +401,31 @@ export default function App(){
     skipNextDraftSaveRef.current=false;
     setDraftHydrating(Boolean(draftKey));
     if(!draftKey)return;
-    const submittedReceipt=getSubmittedDraftReceipt(draftKey);
-    if(submittedReceipt)setDraftCleanup(current=>current?.key===draftKey?current:{key:draftKey,durable:submittedReceipt.durable});
     let active=true;
-    void loadDraft(draftKey).then(draftFiles=>{
-      if(!active)return;
-      setFiles(draftFiles);
+    const authVersion=authLoadVersionRef.current;
+    const isCurrent=()=>active&&authVersion===authLoadVersionRef.current&&previewContextRef.current===draftKey;
+    void loadDraftStore().then(store=>store.readSubmissionDraft(draftKey,isCurrent)).then(snapshot=>{
+      if(!isCurrent())return;
+      setDraftCleanup(current=>current?.key===draftKey&&!current.busy?current:snapshot.cleanup);
+      setFiles(snapshot.files);
       hydratedDraftKeyRef.current=draftKey;
       skipNextDraftSaveRef.current=true;
       draftHydratingRef.current=false;
       setDraftHydrating(false);
-    }).catch(()=>{
-      if(!active)return;
+    }).catch(error=>{
+      if(!isCurrent())return;
+      const busy=error instanceof SubmissionContextBusyError;
+      setDraftCleanup(current=>current?.key===draftKey&&!current.busy?current:busy?{key:draftKey,durable:false,busy:true}:{key:draftKey,durable:false,recovered:true,unverified:true,uncertain:true});
       setFiles([]);
       hydratedDraftKeyRef.current=draftKey;
       skipNextDraftSaveRef.current=true;
       draftHydratingRef.current=false;
       setDraftHydrating(false);
-      showSubmissionMessage("保存済みの下書きを読み込めませんでした。ファイルを選び直してください。");
+      showSubmissionMessage(busy?"別の画面で提出を処理中です。完了後に「端末の記録を再読み込み」を押してください。この操作では送信しません。":"保存済みの提出記録を読み込めませんでした。再送せず、提出履歴と端末の保存設定を確認してください。");
     });
     return()=>{active=false;};
   },[draftKey]);
-  const draftSavePaused=isPending("submission-context")||isPending("submission-files");
+  const draftSavePaused=isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||isPending("draft-cleanup");
   useEffect(()=>{
     if(!draftKey||draftHydrating||hydratedDraftKeyRef.current!==draftKey||draftSavePaused)return;
     if(skipNextDraftSaveRef.current){skipNextDraftSaveRef.current=false;return;}
@@ -408,15 +434,15 @@ export default function App(){
     const timer=setTimeout(()=>{
       timerPending=false;
       // 再描画前に解除が始まった場合も、古い選択内容を保存しない。
-      if(isPending("submission-context")||isPending("submission-files"))return;
-      void saveDraft(draftKey,files).catch(()=>{
+      if(skipNextDraftSaveRef.current||isPending("submission-context")||isPending("submission-files")||isPending("uploadSubmission")||isPending("draft-cleanup"))return;
+      void saveDraft(draftKey,files,()=>authVersion===authLoadVersionRef.current).catch(()=>{
         if(active&&hydratedDraftKeyRef.current===draftKey)showSubmissionMessage("下書きを保存できませんでした。選択中のファイルはこの画面から送信できます。画面を閉じる前に送信するか、端末の空き容量・保存設定を確認してください。");
       });
     },300);
     return()=>{
       active=false;clearTimeout(timer);
       if(timerPending&&!previewContextRef.current&&authVersion===authLoadVersionRef.current&&pendingFiles.length&&!isPending("submission-context")&&!isPending("submission-files")&&!getSubmittedDraftReceipt(pendingDraftKey)){
-        void saveDraft(pendingDraftKey,pendingFiles).catch(()=>{if(authVersion===authLoadVersionRef.current&&!previewContextRef.current)setMessage("提出対象が見つからず、下書きも保存できませんでした。画面を閉じず、シフトを更新して対象を確認してください。");});
+        void saveDraft(pendingDraftKey,pendingFiles,()=>authVersion===authLoadVersionRef.current).catch(()=>{if(authVersion===authLoadVersionRef.current&&!previewContextRef.current)setMessage("提出対象が見つからず、下書きも保存できませんでした。画面を閉じず、シフトを更新して対象を確認してください。");});
       }
     };
   },[draftKey,draftHydrating,files,draftSavePaused]);
@@ -641,6 +667,7 @@ export default function App(){
     }).catch(()=>{if(active)setMessage("メールのリンクでログインできませんでした。メールに記載された確認コードを入力するか、「ログインメールを送る」から送り直してください。");}).finally(()=>{if(active)setEmailLinkPending(false);});
     return()=>{active=false;};
   },[]);
+  const refreshVisibleBusinessData=useEffectEvent(refreshBusinessData);
   useEffect(()=>{
     if(!user||!deviceSessionId||!functions||!db||!auth)return;
     const activeAuth=auth;
@@ -672,7 +699,7 @@ export default function App(){
     const stopWatching=watchDeviceSession(deviceSessionId,()=>handleRevoked("この端末はログアウトされました。"));
     void heartbeat();
     const interval=window.setInterval(()=>void heartbeat(),DEVICE_HEARTBEAT_INTERVAL_MS);
-    const handleVisibility=()=>{if(document.visibilityState==="visible"){void heartbeat();void refreshPushStatus(false);void refreshBusinessData(false);}};
+    const handleVisibility=()=>{if(document.visibilityState==="visible"){void heartbeat();void refreshPushStatus(false);void refreshVisibleBusinessData(false);}};
     document.addEventListener("visibilitychange",handleVisibility);
     return()=>{
       stopped=true;
@@ -1578,7 +1605,7 @@ export default function App(){
 
   async function uploadSubmission(){
     if(!files.length||!submissionConfirmed||isSubmissionActionPending())return;
-    if(draftCleanup?.key===draftKey){showSubmissionMessage("送信済みファイルの端末記録が残っています。新しい提出の前に「端末の後片付けを再試行」を押してください。");return;}
+    if(draftCleanup?.key===draftKey){showSubmissionMessage(draftCleanup.busy?"別の画面での処理完了後に「端末の記録を再読み込み」を押してください。":"送信済みファイルの端末記録が残っています。新しい提出の前に「端末の後片付けを再試行」を押してください。");return;}
     if(files.some(file=>file.size<=0||file.size>MAX_SUBMISSION_FILE_SIZE)){showSubmissionMessage("空のファイルまたは50MBを超えるファイルは送信できません。選び直してください。");return;}
     const assignedJob=selectedJob?myJobs.find(job=>job.id===selectedJob.id):undefined;
     if(!assignedJob){showSubmissionMessage("提出する確定シフトを確認できません。シフト画面から案件を選び直してください。");return;}
@@ -1602,19 +1629,32 @@ export default function App(){
     const currentRequestId=requestId;
     const currentType=submissionType;
     try{
-      await run("uploadSubmission",async()=>{
+      await run("uploadSubmission",async()=>(await loadDraftStore()).withSubmissionContext(draftKey,isCurrentUpload,async lease=>{
+        let bound:boolean;
+        try{bound=await hasSubmittedBindings(draftKey,lease);}
+        catch{
+          if(isCurrentUpload())setDraftCleanup({key:draftKey,durable:false,recovered:true,unverified:true,uncertain:true});
+          throw new Error("端末の提出記録を確認できません。再送せず、提出履歴と端末の保存設定を確認してください。");
+        }
+        if(!isCurrentUpload())return;
+        const pendingReceipt=getSubmittedDraftReceipt(draftKey);
+        if(bound||pendingReceipt){
+          setDraftCleanup({key:draftKey,durable:bound||Boolean(pendingReceipt?.durable),recovered:true});
+          showSubmissionMessage("端末の提出記録が残っています。新しい提出の前に後片付けを確認してください。");
+          return;
+        }
+        await saveDraft(draftKey,files,isCurrentUpload,lease);
         const {getClientStorage,ref,uploadBytesResumable}=await loadUploadStorage().catch(()=>{throw new Error("送信機能を読み込めませんでした。選択ファイルは保持しています。通信状態を確認して、もう一度送信してください。");});
         if(!isCurrentUpload())return;
         const activeStorage=getClientStorage();
         const purpose=currentRequestId?"replacement":"additional";
-        const {prepareSubmissionAttempt,clearSubmissionAttempt}=await loadSubmissionAttempt().catch(()=>{throw new Error("再試行の準備機能を読み込めませんでした。選択ファイルは保持しています。通信状態を確認して、もう一度送信してください。");});
-        const attempt=await prepareSubmissionAttempt(draftKey,files,files.map(submissionFileContentType),isCurrentUpload,assignedJob.mailIntake?assignedJob.revision:undefined);
+        const {prepareSubmissionAttempt,clearSubmissionAttempt,resetUnacceptedSubmission,submissionRequest}=await loadSubmissionAttempt().catch(()=>{throw new Error("再試行の準備機能を読み込めませんでした。選択ファイルは保持しています。通信状態を確認して、もう一度送信してください。");});
+        const attempt=await prepareSubmissionAttempt(draftKey,files,files.map(submissionFileContentType),isCurrentUpload,selectedJob?.revision??0,lease,selectedJob?.dateKey);
         if(!isCurrentUpload())return;
         let r;
-        try { r=await httpsCallable(activeFunctions,"createUploadSession")({clientRequestId:attempt.clientRequestId,...(attempt.expectedRevision!==undefined?{expectedRevision:attempt.expectedRevision}:{}),jobId,type:currentType,purpose,resubmissionRequestId:currentRequestId||undefined,files:files.map((f,index)=>({originalName:f.name,contentType:submissionFileContentType(f),size:f.size,contentSha256:attempt.contentHashes[index]}))}); }
+        try { r=await httpsCallable(activeFunctions,"createUploadSession")(submissionRequest(attempt,{jobId,type:currentType,purpose,resubmissionRequestId:currentRequestId||null},files)); }
         catch(error){
-          const details=(error as {details?:{reason?:unknown;accepted?:unknown;clientRequestId?:unknown;expectedRevision?:unknown}})?.details;
-          if(isCurrentUpload()&&details?.reason==="case_mail_submission_changed"&&details.accepted===false&&details.clientRequestId===attempt.clientRequestId&&details.expectedRevision===(attempt.expectedRevision??null))await clearSubmissionAttempt(attempt,isCurrentUpload);
+          if(await resetUnacceptedSubmission(error,attempt,{jobId,type:currentType,purpose,resubmissionRequestId:currentRequestId||null},isCurrentUpload,lease)&&isCurrentUpload())setSubmissionConfirmed(false);
           throw error;
         }
         if(!isCurrentUpload())return;
@@ -1642,13 +1682,14 @@ export default function App(){
           throw new Error("送信を完了できませんでした。選択ファイルは保持しています。同じ選択ファイルで再度送信すると、受付済みのファイルを確認し、未送信分から続けます。「提出情報を再読み込み」でも履歴を確認できます。");
         }
         if(!isCurrentUpload())return;
-        const durable=markDraftSubmitted(draftKey);
-        const attemptCleared=durable&&await clearSubmissionAttempt(attempt,isCurrentUpload);
+        const durable=await markDraftSubmitted(draftKey,isCurrentUpload,lease);
+        const bindingSaved=durable&&await saveSubmittedBinding(draftKey,attempt,isCurrentUpload,lease);
+        const attemptCleared=bindingSaved&&await clearSubmissionAttempt(attempt,isCurrentUpload,lease);
         if(!isCurrentUpload())return;
         skipNextDraftSaveRef.current=true;
         setFiles([]);
         setSubmissionConfirmed(false);
-        const cleanupTarget={key:draftKey,durable,attempt,attemptCleared};
+        const cleanupTarget={key:draftKey,durable,attempt,attemptCleared,bindingSaved};
         setDraftCleanup(cleanupTarget);
         showSubmissionMessage(data.files.every(target=>!target.uploadRequired)
           ? `${typeLabel}は受付済みです。再アップロードせず、Drive転送の状況を確認しています…`
@@ -1656,53 +1697,50 @@ export default function App(){
         void pollSubmissionProcessing(jobId,data.submissionId,currentType,currentRequestId);
         try{
           if(!attemptCleared)return;
-          await clearDraft(draftKey);
+          await clearDraft(draftKey,attempt,isCurrentUpload,lease);
           if(!isCurrentUpload())return;
-          const receiptCleanup={...cleanupTarget,draftCleared:true};
+          const receiptCleanup={...cleanupTarget,draftCleared:true,recovered:true};
           setDraftCleanup(current=>current===cleanupTarget?receiptCleanup:current);
-          if(isCurrentUpload())setDraftCleanup(current=>current===receiptCleanup?null:current);
+          const finished=await finishSubmittedBindings(draftKey,isCurrentUpload,()=>hasStoredDraft(draftKey,lease),attempt,lease);
+          if(finished&&await confirmDraftCleanupComplete(draftKey,isCurrentUpload,lease)&&isCurrentUpload())setDraftCleanup(current=>current===receiptCleanup?null:current);
         }catch{
           // 送信済み。端末の後片付け失敗をアップロード失敗として扱わない。
+          if(isCurrentUpload())setDraftCleanup(current=>current===cleanupTarget?{...current,recovered:true,unverified:true}:current);
         }
-      },{setMessage:value=>{if(isCurrentUpload())showSubmissionMessage(value);}});
+      }),{setMessage:value=>{if(isCurrentUpload())showSubmissionMessage("送信エラー："+value);}});
     }catch{return;}
   }
 
   async function retryDraftCleanup(){
     if(!draftCleanup||isPending("draft-cleanup")||isPending("uploadSubmission"))return;
-    let target=draftCleanup;
-    const authVersion=authLoadVersionRef.current;
-    const isCurrent=()=>authVersion===authLoadVersionRef.current;
-    const advance=(next:typeof target)=>{
-      const previous=target;
-      setDraftCleanup(current=>current===previous?next:current);
-      target=next;
-    };
+    const target=draftCleanup,authVersion=authLoadVersionRef.current;
+    const isCurrent=()=>authVersion===authLoadVersionRef.current&&previewContextRef.current===target.key;
     try{
       await run("draft-cleanup",async()=>{
-        // The submitted marker alone cannot bind a saved draft to the files actually sent.
-        if(!target.attempt&&!target.attemptCleared){advance({...target,unverified:true});return;}
-        if(!target.durable){
-          if(!markDraftSubmitted(target.key))return;
-          advance({...target,durable:true});
-        }
-        if(!target.attemptCleared){
-          const {clearSubmissionAttempt}=await loadSubmissionAttempt();
-          if(!isCurrent()||!target.attempt)return;
-          const cleared=await clearSubmissionAttempt(target.attempt,isCurrent);
-          if(!isCurrent()||!cleared)return;
-          advance({...target,attemptCleared:true,unverified:false});
-        }
-        if(!target.draftCleared){
-          await clearDraft(target.key);
+        if(target.busy){
+          const {readSubmissionDraft}=await loadDraftStore();
+          const snapshot=await readSubmissionDraft(target.key,isCurrent);
           if(!isCurrent())return;
+          skipNextDraftSaveRef.current=true;
+          hydratedDraftKeyRef.current=target.key;
+          setSubmissionConfirmed(false);
+          setFiles(snapshot.files);
+          setDraftCleanup(current=>current===target?snapshot.cleanup:current);
+          showSubmissionMessage(snapshot.cleanup?"端末に提出記録が残っています。この再読み込みでは送信も削除もしていません。提出履歴と後片付けの状態を確認してください。":"端末の記録を再読み込みました。送信や記録の削除はしていません。次の操作の前に選択ファイルと提出履歴を確認してください。");
+          return;
         }
-        setDraftCleanup(current=>current===target?null:current);
+        const {retrySubmittedCleanup}=await loadSubmittedBindings();
+        await retrySubmittedCleanup(target,isCurrent,setDraftCleanup,{saveSubmittedBinding,finishSubmittedBindings,hasStoredDraft,confirmDraftCleanupComplete});
       });
-    }catch{
-      if(isCurrent())setDraftCleanup(current=>current===target?{...current,unverified:true}:current);
+    }catch(error){
+      if(isCurrent())setDraftCleanup(current=>{
+        if(current!==target)return current;
+        if(!target.busy)return {...current,unverified:true};
+        return error instanceof SubmissionContextBusyError?current:{key:target.key,durable:false,recovered:true,unverified:true,uncertain:true};
+      });
     }
   }
+
   async function loadSubmissionHistory(jobId:string,type:SubmissionType,authLoadVersion=authLoadVersionRef.current):Promise<boolean>{
     if(authLoadVersion!==authLoadVersionRef.current)return false;
     const version=++submissionHistoryVersionRef.current;
@@ -1869,7 +1907,7 @@ export default function App(){
 
     if(!files.length)return true;
     if(!confirm(prompt))return false;
-    try{if(draftKey)await clearDraft(draftKey);}catch{if(isCurrentChange())showSubmissionMessage("選択中のファイルを解除できませんでした。もう一度お試しください。");return false;}
+    try{if(draftKey)await clearDraft(draftKey,undefined,isCurrentChange);}catch{if(isCurrentChange())showSubmissionMessage("選択中のファイルを解除できませんでした。もう一度お試しください。");return false;}
     if(!isCurrentChange())return false;
     setFiles([]);
     setUploadState({});
@@ -1965,7 +2003,7 @@ export default function App(){
     const authVersion=authLoadVersionRef.current,contextVersion=submissionContextVersionRef.current,navigationVersion=navigationVersionRef.current;
     const isCurrentClear=()=>authVersion===authLoadVersionRef.current&&contextVersion===submissionContextVersionRef.current&&navigationVersion===navigationVersionRef.current;
     await run("submission-files",async()=>{
-      try{if(draftKey)await clearDraft(draftKey);}catch{if(isCurrentClear())showSubmissionMessage("選択中のファイルを解除できませんでした。もう一度お試しください。");return;}
+      try{if(draftKey)await clearDraft(draftKey,undefined,isCurrentClear);}catch{if(isCurrentClear())showSubmissionMessage("選択中のファイルを解除できませんでした。もう一度お試しください。");return;}
       if(!isCurrentClear())return;
       fileRemoveFocusRef.current={index:0,authVersion,contextVersion,navigationVersion};
       setFiles([]);
@@ -2020,7 +2058,7 @@ export default function App(){
   return <main className="app-shell">
     <header><img src="/logo.png" alt=""/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button ref={accountMenuToggleRef} className="ghost account-menu-toggle" onClick={toggleAccountMenu} aria-expanded={showAccountMenu} aria-controls="account-menu" disabled={isPending("logout")||deviceActionPending}>{showAccountMenu?"閉じる":"メニュー"}</button>}</header>
     {showAccountMenu&&<section id="account-menu" className="panel account-menu-panel"><div className="section-heading"><div><h2>アカウント</h2><p>状態確認・端末管理・ログアウトはこちらです。</p></div></div><div className="account-menu-actions"><button className="secondary" onClick={()=>{setShowAccountMenu(false);void openQuickDiagnostics();}} disabled={isDiagnosticsPending()||isPending("logout")||deviceActionPending} aria-busy={isDiagnosticsPending()}>{isDiagnosticsPending()?"診断中…":"状態確認"}</button><button className="secondary" onClick={()=>{setShowAccountMenu(false);void loadDevices();}} disabled={deviceActionPending||isPending("logout")}>{deviceActionPending?"処理中…":"端末管理"}</button><button className="ghost logout-button" onClick={()=>{if(!deviceActionPending)void requestLogout();}} aria-disabled={isPending("logout")||deviceActionPending} aria-busy={isPending("logout")}>{isPending("logout")?"ログアウト中…":"ログアウト"}</button></div></section>}
-    {draftCleanup&&<section className="panel" role="status"><strong>ファイルの送信は済んでいます</strong><p>端末の下書き・受付記録の後片付けが完了していません。同じファイルを送り直す必要はありません。新しい提出の前に、下のボタンで後片付けを再試行してください。{draftCleanup.unverified&&"元の受付記録の照合または削除を確認できません。確認がとれるまで新しい提出は保留し、提出履歴を確認してください。"}{!draftCleanup.durable&&"端末に送信済みの記録も保存できませんでした。画面を閉じた後は、再送する前に提出履歴を確認してください。"}</p><button className="secondary" onClick={()=>void retryDraftCleanup()} disabled={isPending("draft-cleanup")||isPending("uploadSubmission")} aria-busy={isPending("draft-cleanup")}>{isPending("draft-cleanup")?"確認中…":"端末の後片付けを再試行"}</button></section>}
+    {draftCleanup&&<section className="panel" role="status"><strong>{draftCleanup.busy?"別の画面で提出を処理中です":draftCleanup.uncertain?"端末の提出記録を確認できません":"ファイルの送信は済んでいます"}</strong><p>{draftCleanup.busy?"処理完了後に、下のボタンで端末の記録を再読み込みしてください。この操作では送信も記録の削除も行いません。":<>{draftCleanup.uncertain?"再送する前に、提出履歴と端末の保存設定を確認してください。":"端末の下書き・受付記録の後片付けが完了していません。同じファイルを送り直す必要はありません。"}新しい提出の前に、下のボタンで後片付けを再試行してください。{draftCleanup.recovered&&"この確認では送信を行いません。対応を確認できない下書きや記録は削除せず保持します。"}{draftCleanup.unverified&&"元の受付記録の照合または削除を確認できません。確認がとれるまで新しい提出は保留し、提出履歴を確認してください。"}{!draftCleanup.durable&&"端末に送信済みの記録も保存できませんでした。画面を閉じた後は、再送する前に提出履歴を確認してください。"}</>}</p><button className="secondary" onClick={()=>void retryDraftCleanup()} disabled={isPending("draft-cleanup")||isPending("uploadSubmission")} aria-busy={isPending("draft-cleanup")}>{isPending("draft-cleanup")?"確認中…":draftCleanup.busy?"端末の記録を再読み込み":"端末の後片付けを再試行"}</button></section>}
     {message&&<div className={messageClassName(message)} role={currentMessageTone==="error"?"alert":"status"}><span>{message}</span>{currentMessageTone!=="working"&&<button className="message-dismiss" onClick={()=>setMessage("")} aria-label="お知らせを閉じる">閉じる</button>}</div>}
     {showDevices&&<section className="panel device-panel" aria-busy={deviceActionPending}><div className="section-heading"><div><h2 ref={deviceHeadingRef} tabIndex={-1}>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="secondary" onClick={()=>void loadDevices()} disabled={deviceActionPending}>再読込</button><button className="ghost" onClick={()=>{setShowDevices(false);accountMenuToggleRef.current?.focus();}} disabled={deviceActionPending}>閉じる</button></div><div className="device-list">{!deviceActionPending&&deviceListUncertain&&<p className="device-list-uncertain" role="status">{devices.length?"端末一覧の更新を確認できません。表示中の情報は前回の内容です。":"端末一覧を確認できません。"}「再読込」で最新の状態を確認してください。</p>}{deviceActionPending&&!pendingDeviceId&&<div className="empty compact" role="status">端末情報を読み込んでいます…</div>}{devices.map((device,index)=><div className="device-row" key={device.id} role="group" aria-label={`端末 ${index+1}件目: ${device.label?.trim()||device.platform?.trim()||"端末"}`}><div><strong>{index+1}. {device.label?.trim()||device.platform?.trim()||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===true?"利用中":device.active===false?"ログアウト済み":"利用状況未確認"}</small></div><button className="secondary" aria-label={`${index+1}件目の端末をログアウト`} disabled={device.active===false||deviceActionPending} onClick={()=>void revokeDevice(device.id)}>{pendingDeviceId===device.id?"ログアウト中…":"ログアウト"}</button></div>)}{!deviceActionPending&&!devices.length&&<EmptyAction title="端末情報がありません" body="通信状態を確認して、最新の端末情報をもう一度読み込んでください。" action="もう一度読み込む" onAction={()=>void loadDevices()}/>}</div></section>}
     {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite" aria-busy={isDiagnosticsPending()}><div className="section-heading"><div><h2 ref={diagnosticHeadingRef} tabIndex={-1}>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading" role="status">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id} role="group" aria-label={`${check.label}: ${check.level==="pass"?"正常":check.level==="warn"?"要確認":"エラー"}`}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}{diagnosticReport&&<details className="diagnostic-copy-text"><summary>共有用の文章を表示</summary><p>自動コピーが使えない場合は、下の文章を選択してコピーしてください。</p><textarea aria-label="診断結果の共有用文章" readOnly rows={8} value={formatDiagnosticReport(diagnosticReport)}/></details>}<div className="diagnostic-actions">{diagnosticReport&&<><button onClick={()=>void shareDiagnostics()} disabled={isPending("diagnostic-export:"+authLoadVersionRef.current)}>結果を共有</button><button className="secondary" onClick={()=>void copyDiagnostics()} disabled={isPending("diagnostic-export:"+authLoadVersionRef.current)}>コピー</button></>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isDiagnosticsPending()}>{isDiagnosticsPending()?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>{closeDiagnostics();accountMenuToggleRef.current?.focus();}}>閉じる</button></div></section>}

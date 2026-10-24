@@ -1,0 +1,10 @@
+{
+  "commit": "33c2b3f439b4aabd56baa54b192765db274bc81e",
+  "source": "existing local Git objects; no network",
+  "sha256": {
+    "uploads.ts": "c208795a4bb457e9e4f77c80252abc27e7c6c1af3f98b839d48b590e452240b5",
+    "submission-integrity.ts": "9371a24c7ff7aa096a0f18eab12945c9dedfc31517977b833c2d8ccb4bc713dd",
+    "case-mail-preparation-core.ts": "6abba05110e347877c63d42056c7b4a5fac5893cf901ad83b311d62140e6c864",
+    "assignment-preparation-core.ts": "229938667c094e2065e1c4a4d1bf082e199a77818608c926295fc4ae2a6f8e70"
+  }
+}

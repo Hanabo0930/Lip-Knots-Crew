@@ -343,8 +343,8 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
     await db.runTransaction(async tx => {
       const [queueSnap, configSnap, operationSnap] = await Promise.all([tx.get(queueRef), tx.get(configRef), tx.get(operationRef)]);
       const current = queueSnap.data(), enabled = configSnap.data();
-      if (!current || current.status !== "pending" || current.operation !== "case_list.assign" || fingerprint(current) !== fingerprint(initial!) ||
-        enabled?.companyId !== initial!.companyId || enabled.caseListEnabled !== true || enabled.caseListAssignmentsEnabled !== true) return;
+      if (!current || !enabled || current.status !== "pending" || current.operation !== "case_list.assign" || fingerprint(current) !== fingerprint(initial!) ||
+        enabled.companyId !== initial!.companyId || enabled.caseListEnabled !== true || enabled.caseListAssignmentsEnabled !== true) return;
       const priorOperation = operationSnap.exists;
       let knownReady = false;
       if (priorOperation && reason === "ANOTHER_CASE_LIST_OPERATION_ACTIVE") {
@@ -580,8 +580,8 @@ export async function retryCaseListMonthlyAssignments(): Promise<void> {
       await db.runTransaction(async tx => {
         const [queueSnap, configSnap, operationSnap] = await Promise.all([tx.get(doc.ref), tx.get(configRef), tx.get(operationRef)]);
         const current = queueSnap.data(), config = configSnap.data();
-        if (!current || current.operation !== "case_list.assign" || current.companyId !== data.companyId ||
-          config?.companyId !== data.companyId || config.caseListEnabled !== true || config.caseListAssignmentsEnabled !== true ||
+        if (!current || !config || current.operation !== "case_list.assign" || current.companyId !== data.companyId ||
+          config.companyId !== data.companyId || config.caseListEnabled !== true || config.caseListAssignmentsEnabled !== true ||
           (current.status !== "pending" && (!(current.retryAt instanceof Timestamp) || current.retryAt.toMillis() > now.toMillis()))) return;
         if (current.status === "pending") {
           if (!current.caseListPhase || current.writeVerificationRequired === true || !operationSnap.exists) return;

@@ -133,7 +133,7 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
         const preserveAssignment = Boolean(old && (old.assignedStaffId || old.assignedStaffName || old.applicationUnconfirmed === true || old.assignmentUnresolved === true || old.status === "assigned"));
         const pendingQueueId = old?.applicationUnconfirmed === true && old.assignmentSheetWrite?.operation === "case_list.assign" && typeof old.assignmentSheetWrite?.queueId === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(old.assignmentSheetWrite.queueId) ? old.assignmentSheetWrite.queueId : null;
         let ownPendingProjection = false;
-        if (pendingQueueId && old?.caseListSource?.rowRevision !== entry.source.rowRevision) {
+        if (old && pendingQueueId && old.caseListSource?.rowRevision !== entry.source.rowRevision) {
           const operationId = createHash("sha256").update(companyId + "|" + pendingQueueId, "utf8").digest("hex");
           const [intentDocument, startedDocument] = await Promise.all([
             tx.get(db.collection(`caseListMonthlyOperations/${operationId}/events`).doc("SOURCE_INTENT")),

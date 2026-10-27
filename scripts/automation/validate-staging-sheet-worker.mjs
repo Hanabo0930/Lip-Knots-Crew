@@ -21,10 +21,10 @@ export const retryWorkerSourcePins = Object.freeze({
   "functions/src/case-list-monthly-adapter.cjs": "1b46d9854ec9cd428eeed784c32f86a8af3a2f642c1a633b2967d249e5a88821",
   "functions/src/case-list-monthly-compact.cjs": "6d40516a62f7d0d7938b060d229f7e6a142ba174b37e494bcec0a051c8144d87",
   "functions/src/case-list-projection.cjs": "059f39d152981e9e9566c276332f9db7da6442dd99fe3ec12e28c587ff9a3326",
-  "functions/src/case-id.ts": "5597010654f3c28cadf1c49e39ebd6ebe6401017030ce03f5973f2e40cb07536",
+  "functions/src/case-id.ts": "7c03676a32947d8c7a81a8a5b7600c1870ccd2c41b036362bf3e8dd475422d87",
   "functions/src/sheet-write-core.ts": "dd73c7ff9715327b81f61efc6cd703d64e5dd64d651361f45c3a4965a81b28c2",
-  "functions/src/system-safety.ts": "92acac27ff3a29750949035325718799ad20d3ab02c650f4337e5d0858cad032",
-  "functions/src/sheet-reader.ts": "475b6cd7c0233eeb73ca9a2291425d396f1757994ee24ce14ae7135e42b79058"
+  "functions/src/system-safety.ts": "25debd6fa931ce85b72f82d4f7e499db99b0054576af0f07a91ffb8917e61ce3",
+  "functions/src/sheet-reader.ts": "9362b67e922d89661a26999c4cb44c5394a199635627b69e0de5057a9202dce0"
 });
 
 export function assertRetryWorkerSource(readSource) {

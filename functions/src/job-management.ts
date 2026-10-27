@@ -9,6 +9,7 @@ import { allocateAdminJobGroup, stageAdminJobGroup } from "./job-group-creation"
 import { createNativeJobGroup } from "./native-job-creation";
 import { createCaseMailJobGroup } from "./case-mail-job-creation";
 import { readMailPublication } from "./case-mail-publication";
+import { readCaseListPublication, requireCaseListExecutive } from "./case-list-source";
 import { assignmentPreparationPatch } from "./assignment-preparation-core";
 import { cancellationSourceAckPending } from "./sheet-write-core";
 import { assertCancelledHistoricalAssignmentCanEdit } from "./cancellation-history-retention-core";
@@ -58,6 +59,13 @@ const PublicationSchema = z.object({
   jobIds: z.array(z.string().min(1)).min(1).max(100),
   action: z.enum(["publish", "schedule", "stop", "draft"]),
   expectedRevisions: z.record(z.string(), z.number().int().min(0)).optional(),
+  expectedSourceRevisions: z.record(z.string(), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
+  caseListConfirmations: z.record(z.string(), z.object({
+    expectedSourceRevision: z.string().regex(/^[a-f0-9]{64}$/),
+    confirmedFields: z.object({ arrival: z.literal(true), execution: z.literal(true), headcount: z.literal(true), dateMode: z.literal(true), payOffer: z.literal(true), vacancy: z.literal(true) }),
+    payOffer: z.object({ dailyWageJPY: z.number().int().min(1).max(1000000), travelExpenses: z.literal("全額支給"), communicationExpenses: z.literal("全額支給") }),
+    sourceReview: z.object({ headcountPerSlot: z.literal(1), reviewedIssues: z.array(z.string().max(1000)).max(100), resolutionNote: z.string().min(3).max(2000) }).optional(),
+  })).optional(),
   publishAt: z.string().nullable().optional(),
 });
 
@@ -304,9 +312,16 @@ export const updateJobPublication = onCall(async (request) => {
 
     // 全候補の追加読取を先に終え、複数案件でもtransactionの読取後書込を守る。
     const mailChecks = new Map<string, Awaited<ReturnType<typeof readMailPublication>>>();
+    const caseListChecks = new Map<string, Awaited<ReturnType<typeof readCaseListPublication>>>();
     if (input.action === "publish") for (const snap of snapshots) {
       if (snap.exists && snap.data()?.companyId === companyId && snap.data()?.mailIntake) {
         mailChecks.set(snap.id, await readMailPublication(tx, snap.id, snap.data()!, input.expectedRevisions?.[snap.id], now.toDate()));
+      }
+      if (snap.exists && snap.data()?.companyId === companyId && snap.data()?.caseListSource) {
+        requireCaseListExecutive(session.token as Record<string, unknown>);
+        const confirmation = input.caseListConfirmations?.[snap.id];
+        if (!confirmation || confirmation.expectedSourceRevision !== input.expectedSourceRevisions?.[snap.id]) throw new HttpsError("failed-precondition", "現在の案件リストの条件確認が必要です。");
+        caseListChecks.set(snap.id, await readCaseListPublication(tx, companyId, snap.id, snap.data()!, input.expectedRevisions?.[snap.id], input.expectedSourceRevisions?.[snap.id], confirmation, session.uid));
       }
     }
     for (const snap of snapshots) {
@@ -317,6 +332,7 @@ export const updateJobPublication = onCall(async (request) => {
         blocked.push(snap.id);
         continue;
       }
+      if (job.caseListSource && input.action === "schedule") { blocked.push(snap.id); continue; }
       if (job.cancelled === true || job.status === "cancelled") {
         blocked.push(snap.id);
         continue;
@@ -358,8 +374,10 @@ export const updateJobPublication = onCall(async (request) => {
       }
 
       const mailCheck = mailChecks.get(snap.id);
+      const caseListCheck = caseListChecks.get(snap.id);
+      if (job.caseListSource && !caseListCheck) { blocked.push(snap.id); continue; }
       if (job.mailIntake && (!mailCheck || mailCheck.issue)) { blocked.push(snap.id); continue; }
-      const sourceReady = job.sourceReady === true ||
+      const sourceReady = Boolean(caseListCheck) || job.sourceReady === true ||
         job.source?.type === "google_sheets_readonly" ||
         Boolean(job.sheetRef?.spreadsheetId);
 
@@ -380,9 +398,12 @@ export const updateJobPublication = onCall(async (request) => {
           : FieldValue.delete(),
         publicationBlockedReason: publication.blockedReason ?? FieldValue.delete(),
         ...(job.mailIntake ? { mailPublication: { ...mailCheck!.confirmation!, actorUid: session.uid, confirmedAt: now } } : {}),
+        ...(caseListCheck ? { ...caseListCheck.jobFields, sourceReady: true, basePay: (caseListCheck.candidate.payOffer as { dailyWageJPY: number }).dailyWageJPY, publicPayOffer: caseListCheck.candidate.payOffer,
+          caseListPublication: { sourceRevision: caseListCheck.source.sourceRevision, confirmedAt: now }, caseListHoldReasons: [] } : {}),
         updatedAt: now,
         revision: FieldValue.increment(1),
       }, { merge: true });
+      if (caseListCheck) tx.set(db.collection("caseListApprovals").doc(snap.id), { companyId, jobId: snap.id, ...caseListCheck.approval, confirmedAt: now });
 
       if (publication.blockedReason) blocked.push(snap.id);
       else updated.push(snap.id);
@@ -422,7 +443,7 @@ export const publishScheduledJobs = onSchedule(
           !(data.scheduledPublishAt instanceof Timestamp)||data.scheduledPublishAt.toMillis()>Timestamp.now().toMillis())return;
         if(data.mailTargetHold!=null||data.mailIntakeReviewRequired===true)return;
         const sourceReady=data.sourceReady===true||data.source?.type==="google_sheets_readonly"||Boolean(data.sheetRef?.spreadsheetId);
-        if(!sourceReady||data.cancelled===true||data.assignedStaffId||data.mailIntake){
+        if(!sourceReady||data.cancelled===true||data.assignedStaffId||data.mailIntake||data.caseListSource){
           tx.set(job.ref,{status:sourceReady?data.status:"draft",publishable:false,recruitmentStopped:true,
             publicationBlockedReason:sourceReady?"invalid_state":"sheet_source_not_ready",updatedAt:FieldValue.serverTimestamp()},{merge:true});
           return;

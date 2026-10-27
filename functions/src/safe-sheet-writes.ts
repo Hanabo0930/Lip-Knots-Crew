@@ -320,6 +320,7 @@ function matchesValue(queue: Queue, key: string, actual: unknown, expected: unkn
 }
 
 async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
+  if (queue.operation === "case_list.assign") throw new BlockedError("案件リストの月別連携は検証中です。既存行の書込経路へは進めません。");
   let mutationAttempted = false;
   try {
     const jobRef = db.collection("jobs").doc(queue.jobId);

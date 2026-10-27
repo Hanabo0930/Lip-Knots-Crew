@@ -1,0 +1,11 @@
+# Case list source integration
+
+The existing authenticated `previewShiftImport` and `syncShiftSheetsReadOnly` callables accept `source: "case-list"`. The source workbook, sheet identity, 65 headers and time zone are server pinned. The separate CaseList import path creates drafts and retains existing assignments, unresolved applications and day locks. Known historical monthly links are held instead of duplicated.
+
+The source revision binds all 65 source user-entered/effective values and the corresponding 25-column assignment ledger record. Public jobs contain only safe business fields, public pay conditions and hashes. Source rows, mail, contacts, management JSON and raw financial values are never copied into public job documents. Owner confirmations are stored in `caseListApprovals`, covered by the unchanged default-deny Rules.
+
+Verified executive identity is required to enable the source or confirm a publication. A new application uses the existing `applyToJob` transaction, day lock and idempotency receipt. The request, receipt and typed `case_list.assign` queue bind the source revision. A previously accepted request returns its saved result before reading a newly changed source. Known precommit source rejection carries an exact request identity so the staff UI can discard only that unaccepted attempt. Unknown network outcomes retain the same retry identity.
+
+This draft checkpoint does not enable assignments. The dedicated monthly writer and native source/monthly readback ACK remain under integration. The legacy worker explicitly refuses the new operation, and existing global pause settings remain unchanged. An application remains unconfirmed until the dedicated native ACK succeeds. No existing source IDs, historical records, manual cell contents or October sheets are deleted or rewritten by this draft.
+
+Validation: `node scripts/test-case-list-integration.mjs` runs synthetic core, actual I/O adapter and actual callable wiring tests. These tests use mocked Google/Firestore boundaries and do not prove native cloud authentication, deployment or business execution. The canonical release workflow runs the suite after its existing mail-assignment regressions. Full TypeScript and application builds run in the ordinary CI.

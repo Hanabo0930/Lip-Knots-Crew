@@ -60,6 +60,7 @@ type PushAction = "enable" | "disable" | "test" | "status";
 type NetPrintItem = { id: string; number: string; printed?: boolean };
 type Job = {
   revision?: number; menuConditions?: string[];
+  caseListSource?: { sourceRevision: string };
   mailIntake?: unknown; mailIntakeReviewRequired?: boolean; pendingSourceWrite?: boolean; adminEditSheetWrite?: {pending?:boolean};
   id: string; workDate: string; dateKey: string; clientName: string; makerName: string;
   menuName: string; storeName: string; workTime: string; basePay: number|null; status: string;
@@ -1307,7 +1308,7 @@ export default function App(){
           if(!firebaseConfigured){accepted=true;applicationResultFocusRef.current={authVersion:authLoadVersion,navigationVersion};setAcceptedApplicationJobId(job.id);setMessage("デモ：応募を受け付けました。シフトで担当の確認状況を確認してください。");setOpenJobs(v=>v.filter(x=>x.id!==job.id));setMyJobs(v=>[...v.filter(x=>x.id!==job.id),{...job,status:"assigned",applicationUnconfirmed:true}]);setExpandedOpenJobId("");return;}
           if(!functions)throw new Error("応募の接続準備を確認できません。画面を再読み込みして、もう一度お試しください。");
           const owner=applicationAttemptOwner(companyId,staffId,user?.uid??"");
-          const attempt=await reserveApplicationAttempt(owner,job.id,()=>applicationAttemptsRef.current.get(job.id)??{requestId:crypto.randomUUID(),startedAt:Date.now(),...(Number.isSafeInteger(job.revision)?{expectedJobRevision:job.revision}:{}),...(job.mailApplication?{mailApplicationId:job.mailApplication.id,mailApplicationRevision:job.mailApplication.revision}:{})},isCurrentAction);
+          const attempt=await reserveApplicationAttempt(owner,job.id,()=>applicationAttemptsRef.current.get(job.id)??{requestId:crypto.randomUUID(),startedAt:Date.now(),...(Number.isSafeInteger(job.revision)?{expectedJobRevision:job.revision}:{}),...(job.caseListSource?{expectedSourceRevision:job.caseListSource.sourceRevision}:{}),...(job.mailApplication?{mailApplicationId:job.mailApplication.id,mailApplicationRevision:job.mailApplication.revision}:{})},isCurrentAction);
           if(!isCurrentAction()||!attempt)return;
           applicationAttemptsRef.current.set(job.id,attempt);
           // サーバーの重複防止記録は24時間。期限を超えた再送は自動で新規応募にしない。
@@ -1317,10 +1318,18 @@ export default function App(){
             throw new Error("前回の応募から時間が経過したため、この画面からの再送を停止しています。「シフト」で「シフトを更新」を押して確定状況を確認し、見つからない場合は管理者に応募結果を確認してください。");
           }
           let response;
-          try{response=await httpsCallable(functions,"applyToJob")({jobId:job.id,requestId:attempt.requestId,...(attempt.expectedJobRevision!==undefined?{expectedJobRevision:attempt.expectedJobRevision}:{}),...(attempt.mailApplicationId?{mailApplicationId:attempt.mailApplicationId,mailApplicationRevision:attempt.mailApplicationRevision}:{})});}
+          try{response=await httpsCallable(functions,"applyToJob")({jobId:job.id,requestId:attempt.requestId,...(attempt.expectedJobRevision!==undefined?{expectedJobRevision:attempt.expectedJobRevision}:{}),...(attempt.expectedSourceRevision?{expectedSourceRevision:attempt.expectedSourceRevision}:{}),...(attempt.mailApplicationId?{mailApplicationId:attempt.mailApplicationId,mailApplicationRevision:attempt.mailApplicationRevision}:{})});}
           catch(error){
             if(isCurrentAction()&&error&&typeof error==="object"&&"code" in error&&error.code==="functions/failed-precondition"&&"details" in error){
               const detail=error.details;
+              if(detail&&typeof detail==="object"&&"reason" in detail&&detail.reason==="case_list_job_changed"&&
+                  "accepted" in detail&&detail.accepted===false&&"jobId" in detail&&detail.jobId===job.id&&
+                  "requestId" in detail&&detail.requestId===attempt.requestId&&
+                  "expectedJobRevision" in detail&&detail.expectedJobRevision===(attempt.expectedJobRevision??null)&&
+                  "expectedSourceRevision" in detail&&detail.expectedSourceRevision===(attempt.expectedSourceRevision??null)){
+                removeSavedApplicationAttempt(owner,job.id,attempt.requestId);applicationAttemptsRef.current.delete(job.id);
+                throw new Error("募集内容が更新されました。まだ確定していません。「募集案件を更新」で最新の内容を確認してから応募してください。");
+              }
               if(detail&&typeof detail==="object"&&"reason" in detail&&detail.reason==="case_mail_job_changed"&&
                   "accepted" in detail&&detail.accepted===false&&"jobId" in detail&&detail.jobId===job.id&&
                   "requestId" in detail&&detail.requestId===attempt.requestId&&

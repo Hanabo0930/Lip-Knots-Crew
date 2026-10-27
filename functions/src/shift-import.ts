@@ -1,5 +1,6 @@
 import { createShiftPreviewRows, type ShiftPreviewList } from "./shift-preview-core";
 import { assertProductionOperational } from "./system-safety";
+import { executeCaseListImport } from "./case-list-source";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
@@ -27,6 +28,9 @@ import {
 
 const ImportRequestSchema = z.object({
   sheetNames: z.array(z.string().min(1)).max(36).optional(),
+  source: z.enum(["monthly", "case-list"]).optional(),
+  enableCaseList: z.boolean().optional(),
+  enableCaseListAssignments: z.boolean().optional(),
 });
 
 const PreviewRequestSchema = ImportRequestSchema.extend({ includePreviewRows:z.boolean().optional() });
@@ -121,6 +125,7 @@ export const previewShiftImport = onCall(
     const session = requireAdmin(request);
     const companyId = companyFromClaims(session.token);
     const input = PreviewRequestSchema.parse(request.data ?? {});
+    if (input.source === "case-list") return executeCaseListImport(companyId, "preview", session.uid, session.token as Record<string, unknown>);
     const result = await executeShiftImport(companyId, "preview", input.sheetNames);
     if (input.includePreviewRows !== true) delete result.previewRows;
     return result;
@@ -133,6 +138,7 @@ export const syncShiftSheetsReadOnly = onCall(
     const session = requireAdmin(request);
     const companyId = companyFromClaims(session.token);
     const input = ImportRequestSchema.parse(request.data ?? {});
+    if (input.source === "case-list") return executeCaseListImport(companyId, "commit", session.uid, session.token as Record<string, unknown>, input.enableCaseList === true, input.enableCaseListAssignments === true);
     return executeShiftImport(companyId, "commit", input.sheetNames);
   }
 );

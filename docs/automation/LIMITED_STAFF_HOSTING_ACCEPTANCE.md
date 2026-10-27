@@ -178,6 +178,55 @@ Preview なら `checkedAt`、staging なら `trialRecordedAt` 以後でなけれ
 技術受入方式では前 metadata snapshot にもこの順序を要求する。
 trial より前に得たログイン結果を staging 受入へ流用しない。
 
+## 既存アカウントの不足理由だけを診断する
+
+`scripts/automation/hosting-staff-account-diagnostic.mjs` の
+`diagnoseStaffAccount(observations)` は、渡された非秘密の読取判定を整理する純粋関数。
+Auth / Firestore / 配備設定を取得せず、ログイン・権限付与・validatorの入力生成も行わない。
+既存の `PILOT_EXISTING_STAFF_ACCOUNT_REQUIRED` は変更しない。
+
+入力は次の6項目だけ。省略は `UNKNOWN`。未取得・読取不能・現在権限不明を
+`NOT_FOUND` や権限拒否へ変換しない。`NOT_FOUND` は対象を固定した読取で不存在を確認した場合だけ使う。
+
+| 項目 | 許可する非秘密の判定 |
+| --- | --- |
+| `authUser` | `FOUND / NOT_FOUND / UNKNOWN` |
+| `emailIndex` | `FOUND / NOT_FOUND / UNKNOWN`（存在だけ。activeや対応一致の証明ではない） |
+| `authIdentity` | `FOUND / NOT_FOUND / UNKNOWN`（Staff判定後のbootstrap処理が作るログイン記録。初回前は不存在でも正常） |
+| `staffProfile` | `MATCHED_ACTIVE / NOT_FOUND / INACTIVE_OR_MISMATCH / UNKNOWN` |
+| `staffClaims` | `EXACT_STAFF_MATCH / MISMATCH / UNKNOWN` |
+| `deployedAdminMembership` | `EXCLUDED / INCLUDED / UNKNOWN` |
+
+profileはAuth UIDから推測せず、確認したemailIndexの `staffId` から照合する。
+indexを確認できなければprofileは `UNKNOWN` のままにする。
+`MATCHED_ACTIVE` は、その参照先でactiveと対象company/Staff一致を確認した判定。
+`EXACT_STAFF_MATCH` は、固定対象の既存claimsが余分なkeyもなくStaff条件に一致した判定。
+Admin除外は配備一覧の読取比較結果が必要で、ローカルソースの既定値から推測しない。
+Auth、profile、claimsの本文や、メール・UID・Staff IDを入力しない。
+未知field・値・accessorは内容を含まない固定エラーで拒否する。
+
+Staff bindingの状態はemailIndexだけで決める。`NOT_FOUND` は `STAFF_BINDING_MISSING`、
+`UNKNOWN` は `STAFF_BINDING_UNVERIFIED`、`FOUND` は `STAFF_BINDING_OBSERVED`。
+authIdentityは不足理由の `reasons` に入れず、独立した `information` に
+`LOGIN_HISTORY_OBSERVED / LOGIN_HISTORY_ABSENT / LOGIN_HISTORY_UNVERIFIED` として記録する。
+履歴の不存在・未確認は、Staffの権限や受入の不足ではない。
+
+合成例として `authUser=FOUND`、emailIndexが `NOT_FOUND`、profile/roleが `UNKNOWN` なら、
+`AUTH_FOUND / STAFF_BINDING_MISSING / PROFILE_UNVERIFIED / ROLE_UNVERIFIED` を同時に返す。
+理由コードでは確認済み不存在と未確認を分け、profile ID未解決も残す。
+存在を観測しただけの `*_OBSERVED` は紐付け全体の検証成功やStaff readyを意味しない。
+初回ログイン前にauthIdentitiesがなくても、emailIndex/profile/claims/Admin除外を観測済みなら
+Staff binding missingにはしない。履歴の有無から不正ユーザーや権限拒否とも判定しない。
+
+出力は常に `diagnosticOnly: true`、`authenticatedAcceptance: "UNVERIFIED"`。
+全観測項目が揃っても、診断を既存validatorのtrue欄や受入成功へ昇格させない。
+email検証、専用対象、gateway非production、費用、公開版など、元の前提検査も別途必要。
+このhelperはworkflow/validatorから呼ばれず、診断だけで実操作を開始する経路はない。
+不足した対象の正規読取は運用担当の別工程とし、診断が新規作成やclaims変更を指示することはない。
+
+合成fixtureの実行: `node --test scripts/automation/test-hosting-staff-account-diagnostic.mjs`。
+この試験は実アカウントや配備の証拠ではない。
+
 ## メール送信前に固定する対象
 
 専用 Staff は既存設定から確認する。アドレスの推測、新規アカウント作成、既存ユーザーの

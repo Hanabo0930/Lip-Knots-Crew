@@ -1,7 +1,7 @@
 import SheetWriteReviewEntry from "./SheetWriteReviewEntry";
 export type SheetWriteIssue = {
  id:string;jobId:string;operation:string;status:string;errorType:string;errorMessage:string;attempts:number;canRetry:boolean;
- writeVerificationRequired?:boolean;sourceWriteVerified?:false;acknowledgedAt?:string|null;acknowledgedNote?:string;
+ canReconcile?:boolean;writeVerificationRequired?:boolean;sourceWriteVerified?:false;acknowledgedAt?:string|null;acknowledgedNote?:string;
  desiredUpdates:Record<string,unknown>;beforeValues:Record<string,unknown>;
  job:null|{workDate:string;storeName:string;assignedStaffName:string;clientName:string};
 };
@@ -15,13 +15,15 @@ export default function AdminSheetIssuePanel({sheetIssues,issuesBusy,operationKe
  <div className="sync-actions"><button className="ghost" onClick={()=>void loadSheetIssues()} disabled={issuesBusy}>{issuesBusy?"読込中…":"再読込"}</button></div>
  <div className="issue-list">{sheetIssues.map(issue=>{
   const reviewed=issue.status==="acknowledged",busy=issuesBusy||operationKeys.includes("issue:"+issue.id);
-  const retry=issue.canRetry&&!issue.writeVerificationRequired&&!reviewed&&["blocked","dead_letter","retry_wait"].includes(issue.status);
+  const caseList=issue.operation==="case_list.assign";
+  const retry=!caseList&&issue.canRetry&&!issue.writeVerificationRequired&&!reviewed&&["blocked","dead_letter","retry_wait"].includes(issue.status);
   return <article key={issue.id} className={"sheet-review-card "+(issue.errorType==="conflict"?"conflict-issue":"")}>
    <div className="sheet-review-summary">
     <strong>{issue.job?issue.job.workDate+" "+issue.job.storeName+" "+issue.job.assignedStaffName:"案件 "+issue.jobId}</strong>
     <p className="sheet-review-state">{reviewed?"確認メモあり・反映未確認":"反映結果の確認が必要"}</p>
     <p>{issue.errorMessage||"依頼の状態とシフト表を確認してください。"}</p>
-    {issue.writeVerificationRequired&&<p className="sheet-review-help">手動での再試行はできません。原本と依頼の照合が必要です。</p>}
+    {caseList&&<p className="sheet-review-help">原本を読み取って保存結果を照合します。再書込は行いません。月別への保存が未完了の場合は保留を続けます。</p>}
+    {issue.writeVerificationRequired&&!caseList&&<p className="sheet-review-help">手動での再試行はできません。原本と依頼の照合が必要です。</p>}
     {issue.status==="paused_global"&&<p className="sheet-review-help">運用設定によって処理が停止されています。</p>}
     {issue.status==="error"&&<p className="sheet-review-help">旧形式のエラー記録です。反映結果を推測して再試行しません。</p>}
     <details><summary>依頼の状態と確認メモ</summary><dl><dt>依頼番号</dt><dd>{issue.id}</dd><dt>処理</dt><dd>{issue.operation||"記録なし"}</dd><dt>保存された状態</dt><dd>{issue.status}</dd>
@@ -29,7 +31,7 @@ export default function AdminSheetIssuePanel({sheetIssues,issuesBusy,operationKe
     </dl></details>
    </div>
    <div className="row-actions">{retry&&<button className="ghost compact" disabled={busy} onClick={()=>void retrySheetIssue(issue)}>再試行</button>}
-    <button className="ghost compact" disabled={busy||reviewed} onClick={()=>void acknowledgeSheetIssue(issue)}>{reviewed?"メモ記録済み":"確認メモを記録"}</button>
+    <button className="ghost compact" disabled={busy||reviewed&&!caseList} onClick={()=>void acknowledgeSheetIssue(issue)}>{caseList?"保存結果を再照合":reviewed?"メモ記録済み":"確認メモを記録"}</button>
    </div>
   </article>;
  })}{!issuesBusy&&!sheetIssues.length&&<div className="empty-inline">表示できる確認対象はありません。</div>}</div>

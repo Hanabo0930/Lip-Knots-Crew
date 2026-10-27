@@ -16,6 +16,8 @@ import { cancellationReasonLabels, cancellationTreatmentLabels } from "./analyti
 import { buildExpenseExpected, buildExpenseSheetUpdates, expenseSheetWriteContext, expenseMailHoldReason, normalizeExpenseInput } from "./admin-operations-core";
 import { getProductionOperationalState } from "./system-safety";
 import { incrementProductionMetrics } from "./production-metrics";
+const caseListMonthlyWorker = (): typeof import("./case-list-monthly-worker") => require("./case-list-monthly-worker");
+const caseListSourceCore = (): typeof import("./case-list-source-core") => require("./case-list-source-core");
 
 type Queue = {
   companyId: string; jobId: string; operation: string; dateKey?: string;
@@ -32,9 +34,13 @@ type Mapping = {
 };
 
 export const processSafeSheetWrite = onDocumentWritten("sheetSyncQueue/{queueId}", async event => {
+  const after = event.data?.after;
+  if (after?.exists && after.data()?.operation === "case_list.assign") {
+    await caseListMonthlyWorker().processCaseListMonthlyAssignment(after.ref);
+    return;
+  }
   // claim・計測より前に停止し、依頼の状態や試行回数を保持する。
   if (sheetWriteExecutionPaused()) return;
-  const after = event.data?.after;
   if (!after?.exists || after.data()?.status !== "pending") return;
   // 遅延イベントの本文ではなく、transactionで獲得した最新の依頼を使う。
   const queue = await claim(after.ref);
@@ -59,6 +65,7 @@ export const processSafeSheetWrite = onDocumentWritten("sheetSyncQueue/{queueId}
 });
 
 export const retrySafeSheetWrites = onSchedule({ schedule: "every 5 minutes", timeZone: "Asia/Tokyo", timeoutSeconds: 300 }, async () => {
+  await caseListMonthlyWorker().retryCaseListMonthlyAssignments();
   // 停止中は再試行の予約変更や期限切れ処理も行わない。
   if (sheetWriteExecutionPaused()) return;
   const now = Timestamp.now();
@@ -155,10 +162,14 @@ function assertPreContact(ref: FirebaseFirestore.DocumentReference, queue: Queue
       saved.temperature !== updates.temperature || !matchesValue(queue, "arrivalTime", saved.arrivalTime, updates.arrivalTime)) {
     throw new BlockedError("事前連絡の内容が最新の保存値と一致しません。");
   }
-  if (!job.sheetRef?.spreadsheetId || job.sheetRef.spreadsheetId !== mapping.spreadsheetId ||
+  if (!caseListBookMatches(job, mapping) ||
       !String(job.assignedStaffName ?? "").trim() || !mapping.columns.staffName || !(mapping.columns.workDate || mapping.identityColumns?.workDate)) {
     throw new BlockedError("事前連絡の元シフト表・担当氏名・勤務日の照合設定が不足しています。");
   }
+}
+function caseListBookMatches(job: FirebaseFirestore.DocumentData, mapping: Mapping): boolean {
+  if (job.caseListSource) return job.caseListSource.bindingHash === caseListSourceCore().caseListBindingHash(mapping.spreadsheetId) && !job.sheetRef?.spreadsheetId;
+  return Boolean(job.sheetRef?.spreadsheetId) && job.sheetRef.spreadsheetId === mapping.spreadsheetId;
 }
 function assertAssignment(ref: FirebaseFirestore.DocumentReference, queue: Queue, job: FirebaseFirestore.DocumentData,
   mapping: Mapping, staff: FirebaseFirestore.DocumentData | undefined, lock: FirebaseFirestore.DocumentData | undefined): void {
@@ -180,7 +191,7 @@ function assertAssignment(ref: FirebaseFirestore.DocumentReference, queue: Queue
       !lock || lock.companyId !== queue.companyId || lock.jobId !== queue.jobId || lock.staffId !== queue.actorStaffId || lock.dateKey !== queue.dateKey || lock.active !== true) {
     throw new ConflictError("応募者の利用状態・氏名または当日の勤務枠が変更されています。");
   }
-  if (!job.sheetRef?.spreadsheetId || job.sheetRef.spreadsheetId !== mapping.spreadsheetId ||
+  if (!caseListBookMatches(job, mapping) ||
       !mapping.columns.staffName || !(mapping.columns.workDate || mapping.identityColumns?.workDate) ||
       stableJson(queue.updates) !== stableJson({ staffName: staff.displayName }) || Object.keys(queue.styles ?? {}).length ||
       stableJson(queue.expected) !== stableJson({ staffName: { mode: "blank" } })) {
@@ -320,6 +331,7 @@ function matchesValue(queue: Queue, key: string, actual: unknown, expected: unkn
 }
 
 async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
+  if (queue.operation === "case_list.assign") throw new BlockedError("案件リストの月別連携は検証中です。既存行の書込経路へは進めません。");
   let mutationAttempted = false;
   try {
     const jobRef = db.collection("jobs").doc(queue.jobId);
@@ -365,7 +377,7 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
     assertSheetCaseIdColumn(job.sheetRef?.caseIdColumn, mapping.idColumn);
     if (mapping.enabled !== true) throw new BlockedError("安全書込がまだ有効化されていません。");
     if (job.companyId !== queue.companyId) throw new BlockedError("会社情報が一致しません。");
-    if (job.sheetRef?.spreadsheetId && job.sheetRef.spreadsheetId !== mapping.spreadsheetId) throw new BlockedError("元のシフト表が一致しません。");
+    if (job.caseListSource ? !caseListBookMatches(job, mapping) : job.sheetRef?.spreadsheetId && job.sheetRef.spreadsheetId !== mapping.spreadsheetId) throw new BlockedError("元のシフト表が一致しません。");
     await verifyAssignment(job, mapping);
     assertAdminEdit(ref, queue, job, mapping);
     await verifyEditSource(job);

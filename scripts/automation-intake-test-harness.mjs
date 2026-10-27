@@ -51,6 +51,9 @@ export function harness(){
   }};
   const boundaries={"./firebase":{db},"firebase-functions/v2/https":{HttpsError,onCall:(...args)=>args.at(-1)},
     "firebase-admin/firestore":{Timestamp,FieldPath:{documentId:()=>"__name__"},FieldValue:{delete:()=>({__delete:true}),serverTimestamp:()=>Timestamp.now()}},
+    // Only the named integration boundary is mocked. A legacy mail fixture
+    // entering CaseList must fail; external Google clients remain refused.
+    "./case-list-source":{readCaseListPublication:()=>assert.fail("Legacy mail intake must not read CaseList publication"),requireCaseListExecutive:()=>assert.fail("Legacy mail intake must not confirm CaseList publication")},
     zod:require("zod"),"node:crypto":require("node:crypto")};
   function load(name){
     if(Object.hasOwn(boundaries,name))return boundaries[name];

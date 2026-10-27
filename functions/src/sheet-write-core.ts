@@ -20,8 +20,9 @@ export function submissionSheetWriteIdentity(job: Record<string, unknown>): stri
 // 取消・復帰の作成時と実行時で、同じ案件・担当・勤務日・元タブを照合する。
 export function cancellationSheetWriteIdentity(job: Record<string, unknown>): string {
   const sheet = job.sheetRef && typeof job.sheetRef === "object" ? job.sheetRef as Record<string, unknown> : {};
+  const caseList = job.caseListSource && typeof job.caseListSource === "object" ? job.caseListSource as Record<string, unknown> : null;
   return JSON.stringify([job.caseId ?? null, job.assignedStaffId ?? null, job.assignedStaffName ?? null,
-    job.dateKey ?? null, job.workDate ?? null, sheet.spreadsheetId ?? null, sheet.sheetId ?? null, sheet.sheetName ?? null,
+    job.dateKey ?? null, job.workDate ?? null, caseList ? caseList.bindingHash ?? null : sheet.spreadsheetId ?? null, sheet.sheetId ?? null, sheet.sheetName ?? null,
     ...(job.mailIntake ? [job.mailIntakeHold ?? null] : []), ...(job.mailTargetHold != null ? [job.mailTargetHold] : [])]);
 }
 
@@ -105,3 +106,4 @@ export function assertSheetCaseIdColumn(savedColumn: unknown, currentColumn: str
     throw new SheetCaseIdColumnError("取込時と書戻しの固定案件ID列が一致しません。列設定を確認して再取込してください。");
   }
 }
+

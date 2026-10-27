@@ -7,11 +7,24 @@ export const RETRY_WORKER = "retrySafeSheetWrites";
 const OLD_WORKER = "processSafeSheetWrite";
 
 // 停止判定だけを模倣した別処理を通さない。変更時は全ソースをレビューして更新する。
-// onSchedule・キュー・先頭return・停止値・リージョン・exportを含む承認候補の固定版。
+// 旧処理の停止値・キュー・リージョン・exportは保持する。CaseList 専用の
+// 明示opt-in処理だけが旧停止判定の前に進むため、その実行依存も固定する。
+// この固定値はソース検査用であり、実行時IAMや本番有効化の承認ではない。
 export const retryWorkerSourcePins = Object.freeze({
-  "functions/src/safe-sheet-writes.ts": "74e821e123834de5db7e8650f95d16be88d96e4e26c527f1fb3711133df2ed1a",
+  "functions/src/safe-sheet-writes.ts": "373f6ad03ba9e5deadc0a4fa4f473b9e31959348c4c71a87cd70365466d56f07",
   "functions/src/sheet-write-control.ts": "a57db6a895c42ed58655a42ae67d84754fb679c2f0751d11b5b65edff0387f08",
-  "functions/src/index.ts": "b5258e6842732565b671c33c89e43da117baec7e629bf7654d0dccffebbe1dc9"
+  "functions/src/index.ts": "b5258e6842732565b671c33c89e43da117baec7e629bf7654d0dccffebbe1dc9",
+  "functions/src/case-list-monthly-worker.ts": "259d6983df64aec4108e2b035c7ea0541fcde412dd8531ab0dc6b4c031690921",
+  "functions/src/case-list-monthly-reader.ts": "7a0cfe841bde8fe9b9e12e41eb4f7b58ff0fbfe14620812cc3fd216bac98021a",
+  "functions/src/case-list-source-core.ts": "40eb55c72ed7a861524b48d191e5237e4f31b1d02b03652b3c3893acf53de82c",
+  "functions/src/case-list-monthly-controller.cjs": "a8867a705ee21ac8c77fa553c15d0471173f10b9da6882c0ed759f1f09853d56",
+  "functions/src/case-list-monthly-adapter.cjs": "1b46d9854ec9cd428eeed784c32f86a8af3a2f642c1a633b2967d249e5a88821",
+  "functions/src/case-list-monthly-compact.cjs": "6d40516a62f7d0d7938b060d229f7e6a142ba174b37e494bcec0a051c8144d87",
+  "functions/src/case-list-projection.cjs": "059f39d152981e9e9566c276332f9db7da6442dd99fe3ec12e28c587ff9a3326",
+  "functions/src/case-id.ts": "7c03676a32947d8c7a81a8a5b7600c1870ccd2c41b036362bf3e8dd475422d87",
+  "functions/src/sheet-write-core.ts": "dd73c7ff9715327b81f61efc6cd703d64e5dd64d651361f45c3a4965a81b28c2",
+  "functions/src/system-safety.ts": "25debd6fa931ce85b72f82d4f7e499db99b0054576af0f07a91ffb8917e61ce3",
+  "functions/src/sheet-reader.ts": "9362b67e922d89661a26999c4cb44c5394a199635627b69e0de5057a9202dce0"
 });
 
 export function assertRetryWorkerSource(readSource) {

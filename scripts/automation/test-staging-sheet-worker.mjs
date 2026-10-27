@@ -44,6 +44,20 @@ try {
     [control, '!== "active"', '=== "paused"'],
     [index, 'region: "asia-northeast1"', 'region: "us-central1"'],
     [index, 'retrySafeSheetWrites } from "./safe-sheet-writes"', 'retrySafeSheetWrites } from "./other"'],
+    [worker, 'await caseListMonthlyWorker().retryCaseListMonthlyAssignments();', 'await untrustedRetry();'],
+    [worker, 'if (after?.exists && after.data()?.operation === "case_list.assign")', 'if (after?.exists)'],
+    ['functions/src/case-list-monthly-worker.ts', 'where("operation", "==", "case_list.assign")', 'where("operation", "==", "job.assign")'],
+    ['functions/src/case-list-monthly-worker.ts', 'where("caseListAssignmentsEnabled", "==", true)', 'where("caseListAssignmentsEnabled", "==", false)'],
+    ['functions/src/case-list-monthly-worker.ts', 'config.companyId === doc.id', 'true'],
+    ['functions/src/case-list-monthly-worker.ts', 'config.caseListEnabled === true', 'true'],
+    ['functions/src/case-list-monthly-worker.ts', '(await getProductionOperationalState(doc.id)).operational', 'true'],
+    ['functions/src/case-list-monthly-worker.ts', 'current.companyId !== data.companyId', 'false'],
+    ['functions/src/case-list-monthly-worker.ts', 'config.caseListAssignmentsEnabled !== true', 'false'],
+    ['functions/src/case-list-monthly-worker.ts', 'assertKnownCaseListContinuation(doc.id, current, operationSnap.data()!, records, configuredCaseListSource(config.spreadsheetId).spreadsheetId);', 'uncheckedContinuation();'],
+    ['functions/src/case-list-monthly-worker.ts', 'if (current.status === "processing")', 'if (false)'],
+    ['functions/src/case-list-monthly-worker.ts', 'current.writeVerificationRequired !== false', 'false'],
+    ['functions/src/case-list-monthly-worker.ts', 'const sheets = owner ? null : google.sheets', 'const sheets = google.sheets'],
+    ['functions/src/case-list-monthly-reader.ts', 'metadata.spreadsheetId !== spreadsheetId', 'false'],
   ]) {
     assert.ok(sources[file].includes(before));
     check(() => assert.throws(() => assertRetryWorkerSource(name => name === file ? sources[name].replace(before, after) : sources[name]), /SOURCE_NOT_REVIEWED/));

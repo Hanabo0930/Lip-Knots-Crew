@@ -42,6 +42,16 @@ function harness(environment={LKC_SHEET_WRITE_MODE:"active"},compiled=false){
  const modules=new Map();
  const boundaries={
   "./firebase":{db},"node:crypto":crypto,
+  // CaseList has its own actual-worker suite. Legacy fixtures must not enter
+  // that writer or load its SDK dependencies. Its retry has no work only when
+  // these records contain neither a CaseList queue nor an explicit opt-in.
+  "./case-list-monthly-worker":{
+   processCaseListMonthlyAssignment:async()=>assert.fail("Legacy fixture entered the CaseList worker"),
+   retryCaseListMonthlyAssignments:async()=>{
+    assert.ok(![...records].some(([path,value])=>path.startsWith("sheetSyncQueue/")&&value.operation==="case_list.assign"),"Legacy fixture contains a CaseList queue");
+    assert.ok(![...records].some(([path,value])=>path.startsWith("sheetImportConfigs/")&&value.caseListAssignmentsEnabled===true),"Legacy fixture enables CaseList assignments");
+   }
+  },
   "firebase-admin/firestore":{Timestamp,FieldValue:{serverTimestamp:()=>Timestamp.now(),increment:n=>({__increment:n}),delete:()=>({__delete:true})}},
   "firebase-functions/v2/https":{HttpsError,onCall:handler=>handler},zod:dependency("zod"),
   "firebase-functions/v2/firestore":{onDocumentWritten:(_path,handler)=>handler},
@@ -59,6 +69,12 @@ const testPrefix=process.argv.find(arg=>arg.startsWith('--test-name-prefix='))?.
 const failedFrom=process.argv.find(arg=>arg.startsWith("--test-failed-from="))?.slice("--test-failed-from=".length);
 const failedNames=failedFrom?new Set(JSON.parse(fs.readFileSync(failedFrom,"utf8")).results.filter(row=>!row.passed).map(row=>row.name)):null;
 async function test(name,fn){if((testPrefix&&!name.startsWith(testPrefix))||(failedNames&&!failedNames.has(name)))return;try{await fn();results.push({name,passed:true});}catch(error){results.push({name,passed:false,error:error.message});}}
+for(const compiled of [false,true]){
+ await test(`legacy CaseList boundary ${compiled?"compiled":"source"} disabled retry has no effects`,async()=>{const h=harness({},compiled),before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);await h.core("./case-list-monthly-worker","retryCaseListMonthlyAssignments");assertPauseUnchanged(h,before,cells);});
+ await test(`legacy CaseList boundary ${compiled?"compiled":"source"} refuses new operation`,async()=>{const h=harness({},compiled);h.queue().operation="case_list.assign";const before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);await assert.rejects(()=>h.retry(),/Legacy fixture contains a CaseList queue/);assertPauseUnchanged(h,before,cells);});
+ await test(`legacy CaseList boundary ${compiled?"compiled":"source"} refuses explicit optin`,async()=>{const h=harness({},compiled);h.records.set(`sheetImportConfigs/${companyId}`,{companyId,caseListAssignmentsEnabled:true});const before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);await assert.rejects(()=>h.retry(),/Legacy fixture enables CaseList assignments/);assertPauseUnchanged(h,before,cells);});
+ await test(`legacy CaseList boundary ${compiled?"compiled":"source"} process fails closed`,async()=>{const h=harness({},compiled),before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);await assert.rejects(()=>h.core("./case-list-monthly-worker","processCaseListMonthlyAssignment",{}),/Legacy fixture entered the CaseList worker/);assertPauseUnchanged(h,before,cells);});
+}
 // 実際の2入口をTS・build済みJSで呼び、キュー・DB・Sheets・計測の副作用を確認する。
 const pauseModes=[undefined,"paused","invalid","","ACTIVE"," active","active "];
 function assertPauseUnchanged(h,before,cells){
@@ -87,7 +103,7 @@ for(const compiled of [false,true])for(const environment of [undefined,"developm
  });
 }
 for(const compiled of [false,true]){
- await test(`sheet pause ignores event payload ${compiled?"compiled":"source"}`,async()=>{const h=harness({},compiled),before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);await h.rawEvent({get data(){assert.fail("paused worker inspected event payload");}});assertPauseUnchanged(h,before,cells);});
+ await test(`sheet pause ignores event payload ${compiled?"compiled":"source"}`,async()=>{const h=harness({},compiled),before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);const payload=new Proxy({operation:"precontact.submit"},{get:(value,key)=>{if(key==="operation")return value.operation;assert.fail("paused worker inspected event payload");}});await h.rawEvent({data:{after:{exists:true,data:()=>payload}}});assertPauseUnchanged(h,before,cells);});
  await test(`sheet active normal ${compiled?"compiled":"source"}`,async()=>{const h=harness({APP_ENVIRONMENT:"staging",LKC_SHEET_WRITE_MODE:"active"},compiled);await h.run();assert.equal(h.queue().status,"completed");assert.equal(h.job().preContactSyncPending,false);assert.equal(h.writes.length,1);});
  await test(`sheet active retry ${compiled?"compiled":"source"}`,async()=>{const h=harness({APP_ENVIRONMENT:"staging",LKC_SHEET_WRITE_MODE:"active"},compiled);Object.assign(h.queue(),{status:"retry_wait",retryAt:Timestamp.fromMillis(0)});await h.retry();assert.equal(h.queue().status,"pending");await h.run();assert.equal(h.queue().status,"completed");assert.equal(h.writes.length,1);});
 }

@@ -7,6 +7,8 @@ import { db } from "./firebase";
 import { companyFromClaims, requireAdmin, requestId } from "./utils";
 import { assertProductionOperational } from "./system-safety";
 import { applicationConfirmationIdentity } from "./assignment-preparation-core";
+const caseListPrivate = (): typeof import("./case-list-private-ref") => require("./case-list-private-ref");
+const CASE_LIST_EXPENSE_HOLD = "この案件の経費確定は保留中です。現在の経費は確認できます。";
 import {
   buildExpenseExpected,
   expenseSheetWriteContext,
@@ -24,6 +26,10 @@ const IssueQuerySchema = z.object({
 const QueueActionSchema = z.object({
   queueId: z.string().min(1),
   note: z.string().max(1000).default(""),
+});
+
+const AcknowledgeQueueSchema = QueueActionSchema.extend({
+  action: z.enum(["note", "reconcile-case-list"]).default("note"),
 });
 
 const JobSchema = z.object({
@@ -88,7 +94,8 @@ export const getSheetWriteIssues = onCall(async (request) => {
         sourceWriteVerified: false,
         acknowledgedAt: serializeTimestamp(data.acknowledgedAt),
         acknowledgedNote: typeof data.acknowledgedNote === "string" ? data.acknowledgedNote : "",
-        canRetry: canManuallyRetrySheetWrite({
+        canReconcile: data.operation === "case_list.assign",
+        canRetry: data.operation !== "case_list.assign" && canManuallyRetrySheetWrite({
           status: String(data.status ?? ""),
           errorType: String(data.errorType ?? ""),
           writeVerificationRequired: data.writeVerificationRequired,
@@ -117,7 +124,7 @@ export const retrySheetWriteIssue = onCall(async (request) => {
       throw new HttpsError("not-found", "書込エラーが見つかりません。");
     }
     const data = snap.data()!;
-    if (!canManuallyRetrySheetWrite({ status: String(data.status ?? ""), errorType: String(data.errorType ?? ""), writeVerificationRequired: data.writeVerificationRequired })) {
+    if (data.operation === "case_list.assign" || !canManuallyRetrySheetWrite({ status: String(data.status ?? ""), errorType: String(data.errorType ?? ""), writeVerificationRequired: data.writeVerificationRequired })) {
       throw new HttpsError("failed-precondition", "現在の書込状態では再試行できません。再読込して確認してください。");
     }
     tx.update(ref, {
@@ -137,8 +144,17 @@ export const retrySheetWriteIssue = onCall(async (request) => {
 export const acknowledgeSheetWriteIssue = onCall(async (request) => {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
-  const input = QueueActionSchema.parse(request.data ?? {});
+  const input = AcknowledgeQueueSchema.parse(request.data ?? {});
   const ref = db.collection("sheetSyncQueue").doc(input.queueId);
+  if (input.action === "reconcile-case-list") {
+    const snapshot = await ref.get();
+    if (!snapshot.exists || snapshot.data()?.companyId !== companyId) throw new HttpsError("not-found", "書込エラーが見つかりません。");
+    if (snapshot.data()?.operation !== "case_list.assign") throw new HttpsError("failed-precondition", "この依頼は保存結果の再照合に対応していません。");
+    // The worker rechecks executive identity and current authority. Owner mode
+    // only reads Sheets and may settle metadata after exact verified images.
+    const worker: typeof import("./case-list-monthly-worker") = require("./case-list-monthly-worker");
+    return worker.reconcileCaseListMonthlyAssignment(ref, session.uid, session.token);
+  }
   const auditRef = db.collection("auditLogs").doc();
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -236,7 +252,9 @@ export const getExpenseReview = onCall(async (request) => {
     throw new HttpsError("failed-precondition", "経費確認と案件の所属情報が一致しません。");
   }
 
-  const jobData = job.data()!;
+  const rawJob = job.data()!;
+  const jobData = rawJob.caseListSource ? await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, rawJob) : rawJob;
+  const linkRef = rawJob.caseListSource ? await caseListPrivate().locateCaseListPrivateSheetRow(jobData.sheetRef) : jobData.sheetRef;
   const currentValues = {
     transportation: numberOrNull(jobData.expenses?.transportation),
     purchase8: numberOrNull(jobData.expenses?.purchase8),
@@ -254,11 +272,12 @@ export const getExpenseReview = onCall(async (request) => {
       storeName: jobData.storeName ?? "",
       makerName: jobData.makerName ?? "",
       assignedStaffName: jobData.assignedStaffName ?? "",
-      sheetUrl: buildSheetUrl(jobData),
+      sheetUrl: buildSheetUrl({ ...jobData, sheetRef: linkRef }),
     },
     currentValues,
-    writeBlockedReason: expenseMailHoldReason(jobData),
+    writeBlockedReason: rawJob.caseListSource ? CASE_LIST_EXPENSE_HOLD : expenseMailHoldReason(jobData),
     reviewVersion: expenseReviewVersion(companyId, input.jobId, job, draft),
+    ...(rawJob.caseListSource ? { reviewVersion: expenseReviewVersion(companyId, input.jobId, job, draft, jobData) } : {}),
     draft: draft.exists ? serializeDocument(draft.data() ?? {}) : null,
   };
 });
@@ -274,14 +293,21 @@ export const saveExpenseReviewDraft = onCall(async (request) => {
     throw new HttpsError("invalid-argument", parsed.errors.join(" / "));
   }
 
-  const job = await requireCompanyJob(companyId, input.jobId);
+  const rawJob = await requireCompanyJob(companyId, input.jobId);
+  const job = rawJob.caseListSource ? await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, rawJob) : rawJob;
   const ref = db.collection("expenseReviews").doc(input.jobId);
   await db.runTransaction(async (tx) => {
     const [currentJob, currentReview] = await Promise.all([
       tx.get(db.collection("jobs").doc(input.jobId)), tx.get(ref),
     ]);
-    assertExpenseWriteContext(companyId, input.jobId, job, currentJob, currentReview);
-    assertExpenseReviewVersion(input.expectedVersion, companyId, input.jobId, currentJob, currentReview);
+    const privateCurrent = currentJob.data()?.caseListSource ? await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, currentJob.data()!, tx) : undefined;
+    if (privateCurrent) {
+      assertExpenseWriteContext(companyId, input.jobId, job, currentJob, currentReview, privateCurrent);
+      assertExpenseReviewVersion(input.expectedVersion, companyId, input.jobId, currentJob, currentReview, privateCurrent);
+    } else {
+      assertExpenseWriteContext(companyId, input.jobId, job, currentJob, currentReview);
+      assertExpenseReviewVersion(input.expectedVersion, companyId, input.jobId, currentJob, currentReview);
+    }
     const now = Timestamp.now();
     tx.set(ref, {
       companyId, jobId: input.jobId, staffId: job.assignedStaffId ?? null,
@@ -309,6 +335,17 @@ export const completeExpenseReview = onCall(async (request) => {
   }
 
   const job = await requireCompanyJob(companyId, input.jobId);
+  if (job.caseListSource) {
+    // The existing expense writer/finalizer uses public job amounts. Keep this
+    // route held until a private-aware completion path can verify its result.
+    await db.runTransaction(async tx => {
+      const [currentJob, review] = await Promise.all([tx.get(db.collection("jobs").doc(input.jobId)), tx.get(db.collection("expenseReviews").doc(input.jobId))]);
+      if (!currentJob.exists || currentJob.data()?.companyId !== companyId) throw new HttpsError("not-found", "案件が見つかりません。");
+      const currentPrivate = await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, currentJob.data()!, tx);
+      assertExpenseReviewVersion(input.expectedVersion, companyId, input.jobId, currentJob, review, currentPrivate);
+    });
+    throw new HttpsError("failed-precondition", CASE_LIST_EXPENSE_HOLD, { reason: "case_list_private_expense_completion_held" });
+  }
   // URL生成で失敗する案件を、キュー作成後のエラーにしない。
   const sheetUrl = buildSheetUrl(job);
   const currentValues = {
@@ -383,7 +420,10 @@ export const getJobSheetLink = onCall(async (request) => {
   const companyId = companyFromClaims(session.token);
   const input = JobSchema.parse(request.data ?? {});
   const job = await requireCompanyJob(companyId, input.jobId);
-  return { url: buildSheetUrl(job) };
+  if (!job.caseListSource) return { url: buildSheetUrl(job) };
+  const privateRef = await caseListPrivate().resolveCaseListPrivateSheetRef(companyId, input.jobId, job);
+  const currentRef = await caseListPrivate().locateCaseListPrivateSheetRow(privateRef);
+  return { url: buildSheetUrl({ ...job, sheetRef: currentRef }) };
 });
 
 export const updateExpenseReviewFromQueue = onDocumentWritten(
@@ -487,21 +527,24 @@ function expenseVersionValue(value: unknown): unknown {
   return value;
 }
 
-function expenseReviewVersion(companyId: string, jobId: string, job: FirebaseFirestore.DocumentSnapshot, review: FirebaseFirestore.DocumentSnapshot): string {
+function expenseReviewVersion(companyId: string, jobId: string, job: FirebaseFirestore.DocumentSnapshot, review: FirebaseFirestore.DocumentSnapshot, privateJob?: FirebaseFirestore.DocumentData): string {
   // 確認版は認可の代用ではない。所属照合後、同じtransactionで現在版を比較する。
   return createHash("sha256").update(JSON.stringify([
-    companyId, jobId, expenseWriteContext(job.data() ?? {}),
+    companyId, jobId, expenseWriteContext(privateJob ?? job.data() ?? {}),
     expenseVersionValue(job.updateTime ?? null), review.exists,
     expenseVersionValue(review.updateTime ?? null), expenseVersionValue(review.data() ?? null),
   ])).digest("hex");
 }
 
-function assertExpenseReviewVersion(expected: string | undefined, companyId: string, jobId: string, job: FirebaseFirestore.DocumentSnapshot, review: FirebaseFirestore.DocumentSnapshot): void {
+function assertExpenseReviewVersion(expected: string | undefined, companyId: string, jobId: string, job: FirebaseFirestore.DocumentSnapshot, review: FirebaseFirestore.DocumentSnapshot, privateJob?: FirebaseFirestore.DocumentData): void {
+  if (job.data()?.caseListSource && expected === undefined) {
+    throw new HttpsError("failed-precondition", "経費確認版がありません。経費を読み直してください。", { reason: "case_list_private_expense_version_required" });
+  }
   // 旧Crew案件の互換性は維持。受信案件では表示版を省略できない。
   if (job.data()?.mailIntake && expected === undefined) {
     throw new HttpsError("failed-precondition", "受信案件の経費確認版がありません。経費を読み直してください。", { reason: "case_mail_expense_version_required" });
   }
-  if (expected !== undefined && expected !== expenseReviewVersion(companyId, jobId, job, review)) {
+  if (expected !== undefined && expected !== expenseReviewVersion(companyId, jobId, job, review, privateJob)) {
     throw new HttpsError("failed-precondition", "経費確認が別の操作で更新されました。再読込して確認してください。");
   }
 }
@@ -511,6 +554,7 @@ function expenseWriteContext(job: FirebaseFirestore.DocumentData): string {
     expenseSheetWriteContext(job),
     ...["transportation", "purchase8", "purchase10", "netPrintCost", "postageCost"].map(key => numberOrNull(job.expenses?.[key])),
     job.sheetRef?.spreadsheetId ?? null, job.sheetRef?.sheetId ?? null, job.sheetRef?.currentRow ?? null,
+    ...(job.caseListSource ? [job.caseListFinancialObservationHash ?? null] : []),
   ]);
 }
 
@@ -519,9 +563,10 @@ function assertExpenseWriteContext(
   jobId: string,
   expectedJob: FirebaseFirestore.DocumentData,
   currentJob: FirebaseFirestore.DocumentSnapshot,
-  review: FirebaseFirestore.DocumentSnapshot
+  review: FirebaseFirestore.DocumentSnapshot,
+  privateJob?: FirebaseFirestore.DocumentData
 ): void {
-  const job = currentJob.data();
+  const job = privateJob ?? currentJob.data();
   if (!currentJob.exists || job?.companyId !== companyId) {
     throw new HttpsError("not-found", "案件が見つかりません。");
   }

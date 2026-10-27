@@ -17,11 +17,14 @@ import { mailPreparationContext, applicationConfirmationIdentity, assignmentPrep
 import { assertProductionOperational } from "./system-safety";
 import { readMailApplicationForAssignment } from "./automation-intake";
 import { readMailPublication } from "./case-mail-publication";
+const caseListSourceModule = (): typeof import("./case-list-source") => require("./case-list-source");
+type CaseListPublicationCheck = Awaited<ReturnType<(typeof import("./case-list-source"))["readCaseListPublication"]>>;
 
 const ApplySchema = z.object({
   jobId: z.string().min(1),
   requestId: z.string().min(8).max(120),
   expectedJobRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  expectedSourceRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   mailApplicationId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   mailApplicationRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
 }).refine(value => (value.mailApplicationId === undefined) === (value.mailApplicationRevision === undefined), {
@@ -59,6 +62,7 @@ export const applyToJob = onCall(async (request) => {
         throw new HttpsError("failed-precondition", "前回と異なる応募候補です。確定状況を確認してください。");
       }
       if ((previous.expectedJobRevision ?? null) !== (input.expectedJobRevision ?? null) ||
+          (previous.expectedSourceRevision ?? null) !== (input.expectedSourceRevision ?? null) ||
           (previous.mailApplicationRevision !== undefined && previous.mailApplicationRevision !== (input.mailApplicationRevision ?? null))) {
         throw new HttpsError("failed-precondition", "前回と異なる確認版です。「シフト」で確定状況を確認してください。");
       }
@@ -112,6 +116,15 @@ export const applyToJob = onCall(async (request) => {
           { reason: "case_mail_job_changed", accepted: false, jobId: input.jobId, requestId: input.requestId, expectedJobRevision: input.expectedJobRevision ?? null });
       }
     }
+    let caseListChecked: CaseListPublicationCheck | null = null;
+    if (job.caseListSource) {
+      try { caseListChecked = await caseListSourceModule().readCaseListPublication(tx, companyId, input.jobId, job, input.expectedJobRevision, input.expectedSourceRevision); }
+      catch (error) {
+        if (error instanceof HttpsError && error.code === "failed-precondition") throw new HttpsError("failed-precondition", error.message,
+          { reason: "case_list_job_changed", accepted: false, jobId: input.jobId, requestId: input.requestId, expectedJobRevision: input.expectedJobRevision ?? null, expectedSourceRevision: input.expectedSourceRevision ?? null });
+        throw error;
+      }
+    }
     const workDate = dateKeyFromIso(String(job.dateKey));
     if (workDate < tokyoParts(new Date()).dateKey) {
       throw new HttpsError("failed-precondition", "この案件は実施日を過ぎているため応募できません。");
@@ -120,7 +133,7 @@ export const applyToJob = onCall(async (request) => {
     const lockRef = db.collection("staffDayLocks").doc(lockId);
     const lockSnap = await tx.get(lockRef);
 
-    if (lockSnap.exists && lockSnap.data()?.active === true) {
+    if (lockSnap.exists && (lockSnap.data()?.active === true || (caseListChecked && lockSnap.data()?.active !== false))) {
       throw new HttpsError("failed-precondition", "この日はシフトが確定済みです。");
     }
 
@@ -144,6 +157,7 @@ export const applyToJob = onCall(async (request) => {
       assignedAt: now,
       ...assignmentPreparationPatch(job, { ...job, assignedStaffId: staffId, assignedStaffName: displayName }),
       assignmentSheetWrite: { queueId: queueRef.id, identity: cancellationSheetWriteIdentity({ ...job, assignedStaffId: staffId, assignedStaffName: displayName }),
+        ...(caseListChecked ? { sourceRevision: caseListChecked.source.sourceRevision, assignedJobRevision: nextAssignmentRevision(job), operation: "case_list.assign" } : {}),
         ...(job.mailIntake ? { confirmation: applicationConfirmationIdentity({ ...job, status: "assigned", assignedStaffId: staffId, assignedStaffName: displayName }) } : {}) },
       applicationUnconfirmed: true,
       updatedAt: now,
@@ -161,15 +175,20 @@ export const applyToJob = onCall(async (request) => {
     tx.set(queueRef, {
       companyId,
       jobId: input.jobId,
-      operation: "job.assign",
+      operation: caseListChecked ? "case_list.assign" : "job.assign",
       dateKey: workDate,
       updates: { staffName: displayName },
       status: "pending",
       attempts: 0,
-      idempotencyKey: `job.assign:${input.jobId}:${queueRef.id}`,
+      idempotencyKey: `${caseListChecked ? "case_list.assign" : "job.assign"}:${input.jobId}:${queueRef.id}`,
       expected: { staffName: { mode: "blank" } },
       actorUid: session.uid,
       actorStaffId: staffId,
+      ...(caseListChecked ? { caseListAssignment: { schema: "LK_CASE_LIST_ASSIGN_V1", queueId: queueRef.id, operationId: queueRef.id,
+        companyId, jobId: input.jobId, sourceCaseId: caseListChecked.source.caseId,
+        sourceRowRevision: caseListChecked.source.rowRevision, sourceLedgerRevision: caseListChecked.source.ledgerRevision, sourceRevision: caseListChecked.source.sourceRevision,
+        preMonthlyContentHash: caseListChecked.preMonthlyContentHash,
+        expectedJobRevision: input.expectedJobRevision, assignedJobRevision: nextAssignmentRevision(job), staffId, staffName: displayName, dateKey: workDate } } : {}),
       createdAt: now,
     });
 
@@ -207,6 +226,7 @@ export const applyToJob = onCall(async (request) => {
     });
     tx.set(idempotencyRef, {
       expectedJobRevision: input.expectedJobRevision ?? null,
+      expectedSourceRevision: input.expectedSourceRevision ?? null,
       mailApplicationRevision: input.mailApplicationRevision ?? null,
       mailApplicationId: input.mailApplicationId ?? null,
       uid: session.uid,

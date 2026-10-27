@@ -1,5 +1,8 @@
 import { createShiftPreviewRows, type ShiftPreviewList } from "./shift-preview-core";
 import { assertProductionOperational } from "./system-safety";
+import { createHash } from "node:crypto";
+const caseListSourceModule = (): typeof import("./case-list-source") => require("./case-list-source");
+const caseListSourceCore = (): typeof import("./case-list-source-core") => require("./case-list-source-core");
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
@@ -27,6 +30,9 @@ import {
 
 const ImportRequestSchema = z.object({
   sheetNames: z.array(z.string().min(1)).max(36).optional(),
+  source: z.enum(["monthly", "case-list"]).optional(),
+  enableCaseList: z.boolean().optional(),
+  enableCaseListAssignments: z.boolean().optional(),
 });
 
 const PreviewRequestSchema = ImportRequestSchema.extend({ includePreviewRows:z.boolean().optional() });
@@ -83,6 +89,13 @@ const ConfigSchema = z.object({
 });
 
 type ImportMode = "preview" | "commit";
+type CaseListAwareConfig = ShiftImportConfig & { caseListEnabled: boolean };
+function assertCaseListMonthlyIdMapping(headers: unknown[], caseIdColumn: string | undefined): void {
+  const matches = headers.flatMap((value, index) => value === "連絡_固定案件ID" ? [index + 1] : []);
+  let expected = "";
+  if (matches.length === 1) for (let n = matches[0]!; n > 0; n = Math.floor((n - 1) / 26)) expected = String.fromCharCode(65 + (n - 1) % 26) + expected;
+  if (!expected || caseIdColumn !== expected) throw new HttpsError("failed-precondition", "月別の固定案件ID列と連携設定が一致しません。原本を保持して取込を停止しました。");
+}
 
 type ImportExecutionResult = {
   runId: string | null;
@@ -121,6 +134,7 @@ export const previewShiftImport = onCall(
     const session = requireAdmin(request);
     const companyId = companyFromClaims(session.token);
     const input = PreviewRequestSchema.parse(request.data ?? {});
+    if (input.source === "case-list") return caseListSourceModule().executeCaseListImport(companyId, "preview", session.uid, session.token as Record<string, unknown>);
     const result = await executeShiftImport(companyId, "preview", input.sheetNames);
     if (input.includePreviewRows !== true) delete result.previewRows;
     return result;
@@ -133,6 +147,7 @@ export const syncShiftSheetsReadOnly = onCall(
     const session = requireAdmin(request);
     const companyId = companyFromClaims(session.token);
     const input = ImportRequestSchema.parse(request.data ?? {});
+    if (input.source === "case-list") return caseListSourceModule().executeCaseListImport(companyId, "commit", session.uid, session.token as Record<string, unknown>, input.enableCaseList === true, input.enableCaseListAssignments === true);
     return executeShiftImport(companyId, "commit", input.sheetNames);
   }
 );
@@ -241,7 +256,14 @@ async function executeShiftImport(
       try {
         const readStartedAtMs = Date.now();
         const caseIdColumn = resolveSheetCaseIdColumn(config.columns.caseId, config.caseIdColumnsBySheet, target.title);
-        const readEndColumn = config.caseIdColumnsBySheet === undefined ? config.readRangeEndColumn : extendSheetReadColumn(config.readRangeEndColumn, caseIdColumn);
+        const targetMonth = /^(20\d\d)\.(\d{1,2})$/.exec(target.title);
+        if (config.caseListEnabled && targetMonth && Number(targetMonth[1]) * 12 + Number(targetMonth[2]) >= 2026 * 12 + 11) {
+          if (target.columnCount < 1 || target.columnCount > 65) throw new HttpsError("failed-precondition", "対象月の列構造を確認できません。");
+          let endColumn = ""; for (let n = target.columnCount; n > 0; n = Math.floor((n - 1) / 26)) endColumn = String.fromCharCode(65 + (n - 1) % 26) + endColumn;
+          const headerRows = await readShiftSheet(sheets, config.spreadsheetId, target, endColumn, 1);
+          assertCaseListMonthlyIdMapping(headerRows[0] ?? [], caseIdColumn);
+        }
+        const readEndColumn = config.caseListEnabled || config.caseIdColumnsBySheet !== undefined ? extendSheetReadColumn(config.readRangeEndColumn, caseIdColumn) : config.readRangeEndColumn;
         const values = await readShiftSheet(
           sheets,
           config.spreadsheetId,
@@ -362,7 +384,7 @@ async function executeShiftImport(
   }
 }
 
-async function loadConfig(companyId: string): Promise<ShiftImportConfig> {
+async function loadConfig(companyId: string): Promise<CaseListAwareConfig> {
   const snap = await db.collection("sheetImportConfigs").doc(companyId).get();
   if (!snap.exists) {
     throw new HttpsError(
@@ -386,7 +408,7 @@ async function loadConfig(companyId: string): Promise<ShiftImportConfig> {
       parsed.error.flatten()
     );
   }
-  const config = parsed.data as ShiftImportConfig;
+  const config = { ...parsed.data, caseListEnabled: saved?.caseListEnabled === true } as CaseListAwareConfig;
   const mapping = await db.collection(`companies/${companyId}/sheetMappings`).doc("shift").get();
   config.adminEditColumns = selectEditSourceColumns(config.columns as Record<string, unknown>, mapping.data(), config.spreadsheetId);
   return config;
@@ -440,6 +462,13 @@ async function writeJobsAndLocks(
       }
       const jobRefs = chunk.map((job) => db.collection("jobs").doc(job.jobId));
       const snapshots = await tx.getAll(...jobRefs);
+      const privateCaseListReads = chunk.flatMap((job, index) => snapshots[index]?.data()?.caseListSource ? [
+        { jobId: job.jobId, kind: "ref", ref: db.collection("caseListSheetRefs").doc(job.jobId) },
+        ...(typeof snapshots[index]?.data()?.assignmentSheetWrite?.queueId === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(snapshots[index]!.data()!.assignmentSheetWrite.queueId)
+          ? [{ jobId: job.jobId, kind: "accepted", ref: db.collection(`caseListMonthlyOperations/${createHash("sha256").update(job.companyId + "|" + snapshots[index]!.data()!.assignmentSheetWrite.queueId, "utf8").digest("hex")}/events`).doc("ACCEPTED") }] : []),
+      ] : []);
+      const privateCaseListSnaps = privateCaseListReads.length ? await tx.getAll(...privateCaseListReads.map(read => read.ref)) : [];
+      const privateCaseList = new Map(privateCaseListReads.map((read, index) => [read.jobId + ":" + read.kind, privateCaseListSnaps[index]?.data()]));
       // 旧方式の管理者案件を別IDで再作成しない。曖昧な既存対応は移し替えず停止する。
       for (const [index, job] of chunk.entries()) {
         if (!/^LKC-(?:ADMIN|DUP)-/.test(job.caseId) || snapshots[index]?.data()?.mailIntake) continue;
@@ -460,6 +489,8 @@ async function writeJobsAndLocks(
       const evidenceSnaps = evidenceRefs.length ? await tx.getAll(...evidenceRefs) : [];
       const evidence = new Map(evidenceRefs.map((ref,index) => [ref.path,evidenceSnaps[index]?.data()]));
       const now = Timestamp.now();
+      const caseListObservations = new Map<string, Record<string, unknown>>();
+      const caseListRefUpdates = new Map<string, Record<string, unknown>>();
       const plans = chunk.map((job, index) => {
         const ref = jobRefs[index];
         const snapshot = snapshots[index];
@@ -467,6 +498,42 @@ async function writeJobsAndLocks(
         const old = snapshot.exists ? snapshot.data() : undefined;
         if (old && old.companyId !== job.companyId) {
           throw new HttpsError("permission-denied", "既存案件の会社が一致しません。取込を停止しました。");
+        }
+        if (old?.caseListSource) {
+          const equal = (left: unknown, right: unknown): boolean => String(left ?? "").normalize("NFKC").replace(/[\s　]+/g, "") === String(right ?? "").normalize("NFKC").replace(/[\s　]+/g, "");
+          const resolvedStaffId = staffNameIndex.get(normalizeName(job.assignedStaffName)) ?? null;
+          const privateRef = privateCaseList.get(job.jobId + ":ref"), event = privateCaseList.get(job.jobId + ":accepted"), payload = event?.payload, ack = payload?.ack;
+          const bindingHash = caseListSourceCore().caseListBindingHash(job.sheetRef.spreadsheetId, job.sheetRef.sheetId ?? old.sheetRef?.sheetId);
+          const effectiveCaseIdColumn = job.sheetRef.caseIdColumn ?? old.sheetRef?.caseIdColumn;
+          const acceptedScope = old.sourceMissing !== true && Number.isSafeInteger(old.revision) && old.revision >= 0 && privateRef?.companyId === job.companyId && privateRef.jobId === job.jobId && privateRef.sourceBindingHash === old.caseListSource.bindingHash &&
+            privateRef.sheetRef?.spreadsheetId === job.sheetRef.spreadsheetId && privateRef.sheetRef?.sheetId === job.sheetRef.sheetId && privateRef.sheetRef?.sheetName === job.sheetRef.sheetName && privateRef.sheetRef?.caseId === job.caseId &&
+            privateRef.sheetRef?.caseIdColumn === effectiveCaseIdColumn && privateRef.sheetRef?.bindingHash === bindingHash &&
+            old.sheetRef?.bindingHash === bindingHash && old.sheetRef?.sheetId === job.sheetRef.sheetId && old.sheetRef?.sheetName === job.sheetRef.sheetName && old.sheetRef?.caseIdColumn === effectiveCaseIdColumn &&
+            old.assignmentSheetWrite?.nativeAck?.target?.bindingHash === bindingHash && old.assignmentSheetWrite?.nativeAck?.target?.fixedId === job.caseId &&
+            event?.companyId === job.companyId && event.queueId === old.assignmentSheetWrite?.queueId && payload?.stage === "ACCEPTED" && payload?.operationId === old.assignmentSheetWrite?.queueId && payload.caseId === job.caseId && payload.spreadsheetId === job.sheetRef.spreadsheetId &&
+            event.payloadHash === caseListSourceCore().hashCaseList(payload) && ack?.status === "MONTHLY_READBACK_VERIFIED" && ack.companyId === job.companyId && ack.jobId === job.jobId && ack.sourceCaseId === job.caseId &&
+            ack.spreadsheetId === job.sheetRef.spreadsheetId && ack.target?.sheetId === job.sheetRef.sheetId && ack.target?.title === job.sheetRef.sheetName && ack.target?.fixedId === job.caseId &&
+            privateRef.acceptedAckHash === caseListSourceCore().hashCaseList(ack);
+          const matches = acceptedScope && old.caseId === job.caseId && old.dateKey === job.dateKey && old.assignedStaffId === resolvedStaffId && equal(old.assignedStaffName, job.assignedStaffName) &&
+            ["clientName", "storeName", "makerName", "menuName", "entryTime", "workTime"].every(key => equal(old[key], job[key as keyof ParsedShiftJob])) && job.cancelled !== true;
+          const confirmed = old.applicationUnconfirmed === false && old.assignmentSheetWrite?.nativeAck?.status === "MONTHLY_READBACK_VERIFIED";
+          const publicSheetRef = { sheetId: job.sheetRef.sheetId, sheetName: job.sheetRef.sheetName, currentRow: job.sheetRef.currentRow, headerRow: job.sheetRef.headerRow,
+            caseId: job.caseId, caseIdColumn: effectiveCaseIdColumn,
+            bindingHash: caseListSourceCore().caseListBindingHash(job.sheetRef.spreadsheetId, job.sheetRef.sheetId ?? old.sheetRef?.sheetId), verifiedAt: now };
+          const observationIdentity = { schema: "LK_CASE_LIST_MONTHLY_OBSERVATION_ID_V1", companyId: job.companyId, jobId: job.jobId, caseId: job.caseId,
+            observedJobRevision: old.revision, sourceRevision: old.caseListSource.sourceRevision, rowRevision: old.caseListSource.rowRevision, ledgerRevision: old.caseListSource.ledgerRevision,
+            acceptedAckHash: privateRef?.acceptedAckHash ?? null, assignedStaffId: old.assignedStaffId ?? null, assignedStaffName: old.assignedStaffName ?? null, dateKey: old.dateKey,
+            sourceBindingHash: old.caseListSource.bindingHash, monthBindingHash: bindingHash, publicPayOfferHash: caseListSourceCore().hashCaseList(old.publicPayOffer ?? null) };
+          caseListObservations.set(job.jobId, { companyId: job.companyId, jobId: job.jobId, observedAt: now, runId, matches, sourceReadStartedAtMs,
+            ...(matches ? { ...observationIdentity, observationIdentityHash: caseListSourceCore().hashCaseList(observationIdentity) } : {}),
+            sheetRef: { ...job.sheetRef, caseId: job.caseId, caseIdColumn: effectiveCaseIdColumn }, basePay: job.basePay, financials: job.financials, expenses: job.expenses, ...sourceMoneyInputs(job.editSourceSnapshot), editSourceSnapshot: job.editSourceSnapshot ?? null });
+          if (confirmed && matches) caseListRefUpdates.set(job.jobId, { sheetRef: { ...privateRef!.sheetRef, currentRow: job.sheetRef.currentRow, verifiedAt: now }, observedAt: now, runId });
+          const data: Record<string, unknown> = { caseListMonthlyObservedAt: now, updatedAt: now,
+            ...(confirmed && matches ? { sheetRef: publicSheetRef } : {}),
+            ...(old.applicationUnconfirmed !== true && !matches ? { applicationUnconfirmed: true, assignmentUnresolved: true, caseListAssignmentReviewRequired: true, publishable: false, recruitmentStopped: true } : {}) };
+          // The native journal owns finality. A matching monthly read cannot
+          // clear an unconfirmed application or change/release its day lock.
+          return { job, oldStaffId: null, oldDateKey: "", oldLockId: null, newLockId: null, sourceCancellationConfirmed: false, data, ref };
         }
         let sourceCancellationConfirmed: boolean;
         try { sourceCancellationConfirmed = importedCancellationSourceAck(old, job, sourceReadStartedAtMs); }
@@ -659,9 +726,16 @@ async function writeJobsAndLocks(
       let committedWrites = 0;
       for (const plan of plans) {
         tx.set(plan.ref, plan.data, { merge: true });
-        if (plan.job.editSourceSnapshot) {
+        if (plan.job.editSourceSnapshot && !caseListObservations.has(plan.job.jobId)) {
           tx.set(db.collection("adminJobEditSources").doc(plan.job.jobId), { ...plan.job.editSourceSnapshot, observedAt: now, runId });
           committedWrites++;
+        }
+        const caseListObservation = caseListObservations.get(plan.job.jobId);
+        if (caseListObservation) {
+          tx.set(db.collection("caseListMonthlyObservations").doc(plan.job.jobId), caseListObservation);
+          const refUpdate = caseListRefUpdates.get(plan.job.jobId);
+          if (refUpdate) tx.set(db.collection("caseListSheetRefs").doc(plan.job.jobId), refUpdate, { merge: true });
+          committedWrites += refUpdate ? 2 : 1;
         }
         committedWrites++;
         const oldLock = plan.oldLockId ? locks.get(plan.oldLockId) : undefined;

@@ -50,6 +50,7 @@ const AdminExpensePanel = lazy(() => import("./AdminExpensePanel"));
 const JobSafeEditPanel = lazy(() => import("./JobSafeEditPanel"));
 const NativeCreationRecovery = lazy(() => import("./NativeCreationRecovery"));
 const CaseMailIntakeEntry = lazy(() => import("./CaseMailIntakeEntry"));
+const CaseListImportPanel = lazy(() => import("./CaseListImportPanel"));
 
 export type Job = {
   id: string;
@@ -63,6 +64,7 @@ export type Job = {
   menuName?: string;
   menuConditions?: string[];
   mailIntake?: { receiptId: string; candidateId: string; sourceKey: string };
+  caseListSource?: { sourceRevision: string };
   mailIntakeReviewRequired?: boolean;
   entryTime?: string;
   workTime?: string;
@@ -2802,6 +2804,15 @@ async function previewRowCreation() {
   }
 
   async function acknowledgeSheetIssue(issue:SheetWriteIssue) {
+    if(issue.operation==="case_list.assign") {
+      await runAdminOperation("issue:"+issue.id,"acknowledgeSheetWriteIssue",{queueId:issue.id,action:"reconcile-case-list"},data=>{
+        const status=(data as {status?:string})?.status;
+        if(status==="MONTHLY_READBACK_VERIFIED"||status==="NO_OP_ALREADY_ACCEPTED")return "保存済みの原本を照合し、応募の反映を確認しました。";
+        if(status==="OWNER_RESUME_REQUIRED")return "案件リストの担当者反映まで確認できました。月別への保存は未完了のため保留しています。";
+        return "保存結果を確定できませんでした。現在のデータを保持して保留しています。";
+      },false);
+      return;
+    }
     const note=window.prompt("確認メモ", "");
     if(note!==null)await runSheetIssueAction(issue,"acknowledgeSheetWriteIssue",note);
   }
@@ -2815,7 +2826,7 @@ async function previewRowCreation() {
     await runAdminOperation("job:"+job.id,"confirmApplication",{jobId:job.id,expectedRevision:job.revision??0},"管理者確認済みです。原本照合は状態欄に表示します。",true);
   }
 
-  async function runAdminOperation(key:string,action:string,payload:Record<string,unknown>,success:string,application:boolean|"resubmission"|"netprint"|"cancellation"|"devices") {
+  async function runAdminOperation(key:string,action:string,payload:Record<string,unknown>,success:string|((data:unknown)=>string),application:boolean|"resubmission"|"netprint"|"cancellation"|"devices") {
     const user=auth?.currentUser,epoch=operationEpochRef.current;
     if(operationLocksRef.current.has(key)||firebaseConfigured&&(!functions||!user||!adminSessionReady))return;
     const token=Symbol(key),isCurrent=()=>auth?.currentUser===user&&operationEpochRef.current===epoch;
@@ -2828,7 +2839,7 @@ async function previewRowCreation() {
         const {applyDemoSheetIssue}=await import("./AdminSheetIssuePanel");
         if(!isCurrent())return;setSheetIssues(applyDemoSheetIssue(action,payload));
       }
-      accepted=true;setMessage((firebaseConfigured?"":"デモ：")+success+(application==="netprint"&&firebaseConfigured?`変更${(response?.data as {changedCount?:number})?.changedCount??0}件`:""));
+      accepted=true;setMessage((firebaseConfigured?"":"デモ：")+(typeof success==="function"?success(response?.data):success)+(application==="netprint"&&firebaseConfigured?`変更${(response?.data as {changedCount?:number})?.changedCount??0}件`:""));
       if(application==="resubmission"){
         if(comparisonRequestRef.current===payload.requestId){comparisonVersionRef.current++;comparisonRequestRef.current=null;}
         setComparison(current=>current?.request.id===payload.requestId?null:current);
@@ -2840,6 +2851,7 @@ async function previewRowCreation() {
         if(profile&&profile.id===payload.staffId){if(firebaseConfigured)await openStaffDevices(profile,true);else setStaffDevices(current=>current.map(device=>({...device,active:false})));}
       }
       else if(firebaseConfigured&&application==="cancellation")await Promise.all([loadJobs(isCurrent),loadDashboard(undefined,isCurrent,true)]);
+      else if(firebaseConfigured&&payload.action==="reconcile-case-list")await Promise.all([loadJobs(isCurrent),loadSheetIssues(isCurrent,true)]);
       else if(firebaseConfigured){if(application)await loadJobs(isCurrent);else await loadSheetIssues(isCurrent,true);}
       else if(application==="netprint")setJobs(current=>current.map(job=>job.id===payload.jobId?{...job,netPrint:{items:(payload.numbers as string[]).filter(Boolean).map((number,index)=>({id:`demo_np_${index}`,number,printed:false}))}}:job));
       else if(application)setJobs(current=>current.map(job=>job.id===payload.jobId?{...job,applicationAdminConfirmed:true}:job));
@@ -3185,6 +3197,35 @@ async function duplicateJobAction(job:Job,isCurrent:()=>boolean) {
 
 async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"schedule",isCurrent:()=>boolean) {
   const confirmedRevision=job.revision;
+  let caseListConfirmation: { expectedSourceRevision: string; confirmedFields: { arrival: true; execution: true; headcount: true; dateMode: true; payOffer: true; vacancy: true }; payOffer: { dailyWageJPY: number; travelExpenses: "全額支給"; communicationExpenses: "全額支給" }; sourceReview?: { headcountPerSlot: 1; reviewedIssues: string[]; resolutionNote: string } } | undefined;
+  if(job.caseListSource && action==="publish") {
+    if(!Number.isSafeInteger(confirmedRevision)||!/^[a-f0-9]{64}$/.test(job.caseListSource.sourceRevision)){setMessage("案件リストを取り込み直してください。");return;}
+    const wage=window.prompt("この案件の公開日給（円）を確認して入力してください。交通費・通信費は全額支給です。",typeof job.basePay==="number"&&job.basePay>0?String(job.basePay):"");
+    if(wage===null||!isCurrent())return;
+    if(!/^\d+$/.test(wage)||!Number.isSafeInteger(Number(wage))||Number(wage)<1||Number(wage)>1000000){setMessage("公開日給を正しい金額で入力してください。");return;}
+    if(!functions)return;
+    type SourceReviewRow = { jobId: string; sourceRevision: string; workDate?: string; storeName?: string; makerName?: string; menuName?: string; entryTime?: string; workTime?: string; ownerReviewRequired?: boolean; reviewIssues?: string[] };
+    let currentSource: SourceReviewRow | undefined;
+    try {
+      const response=await httpsCallable(functions,"previewShiftImport")({source:"case-list"});
+      if(!isCurrent())return;
+      const result=response.data as {rows?:SourceReviewRow[]};
+      currentSource=result.rows?.find(row=>row.jobId===job.id);
+      if(!currentSource||currentSource.sourceRevision!==job.caseListSource.sourceRevision)throw new Error("案件リストが更新されています。下書きを取り込み直してください。");
+    } catch(error) { if(isCurrent())setMessage(error instanceof Error?error.message:"案件リストを確認できません。");return; }
+    const issues=currentSource.reviewIssues??[];
+    let sourceReview: {headcountPerSlot:1;reviewedIssues:string[];resolutionNote:string}|undefined;
+    if(currentSource.ownerReviewRequired||issues.length){
+      const note=window.prompt("原本の確認事項：\n"+(issues.length?issues.join("\n"):"人数・募集条件の確認")+"\n\n1名枠として確認した根拠・解消内容を入力してください。確認の記録はこの案件に保存されます。","");
+      if(note===null||!isCurrent())return;
+      if(note.trim().length<3||note.length>2000){setMessage("確認の根拠・解消内容を3〜2000文字で入力してください。");return;}
+      sourceReview={headcountPerSlot:1,reviewedIssues:issues,resolutionNote:note.trim()};
+    }
+    const details=[["実施日",currentSource.workDate],["店舗",currentSource.storeName],["メーカー",currentSource.makerName],["内容",currentSource.menuName],["入店",currentSource.entryTime],["勤務時間",currentSource.workTime]].map(([label,value])=>label+"："+(value||"未確認")).join("\n");
+    if(!window.confirm(details+`\n日給：${Number(wage).toLocaleString()}円＋交通費・通信費全額支給\n\n未手配の単日1名枠で、入店・勤務時間・人数・日程・給与条件を確認済みとして募集します。既存シフト・実績台帳との照合が未完了なら開始できません。`))return;
+    if(!isCurrent())return;
+    caseListConfirmation={expectedSourceRevision:job.caseListSource.sourceRevision,confirmedFields:{arrival:true,execution:true,headcount:true,dateMode:true,payOffer:true,vacancy:true},payOffer:{dailyWageJPY:Number(wage),travelExpenses:"全額支給",communicationExpenses:"全額支給"},...(sourceReview?{sourceReview}:{})};
+  }
   if(job.mailIntake&&action==="publish"){
     if(!Number.isSafeInteger(confirmedRevision)||Number(confirmedRevision)<0){setMessage("案件の確認版がありません。一覧を読み直してください。");return;}
     if(job.mailIntakeReviewRequired){setMessage("受信内容が変更されています。変更・取消の確認を完了してから募集してください。");return;}
@@ -3216,6 +3257,7 @@ async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"
     const response=await httpsCallable(functions,"updateJobPublication")({
       jobIds:[job.id],action,publishAt,
       ...(Number.isSafeInteger(confirmedRevision)?{expectedRevisions:{[job.id]:confirmedRevision}}:{}),
+      ...(caseListConfirmation?{expectedSourceRevisions:{[job.id]:caseListConfirmation.expectedSourceRevision},caseListConfirmations:{[job.id]:caseListConfirmation}}:{}),
     });
     if(!isCurrent())return;
     const data=response.data as {updated?:string[];blocked?:string[]};
@@ -3451,6 +3493,7 @@ function downloadCsv(filename:string,content:string) {
           </button>
         </div>
         {shiftPreview&&<Suspense fallback={<p role="status">読取結果を表示中…</p>}><AdminShiftImportPreview preview={shiftPreview} demo={!firebaseConfigured}/></Suspense>}
+        <Suspense fallback={<p role="status">案件リストの連携を表示中…</p>}><CaseListImportPanel functions={functions} demo={!firebaseConfigured} onRefresh={isCurrent=>refreshJobsAfterAction("案件リストを取り込みました。",isCurrent)}/></Suspense>
       </section></WorkspacePanel>
 <WorkspacePanel view="home" activeView={workspaceView} visitedViews={visitedViews} group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><section className="two">
         <article className="panel">

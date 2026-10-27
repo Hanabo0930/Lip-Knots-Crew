@@ -152,6 +152,10 @@ jobs:
           node scripts/test-case-mail-targets.mjs
           node scripts/test-case-mail-publication.mjs
           node scripts/test-case-mail-assignment.mjs
+          node scripts/test-case-list-integration.mjs
+          node scripts/automation/test-case-list-auth-guard.mjs
+          node scripts/test-case-list-runtime-assets.mjs
+          node --max-old-space-size=128 scripts/test-case-list-runtime-budget.mjs
           node scripts/test-case-mail-preparation.mjs
           node scripts/test-case-mail-resolution.mjs
           node scripts/test-case-mail-target-binding.mjs

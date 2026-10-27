@@ -12,13 +12,17 @@ var LK_MONTHLY_V5 = (() => {
   const WRITABLE = ['userEnteredValue','note','userEnteredFormat','dataValidation','textFormatRuns','chipRuns'];
   const FUNCTIONS = new Set('AND ASC COUNT COUNTIF DATE DAY IF IFERROR IFNA IFS INDEX ISNUMBER LET MATCH MOD MONTH N NOT OR REGEXEXTRACT REGEXMATCH REGEXREPLACE RIGHT ROW SEARCH SPLIT SUBSTITUTE SUM SWITCH TEXT TRIM VALUE VLOOKUP WEEKDAY XLOOKUP LEN LEFT MID FIND MIN MAX ROUND EXACT TO_TEXT ISFORMULA CHAR TRUE FALSE'.split(' '));
   const EXTERNALS = new Set(['スタッフマスタ','各社見積書','イオンデモ遠方リスト','ケイ_応募日補助']);
+  const SOURCE_INDEX_COLUMNS=[1,2,10,60,63];
+  const COMPACT_COVERAGE='LK_MONTHLY_COMPACT_COVERAGE_V1',STRUCTURAL_LAYOUT='LK_MONTHLY_STRUCTURAL_LAYOUT_V1',LEGACY_LAYOUT='LK_MONTHLY_FULL_WRITABLE_LEGACY_ISOLATED_V1';
   const copy=x=>JSON.parse(JSON.stringify(x));
   const text=c=>typeof c?.userEnteredValue?.stringValue==='string'?c.userEnteredValue.stringValue:(typeof c?.effectiveValue?.stringValue==='string'?c.effectiveValue.stringValue:'');
+  function possibleStaff(c){const entered=c?.userEnteredValue||{},effective=c?.effectiveValue||{};if([entered,effective].some(value=>Object.hasOwn(value,'numberValue')||Object.hasOwn(value,'boolValue')||value.errorValue))return true;if([entered,effective].some(value=>typeof value.stringValue==='string'&&value.stringValue.trim()!==''))return true;return typeof entered.formulaValue==='string'&&typeof effective.stringValue!=='string';}
   const num=c=>c?.effectiveValue?.numberValue??c?.userEnteredValue?.numberValue;
   function fail(code,detail){const e=new Error(code);e.code=code;e.detail=detail||{};throw e;}
   function need(ok,code,detail){if(!ok)fail(code,detail);}
   function canonical(x){if(x===null||['string','boolean'].includes(typeof x))return JSON.stringify(x);if(typeof x==='number'&&Number.isFinite(x))return JSON.stringify(x);if(Array.isArray(x))return '['+x.map(canonical).join(',')+']';if(x&&typeof x==='object')return '{'+Object.keys(x).sort().map(k=>JSON.stringify(k)+':'+canonical(x[k])).join(',')+'}';fail('UNSERIALIZABLE');}
-  function writable(c){return Object.fromEntries(WRITABLE.filter(k=>Object.hasOwn(c||{},k)).map(k=>[k,copy(c[k])]))}
+  function knownCell(c){return !!c&&typeof c==='object'&&!Array.isArray(c)&&c.$unknown!==true;}
+  function writable(c){need(knownCell(c),'UNKNOWN_CELL_NOT_WRITABLE');return Object.fromEntries(WRITABLE.filter(k=>Object.hasOwn(c,k)).map(k=>[k,copy(c[k])]))}
   function normalizedEffective(c){const v=c?.effectiveValue;if(!v||!Object.keys(v).length||v.stringValue==='')return null;return copy(v)}
   function serialDate(n){need(Number.isInteger(n)&&n>0&&n<2958466,'INVALID_DATE');return new Date(Date.UTC(1899,11,30)+n*86400000).toISOString().slice(0,10)}
   function column(n){let s='';for(;n>0;n=Math.floor((n-1)/26))s=String.fromCharCode(65+(n-1)%26)+s;return s;}
@@ -26,7 +30,62 @@ var LK_MONTHLY_V5 = (() => {
   function time(s){const m=/^([01]?\d|2[0-3]):([0-5]\d)$/.exec(String(s).normalize('NFKC'));return m?Number(m[1])*60+Number(m[2]):null;}
   function cancellation(s){return /取消|キャンセル|中止|\bcancel(?:led|ed)?\b/i.test(String(s).normalize('NFKC').replace(/\s/g,''));}
   function sha(services,x){return services.sha256(typeof x==='string'?x:canonical(x));}
-  function contentHash(services,cells){return sha(services,cells.map(writable));}
+  function contentHash(services,cells){need(Array.isArray(cells)&&Array.from(cells).every(knownCell),'FULL_WRITABLE_CELLS_REQUIRED');return sha(services,cells.map(writable));}
+  function monthIndexColumns(width){return [0,1,9,10,11,12,13,14,width-1];}
+  function exactColumns(actual,expected){return Array.isArray(actual)&&actual.length===expected.length&&new Set(actual).size===actual.length&&actual.every(Number.isInteger)&&[...actual].sort((a,b)=>a-b).every((n,i)=>n===[...expected].sort((a,b)=>a-b)[i]);}
+  function rowKnows(row,columns){return Array.isArray(row.knownColumns)&&columns.every(c=>row.knownColumns.includes(c)&&knownCell(row.cells?.[c]));}
+  function fullRow(row,width,flag){return row.cells?.length===width&&row[flag]===true&&exactColumns(row.knownColumns,Array.from({length:width},(_,i)=>i))&&Array.from(row.cells).every(knownCell);}
+  function indexId(row,column,key){const id=text(row.cells[column]);need(typeof row[key]==='string'&&row[key]===id,'INDEX_ID_ATTRIBUTE_MISMATCH');if(id)need(row.cells[column].userEnteredValue?.stringValue===id,'INDEX_ID_NOT_PERSISTED');return id;}
+  function completeRows(table,first,code){need(Number.isInteger(table.rowCount)&&table.rowCount>=first-1&&Array.isArray(table.rows)&&table.rows.length===table.rowCount-first+1,code);need(table.rows.every((r,i)=>r.row===i+first),code);}
+  function assertSnapshotCoverage(snapshot,caseId,services){
+    const coverage=snapshot.coverage;
+    if(!coverage){need(snapshot.isolated===true,'SNAPSHOT_COVERAGE_REQUIRED');return LEGACY_LAYOUT;}
+    need(coverage.schema===COMPACT_COVERAGE,'SNAPSHOT_COVERAGE_SCHEMA');
+    const source=snapshot.source,sc=coverage.source;
+    need(sc&&sc.sheetId===source.sheetId&&sc.rowCount===source.rowCount&&sc.headersComplete===true&&sc.indexReadComplete===true&&sc.selectedCaseId===caseId&&exactColumns(sc.structuralColumns,SOURCE_INDEX_COLUMNS),'SOURCE_INDEX_COVERAGE_UNVERIFIED');
+    completeRows(source,2,'SOURCE_INDEX_ROWS_INCOMPLETE');
+    for(const row of source.rows){need(row.cells?.length===65&&rowKnows(row,SOURCE_INDEX_COLUMNS),'SOURCE_KNOWN_COLUMNS_INCOMPLETE');const id=indexId(row,60,'caseId');need(id||(!possibleStaff(row.cells[2])&&!serialSafe(row.cells[1])&&!text(row.cells[10])),'SOURCE_ASSIGNMENT_ID_UNVERIFIED');}
+    const sourceSelected=source.rows.filter(r=>r.caseId===caseId);need(sourceSelected.length===1&&fullRow(sourceSelected[0],65,'fullWritable'),'SELECTED_SOURCE_FULL_WRITABLE_REQUIRED');
+    const own=sourceSelected[0];
+    if(typeof own.cells[1].userEnteredValue?.numberValue==='number')need(own.cells[1].effectiveValue?.numberValue===own.cells[1].userEnteredValue.numberValue,'SOURCE_DATE_EFFECTIVE_READ_MISSING');
+    if(typeof own.cells[2].userEnteredValue?.stringValue==='string'&&own.cells[2].userEnteredValue.stringValue)need(own.cells[2].effectiveValue?.stringValue===own.cells[2].userEnteredValue.stringValue,'SOURCE_NAME_EFFECTIVE_READ_MISSING');
+    for(const column of FEE){const cell=own.cells[column];if(typeof cell.userEnteredValue?.numberValue==='number')need(cell.effectiveValue?.numberValue===cell.userEnteredValue.numberValue,'SOURCE_MANUAL_FEE_EFFECTIVE_READ_MISSING');}
+    need(Array.isArray(coverage.months)&&coverage.months.length===snapshot.months.length,'MONTH_INDEX_COVERAGE_UNVERIFIED');
+    const allMonthIds=[];
+    for(const month of snapshot.months){const width=month.headers.length,columns=monthIndexColumns(width),mc=coverage.months.filter(c=>c.sheetId===month.sheetId&&c.title===month.title);need(mc.length===1&&mc[0].rowCount===month.rowCount&&mc[0].headersComplete===true&&mc[0].indexReadComplete===true&&exactColumns(mc[0].structuralColumns,columns),'MONTH_INDEX_COVERAGE_UNVERIFIED');completeRows(month,2,'MONTH_INDEX_ROWS_INCOMPLETE');for(const row of month.rows){need(row.cells?.length===width&&rowKnows(row,columns),'MONTH_KNOWN_COLUMNS_INCOMPLETE');const id=indexId(row,width-1,'fixedId');if(id)allMonthIds.push(id.toLowerCase());need(!text(row.cells[9])||!serialSafe(row.cells[0])||id,'MONTHLY_ASSIGNMENT_ID_UNVERIFIED');if(id.toLowerCase()===caseId.toLowerCase())need(fullRow(row,width,'fullWritable'),'SELECTED_DESTINATION_FULL_WRITABLE_REQUIRED');}}
+    need(new Set(allMonthIds).size===allMonthIds.length,'CROSS_MONTH_CANONICAL_DUPLICATE_ID');
+    const ledger=snapshot.ledger,lc=coverage.ledger;
+    need(ledger&&lc&&ledger.headerRow===3&&lc.headerRow===3&&lc.sheetId===ledger.sheetId&&lc.rowCount===ledger.rowCount&&lc.headersComplete===true&&lc.indexReadComplete===true&&lc.selectedCaseId===caseId&&exactColumns(lc.structuralColumns,[0])&&ledger.headers?.length===25,'LEDGER_INDEX_COVERAGE_UNVERIFIED');completeRows(ledger,4,'LEDGER_INDEX_ROWS_INCOMPLETE');
+    const ledgerIds=[];for(const row of ledger.rows){need(row.cells?.length===25&&rowKnows(row,[0]),'LEDGER_KNOWN_COLUMNS_INCOMPLETE');const id=indexId(row,0,'caseId');if(id)ledgerIds.push(id.toLowerCase());}
+    need(new Set(ledgerIds).size===ledgerIds.length,'LEDGER_CANONICAL_DUPLICATE_ID');
+    const record=ledger.rows.filter(r=>r.caseId.toLowerCase()===caseId.toLowerCase());need(record.length<=1,'LEDGER_SELECTED_ID_AMBIGUOUS');
+    if(record.length)need(lc.selectedRecordPresent===true&&lc.selectedRow===record[0].row&&lc.selectedRowReadComplete===true&&lc.absenceProven===false&&fullRow(record[0],25,'fullValues'),'SELECTED_LEDGER_FULL_VALUES_REQUIRED');
+    else need(lc.selectedRecordPresent===false&&lc.selectedRow===null&&lc.selectedRowReadComplete===false&&lc.absenceProven===true,'SELECTED_LEDGER_ABSENCE_UNPROVEN');
+    if(services){const value=record.length?record[0].cells.map(c=>({userEnteredValue:c.userEnteredValue??{},effectiveValue:c.effectiveValue??{}})):null;need(snapshot.catalog?.ledgerRevision===sha(services,value),'LEDGER_AUTHORITY_REVISION_CHANGED');}
+    return STRUCTURAL_LAYOUT;
+  }
+  function monthLayoutHash(services,month,profile){
+    if(profile===LEGACY_LAYOUT)return sha(services,month.rows.map(r=>({row:r.row,cells:r.cells.map(writable)})));
+    need(profile===STRUCTURAL_LAYOUT,'MONTH_LAYOUT_PROFILE_UNSUPPORTED');const columns=monthIndexColumns(month.headers.length);
+    const rows=month.rows.map(row=>{need(rowKnows(row,columns),'MONTH_KNOWN_COLUMNS_INCOMPLETE');return {row:row.row,cells:columns.map(column=>({column,userEnteredValue:row.cells[column].userEnteredValue??{},effectiveValue:row.cells[column].effectiveValue??{}}))};});
+    return sha(services,{schema:STRUCTURAL_LAYOUT,sheetId:month.sheetId,title:month.title,rowCount:month.rowCount,headers:month.headers,columns,rows});
+  }
+  function assertSourceAssignmentPreflight(snapshot,intent,services){
+    assertSnapshotCoverage(snapshot,intent.caseId,services);const row=sourceRow(snapshot,intent.caseId),a=intent.assignment;
+    need(contentHash(services,row.cells)===intent.preMonthlyContentHash&&sameCatalog(snapshot.catalog,intent.preCatalog)&&snapshot.dependencyHash===intent.dependencyHash,'SOURCE_PREIMAGE_CHANGED');
+    need(a?.authority==='CREW_QUEUE'&&sha(services,a)===intent.assignmentHash,'ASSIGNMENT_CHANGED');
+    need(!row.cells[2].userEnteredValue||!Object.keys(row.cells[2].userEnteredValue).length||row.cells[2].userEnteredValue.stringValue==='','SOURCE_STAFF_ALREADY_FILLED');
+    const prospective={...row,cells:copy(row.cells)};prospective.cells[2]={...prospective.cells[2],userEnteredValue:{stringValue:a.staffName},effectiveValue:{stringValue:a.staffName}};
+    const valid=validate(snapshot,prospective,a,services);
+    need(!snapshot.months.some(m=>m.rows.some(r=>r.fixedId&&r.fixedId.toLowerCase()===row.caseId.toLowerCase())),'EXISTING_DESTINATION_WITHOUT_RECEIPT');
+    choosePosition(valid.month,valid.date,prospective,intent.layoutMode);mapSource(prospective.cells,'PROSPECTIVE_ONLY',valid.schema.width);
+  }
+  function assertMonthlyWritePreflight(snapshot,intent,services){
+    assertSnapshotCoverage(snapshot,intent.caseId,services);const row=sourceRow(snapshot,intent.caseId);
+    need(contentHash(services,row.cells)===intent.sourceContentHash&&snapshot.dependencyHash===intent.dependencyHash,'MONTHLY_PREIMAGE_CHANGED');
+    need(sha(services,intent.assignment)===intent.assignmentHash,'ASSIGNMENT_CHANGED');checkPromisedPay(row,intent.assignment);
+    const valid=validate(snapshot,row,intent.assignment,services);choosePosition(valid.month,valid.date,row,intent.position.kind==='ISOLATED_TAIL'?'ISOLATED_TAIL':undefined);
+  }
   function unique(rows,key,code){const out=new Map();for(const r of rows){need(typeof r[key]==='string'&&r[key]&&!out.has(r[key]),code);out.set(r[key],r);}return out;}
   function sourceSchema(headers){need(headers.length===65&&headers.every((h,i)=>h===SOURCE[i]||(i===0&&h==='月別転記')),'SOURCE_SCHEMA_CHANGED');}
   function monthSchema(m){need(/^20\d\d\.(?:[1-9]|1[012])$/.test(m.title),'MONTH_TITLE');const expected=m.headers.length;need([55,56].includes(expected)&&BUSINESS.every((h,i)=>h===m.headers[i]),'MONTH_SCHEMA_CHANGED');need(m.headers[expected-1]==='連絡_固定案件ID'&&(expected===55||m.headers[54]===''),'MONTH_ID_COLUMN_CHANGED');return {width:expected,idColumn:expected};}
@@ -110,7 +169,7 @@ var LK_MONTHLY_V5 = (() => {
       need(r.staffIdentityVerified===true&&typeof r.staffId==='string'&&r.staffId,'MONTHLY_STAFF_IDENTITY_UNVERIFIED',{month:m.title,row:r.row});
       if(r.staffId===assignment.staffId)fail('STAFF_ALREADY_ASSIGNED_SAME_DAY',{month:m.title,row:r.row});
     }
-    for(const other of snapshot.source.rows)if(other.caseId&&other.caseId!==row.caseId&&text(other.cells[2])&&['ASSIGNED','担当確定・転記待ち'].includes(text(other.cells[55]))&&other.cells[63]?.userEnteredValue?.boolValue!==true){
+    for(const other of snapshot.source.rows)if(other.caseId&&other.caseId!==row.caseId&&possibleStaff(other.cells[2])&&other.cells[63]?.userEnteredValue?.boolValue!==true&&!cancellation(text(other.cells[10]))){
       need(serialSafe(other.cells[1]),'SOURCE_ASSIGNMENT_DATE_UNVERIFIED');if(serialSafe(other.cells[1])!==date)continue;
       need(other.staffIdentityVerified===true&&typeof other.staffId==='string'&&other.staffId,'SOURCE_STAFF_IDENTITY_UNVERIFIED');
       if(other.staffId===assignment.staffId)fail('SOURCE_SAME_DAY_ASSIGNMENT');
@@ -132,20 +191,42 @@ var LK_MONTHLY_V5 = (() => {
     // operational rows are counted. Historic ranges differ; their intent has
     // not been verified, so incomplete day coverage is held below.
     need(typeof formula==='string'&&/^="（"&\(COUNTIF\(\$A\$\d+:\$A\$\d+,\s*A\d+\)-1\)&"人）"$/.test(formula),'DAILY_TOTAL_FORMULA_UNSUPPORTED');
-    const first=/COUNTIF\(\$A\$(\d+):\$A\$(\d+),/.exec(formula);need(Number(first[1])<=day[0].row&&Number(first[2])>=total.row,'DAILY_TOTAL_RANGE_UNVERIFIED');
+    const first=/COUNTIF\(\$A\$(\d+):\$A\$(\d+),\s*A(\d+)\)/.exec(formula);need(Number(first[1])<=day[0].row&&Number(first[2])>=total.row,'DAILY_TOTAL_RANGE_UNVERIFIED');need(Number(first[3])===total.row,'DAILY_TOTAL_CRITERION_UNVERIFIED');
+    const placement=position=>{need(position.row>Number(first[1]),'DAILY_TOTAL_INSERTION_BOUNDARY_REQUIRES_REVIEW');return position;};
     const work=day.filter(r=>text(r.cells[9]));need(work.length===day.length-1,'DAY_NONBUSINESS_ROW_UNVERIFIED');
     const client=text(row.cells[10]),arrival=time(text(row.cells[14]));
     const matching=work.filter(r=>text(r.cells[9])===client);
-    if(!matching.length)return {row:total.row,append:false,totalRow:total.row,kind:'EXISTING_DAY_NEW_CLIENT_APPEND'};
+    if(!matching.length)return placement({row:total.row,append:false,totalRow:total.row,kind:'EXISTING_DAY_NEW_CLIENT_APPEND'});
     need(matching.every((r,i)=>i===0||r.row===matching[i-1].row+1),'CLIENT_BLOCK_NOT_CONTIGUOUS');
     const timed=matching.map(r=>({r,t:time(text(r.cells[13]))}));need(timed.every(x=>x.t!==null),'CLIENT_ARRIVAL_TIME_UNSUPPORTED');
     need(timed.every((x,i)=>i===0||x.t>=timed[i-1].t),'CLIENT_TIME_ORDER_CHANGED');
-    const later=timed.find(x=>x.t>arrival);return {row:later?later.r.row:matching[matching.length-1].row+1,append:false,totalRow:total.row,kind:'EXISTING_DAY_CLIENT_TIME_INSERT'};
+    const later=timed.find(x=>x.t>arrival);return placement({row:later?later.r.row:matching[matching.length-1].row+1,append:false,totalRow:total.row,kind:'EXISTING_DAY_CLIENT_TIME_INSERT'});
+  }
+  function verifyPostPlacement(intent,month,row){
+    need(month.title===intent.month.title&&month.sheetId===intent.month.sheetId&&row.fixedId===intent.fixedId,'POST_PLACEMENT_SCOPE_MISMATCH');
+    if(intent.position.kind==='ISOLATED_TAIL'){need(month.isolated===true,'POST_PLACEMENT_ISOLATED_SCOPE_REQUIRED');return {verified:true,scope:'ISOLATED_TAIL_ONLY',chronologicalPlacementAccepted:false};}
+    need(intent.position.append===false,'NORMAL_INSERT_EXPECTED');
+    const own=month.rows.filter(r=>r.fixedId===intent.fixedId);need(own.length===1&&own[0].row===row.row,'POST_PLACEMENT_ID_NOT_UNIQUE');
+    const day=month.rows.filter(r=>serialSafe(r.cells[0])===intent.assignment.dateKey),work=day.filter(r=>text(r.cells[9]));
+    const totals=day.filter(r=>!text(r.cells[9])&&/^\(\d+人\)$/.test(text(r.cells[1]).normalize('NFKC')));
+    need(totals.length===1&&day[day.length-1].row===totals[0].row,'POST_DAILY_TOTAL_BOUNDARY_CHANGED');
+    const total=totals[0],count=/^="（"&\(COUNTIF\(\$A\$(\d+):\$A\$(\d+),\s*A(\d+)\)-1\)&"人）"$/.exec(total.cells[1]?.userEnteredValue?.formulaValue||'');
+    need(count&&Number(count[3])===total.row,'POST_DAILY_TOTAL_CRITERION_CHANGED');need(Number(count[1])<=day[0].row&&Number(count[2])>=total.row,'POST_DAILY_TOTAL_RANGE_UNVERIFIED');
+    need(Number(/^\((\d+)人\)$/.exec(text(totals[0].cells[1]).normalize('NFKC'))[1])===work.length,'POST_DAILY_TOTAL_VALUE_UNVERIFIED');
+    const compressed=n=>n>row.row?n-1:n;
+    const remaining={...month,rowCount:month.rowCount-1,rows:month.rows.filter(r=>r.row!==row.row).map(r=>{
+      const virtual={...r,row:compressed(r.row)};
+      if(r.row===total.row){virtual.cells=r.cells.slice();virtual.cells[1]={...r.cells[1],userEnteredValue:{formulaValue:'="（"&(COUNTIF($A$'+compressed(Number(count[1]))+':$A$'+compressed(Number(count[2]))+', A'+compressed(total.row)+')-1)&"人）"'}};}
+      return virtual;
+    })};
+    const expected=choosePosition(remaining,intent.assignment.dateKey,{cells:intent.sourceSnapshot});need(expected.row===row.row,'POST_PLACEMENT_CHANGED');
+    return {verified:true,scope:'NORMAL_EXISTING_DAY_CLIENT_TIME_AND_DAILY_COUNT',chronologicalPlacementAccepted:true};
   }
   function sameCatalog(a,b){return a&&b&&['rowRevision','ledgerRevision','sourceRevision'].every(k=>a[k]===b[k]);}
   function checkPromisedPay(row,assignment){if(assignment.authority==='CREW_QUEUE')need(typeof row.cells[36]?.effectiveValue?.numberValue==='number'&&row.cells[36].effectiveValue.numberValue===assignment.publicPayOffer.dailyWageJPY,'PUBLIC_PAY_OFFER_SOURCE_BASIC_MISMATCH');}
   function transferCapability(snapshot,row,options={}){
     try{
+      assertSnapshotCoverage(snapshot,row?.caseId,null);
       sourceSchema(snapshot.source.headers);need(row?.cells?.length===65&&row.caseId,'CAPABILITY_SOURCE_ROW_REQUIRED');
       need(row.cells[63].userEnteredValue?.boolValue===false&&!cancellation(text(row.cells[10])),'SOURCE_CANCELLED_OR_INVALID');
       need(['単日','SINGLE'].includes(text(row.cells[58]))&&!text(row.cells[59]),'GROUP_REQUIRES_SEPARATE_POLICY');
@@ -168,8 +249,9 @@ var LK_MONTHLY_V5 = (() => {
     async function context(request){
       need(request&&/^[A-Za-z0-9_.:-]{1,160}$/.test(request.operationId||'')&&request.caseId,'REQUEST_INVALID');
       await services.authorize(request);
-      const snapshot=await services.readSnapshot(request),row=sourceRow(snapshot,request.caseId);
+      const snapshot=await services.readSnapshot(request);
       need(snapshot.spreadsheetId===services.spreadsheetId,'SNAPSHOT_SPREADSHEET_MISMATCH');
+      assertSnapshotCoverage(snapshot,request.caseId,services);const row=sourceRow(snapshot,request.caseId);
       sourceSchema(snapshot.source.headers);
       const assignment=await approvedAssignment(services,request,snapshot,row),events=await services.readEvents(request.operationId);
       need(events.every(e=>e.caseId===row.caseId&&e.spreadsheetId===services.spreadsheetId),'OPERATION_ID_REUSED');
@@ -194,7 +276,7 @@ var LK_MONTHLY_V5 = (() => {
       need(!snapshot.months.some(m=>m.rows.some(r=>r.fixedId&&r.fixedId.toLowerCase()===row.caseId.toLowerCase())),'EXISTING_DESTINATION_WITHOUT_RECEIPT');
       choosePosition(validation.month,validation.date,prospective,request.layoutMode);
       mapSource(prospective.cells,'PROSPECTIVE_ONLY',validation.schema.width);
-      const intent={schema:'LK_SOURCE_ASSIGNMENT_INTENT_V1',stage:'SOURCE_INTENT',spreadsheetId:services.spreadsheetId,operationId:request.operationId,caseId:row.caseId,assignment:a,assignmentHash:sha(services,a),preCatalog:copy(snapshot.catalog),preMonthlyContentHash:contentHash(services,row.cells),sourceBefore:row.cells.map(writable),expectedSourceAfter:expected,expectedPostMonthlyContentHash:sha(services,expected),dependencyHash:snapshot.dependencyHash,createdAt:services.now()};
+      const intent={schema:'LK_SOURCE_ASSIGNMENT_INTENT_V1',stage:'SOURCE_INTENT',spreadsheetId:services.spreadsheetId,operationId:request.operationId,caseId:row.caseId,assignment:a,assignmentHash:sha(services,a),preCatalog:copy(snapshot.catalog),preMonthlyContentHash:contentHash(services,row.cells),sourceBefore:row.cells.map(writable),expectedSourceAfter:expected,expectedPostMonthlyContentHash:sha(services,expected),dependencyHash:snapshot.dependencyHash,layoutMode:request.layoutMode||null,createdAt:services.now()};
       intent.intentHash=sha(services,{...intent,createdAt:0});return intent;
     }
     async function prepareSourceInside(request){
@@ -211,10 +293,12 @@ var LK_MONTHLY_V5 = (() => {
       // dispatch event. Reconcile it; never write it a second time.
       if(contentHash(services,c.row.cells)===intent.expectedPostMonthlyContentHash)return {status:'SOURCE_RECONCILIATION_REQUIRED',automaticRetry:false};
       need(contentHash(services,c.row.cells)===intent.preMonthlyContentHash&&sameCatalog(c.snapshot.catalog,intent.preCatalog)&&c.snapshot.dependencyHash===intent.dependencyHash,'SOURCE_PREIMAGE_CHANGED');
+      assertSourceAssignmentPreflight(c.snapshot,intent,services);
       // Persist before the API call. A hard crash or expired worker lease while
       // the old request is still in flight must never dispatch it a second time.
       await save({stage:'SOURCE_WRITE_STARTED',operationId:request.operationId,caseId:intent.caseId,intentHash:intent.intentHash,at:services.now()});
-      try{const dispatch=await services.applySourceAssignment(intent,c.snapshot);if(dispatch?.status==='NATIVE_BATCH_READY'){need(typeof dispatch.nativeBatchId==='string'&&dispatch.nativeBatchId,'NATIVE_BATCH_ID_REQUIRED');await save({stage:'SOURCE_DEFERRED',operationId:request.operationId,caseId:intent.caseId,intentHash:intent.intentHash,nativeBatchId:dispatch.nativeBatchId,at:services.now()});return {status:'SOURCE_NATIVE_BATCH_READY',nativeBatchId:dispatch.nativeBatchId,automaticRetry:false,actualWriteAcknowledged:false};}}catch(e){await save({stage:'SOURCE_UNKNOWN',operationId:request.operationId,caseId:intent.caseId,intentHash:intent.intentHash,at:services.now()});return {status:'SOURCE_WRITE_UNKNOWN',automaticRetry:false};}
+      c.snapshot=null; // The mutation adapter performs its own fresh read.
+      try{const dispatch=await services.applySourceAssignment(intent);if(dispatch?.status==='NATIVE_BATCH_READY'){need(typeof dispatch.nativeBatchId==='string'&&dispatch.nativeBatchId,'NATIVE_BATCH_ID_REQUIRED');await save({stage:'SOURCE_DEFERRED',operationId:request.operationId,caseId:intent.caseId,intentHash:intent.intentHash,nativeBatchId:dispatch.nativeBatchId,at:services.now()});return {status:'SOURCE_NATIVE_BATCH_READY',nativeBatchId:dispatch.nativeBatchId,automaticRetry:false,actualWriteAcknowledged:false};}}catch(e){await save({stage:'SOURCE_UNKNOWN',operationId:request.operationId,caseId:intent.caseId,intentHash:intent.intentHash,at:services.now()});return {status:'SOURCE_WRITE_UNKNOWN',automaticRetry:false};}
       await save({stage:'SOURCE_DISPATCHED',operationId:request.operationId,caseId:intent.caseId,intentHash:intent.intentHash,at:services.now()});
       return {status:'SOURCE_WRITE_DISPATCHED',sourceCellWrites:1,monthlyWrites:0,mailWrites:0};
     }
@@ -245,7 +329,8 @@ var LK_MONTHLY_V5 = (() => {
       const position=choosePosition(month,date,row,request.layoutMode),mapped=mapSource(row.cells,fixedId,schema.width);
       const fees=FEE.map(column=>({column,value:normalizedEffective(row.cells[column])}));
       const projected=one(c.events,'SOURCE_PROJECTED');
-      const intent={schema:'LK_MONTHLY_INTENT_V5',stage:'INTENT',spreadsheetId:services.spreadsheetId,operationId:request.operationId,caseId:row.caseId,fixedId,sourceContentHash:contentHash(services,row.cells),sourceSnapshot:row.cells.map(writable),sourceEffectiveFees:fees,assignment,assignmentHash:sha(services,assignment),preCatalog:projected?.preCatalog||snapshot.catalog||null,postCatalog:snapshot.catalog||null,preMonthlyContentHash:projected?.preMonthlyContentHash||contentHash(services,row.cells),postMonthlyContentHash:contentHash(services,row.cells),month:{title:month.title,sheetId:month.sheetId,width:schema.width,rowCount:month.rowCount,contentHash:sha(services,month.rows.map(r=>({row:r.row,cells:r.cells.map(writable)})))},position,mapped,dependencyHash:snapshot.dependencyHash,createdAt:services.now(),retention:'AT_LEAST_THROUGH_'+(Number(date.slice(0,4))+(Number(date.slice(5,7))>=10?1:0))+'-09-30',concurrencyGuarantee:'TRUSTED_QUEUE_LEASE_AND_SAME_PROJECT_CONTROLLER_LOCK_ONLY'};
+      const snapshotProfile=snapshot.coverage?.schema===COMPACT_COVERAGE?STRUCTURAL_LAYOUT:LEGACY_LAYOUT;
+      const intent={schema:'LK_MONTHLY_INTENT_V5',stage:'INTENT',spreadsheetId:services.spreadsheetId,operationId:request.operationId,caseId:row.caseId,fixedId,sourceContentHash:contentHash(services,row.cells),sourceSnapshot:row.cells.map(writable),sourceEffectiveFees:fees,assignment,assignmentHash:sha(services,assignment),preCatalog:projected?.preCatalog||snapshot.catalog||null,postCatalog:snapshot.catalog||null,preMonthlyContentHash:projected?.preMonthlyContentHash||contentHash(services,row.cells),postMonthlyContentHash:contentHash(services,row.cells),month:{title:month.title,sheetId:month.sheetId,width:schema.width,rowCount:month.rowCount,snapshotProfile,contentHash:monthLayoutHash(services,month,snapshotProfile)},position,mapped,dependencyHash:snapshot.dependencyHash,createdAt:services.now(),retention:'AT_LEAST_THROUGH_'+(Number(date.slice(0,4))+(Number(date.slice(5,7))>=10?1:0))+'-09-30',concurrencyGuarantee:'TRUSTED_QUEUE_LEASE_AND_SAME_PROJECT_CONTROLLER_LOCK_ONLY'};
       intent.planHash=sha(services,{...intent,createdAt:0});return intent;
     }
     async function previewInside(request){
@@ -268,7 +353,8 @@ var LK_MONTHLY_V5 = (() => {
       if(one(c.events,'MONTHLY_WRITE_STARTED')||one(c.events,'MONTHLY_DISPATCHED')||one(c.events,'UNKNOWN')||one(c.events,'DEFERRED')||c.snapshot.months.some(m=>m.rows.some(r=>r.fixedId===intent.fixedId)))return {status:'MONTHLY_RECONCILIATION_REQUIRED',automaticRetry:false};
       const fresh=monthlyPlan(c,request);need(fresh.planHash===intent.planHash,'MONTH_LAYOUT_OR_SOURCE_CHANGED');
       await save({stage:'MONTHLY_WRITE_STARTED',operationId:request.operationId,caseId:intent.caseId,planHash:intent.planHash,at:services.now()});
-      try{const dispatch=await services.applyMonthly(intent,c.snapshot);if(dispatch?.status==='NATIVE_BATCH_READY'){need(typeof dispatch.nativeBatchId==='string'&&dispatch.nativeBatchId,'NATIVE_BATCH_ID_REQUIRED');await save({stage:'DEFERRED',operationId:request.operationId,caseId:intent.caseId,planHash:intent.planHash,nativeBatchId:dispatch.nativeBatchId,at:services.now()});return {status:'MONTHLY_NATIVE_BATCH_READY',nativeBatchId:dispatch.nativeBatchId,automaticRetry:false,actualWriteAcknowledged:false};}}catch(e){await save({stage:'UNKNOWN',operationId:request.operationId,caseId:intent.caseId,planHash:intent.planHash,at:services.now()});return {status:'MONTHLY_WRITE_UNKNOWN',automaticRetry:false};}
+      c.snapshot=null;
+      try{const dispatch=await services.applyMonthly(intent);if(dispatch?.status==='NATIVE_BATCH_READY'){need(typeof dispatch.nativeBatchId==='string'&&dispatch.nativeBatchId,'NATIVE_BATCH_ID_REQUIRED');await save({stage:'DEFERRED',operationId:request.operationId,caseId:intent.caseId,planHash:intent.planHash,nativeBatchId:dispatch.nativeBatchId,at:services.now()});return {status:'MONTHLY_NATIVE_BATCH_READY',nativeBatchId:dispatch.nativeBatchId,automaticRetry:false,actualWriteAcknowledged:false};}}catch(e){await save({stage:'UNKNOWN',operationId:request.operationId,caseId:intent.caseId,planHash:intent.planHash,at:services.now()});return {status:'MONTHLY_WRITE_UNKNOWN',automaticRetry:false};}
       await save({stage:'MONTHLY_DISPATCHED',operationId:request.operationId,caseId:intent.caseId,planHash:intent.planHash,at:services.now()});return {status:'MONTHLY_WRITE_DISPATCHED',monthlyBatches:1,sourceWrites:0,mailWrites:0};
     }
     async function reconcileInside(request){
@@ -280,15 +366,17 @@ var LK_MONTHLY_V5 = (() => {
       for(let i=0;i<54;i++)need(canonical(writable(r.cells[i]))===canonical(intent.mapped.business[i]),'DESTINATION_CONTENT_CHANGED',{column:i+1});
       need(canonical(writable(r.cells[intent.month.width-1]))===canonical(intent.mapped.idCell),'DESTINATION_ID_CHANGED');
       const actualFees=FEE.map(column=>({column,value:normalizedEffective(r.cells[column-1])}));need(canonical(actualFees)===canonical(intent.sourceEffectiveFees),'FINANCIAL_READBACK_MISMATCH');need(!r.cells.some(cell=>cell.effectiveValue?.errorValue),'DESTINATION_FORMULA_ERROR');
+      const placementVerification=verifyPostPlacement(intent,m,r);
       const prior=one(c.events,'ACCEPTED');if(prior){need(prior.destinationContentHash===contentHash(services,r.cells),'DESTINATION_MANUAL_EDIT_CONFLICT');return {status:'NO_OP_ALREADY_ACCEPTED',ack:prior.ack,monthlyWrites:0,sourceWrites:0,mailWrites:0};}
-      const a=intent.assignment,ack={schema:'LK_CASE_LIST_MONTHLY_ACK_V1',status:'MONTHLY_READBACK_VERIFIED',spreadsheetId:services.spreadsheetId,operationId:intent.operationId,queueId:a.queueId||null,companyId:a.companyId||null,jobId:a.jobId||null,sourceCaseId:intent.caseId,preCatalog:intent.preCatalog,postCatalog:intent.postCatalog,preMonthlyContentHash:intent.preMonthlyContentHash,postMonthlyContentHash:intent.postMonthlyContentHash,assignedJobRevision:a.assignedJobRevision||null,staffId:a.staffId,staffName:a.staffName,dateKey:a.dateKey,target:{sheetId:m.sheetId,title:m.title,fixedId:intent.fixedId,rowHint:r.row,readbackHash:contentHash(services,r.cells)},financialReadbackHash:sha(services,actualFees),preserveSource:true};
+      const a=intent.assignment,ack={schema:'LK_CASE_LIST_MONTHLY_ACK_V1',status:'MONTHLY_READBACK_VERIFIED',spreadsheetId:services.spreadsheetId,operationId:intent.operationId,queueId:a.queueId||null,companyId:a.companyId||null,jobId:a.jobId||null,sourceCaseId:intent.caseId,preCatalog:intent.preCatalog,postCatalog:intent.postCatalog,preMonthlyContentHash:intent.preMonthlyContentHash,postMonthlyContentHash:intent.postMonthlyContentHash,assignedJobRevision:a.assignedJobRevision||null,staffId:a.staffId,staffName:a.staffName,dateKey:a.dateKey,target:{sheetId:m.sheetId,title:m.title,fixedId:intent.fixedId,rowHint:r.row,readbackHash:contentHash(services,r.cells)},financialReadbackHash:sha(services,actualFees),placementVerification,preserveSource:true};
       await save({stage:'ACCEPTED',operationId:intent.operationId,caseId:intent.caseId,planHash:intent.planHash,sourceContentHash:intent.sourceContentHash,assignmentHash:intent.assignmentHash,destinationContentHash:contentHash(services,r.cells),ack,at:services.now()});return {status:'MONTHLY_READBACK_VERIFIED',ack,sourceWrites:0,mailWrites:0};
     }
     // Caller may use one bounded stage per invocation. execute is convenient for
     // the existing trusted worker; all mutations still have separate readbacks.
     async function executeInside(request){
-      let c=await context(request);if(one(c.events,'ACCEPTED'))return reconcileInside(request);
-      if(c.assignment.authority==='CREW_QUEUE'&&!one(c.events,'SOURCE_PROJECTED')){
+      let c=await context(request);const accepted=!!one(c.events,'ACCEPTED'),projectSource=c.assignment.authority==='CREW_QUEUE'&&!one(c.events,'SOURCE_PROJECTED');c=null;
+      if(accepted)return reconcileInside(request);
+      if(projectSource){
         await prepareSourceInside(request);const dispatch=await applySourceInside(request);if(['SOURCE_WRITE_UNKNOWN','SOURCE_NATIVE_BATCH_READY'].includes(dispatch.status))return dispatch;
         const projected=await reconcileSourceInside(request);if(!['SOURCE_ASSIGNMENT_PROJECTED','SOURCE_ALREADY_PROJECTED'].includes(projected.status))return projected;
       }
@@ -296,6 +384,6 @@ var LK_MONTHLY_V5 = (() => {
     }
     return {preview:request=>locked(()=>previewInside(request)),prepareSource:request=>locked(()=>prepareSourceInside(request)),applySource:request=>locked(()=>applySourceInside(request)),reconcileSource:request=>locked(()=>reconcileSourceInside(request)),prepareMonthly:request=>locked(()=>prepareMonthlyInside(request)),applyMonthly:request=>locked(()=>applyMonthlyInside(request)),reconcile:request=>locked(()=>reconcileInside(request)),execute:request=>locked(()=>executeInside(request))};
   }
-  return {create,canonical,contentHash,translateFormula,mapSource,choosePosition,transferCapability,SOURCE_HEADERS:SOURCE,BUSINESS_HEADERS:BUSINESS,FINANCIAL_COLUMNS:FEE};
+  return {create,canonical,contentHash,translateFormula,mapSource,choosePosition,verifyPostPlacement,transferCapability,assertSnapshotCoverage,assertSourceAssignmentPreflight,assertMonthlyWritePreflight,monthLayoutHash,SOURCE_INDEX_COLUMNS,monthIndexColumns,COMPACT_COVERAGE,STRUCTURAL_LAYOUT,LEGACY_LAYOUT,SOURCE_HEADERS:SOURCE,BUSINESS_HEADERS:BUSINESS,FINANCIAL_COLUMNS:FEE};
 })();
 if(typeof module!=='undefined')module.exports=LK_MONTHLY_V5;

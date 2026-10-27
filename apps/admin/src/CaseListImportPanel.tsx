@@ -35,6 +35,6 @@ export default function CaseListImportPanel({ functions, demo, onRefresh }: { fu
       <button className="ghost" disabled={busy} onClick={() => void run("assignments")}>応募・月別連携を有効化</button></div>
     {message && <p role="status">{message}</p>}
     {preview && <><p>登録 {preview.counts.total}件／確認待ち {preview.counts.held}件／既存シフトとの対応あり {preview.counts.existingMonthlyLinks}件</p>
-      <details><summary>読取結果を見る</summary><table><thead><tr><th>実施日</th><th>店舗</th><th>確認</th></tr></thead><tbody>{preview.rows.map(row => <tr key={row.caseId}><td>{row.workDate}</td><td>{row.storeName}</td><td>{row.holdReasons.length ? "条件・担当の確認待ち" : "確認済み"}</td></tr>)}</tbody></table></details></>}
+      <details><summary>読取結果を見る</summary><table><thead><tr><th>実施日</th><th>店舗</th><th>確認</th></tr></thead><tbody>{preview.rows.map(row => <tr key={row.caseId}><td>{row.workDate}</td><td>{row.storeName}</td><td>{row.holdReasons.length ? "条件・担当の確認待ち" : "公開前の確認が必要"}</td></tr>)}</tbody></table></details></>}
   </section>;
 }

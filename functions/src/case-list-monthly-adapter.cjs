@@ -6,6 +6,7 @@ function need(ok,code){if(!ok){const e=new Error(code);e.code=code;throw e;}}
 function string(cell){return cell?.userEnteredValue?.stringValue||cell?.effectiveValue?.stringValue||'';}
 function sourceRequests(intent,snapshot){
   need(intent?.spreadsheetId&&snapshot.spreadsheetId===intent.spreadsheetId,'SOURCE_SPREADSHEET_MISMATCH');
+  Core.assertSnapshotCoverage(snapshot,intent.caseId,null);
   need(intent?.stage==='SOURCE_INTENT'&&snapshot.source.sheetId===2026101601,'SOURCE_INTENT_SCOPE');
   const rows=snapshot.source.rows.filter(r=>r.caseId===intent.caseId);need(rows.length===1,'SOURCE_ID_NOT_UNIQUE');
   const row=rows[0];need(row.row>=2&&row.cells.length===65,'SOURCE_ROW_SCOPE');
@@ -15,6 +16,7 @@ function sourceRequests(intent,snapshot){
 }
 function monthlyRequests(intent,snapshot){
   need(intent?.spreadsheetId&&snapshot.spreadsheetId===intent.spreadsheetId,'MONTHLY_SPREADSHEET_MISMATCH');
+  Core.assertSnapshotCoverage(snapshot,intent.caseId,null);
   need(intent?.stage==='INTENT'&&intent.month?.title!=='2026.10','MONTHLY_INTENT_SCOPE');
   const month=snapshot.months.find(m=>m.title===intent.month.title&&m.sheetId===intent.month.sheetId);need(month,'MONTHLY_SHEET_NOT_FOUND');
   need(Core.BUSINESS_HEADERS.every((h,i)=>month.headers[i]===h),'MONTHLY_HEADERS_CHANGED');
@@ -68,8 +70,28 @@ function snapshotFromNative({metadata,cells,dependencyHash,catalog,resolveStaff,
 }
 function createGoogleSheetsMutationAdapter({spreadsheetId,transport,readSnapshot,hash}){
   need(typeof spreadsheetId==='string'&&transport&&typeof transport.batchUpdate==='function'&&typeof readSnapshot==='function'&&typeof hash==='function','NATIVE_ADAPTER_ARGUMENTS');
-  async function source(intent){const snapshot=await readSnapshot({operationId:intent.operationId,caseId:intent.caseId});need(snapshot.spreadsheetId===spreadsheetId&&intent.spreadsheetId===spreadsheetId,'SOURCE_BOUND_BOOK_MISMATCH');const row=snapshot.source.rows.find(r=>r.caseId===intent.caseId);need(row&&Core.contentHash({sha256:hash},row.cells)===intent.preMonthlyContentHash,'SOURCE_NATIVE_PREIMAGE_CHANGED');need(snapshot.dependencyHash===intent.dependencyHash,'SOURCE_NATIVE_DEPENDENCIES_CHANGED');return transport.batchUpdate({spreadsheetId,requests:sourceRequests(intent,snapshot)});}
-  async function monthly(intent){const snapshot=await readSnapshot({operationId:intent.operationId,caseId:intent.caseId});need(snapshot.spreadsheetId===spreadsheetId&&intent.spreadsheetId===spreadsheetId,'MONTHLY_BOUND_BOOK_MISMATCH');const row=snapshot.source.rows.find(r=>r.caseId===intent.caseId),month=snapshot.months.find(m=>m.sheetId===intent.month.sheetId);need(row&&Core.contentHash({sha256:hash},row.cells)===intent.sourceContentHash&&snapshot.dependencyHash===intent.dependencyHash,'MONTHLY_NATIVE_PREIMAGE_CHANGED');need(month&&hash(Core.canonical(month.rows.map(r=>({row:r.row,cells:r.cells.map(c=>Object.fromEntries(WRITABLE.filter(k=>Object.hasOwn(c,k)).map(k=>[k,c[k]])))}))))===intent.month.contentHash,'MONTHLY_NATIVE_LAYOUT_CHANGED');return transport.batchUpdate({spreadsheetId,requests:monthlyRequests(intent,snapshot)});}
+  async function source(intent){
+    let snapshot=await readSnapshot({operationId:intent.operationId,caseId:intent.caseId});
+    need(snapshot.spreadsheetId===spreadsheetId&&intent.spreadsheetId===spreadsheetId,'SOURCE_BOUND_BOOK_MISMATCH');
+    Core.assertSnapshotCoverage(snapshot,intent.caseId,{sha256:hash});
+    Core.assertSourceAssignmentPreflight(snapshot,intent,{sha256:hash});
+    const row=snapshot.source.rows.find(r=>r.caseId===intent.caseId);
+    need(row&&Core.contentHash({sha256:hash},row.cells)===intent.preMonthlyContentHash,'SOURCE_NATIVE_PREIMAGE_CHANGED');
+    need(snapshot.dependencyHash===intent.dependencyHash,'SOURCE_NATIVE_DEPENDENCIES_CHANGED');
+    const requests=sourceRequests(intent,snapshot);snapshot=null;
+    return transport.batchUpdate({spreadsheetId,requests});
+  }
+  async function monthly(intent){
+    let snapshot=await readSnapshot({operationId:intent.operationId,caseId:intent.caseId});
+    need(snapshot.spreadsheetId===spreadsheetId&&intent.spreadsheetId===spreadsheetId,'MONTHLY_BOUND_BOOK_MISMATCH');
+    Core.assertSnapshotCoverage(snapshot,intent.caseId,{sha256:hash});
+    Core.assertMonthlyWritePreflight(snapshot,intent,{sha256:hash});
+    let row=snapshot.source.rows.find(r=>r.caseId===intent.caseId),month=snapshot.months.find(m=>m.sheetId===intent.month.sheetId);
+    need(row&&Core.contentHash({sha256:hash},row.cells)===intent.sourceContentHash&&snapshot.dependencyHash===intent.dependencyHash,'MONTHLY_NATIVE_PREIMAGE_CHANGED');
+    need(month&&Core.monthLayoutHash({sha256:hash},month,intent.month.snapshotProfile||Core.LEGACY_LAYOUT)===intent.month.contentHash,'MONTHLY_NATIVE_LAYOUT_CHANGED');
+    const requests=monthlyRequests(intent,snapshot);snapshot=null;row=null;month=null;
+    return transport.batchUpdate({spreadsheetId,requests});
+  }
   return {applySourceAssignment:source,applyMonthly:monthly};
 }
 module.exports={sourceRequests,monthlyRequests,snapshotFromNative,createGoogleSheetsMutationAdapter};

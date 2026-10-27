@@ -60,6 +60,8 @@ for (const moduleName of ['jobs', 'analytics']) {
       './analytics-core': { cancellationReasonLabels: { other: 'その他' }, cancellationTreatmentLabels: { neither: 'なし' } },
       './notification-core': { queueDocumentData: (input) => input },
       './case-mail-publication': { readMailPublication: () => assert.fail('Native cancellation must not read mail publication') },
+      // This legacy fixture must never cross into the opt-in CaseList path.
+      './case-list-source': { readCaseListPublication: () => assert.fail('Native cancellation must not read CaseList publication'), requireCaseListExecutive: () => assert.fail('Native cancellation must not confirm CaseList publication') },
       './notification-time': { tokyoParts: () => assert.fail('Cancellation must not evaluate application dates') },
       './sheet-write-core': pureModule('sheet-write-core'),
       './cancellation-history-retention-core': pureModule('cancellation-history-retention-core'),

@@ -23,6 +23,10 @@ export function canonical(value: unknown): string {
 }
 export const hashCaseList = (value: unknown): string => createHash("sha256").update(canonical(value), "utf8").digest("hex");
 export const caseListMonthlyContentHash = (cells: Cell[]): string => hashCaseList(cells.map(cell => Object.fromEntries(["userEnteredValue", "note", "userEnteredFormat", "dataValidation", "textFormatRuns", "chipRuns"].filter(key => Object.hasOwn(cell, key)).map(key => [key, (cell as Record<string, unknown>)[key]]))));
+export const caseListBindingHash = (spreadsheetId: string, sheetId = CASE_LIST_SOURCE.sheetId): string => hashCaseList({ schema: "LK_CASE_LIST_SOURCE_BINDING_V1", spreadsheetId: configuredCaseListSource(spreadsheetId).spreadsheetId, sheetId });
+export function publicCaseListSource(source: CaseListSource) {
+  return { version: source.version, sheetId: source.sheetId, caseId: source.caseId, sourceRevision: source.sourceRevision, rowRevision: source.rowRevision, ledgerRevision: source.ledgerRevision, bindingHash: caseListBindingHash(source.spreadsheetId, source.sheetId) };
+}
 function value(cell?: Cell): unknown {
   const raw = cell?.userEnteredValue ?? {};
   const v = Object.hasOwn(raw, "formulaValue") ? cell?.effectiveValue ?? {} : raw;
@@ -99,5 +103,5 @@ export function confirmedCaseListCandidate(rows: Cell[][], ledgerRows: Cell[][],
 }
 export function assertCaseListJobBinding(companyId: string, jobId: string, job: Record<string, unknown>, source: CaseListSource, createJobId: (companyId: string, caseId: string) => string): void {
   const saved = job.caseListSource as Partial<CaseListSource> | undefined;
-  if (job.companyId !== companyId || job.caseId !== source.caseId || jobId !== createJobId(companyId, source.caseId) || saved?.sourceRevision !== source.sourceRevision || saved.spreadsheetId !== source.spreadsheetId || saved.sheetId !== source.sheetId) throw new Error("CASE_LIST_JOB_SOURCE_CHANGED");
+  if (job.companyId !== companyId || job.caseId !== source.caseId || jobId !== createJobId(companyId, source.caseId) || saved?.sourceRevision !== source.sourceRevision || (saved as Record<string, unknown> | undefined)?.bindingHash !== caseListBindingHash(source.spreadsheetId, source.sheetId) || saved.sheetId !== source.sheetId) throw new Error("CASE_LIST_JOB_SOURCE_CHANGED");
 }

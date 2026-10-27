@@ -4,7 +4,7 @@ import {runInNewContext} from 'node:vm';
 const read=p=>fs.readFileSync(new URL('../../'+p,import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^import .*;\n/gm,'');
 const modules={previewStaffImport:'staff-import',syncStaffDirectoryReadOnly:'staff-import',previewShiftImport:'shift-import',syncShiftSheetsReadOnly:'shift-import',retrySheetWriteIssue:'admin-operations',acknowledgeSheetWriteIssue:'admin-operations'};
-const sources=Object.fromEntries([...new Set([...Object.values(modules),'sheet-reader'])].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
+const sources=Object.fromEntries([...new Set([...Object.values(modules),'sheet-reader','case-list-source','case-list-source-core','case-list-monthly-worker'])].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
 let cases=0;
 function run(name,change){
  const files={...sources};change?.(files);
@@ -36,6 +36,45 @@ for(const [name,module]of Object.entries(modules)){
   reject(name,'actorUid: session.uid','actorUid: input.uid');
  }
 }
+// Check both modes independently: the first mode literal belongs to the new
+// route, so mutating just that literal no longer covers the legacy call.
+for (const name of ['previewShiftImport','syncShiftSheetsReadOnly']) {
+ const mode=name.startsWith('preview')?'preview':'commit',other=mode==='preview'?'commit':'preview';
+ reject(name,`executeShiftImport(companyId, "${mode}", input.sheetNames)`,`executeShiftImport(companyId, "${other}", input.sheetNames)`);
+ reject(name,`executeCaseListImport(companyId, "${mode}", session.uid, session.token`,`executeCaseListImport(companyId, "${other}", session.uid, session.token`);
+ reject(name,'if (input.source === "case-list")','if (input.source === "monthly")');
+ reject(name,`executeCaseListImport(companyId, "${mode}", session.uid`,`executeCaseListImport("other-company", "${mode}", session.uid`);
+ reject(name,`executeCaseListImport(companyId, "${mode}", session.uid`,`executeCaseListImport(companyId, "${mode}", "untrusted-actor"`);
+ reject(name,'session.token as Record<string, unknown>','request.data.token as Record<string, unknown>');
+ if(mode==='commit') {
+  reject(name,'input.enableCaseList === true','true');
+  reject(name,'input.enableCaseListAssignments === true','true');
+ }
+}
+for(const [before,after,module] of [
+ ['requireCaseListExecutive(token);','','case-list-source'],
+ ['if (enable || enableAssignments) {','if (false) {','case-list-source'],
+ ['mode !== "commit" || token.companyId !== companyId || (token.uid ?? token.sub) !== actorUid','false','case-list-source'],
+ ['mode !== "commit" || token.companyId !== companyId','false || token.companyId !== companyId','case-list-source'],
+ ['token.companyId !== companyId','false','case-list-source'],
+ ['(token.uid ?? token.sub) !== actorUid','false','case-list-source'],
+ ['const verifiedColumns = enable || enableAssignments ? await readVerifiedMonthIdColumns(snapshot.spreadsheetId) : null;','const verifiedColumns = null;','case-list-source'],
+ ['const enforceOperational = (process.env.APP_ENVIRONMENT ?? "development") === "production";','const enforceOperational = false;','case-list-source'],
+ ['(await tx.get(db.collection("productionControls").doc(companyId))).data()','null','case-list-source'],
+ ['operationalControl?.productionEnabled !== true','false','case-list-source'],
+ ['operationalControl?.emergencyLock !== false','false','case-list-source'],
+ ['enableAssignments && currentConfig.caseListEnabled !== true && !enable','false','case-list-source'],
+ ['if (enable) tx.set(db.collection("sheetImportConfigs").doc(companyId), { caseListEnabled: true','if (true) tx.set(db.collection("sheetImportConfigs").doc(companyId), { caseListEnabled: true','case-list-source'],
+ ['if (enableAssignments) tx.set(db.collection("sheetImportConfigs").doc(companyId), { caseListAssignmentsEnabled: true','if (true) tx.set(db.collection("sheetImportConfigs").doc(companyId), { caseListAssignmentsEnabled: true','case-list-source'],
+ ['if (mode === "commit") await assertProductionOperational(companyId);','','case-list-source'],
+ ['if (mode === "preview") return { ...preview, writes: 0, publications: 0 };','if (mode === "commit") return { ...preview, writes: 0, publications: 0 };','case-list-source'],
+ ['if (mode === "preview") return { ...preview, writes: 0, publications: 0 };','await db.collection("unsafe").doc(companyId).set({}); if (mode === "preview") return { ...preview, writes: 0, publications: 0 };','case-list-source'],
+ ['config.companyId !== companyId','false','case-list-source'],
+ ['configuredCaseListSource(config.spreadsheetId).spreadsheetId','"untrusted-book"','case-list-source'],
+ ['token.email_verified !== true','false','case-list-source-core'],
+ ['token.role !== "admin"','false','case-list-source-core'],
+ ['!emails.includes(token.email.toLowerCase())','false','case-list-source-core'],
+]) reject('syncShiftSheetsReadOnly',before,after,{whole:true,module});
 for(const [before,after]of [
  ['lease.companyId !== companyId','false'],['lease.token !== token','false'],
  ['!(lease.leaseUntil instanceof Timestamp)','false'],['lease.leaseUntil.toMillis() <= Timestamp.now().toMillis()','false'],
@@ -55,7 +94,7 @@ for(const [before,after]of [
 ])reject('syncShiftSheetsReadOnly',before,after,{whole:true});
 for(const [before,after]of [
  ['await assertProductionOperational(companyId);',''],
- ['if (!canManuallyRetrySheetWrite({','if (unchecked({'],
+ ['if (data.operation === "case_list.assign" || !canManuallyRetrySheetWrite({','if (unchecked({'],
  ['writeVerificationRequired: data.writeVerificationRequired','writeVerificationRequired: false'],
 ])reject('retrySheetWriteIssue',before,after);
 for(const [before,after]of [
@@ -64,6 +103,23 @@ for(const [before,after]of [
  ['acknowledgedFromStatus: data.status,',''],
  ['if (!["blocked", "dead_letter", "retry_wait", "error", "paused_global"].includes(String(data.status ?? "")))','if (false)'],
 ])reject('acknowledgeSheetWriteIssue',before,after);
+for(const [before,after] of [
+ ['input.action === "reconcile-case-list"','false'],
+ ['snapshot.data()?.companyId !== companyId','false'],
+ ['snapshot.data()?.operation !== "case_list.assign"','false'],
+ ['reconcileCaseListMonthlyAssignment(ref, session.uid, session.token)','reconcileCaseListMonthlyAssignment(ref, "untrusted-owner", session.token)'],
+ ['reconcileCaseListMonthlyAssignment(ref, session.uid, session.token)','runCaseListMonthlyAssignment(ref)'],
+]) reject('acknowledgeSheetWriteIssue',before,after);
+for(const [before,after]of [
+ ['assertExecutive(owner.token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");',''],
+ ['owner.token.companyId === initial.companyId','true'],
+ ['(owner.token.uid ?? owner.token.sub) === owner.actorUid','true'],
+ ['const sheets = owner ? null : google.sheets(','const sheets = google.sheets('],
+ ['applySourceAssignment: async () => stop("OWNER_RECONCILIATION_GOOGLE_WRITE_FORBIDDEN")','applySourceAssignment: async () => ({ok:true})'],
+ ['need(!owner, "OWNER_RECONCILIATION_GOOGLE_WRITE_FORBIDDEN");',''],
+ ['result = await core.reconcileSource(request);','result = await core.applySource(request);'],
+]) reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-monthly-worker'});
+reject('retrySheetWriteIssue','data.operation === "case_list.assign" || !canManuallyRetrySheetWrite({','!canManuallyRetrySheetWrite({');
 const allowed=JSON.parse(read('config/automation/staging-safety.json')).allowedFunctions;
 assert.ok(Object.keys(modules).every(n=>allowed.includes(n)));assert.ok(!allowed.includes('syncStaffDirectoryScheduled')&&!allowed.includes('syncShiftSheetsScheduled'));cases++;
 console.log(JSON.stringify({importIssuesAuthGuardTests:cases,functions:Object.keys(modules),cloudOperations:false}));

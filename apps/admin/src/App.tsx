@@ -2804,6 +2804,15 @@ async function previewRowCreation() {
   }
 
   async function acknowledgeSheetIssue(issue:SheetWriteIssue) {
+    if(issue.operation==="case_list.assign") {
+      await runAdminOperation("issue:"+issue.id,"acknowledgeSheetWriteIssue",{queueId:issue.id,action:"reconcile-case-list"},data=>{
+        const status=(data as {status?:string})?.status;
+        if(status==="MONTHLY_READBACK_VERIFIED"||status==="NO_OP_ALREADY_ACCEPTED")return "保存済みの原本を照合し、応募の反映を確認しました。";
+        if(status==="OWNER_RESUME_REQUIRED")return "案件リストの担当者反映まで確認できました。月別への保存は未完了のため保留しています。";
+        return "保存結果を確定できませんでした。現在のデータを保持して保留しています。";
+      },false);
+      return;
+    }
     const note=window.prompt("確認メモ", "");
     if(note!==null)await runSheetIssueAction(issue,"acknowledgeSheetWriteIssue",note);
   }
@@ -2817,7 +2826,7 @@ async function previewRowCreation() {
     await runAdminOperation("job:"+job.id,"confirmApplication",{jobId:job.id,expectedRevision:job.revision??0},"管理者確認済みです。原本照合は状態欄に表示します。",true);
   }
 
-  async function runAdminOperation(key:string,action:string,payload:Record<string,unknown>,success:string,application:boolean|"resubmission"|"netprint"|"cancellation"|"devices") {
+  async function runAdminOperation(key:string,action:string,payload:Record<string,unknown>,success:string|((data:unknown)=>string),application:boolean|"resubmission"|"netprint"|"cancellation"|"devices") {
     const user=auth?.currentUser,epoch=operationEpochRef.current;
     if(operationLocksRef.current.has(key)||firebaseConfigured&&(!functions||!user||!adminSessionReady))return;
     const token=Symbol(key),isCurrent=()=>auth?.currentUser===user&&operationEpochRef.current===epoch;
@@ -2830,7 +2839,7 @@ async function previewRowCreation() {
         const {applyDemoSheetIssue}=await import("./AdminSheetIssuePanel");
         if(!isCurrent())return;setSheetIssues(applyDemoSheetIssue(action,payload));
       }
-      accepted=true;setMessage((firebaseConfigured?"":"デモ：")+success+(application==="netprint"&&firebaseConfigured?`変更${(response?.data as {changedCount?:number})?.changedCount??0}件`:""));
+      accepted=true;setMessage((firebaseConfigured?"":"デモ：")+(typeof success==="function"?success(response?.data):success)+(application==="netprint"&&firebaseConfigured?`変更${(response?.data as {changedCount?:number})?.changedCount??0}件`:""));
       if(application==="resubmission"){
         if(comparisonRequestRef.current===payload.requestId){comparisonVersionRef.current++;comparisonRequestRef.current=null;}
         setComparison(current=>current?.request.id===payload.requestId?null:current);
@@ -2842,6 +2851,7 @@ async function previewRowCreation() {
         if(profile&&profile.id===payload.staffId){if(firebaseConfigured)await openStaffDevices(profile,true);else setStaffDevices(current=>current.map(device=>({...device,active:false})));}
       }
       else if(firebaseConfigured&&application==="cancellation")await Promise.all([loadJobs(isCurrent),loadDashboard(undefined,isCurrent,true)]);
+      else if(firebaseConfigured&&payload.action==="reconcile-case-list")await Promise.all([loadJobs(isCurrent),loadSheetIssues(isCurrent,true)]);
       else if(firebaseConfigured){if(application)await loadJobs(isCurrent);else await loadSheetIssues(isCurrent,true);}
       else if(application==="netprint")setJobs(current=>current.map(job=>job.id===payload.jobId?{...job,netPrint:{items:(payload.numbers as string[]).filter(Boolean).map((number,index)=>({id:`demo_np_${index}`,number,printed:false}))}}:job));
       else if(application)setJobs(current=>current.map(job=>job.id===payload.jobId?{...job,applicationAdminConfirmed:true}:job));
@@ -3190,15 +3200,16 @@ async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"
   let caseListConfirmation: { expectedSourceRevision: string; confirmedFields: { arrival: true; execution: true; headcount: true; dateMode: true; payOffer: true; vacancy: true }; payOffer: { dailyWageJPY: number; travelExpenses: "全額支給"; communicationExpenses: "全額支給" }; sourceReview?: { headcountPerSlot: 1; reviewedIssues: string[]; resolutionNote: string } } | undefined;
   if(job.caseListSource && action==="publish") {
     if(!Number.isSafeInteger(confirmedRevision)||!/^[a-f0-9]{64}$/.test(job.caseListSource.sourceRevision)){setMessage("案件リストを取り込み直してください。");return;}
-    const wage=window.prompt("この案件の公開日給（円）。交通費・通信費は全額支給です。",String(job.basePay??10000));
+    const wage=window.prompt("この案件の公開日給（円）を確認して入力してください。交通費・通信費は全額支給です。",typeof job.basePay==="number"&&job.basePay>0?String(job.basePay):"");
     if(wage===null||!isCurrent())return;
     if(!/^\d+$/.test(wage)||!Number.isSafeInteger(Number(wage))||Number(wage)<1||Number(wage)>1000000){setMessage("公開日給を正しい金額で入力してください。");return;}
     if(!functions)return;
-    let currentSource: { jobId: string; sourceRevision: string; workDate?: string; storeName?: string; makerName?: string; menuName?: string; entryTime?: string; workTime?: string; ownerReviewRequired?: boolean; reviewIssues?: string[] } | undefined;
+    type SourceReviewRow = { jobId: string; sourceRevision: string; workDate?: string; storeName?: string; makerName?: string; menuName?: string; entryTime?: string; workTime?: string; ownerReviewRequired?: boolean; reviewIssues?: string[] };
+    let currentSource: SourceReviewRow | undefined;
     try {
       const response=await httpsCallable(functions,"previewShiftImport")({source:"case-list"});
       if(!isCurrent())return;
-      const result=response.data as {rows?:Array<NonNullable<typeof currentSource>>};
+      const result=response.data as {rows?:SourceReviewRow[]};
       currentSource=result.rows?.find(row=>row.jobId===job.id);
       if(!currentSource||currentSource.sourceRevision!==job.caseListSource.sourceRevision)throw new Error("案件リストが更新されています。下書きを取り込み直してください。");
     } catch(error) { if(isCurrent())setMessage(error instanceof Error?error.message:"案件リストを確認できません。");return; }

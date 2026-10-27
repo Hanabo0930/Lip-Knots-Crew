@@ -17,7 +17,8 @@ import { mailPreparationContext, applicationConfirmationIdentity, assignmentPrep
 import { assertProductionOperational } from "./system-safety";
 import { readMailApplicationForAssignment } from "./automation-intake";
 import { readMailPublication } from "./case-mail-publication";
-import { readCaseListPublication } from "./case-list-source";
+const caseListSourceModule = (): typeof import("./case-list-source") => require("./case-list-source");
+type CaseListPublicationCheck = Awaited<ReturnType<(typeof import("./case-list-source"))["readCaseListPublication"]>>;
 
 const ApplySchema = z.object({
   jobId: z.string().min(1),
@@ -115,9 +116,9 @@ export const applyToJob = onCall(async (request) => {
           { reason: "case_mail_job_changed", accepted: false, jobId: input.jobId, requestId: input.requestId, expectedJobRevision: input.expectedJobRevision ?? null });
       }
     }
-    let caseListChecked: Awaited<ReturnType<typeof readCaseListPublication>> | null = null;
+    let caseListChecked: CaseListPublicationCheck | null = null;
     if (job.caseListSource) {
-      try { caseListChecked = await readCaseListPublication(tx, companyId, input.jobId, job, input.expectedJobRevision, input.expectedSourceRevision); }
+      try { caseListChecked = await caseListSourceModule().readCaseListPublication(tx, companyId, input.jobId, job, input.expectedJobRevision, input.expectedSourceRevision); }
       catch (error) {
         if (error instanceof HttpsError && error.code === "failed-precondition") throw new HttpsError("failed-precondition", error.message,
           { reason: "case_list_job_changed", accepted: false, jobId: input.jobId, requestId: input.requestId, expectedJobRevision: input.expectedJobRevision ?? null, expectedSourceRevision: input.expectedSourceRevision ?? null });

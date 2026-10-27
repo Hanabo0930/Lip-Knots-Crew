@@ -4,7 +4,7 @@ import {runInNewContext} from 'node:vm';
 const read=p=>fs.readFileSync(new URL('../../'+p,import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^import .*;\n/gm,'');
 const modules={applyToJob:'jobs',getMyTasks:'staff-tasks',listMyMailApplications:'automation-intake',setSalesFloorClientSubmitted:'submission-status',submitPreContact:'precontact'};
-const sources=Object.fromEntries(Object.values(modules).map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
+const sources=Object.fromEntries([...Object.values(modules),'case-list-source','case-list-source-core'].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
 let cases=0;
 function run(name,change) {
  const files={...sources};change?.(files);
@@ -40,7 +40,7 @@ const mutations={
   ['staff.active !== true','false'],
   ['job.status !== "open" || job.assignedStaffId','false'],
   ['job.sourceMissing === true || job.assignmentUnresolved === true || job.applicationUnconfirmed === true || job.publishable !== true','false'],
-  ['lockSnap.exists && lockSnap.data()?.active === true','false'],
+  ['lockSnap.exists && (lockSnap.data()?.active === true || (caseListChecked && lockSnap.data()?.active !== false))','false'],
   ['await readMailApplicationForAssignment(tx,','await unverifiedApplication(tx,'],
   ['tx.set(idempotencyRef,','await idempotencyRef.set('],
  ],
@@ -109,3 +109,4 @@ console.log("受信案件の事前連絡ガード追加2条件成功");
 
 reject("getMyTasks", "!caseMailPreparationHeld(job)", "true");
 console.log("受信保留中のタスクガード追加1条件成功");
+

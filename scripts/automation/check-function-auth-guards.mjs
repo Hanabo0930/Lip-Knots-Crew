@@ -290,6 +290,133 @@ function checkExternalHandoff(name) {
   return all(shared[modules[name]]);
 }
 
+// This scanner checks fixed source shapes, not execution or cloud IAM. Keep the
+// legacy route checks and validate every opt-in CaseList route independently.
+function checkCaseListSourceGuards(publication = false) {
+  const compact = text => text.replace(/\s+/g, "");
+  const source = compact(sourceFile("functions/src/case-list-source.ts"));
+  const core = compact(sourceFile("functions/src/case-list-source-core.ts"));
+  if (![
+    'assertExecutive(token,process.env.EXECUTIVE_APPROVER_EMAILS??"")',
+    'if(enable||enableAssignments){requireCaseListExecutive(token);',
+    'if(mode!=="commit"||token.companyId!==companyId||(token.uid??token.sub)!==actorUid){thrownewHttpsError(',
+    'if(mode==="commit")awaitassertProductionOperational(companyId);',
+    'constsnapshot=awaitreadLiveCaseList(companyId,undefined,mode==="preview"||enable);',
+    'if(mode==="preview")return{...preview,writes:0,publications:0};',
+    'config.companyId!==companyId', 'config.caseListEnabled!==true',
+    'configuredCaseListSource(config.spreadsheetId).spreadsheetId',
+    'metadata.data.spreadsheetId!==bookId', 'result.data.spreadsheetId!==bookId',
+    'metadata.data.properties?.timeZone!=="Asia/Tokyo"',
+  ].every(part => source.includes(part))) return false;
+  const execution = source.slice(source.indexOf('exportasyncfunctionexecuteCaseListImport('), source.indexOf('exportasyncfunctionreadCaseListPublication('));
+  const previewEnd = execution.indexOf('if(mode==="preview")return{...preview,writes:0,publications:0};');
+  const optInEnd = execution.indexOf('if(mode==="commit")awaitassertProductionOperational(companyId);');
+  if (!execution.slice(0,optInEnd).includes('if(enable||enableAssignments){requireCaseListExecutive(token);if(mode!=="commit"||token.companyId!==companyId||(token.uid??token.sub)!==actorUid){thrownewHttpsError(') || ![
+    'constverifiedColumns=enable||enableAssignments?awaitreadVerifiedMonthIdColumns(snapshot.spreadsheetId):null;',
+    'constenforceOperational=(process.env.APP_ENVIRONMENT??"development")==="production";',
+    'constoperationalControl=enforceOperational?(awaittx.get(db.collection("productionControls").doc(companyId))).data():null;',
+    'if(enforceOperational&&(operationalControl?.productionEnabled!==true||operationalControl?.emergencyLock!==false))thrownewHttpsError(',
+    'if(enableAssignments&&currentConfig.caseListEnabled!==true&&!enable)thrownewHttpsError(',
+    'if(enable)tx.set(db.collection("sheetImportConfigs").doc(companyId),{caseListEnabled:true,caseListEnabledBy:actorUid,caseListEnabledAt:Timestamp.now()},{merge:true});',
+    'if(enableAssignments)tx.set(db.collection("sheetImportConfigs").doc(companyId),{caseListAssignmentsEnabled:true,caseListAssignmentsEnabledBy:actorUid,caseListAssignmentsEnabledAt:Timestamp.now()},{merge:true});',
+  ].every(part => execution.includes(part)) || execution.indexOf('if(enforceOperational&&') > execution.indexOf('tx.set(leaseRef,')) return false;
+  if (previewEnd < 0 || previewEnd > execution.indexOf('awaitdb.runTransaction(') ||
+      /\.(?:add|create|set|update|delete|commit)\(/.test(execution.slice(0, previewEnd)) ||
+      execution.indexOf('if(mode==="commit")awaitassertProductionOperational(companyId);') > execution.indexOf('awaitreadLiveCaseList(') ||
+      /sheets\.spreadsheets\.(?:batchUpdate|values\.(?:update|append|clear|batchUpdate|batchClear))\(/.test(source)) return false;
+  const executive = core.slice(core.indexOf('exportfunctionassertExecutive('), core.indexOf('exportfunctioninspectCaseList('));
+  if (!executive.includes('if(token.role!=="admin"||token.email_verified!==true||typeoftoken.email!=="string"||!emails.includes(token.email.toLowerCase()))throw')) return false;
+  if (!publication) return true;
+  const binding = core.slice(core.indexOf('exportfunctionassertCaseListJobBinding('));
+  if (!['job.companyId!==companyId||job.caseId!==source.caseId||jobId!==createJobId(companyId,source.caseId)',
+        'saved?.sourceRevision!==source.sourceRevision', 'bindingHash!==caseListBindingHash(source.spreadsheetId,source.sheetId)',
+        'saved.sheetId!==source.sheetId'].every(part => binding.includes(part))) return false;
+  const block = source.slice(source.indexOf('exportasyncfunctionreadCaseListPublication('));
+  const has = parts => parts.every(part => block.includes(part));
+  if (!has([
+    '!Number.isSafeInteger(expectedJobRevision)||expectedJobRevision!==job.revision||typeofexpectedSourceRevision!=="string"',
+    '!entry||entry.source.sourceRevision!==expectedSourceRevision',
+    'assertCaseListJobBinding(companyId,jobId,job,entry.source,createJobIdFromPersistedCaseId)',
+    'savedDocument?.companyId===companyId&&savedDocument.jobId===jobId',
+    '!approval||!owner||approval.expectedSourceRevision!==expectedSourceRevision',
+    'confirmedCaseListCandidate(snapshot.rows,snapshot.ledgerRows,entry.caseId,approval,newDate().toISOString(),owner,snapshot.spreadsheetId)',
+    'Object.entries(jobFields).some(([key,value])=>job[key]!==value)',
+    'job.basePay!==(candidate.payOfferas{dailyWageJPY:number}).dailyWageJPY',
+    'hashCaseList(job.publicPayOffer)!==hashCaseList(candidate.payOffer)',
+  ])) return false;
+  const freshCompact = has([
+    'config?.companyId!==companyId||config.caseListEnabled!==true||config.caseListAssignmentsEnabled!==true',
+    'constmonthlySnapshot=awaitreadCaseListMonthlySnapshot(companyId,job.caseId);',
+    'awaitverifyCaseListTransferCapability(companyId,entry.source,monthlySnapshot);',
+  ]);
+  const freshLegacy = has([
+    'awaitreadLiveCaseList(companyId,tx)',
+    'caseListAssignmentsEnabled!==true',
+    'awaitverifyCaseListTransferCapability(companyId,entry.source);',
+  ]);
+  return freshCompact || freshLegacy;
+}
+function checkCaseListPublicationRoute(block) {
+  const approvalWrite = 'if(caseListCheck)tx.set(db.collection("caseListApprovals").doc(snap.id),{companyId,jobId:snap.id,...caseListCheck.approval,confirmedAt:now});';
+  if (![
+    'if(input.action==="publish")for(constsnapofsnapshots){',
+    'if(snap.exists&&snap.data()?.companyId===companyId&&snap.data()?.caseListSource){',
+    'caseListSourceModule().requireCaseListExecutive(session.tokenasRecord<string,unknown>);',
+    'constconfirmation=input.caseListConfirmations?.[snap.id];',
+    '!confirmation||confirmation.expectedSourceRevision!==input.expectedSourceRevisions?.[snap.id]',
+    'caseListSourceModule().readCaseListPublication(tx,companyId,snap.id,snap.data()!,input.expectedRevisions?.[snap.id],input.expectedSourceRevisions?.[snap.id],confirmation,session.uid)',
+    'if(job.caseListSource&&input.action==="schedule"){blocked.push(snap.id);continue;}',
+    'constcaseListCheck=caseListChecks.get(snap.id);',
+    'if(job.caseListSource&&!caseListCheck){blocked.push(snap.id);continue;}',
+    approvalWrite,
+  ].every(part => block.includes(part)) || block.split(approvalWrite).length !== 2) return false;
+  // Permit exactly this company/job-bound private approval sink. All other
+  // publication writes retain the original exact three transaction-set limit.
+  return (block.replace(approvalWrite, '').match(/tx\.set\(/g) ?? []).length === 3 && checkCaseListSourceGuards(true);
+}
+function checkCaseListApplyRoute(block) {
+  if (![
+    'letcaseListChecked:CaseListPublicationCheck|null=null;',
+    'if(job.caseListSource){',
+    'caseListChecked=awaitcaseListSourceModule().readCaseListPublication(tx,companyId,input.jobId,job,input.expectedJobRevision,input.expectedSourceRevision);',
+    '(previous.expectedSourceRevision??null)!==(input.expectedSourceRevision??null)',
+    'if(lockSnap.exists&&(lockSnap.data()?.active===true||(caseListChecked&&lockSnap.data()?.active!==false)))',
+    'operation:caseListChecked?"case_list.assign":"job.assign",',
+    'idempotencyKey:`${caseListChecked?"case_list.assign":"job.assign"}:${input.jobId}:${queueRef.id}`',
+    '...(caseListChecked?{caseListAssignment:{schema:"LK_CASE_LIST_ASSIGN_V1",queueId:queueRef.id,operationId:queueRef.id,companyId,jobId:input.jobId,sourceCaseId:caseListChecked.source.caseId,',
+    'sourceRowRevision:caseListChecked.source.rowRevision,sourceLedgerRevision:caseListChecked.source.ledgerRevision,sourceRevision:caseListChecked.source.sourceRevision,',
+    'preMonthlyContentHash:caseListChecked.preMonthlyContentHash,',
+    'expectedJobRevision:input.expectedJobRevision,assignedJobRevision:nextAssignmentRevision(job),staffId,staffName:displayName,dateKey:workDate',
+    'tx.set(idempotencyRef,{expectedJobRevision:input.expectedJobRevision??null,expectedSourceRevision:input.expectedSourceRevision??null,mailApplicationRevision:input.mailApplicationRevision??null,mailApplicationId:input.mailApplicationId??null,uid:session.uid,companyId,staffId,result:response,',
+  ].every(part => block.includes(part))) return false;
+  if (block.indexOf('if(idempotencySnap.exists){') > block.indexOf('caseListSourceModule().readCaseListPublication(') ||
+      block.indexOf('caseListSourceModule().readCaseListPublication(') > block.indexOf('tx.update(jobRef,')) return false;
+  return checkCaseListSourceGuards(true);
+}
+
+function checkCaseListOwnerReconciliation(block, whole) {
+  if (!whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list"]).default("note"),});')) return false;
+  const route = block.slice(block.indexOf('if(input.action==="reconcile-case-list"){'), block.indexOf('constauditRef='));
+  if (![
+    'if(input.action==="reconcile-case-list"){constsnapshot=awaitref.get();',
+    '!snapshot.exists||snapshot.data()?.companyId!==companyId',
+    'snapshot.data()?.operation!=="case_list.assign"',
+    'require("./case-list-monthly-worker")',
+    'returnworker.reconcileCaseListMonthlyAssignment(ref,session.uid,session.token);',
+  ].every(part => route.includes(part)) || /\.(?:add|create|set|update|delete|commit)\(/.test(route)) return false;
+  const worker = sourceFile('functions/src/case-list-monthly-worker.ts').replace(/\s+/g, '');
+  if (![
+    'assertExecutive(owner.token,process.env.EXECUTIVE_APPROVER_EMAILS??"");',
+    'owner.token.companyId===initial.companyId&&(owner.token.uid??owner.token.sub)===owner.actorUid',
+    'constsheets=owner?null:google.sheets(',
+    'constmutation=owner?{applySourceAssignment:async()=>stop("OWNER_RECONCILIATION_GOOGLE_WRITE_FORBIDDEN"),applyMonthly:async()=>stop("OWNER_RECONCILIATION_GOOGLE_WRITE_FORBIDDEN")}',
+    'need(!owner,"OWNER_RECONCILIATION_GOOGLE_WRITE_FORBIDDEN");',
+    'returnrunCaseListMonthlyAssignment(queueRef,{actorUid,token});',
+  ].every(part => worker.includes(part))) return false;
+  const readOnly = worker.slice(worker.indexOf('if(owner){constevents=awaitreadEvents(queueRef.id);'), worker.indexOf('}else{result=awaitcore['));
+  return ['result=awaitcore.reconcileSource(request);','result=awaitcore.reconcile(request);'].every(part => readOnly.includes(part)) && !/core\.(?:prepare|apply)/.test(readOnly);
+}
+
 function checkImportIssues(name) {
   const staff = ["previewStaffImport", "syncStaffDirectoryReadOnly"].includes(name);
   const shift = ["previewShiftImport", "syncShiftSheetsReadOnly"].includes(name);
@@ -301,6 +428,7 @@ function checkImportIssues(name) {
   const compact = text => text.replace(/\s+/g, "");
   const block = compact(source.slice(start, end + marker.length)), whole = compact(source);
   const has = values => values.every(value => block.includes(value));
+  const ownerReconcile = !staff && !shift && whole.includes("AcknowledgeQueueSchema");
   const utils = source.match(/import \{([^}]+)\} from "\.\/utils";/)?.[1] ?? "";
   if (!/\brequireAdmin\b/.test(utils) || !/\bcompanyFromClaims\b/.test(utils)
     || !has(["constsession=requireAdmin(request);", "constcompanyId=companyFromClaims(session.token);"])
@@ -315,6 +443,11 @@ function checkImportIssues(name) {
       || !whole.includes('if(mode==="commit")awaitassertProductionOperational(companyId);constconfig=awaitloadConfig(companyId);')
       || !whole.includes(staff ? "stored.companyId!==undefined&&stored.companyId!==companyId" : "saved?.companyId!==undefined&&saved.companyId!==companyId")
       || !whole.includes(staff ? "ConfigSchema.safeParse({...stored,companyId})" : "ConfigSchema.safeParse({...saved,companyId,})")) return false;
+    if (shift && whole.includes('caseListSourceModule')) {
+      const route = 'if(input.source==="case-list")returncaseListSourceModule().executeCaseListImport(companyId,"' + mode + '",session.uid,session.tokenasRecord<string,unknown>' + (mode === "commit" ? ',input.enableCaseList===true,input.enableCaseListAssignments===true' : '') + ');';
+      if (!block.includes(route) || (block.match(/executeCaseListImport\(/g) ?? []).length !== 1 ||
+          !whole.includes('source:z.enum(["monthly","case-list"]).optional()') || !checkCaseListSourceGuards()) return false;
+    }
     const reader = compact(sourceFile("functions/src/sheet-reader.ts"));
     if (!reader.includes('scopes:["https://www.googleapis.com/auth/spreadsheets.readonly"]')
       || /sheets\.spreadsheets\.(?:batchUpdate|values\.(?:update|append|clear|batchUpdate|batchClear))\(/.test(whole + reader)) return false;
@@ -338,14 +471,15 @@ function checkImportIssues(name) {
     ];
     return requirements.every(value => whole.includes(value));
   }
-  if (!has(['QueueActionSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
+  if (!has([ownerReconcile && name === 'acknowledgeSheetWriteIssue' ? 'AcknowledgeQueueSchema.parse(request.data??{})' : 'QueueActionSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
     'constsnap=awaittx.get(ref);', '!snap.exists||snap.data()?.companyId!==companyId', 'tx.update(ref,{',
     'tx.set(auditRef,{companyId,actorUid:session.uid,'])) return false;
   if (name === "retrySheetWriteIssue") return has([
-    'awaitassertProductionOperational(companyId);', 'if(!canManuallyRetrySheetWrite({',
+    'awaitassertProductionOperational(companyId);', ownerReconcile ? 'if(data.operation==="case_list.assign"||!canManuallyRetrySheetWrite({' : 'if(!canManuallyRetrySheetWrite({',
     'writeVerificationRequired:data.writeVerificationRequired', 'status:"pending",attempts:0,',
     'manualRetryBy:session.uid', 'action:"sheet.issue.retry"',
   ]);
+  if (ownerReconcile && !checkCaseListOwnerReconciliation(block, whole)) return false;
   return has([
     'if(data.status==="acknowledged")', 'data.acknowledgedBy===session.uid&&data.acknowledgedNote===input.note',
     'if(!["blocked","dead_letter","retry_wait","error","paused_global"].includes(String(data.status??"")))',
@@ -429,7 +563,7 @@ function checkAdminCore(name) {
       'IssueQuerySchema.parse(request.data??{})', 'db.collection("sheetSyncQueue").where("companyId","==",companyId)',
       '.where("status","in",["blocked","dead_letter","retry_wait","acknowledged","error","paused_global"])',
       '.orderBy("updatedAt","desc").limit(input.limit)', 'job?.companyId===companyId?',
-      'canRetry:canManuallyRetrySheetWrite({', 'sourceWriteVerified:false',
+      ...(compact(source).includes('AcknowledgeQueueSchema') ? ['canReconcile:data.operation==="case_list.assign"','canRetry:data.operation!=="case_list.assign"&&canManuallyRetrySheetWrite({'] : ['canRetry:canManuallyRetrySheetWrite({']), 'sourceWriteVerified:false',
     ],
     getOperationsDashboard: [
       'MonthSchema.parse(request.data??{})', 'db.collection("jobs").where("companyId","==",companyId)',
@@ -557,7 +691,11 @@ function checkAdminCore(name) {
     ].every(part => intake.includes(part)) || /(?:db\.batch\(|(?:operationRef|ownerRef|candidateRef|auditRef)\.(?:set|create|update)\()/.test(intake)) return false;
   }
   if (name === "createAdminJobGroup" && !checkCaseMailDraft()) return false;
-  if (name === "updateJobPublication" && ((block.match(/if\(job\.assignedStaffId\)\{/g) ?? []).length !== 2 || (block.match(/tx\.set\(/g) ?? []).length !== 3 || /(?:batch|snap\.ref)\.(?:set|update|delete)\(/.test(block))) return false;
+  if (name === "updateJobPublication") {
+    const caseList = block.includes('caseListChecks') || block.includes('caseListSourceModule');
+    if ((block.match(/if\(job\.assignedStaffId\)\{/g) ?? []).length !== 2 || /(?:batch|snap\.ref)\.(?:set|update|delete)\(/.test(block) ||
+        (caseList ? !checkCaseListPublicationRoute(block) : (block.match(/tx\.set\(/g) ?? []).length !== 3)) return false;
+  }
   const whole = compact(source);
   if (name === "generateJobExport" && !whole.includes('constExportSchema=z.object({from:z.iso.date(),through:z.iso.date(),')) return false;
   if (name === "createAdminJobGroup" && !['feature.data()?.adminJobCreationSourceReady===true', 'mapping.data()?.enabled===true', 'mapping.data()?.rowCreation?.enabled===true'].every(part => whole.includes(part))) return false;
@@ -619,6 +757,8 @@ function checkStaffJourney(name) {
     'awaitreadMailApplicationForAssignment(reader,{companyId,staffId,jobId:candidate.jobId,applicationId:doc.id,revision:candidate.revision})',
     'constrecords=page.docs.slice(0,25);',
   ]);
+  const caseListApply = name === "applyToJob" && (block.includes("caseListChecked") || block.includes("caseListSourceModule"));
+  if (caseListApply && !checkCaseListApplyRoute(block)) return false;
   if (name === "applyToJob") return source.includes('import { readMailApplicationForAssignment } from "./automation-intake";') && has([
     'if(session.token.role!=="staff")', 'ApplySchema.parse(request.data)',
     'constidempotencySnap=awaittx.get(idempotencyRef);',
@@ -633,13 +773,13 @@ function checkStaffJourney(name) {
     'awaitreadMailPublication(tx,input.jobId,job,input.expectedJobRevision,newDate(),"apply")',
     'confirmed.context!==checked.confirmation.context',
     '(previous.expectedJobRevision??null)!==(input.expectedJobRevision??null)',
-    'constlockSnap=awaittx.get(lockRef);', 'if(lockSnap.exists&&lockSnap.data()?.active===true)',
+    'constlockSnap=awaittx.get(lockRef);', ...(caseListApply ? [] : ['if(lockSnap.exists&&lockSnap.data()?.active===true)']),
     'awaitreadMailApplicationForAssignment(tx,{companyId,staffId,jobId:input.jobId,applicationId:input.mailApplicationId,revision:input.mailApplicationRevision!,})',
     'tx.update(jobRef,{revision:nextAssignmentRevision(job),status:"assigned",assignedStaffId:staffId,assignedStaffName:displayName,assignedUid:session.uid,',
     'tx.set(lockRef,{companyId,staffId,dateKey:workDate,jobId:input.jobId,active:true,',
-    'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.assign",',
+    caseListApply ? 'tx.set(queueRef,{companyId,jobId:input.jobId,operation:caseListChecked?"case_list.assign":"job.assign",' : 'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.assign",',
     'actorUid:session.uid,actorStaffId:staffId,',
-    'tx.set(idempotencyRef,{expectedJobRevision:input.expectedJobRevision??null,mailApplicationRevision:input.mailApplicationRevision??null,mailApplicationId:input.mailApplicationId??null,uid:session.uid,companyId,staffId,result:response,',
+    ...(caseListApply ? [] : ['tx.set(idempotencyRef,{expectedJobRevision:input.expectedJobRevision??null,mailApplicationRevision:input.mailApplicationRevision??null,mailApplicationId:input.mailApplicationId??null,uid:session.uid,companyId,staffId,result:response,']),
   ]);
   if (!has([
     'if(job.companyId!==companyId||job.assignedStaffId!==staffId)',
@@ -1605,3 +1745,4 @@ if (requestedFunctions.includes("retrySafeSheetWrites")) console.log("SCHEDULED_
 console.log(`SOURCE_GUARD_STATUS=${allPass ? "PASS" : "FAIL"}`);
 
 if (requirePass && !allPass) process.exitCode = 1;
+

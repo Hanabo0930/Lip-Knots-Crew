@@ -14,6 +14,10 @@ spec = importlib.util.spec_from_file_location("readiness", pathlib.Path(__file__
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
 SHA = "a" * 40
+CASE_LIST_ASSETS = (
+    "case-list-projection.cjs", "case-list-monthly-compact.cjs",
+    "case-list-monthly-controller.cjs", "case-list-monthly-adapter.cjs",
+)
 
 def metadata(function):
     prefix = f"projects/{g.PROJECT}/locations/{g.REGION}"
@@ -42,6 +46,7 @@ class ReadinessTests(unittest.TestCase):
                  "functions/lib/uploads.js": "exports.version = 2;\n",
                  "functions/src/uploads.ts": "export const version = 2;\n",
                  "functions/case-mail-runtime/adapter.cjs": "module.exports = {};\n"}
+        files.update({f"functions/src/{name}": "module.exports = {synthetic: true};\n" for name in CASE_LIST_ASSETS})
         for name, value in files.items():
             p = self.root / name
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -58,6 +63,32 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(len(result["functions"]), 2)
         self.assertNotIn("source", json.dumps(result["functions"]))
+
+    def test_case_list_source_cjs_assets_are_in_exact_inventory(self):
+        expected = g.expected_files(self.root)
+        for name in CASE_LIST_ASSETS:
+            with self.subTest(asset=name):
+                self.assertIn(f"src/{name}", expected)
+        self.assertEqual(self.run_check()["verifiedFileCount"], len(self.files))
+
+    def test_changed_case_list_source_cjs_asset_stops(self):
+        for name in CASE_LIST_ASSETS:
+            with self.subTest(asset=name):
+                changed = [(k, v + b"// changed\n" if k == f"src/{name}" else v) for k, v in self.files]
+                with self.assertRaisesRegex(g.ReadinessError, "DEPLOYED_SOURCE_MISMATCH"):
+                    self.run_check(blob=archive(changed))
+
+    def test_missing_case_list_source_cjs_asset_stops(self):
+        for name in CASE_LIST_ASSETS:
+            with self.subTest(asset=name):
+                missing = [(k, v) for k, v in self.files if k != f"src/{name}"]
+                with self.assertRaisesRegex(g.ReadinessError, "DEPLOYED_CODE_INVENTORY_MISMATCH"):
+                    self.run_check(blob=archive(missing))
+
+    def test_extra_source_cjs_asset_stops_even_with_matching_contents(self):
+        known = next(v for k, v in self.files if k == f"src/{CASE_LIST_ASSETS[0]}")
+        with self.assertRaisesRegex(g.ReadinessError, "DEPLOYED_CODE_INVENTORY_MISMATCH"):
+            self.run_check(blob=archive(self.files + [("src/unexpected.cjs", known)]))
 
     def test_invalid_metadata_stops_before_download(self):
         variants = [

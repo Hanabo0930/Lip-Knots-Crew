@@ -48,6 +48,9 @@ class SourceEvidenceTests(unittest.TestCase):
                   "functions/lib/uploads.js": "exports.synthetic = true;\n",
                   "functions/src/uploads.ts": "export const synthetic = true;\n",
                   "functions/case-mail-runtime/adapter.cjs": "module.exports = {};\n"}
+        for name in ("case-list-projection.cjs", "case-list-monthly-compact.cjs",
+                     "case-list-monthly-controller.cjs", "case-list-monthly-adapter.cjs"):
+            values[f"functions/src/{name}"] = "module.exports = {synthetic: true};\n"
         for name, value in values.items():
             p = self.root / name
             p.parent.mkdir(parents=True, exist_ok=True)

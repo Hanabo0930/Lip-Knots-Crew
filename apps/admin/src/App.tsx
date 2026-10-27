@@ -3479,7 +3479,7 @@ function downloadCsv(filename:string,content:string) {
         <div className="sync-head">
           <div>
             <h2>シフト表の確認</h2>
-            <p>月別タブを読取専用で確認し、元スプシを変更せずアプリ用データへ同期します。</p>
+            <p>月別タブの「アプリへ取込確定」は、原本を変更しない読取同期です。応募の原本反映を確認した後、この同期で経費・請求・支払の確認値を更新してください。</p>
           </div>
           <strong>{syncSummary}</strong>
         </div>
@@ -3948,7 +3948,7 @@ function downloadCsv(filename:string,content:string) {
 
 <WorkspacePanel view="export" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel export-panel">
   <div className="section-heading">
-    <div><h2>メーカー・クライアント別資料</h2><p>期間と対象を選び、案件・請求・支払・粗利のCSVを出力します。</p></div>
+    <div><h2>メーカー・クライアント別資料</h2><p>期間と対象を選び、案件・請求・支払・粗利のCSVを出力します。</p><p>案件リスト連携の金額は、月別タブを読取同期して確認した値を使います。未確認の案件が含まれる場合は、CSV出力を保留します。</p></div>
   </div>
   <div className="export-controls">
     <label>開始<input type="date" value={exportFrom} onChange={(e)=>setExportFrom(e.target.value)} /></label>

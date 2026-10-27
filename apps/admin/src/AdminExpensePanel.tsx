@@ -2,7 +2,7 @@ import { expenseReadinessMessage } from "./expense-readiness";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 type ExpenseValues = { transportation:string;purchase8:string;purchase10:string;netPrintCost:string;postageCost:string };
-type ExpenseJob = { id:string;workDate:string;storeName:string;assignedStaffName?:string|null } & NonNullable<Parameters<typeof expenseReadinessMessage>[0]>;
+type ExpenseJob = { id:string;workDate:string;storeName:string;assignedStaffName?:string|null;caseListSource?:unknown } & NonNullable<Parameters<typeof expenseReadinessMessage>[0]>;
 type Props = {
   expenseHoldReason?:string;
   focusRequest?:number;active?:boolean;openReport?:(jobId:string)=>void;
@@ -24,8 +24,9 @@ export default function AdminExpensePanel({expenseHoldReason,focusRequest=0,acti
   },[focusRequest,active]);
   const [jobQuery,setJobQuery]=useState(""),[jobPage,setJobPage]=useState(0);
   const selectedJob=useMemo(()=>jobs.find(job=>job.id===expenseJobId),[jobs,expenseJobId]);
+  const caseListJob=Boolean(selectedJob?.caseListSource);
   const selectedInList=!!selectedJob;
-  const holdReason=expenseHoldReason??expenseReadinessMessage(selectedJob);
+  const holdReason=expenseHoldReason??(caseListJob?"案件リスト連携の経費は読取確認用です。経費の編集・確定は保留中です。":expenseReadinessMessage(selectedJob));
   const matchingJobs=useMemo(()=>{
     const terms=jobQuery.normalize("NFKC").toLocaleLowerCase("ja-JP").trim().split(/\s+/).filter(Boolean);
     return terms.length?jobs.filter(job=>{const text=[job.id,job.workDate,job.storeName,job.assignedStaffName??"募集中"].join(" ").normalize("NFKC").toLocaleLowerCase("ja-JP");return terms.every(term=>text.includes(term));}):jobs;
@@ -38,7 +39,7 @@ export default function AdminExpensePanel({expenseHoldReason,focusRequest=0,acti
         <div className="section-heading">
           <div>
             <h2 ref={headingRef} tabIndex={-1}>報告書確認・経費入力</h2>
-            <p>報告書を確認して経費を入力し、確認完了でスプレッドシートへの反映を受け付けます。</p>
+            <p>{caseListJob ? "案件リスト連携の経費は読取確認用です。原本反映を確認した後に、月別タブの「アプリへ取込確定」で金額を更新してください。経費の編集・確定と原本への書込みは保留中です。" : "報告書を確認して経費を入力し、確認完了でスプレッドシートへの反映を受け付けます。"}</p>
           </div>
           <span className="mini-tag" role="status" aria-label="経費確認の状態">{statusLabel}</span>
         </div>
@@ -87,7 +88,7 @@ export default function AdminExpensePanel({expenseHoldReason,focusRequest=0,acti
         </label>
         <div className="sync-actions">
           <button className="ghost" onClick={saveExpenseDraft} disabled={expenseBusy||!expenseReady||Boolean(holdReason)} aria-describedby={holdReason?"expense-hold-reason":undefined}>一時保存</button>
-          <button onClick={completeExpense} disabled={expenseBusy||!expenseReady||Boolean(holdReason)} aria-describedby={holdReason?"expense-hold-reason":undefined}>確認完了・書込待ちへ</button>
+          <button onClick={completeExpense} disabled={expenseBusy||!expenseReady||Boolean(holdReason)} aria-describedby={holdReason?"expense-hold-reason":undefined}>{caseListJob?"経費確定は保留中":"確認完了・書込待ちへ"}</button>
           <button className="ghost" onClick={openSheet} disabled={!selectedInList}>スプシ該当行</button>
         </div>
       </section>);

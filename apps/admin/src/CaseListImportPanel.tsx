@@ -11,7 +11,7 @@ export default function CaseListImportPanel({ functions, demo, onRefresh }: { fu
     if (!activeUser || busy) return;
     const current = () => auth?.currentUser === activeUser;
     if (action !== "preview" && !window.confirm(action === "assignments"
-      ? "案件リストからの応募・月別シフトへの連携を有効にします。募集開始は、案件ごとの社長確認が済んだ場合だけ行います。"
+      ? "応募・月別連携を有効にします。社長が条件を確認した案件へスタッフが応募すると、案件リストの担当欄（C列）と月別シフトへ順に自動反映します。原本の読取照合が済むまで準備は確認待ちになります。"
       : "案件リストの連携を有効にし、アプリへ下書きとして取り込みます。既存の担当・シフト・手入力は保持します。")) return;
     setBusy(true); setMessage("");
     try {
@@ -22,7 +22,7 @@ export default function CaseListImportPanel({ functions, demo, onRefresh }: { fu
       if (!current()) return;
       if (!result?.counts || !Array.isArray(result.rows)) throw new Error("読取結果を確認できません。もう一度確認してください。");
       setPreview(result);
-      setMessage(action === "preview" ? "原本の読取を確認しました。" : action === "assignments" ? "応募・月別連携を有効にしました。募集開始は案件ごとの確認後に行ってください。" : "下書きとして取り込みました。募集条件を確認してから公開してください。");
+      setMessage(action === "preview" ? "原本の読取を確認しました。公開時に月別へ反映できる条件も確認します。" : action === "assignments" ? "応募・月別連携を有効にしました。案件ごとの確認後に募集してください。応募後は原本へ自動反映し、照合が済むまで準備は確認待ちになります。" : "下書きとして取り込みました。募集条件を確認してから公開してください。");
       if (action !== "preview") await onRefresh(current);
     } catch (error) { if (current()) setMessage(error instanceof Error ? error.message : "案件リストを確認できません。"); }
     finally { if (current()) setBusy(false); }
@@ -30,6 +30,8 @@ export default function CaseListImportPanel({ functions, demo, onRefresh }: { fu
   return <section aria-label="案件リストの連携" aria-busy={busy}>
     <h3>案件リストから連携</h3>
     <p>案件リストを下書きとして取り込み、条件を確認した案件を募集できます。既に担当が決まっている案件は保留します。</p>
+    <p>下書き取込は原本を変更しません。応募・月別連携を有効にすると、社長が募集条件を確認した案件への応募後に、案件リストの担当欄（C列）と月別シフトへ順に自動反映します。原本の読取照合が済むまで準備は確認待ちです。</p>
+    <p className="locked-note">現在の対応範囲は2026年11月・12月の通常の単日1名枠です。複数日・グループ案件、研修・OJT・ラウンダー・出口調査・グレイス／グレースなどの特殊条件、対応月以外の案件は保留します。月別の日別行・集計行を確認できない場合も、原本を保持して停止します。</p>
     <div className="sync-actions"><button className="ghost" disabled={busy} onClick={() => void run("preview")}>案件リストを確認</button>
       <button disabled={busy} onClick={() => void run("import")}>連携を有効化・下書き取込</button>
       <button className="ghost" disabled={busy} onClick={() => void run("assignments")}>応募・月別連携を有効化</button></div>

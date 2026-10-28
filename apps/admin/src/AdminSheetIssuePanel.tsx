@@ -4,6 +4,7 @@ import SheetWriteReviewEntry from "./SheetWriteReviewEntry";
 export type SheetWriteIssue = {
  id:string;jobId:string;operation:string;status:string;errorType:string;errorMessage:string;attempts:number;canRetry:boolean;
  canReconcile?:boolean;writeVerificationRequired?:boolean;sourceWriteVerified?:false;acknowledgedAt?:string|null;acknowledgedNote?:string;
+ manualSourceStaffName?:string;manualCanonicalStaffName?:string;
  manualSourcePending?:boolean;manualObservationHash?:string|null;manualExpectedJobRevision?:number|null;manualExpectedSourceRevision?:string|null;
  suggestedPayOffer?:{dailyWageJPY:number;travelExpenses:"全額支給";communicationExpenses:"全額支給"}|null;
  manualTransferPending?:boolean;canSelectMonthlyTransfer?:boolean;manualTransferReviewKey?:string|null;

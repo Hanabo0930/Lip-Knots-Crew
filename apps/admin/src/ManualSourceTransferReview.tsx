@@ -9,6 +9,7 @@ export default function ManualSourceTransferReview({issue,busy,onSelect}:{issue:
  const available=readyManualSourceTransferIssue(issue),ready=available&&wage.trim()!==''&&validManualSourceTransferConfirmation(confirmation);
  return <form className="manual-source-transfer-review" aria-label="シート手入力案件の移行確認" onSubmit={event=>{event.preventDefault();if(busy||!ready||!validManualSourceTransferConfirmation(confirmation))return;onSelect(confirmation);}}>
   <h3>シートへ直接入力した担当者の確認</h3>
+  {typeof issue.manualSourceStaffName==='string'&&typeof issue.manualCanonicalStaffName==='string'&&issue.manualSourceStaffName!==issue.manualCanonicalStaffName&&<p>シート入力名：{issue.manualSourceStaffName} / 名簿の正式名：{issue.manualCanonicalStaffName}</p>}
   <p>{issue.job?.makerName||'メーカー確認待ち'} / {issue.job?.menuName||'業務確認待ち'}</p>
   <p>入店時間：{issue.job?.entryTime||'確認待ち'} / 勤務時間：{issue.job?.workTime||'確認待ち'}</p>
   <label>スタッフへ提示する日給（円）<input type="number" inputMode="numeric" min="1" max="1000000" step="1" required value={wage} disabled={busy||!available} onChange={event=>setWage(event.target.value)}/></label>

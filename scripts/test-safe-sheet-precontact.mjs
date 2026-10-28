@@ -235,11 +235,32 @@ for(const value of ["36.50","３６．５",36.5])await test("formatted identical
 await test("assignment change after values prevents further style mutation",async()=>{const h=harness();generic(h);h.queue().styles={transportation:{background:"#ffeedd"}};h.onWrite=()=>{h.job().assignedStaffId="new-person";};await h.run();assert.equal(h.writes.length,1);assert.equal(h.queue().errorType,"verification_required");});
 await test("actual admin panel hides retry for unknown write",async()=>{
  const h=harness();h.failAfterWrite=true;await h.run();const issues=(await h.admin("getSheetWriteIssues")).issues;
- // 追加した読取入口の動作は専用ブラウザー検証で確認し、ここでは実パネルの再試行拒否を確認する。
- const exports={},source=fs.readFileSync(new URL("../apps/admin/src/AdminSheetIssuePanel.tsx",import.meta.url),"utf8");
- runInNewContext(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText,{exports,require:name=>{if(name==="./SheetWriteReviewEntry")return {__esModule:true,default:()=>null};assert.equal(name,"react/jsx-runtime");return dependency(name);}});
- const html=dependency("react-dom/server").renderToStaticMarkup(dependency("react").createElement(exports.default,{sheetIssues:issues,issuesBusy:false,operationKeys:[],loadSheetIssues(){},retrySheetIssue(){throw Error("must not retry");},acknowledgeSheetIssue(){}}));
+ // Render the actual panel, manual review and read-only entry. Only the
+ // Firebase configuration boundary is synthetic; no product UI is replaced.
+ const modules={"./AdminSheetIssuePanel":"AdminSheetIssuePanel.tsx","./ManualSourceTransferReview":"ManualSourceTransferReview.tsx","./manual-source-transfer":"manual-source-transfer.ts","./SheetWriteReviewEntry":"SheetWriteReviewEntry.tsx","./sheet-write-review":"sheet-write-review.ts"},cache=new Map();
+ function loadPanel(name){
+  if(cache.has(name))return cache.get(name);
+  assert.ok(Object.hasOwn(modules,name),"Unreviewed admin fixture module: "+name);
+  const exports={};cache.set(name,exports);
+  const source=fs.readFileSync(new URL("../apps/admin/src/"+modules[name],import.meta.url),"utf8");
+  runInNewContext(ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText,{exports,require:request=>{
+   if(Object.hasOwn(modules,request))return loadPanel(request);
+   if(request==="./manual-source-transfer.css")return {};
+   if(request==="./firebase")return {firebaseConfigured:false,auth:null,functions:null};
+   assert.ok(["react","react/jsx-runtime","firebase/functions"].includes(request),"Unexpected admin fixture dependency: "+request);
+   return dependency(request);
+  }});
+  return exports;
+ }
+ const Panel=loadPanel("./AdminSheetIssuePanel").default,render=items=>dependency("react-dom/server").renderToStaticMarkup(dependency("react").createElement(Panel,{sheetIssues:items,issuesBusy:false,operationKeys:[],loadSheetIssues(){},retrySheetIssue(){throw Error("must not retry");},acknowledgeSheetIssue(){},selectMonthlyTransfer(){throw Error("render must not select");}}));
+ const html=render(issues);
  assert.ok(html.includes("自動再書込は行いません"));assert.ok(!html.includes(">再試行</button>"));assert.ok(html.includes(">確認メモを記録</button>"));
+ assert.ok(html.includes("日時がない旧依頼も確認"),"actual read-only history entry is retained");
+ const caseList=render([{...issues[0],operation:"case_list.assign",manualTransferPending:false,canRetry:true}]);
+ assert.ok(!caseList.includes(">再試行</button>"));assert.ok(caseList.includes(">保存結果を再照合</button>"));assert.ok(!caseList.includes(">確認メモを記録</button>"));
+ const manual=render([{...issues[0],operation:"case_list.manual",manualSourcePending:true,manualTransferPending:true,canSelectMonthlyTransfer:false,canRetry:true}]);
+ assert.ok(manual.includes("シート手入力案件の移行確認"));assert.ok(manual.includes("照合が終わるまで保留"));assert.ok(!manual.includes(">再試行</button>"));assert.ok(!manual.includes(">確認メモを記録</button>"));assert.ok(!manual.includes(">保存結果を再照合</button>"));
+ for(const name of ["./ManualSourceTransferReview","./manual-source-transfer","./SheetWriteReviewEntry","./sheet-write-review"])assert.ok(cache.has(name),"actual admin module loaded: "+name);
 });
 async function expenseHarness(){
  const h=harness();

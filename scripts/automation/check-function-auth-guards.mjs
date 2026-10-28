@@ -395,7 +395,6 @@ function checkCaseListApplyRoute(block) {
 }
 
 function checkCaseListOwnerReconciliation(block, whole) {
-  if (!whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list"]).default("note"),});')) return false;
   const route = block.slice(block.indexOf('if(input.action==="reconcile-case-list"){'), block.indexOf('constauditRef='));
   if (![
     'if(input.action==="reconcile-case-list"){constsnapshot=awaitref.get();',
@@ -415,6 +414,56 @@ function checkCaseListOwnerReconciliation(block, whole) {
   ].every(part => worker.includes(part))) return false;
   const readOnly = worker.slice(worker.indexOf('if(owner){constevents=awaitreadEvents(queueRef.id);'), worker.indexOf('}else{result=awaitcore['));
   return ['result=awaitcore.reconcileSource(request);','result=awaitcore.reconcile(request);'].every(part => readOnly.includes(part)) && !/core\.(?:prepare|apply)/.test(readOnly);
+}
+
+function checkCaseListOwnerSelection(block, whole) {
+  // Historical sources have no selection action. Keep their exact legacy
+  // schema/read-only checks; a new selection route must pass every new guard.
+  if (whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list"]).default("note"),});') && !whole.includes('"select-case-list-monthly"')) return true;
+  if (!whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list","select-case-list-monthly"]).default("note"),reviewKey:z.string().regex(/^[a-f0-9]{64}$/).optional(),clientNameUpConfirmed:z.literal(true).optional(),});')) return false;
+  const start = block.indexOf('if(input.action==="select-case-list-monthly"){'), end = block.indexOf('if(input.action==="reconcile-case-list"){');
+  if (start < 0 || end <= start) return false;
+  const route = block.slice(start, end);
+  if (![
+    'if(!input.reviewKey||input.clientNameUpConfirmed!==true)', 'awaitassertProductionOperational(companyId);',
+    '!snapshot.exists||snapshot.data()?.companyId!==companyId', 'snapshot.data()?.operation!=="case_list.assign"',
+    'returnawaitworker.selectCaseListMonthlyTransfer(ref,session.uid,session.token,input.reviewKey,true);',
+  ].every(part => route.includes(part)) || /\.(?:add|create|set|update|delete|commit)\(/.test(route) ||
+      !block.includes('if(data.operation==="case_list.assign")thrownewHttpsError(')) return false;
+  const worker = sourceFile('functions/src/case-list-monthly-worker.ts').replace(/\s+/g, '');
+  const selection = worker.slice(worker.indexOf('exportasyncfunctionselectCaseListMonthlyTransfer('), worker.indexOf('exportasyncfunctionprocessCaseListMonthlyAssignment('));
+  if (![
+    'assertExecutive(token,process.env.EXECUTIVE_APPROVER_EMAILS??"");',
+    'ID.test(actorUid)&&(token.uid??token.sub)===actorUid&&HASH.test(reviewKey)&&clientNameUpConfirmed===true',
+    'initial?.operation==="case_list.assign"&&initial.companyId===token.companyId',
+    '(awaitgetProductionOperationalState(initial.companyId)).operational',
+    'readCaseListMonthlySnapshot(initial.companyId,a.sourceCaseId,',
+    'sourceControlHeader!=="キャンセル"||row.cells[0].userEnteredValue?.boolValue===false',
+    'queue.companyId===token.companyId&&fingerprint(queue)===fingerprint(initial)',
+    'assertCaseListMonthlyAuthority(queueRef.id,queue,job,staff,day,currentConfig,approval)',
+    '"OWNER_TRANSFER_LEASE_ACTIVE"',
+    'queue.status==="blocked"&&queue.errorType==="owner_transfer_required"&&queue.caseListPhase?.phase==="MONTHLY_PREPARE"&&queue.caseListPhase.continuationHash===reviewKey',
+    'assertKnownCaseListContinuation(queueRef.id,queue,operation,records,spreadsheetId);',
+    '!records.INTENT&&!records.MONTHLY_WRITE_STARTED&&!records.ACCEPTED',
+    'hashCaseList(writable)===projected.postMonthlyContentHash&&canonical(selectedCatalog)===canonical(projected.postCatalog)&&snapshot.dependencyHash===source.dependencyHash',
+    'selected:true,clientNameUpConfirmed:true,sourceControlHeader,selectedBy:actorUid,selectedAt:Date.now(),reviewKey,',
+    'queueFingerprint:fingerprint(queue),assignmentHash:source.assignmentHash,sourceContentHash:selectedContentHash,sourceRevision:selectedCatalog.sourceRevision',
+    'tx.set(operationRef,{ownerTransferSelection:selection,', 'tx.set(queueRef,{status:"pending",',
+  ].every(part => selection.includes(part)) || /(?:batchUpdate|\.values\.(?:update|append|clear)|core\.(?:apply|prepare))\(/.test(selection)) return false;
+  if (![
+    'constwaitForOwner=next==="MONTHLY_PREPARE";', 'status:waitForOwner?"blocked":"pending"', 'errorType:waitForOwner?"owner_transfer_required":',
+    'if(requireClaim&&!owner&&phase.startsWith("MONTHLY_"))need(ownerTransferSelection.schema==="LK_OWNER_MONTHLY_TRANSFER_V1"&&ownerTransferSelection.queueFingerprint===fingerprint(queue)&&ownerTransferSelection.selected===true&&ownerTransferSelection.clientNameUpConfirmed===true,',
+    'authorizeMonthlyTransfer:async()=>clone((awaitauthorize()).ownerTransferSelection)',
+  ].every(part => worker.includes(part))) return false;
+  const controller = sourceFile('functions/src/case-list-monthly-controller.cjs').replace(/\s+/g, '');
+  return [
+    'assertOwnerTransfer(snapshot,row,intent.assignment,intent.ownerTransfer,services,intent.operationId);',
+    'need(typeofservices.authorizeMonthlyTransfer===\'function\',\'OWNER_TRANSFER_SELECTION_REQUIRED\');',
+    'selection.selected===true&&selection.clientNameUpConfirmed===true',
+    'selection.operationId===operationId&&selection.caseId===row.caseId&&selection.assignmentHash===sha(services,assignment)',
+    'selection.sourceContentHash===contentHash(services,row.cells)&&selection.sourceRevision===(snapshot.catalog?.sourceRevision||null)',
+    'constc=awaitmonthlyContext(request),intent=one(c.events,\'INTENT\');',
+  ].every(part => controller.includes(part));
 }
 
 function checkImportIssues(name) {
@@ -479,7 +528,7 @@ function checkImportIssues(name) {
     'writeVerificationRequired:data.writeVerificationRequired', 'status:"pending",attempts:0,',
     'manualRetryBy:session.uid', 'action:"sheet.issue.retry"',
   ]);
-  if (ownerReconcile && !checkCaseListOwnerReconciliation(block, whole)) return false;
+  if (ownerReconcile && (!checkCaseListOwnerReconciliation(block, whole) || !checkCaseListOwnerSelection(block, whole))) return false;
   return has([
     'if(data.status==="acknowledged")', 'data.acknowledgedBy===session.uid&&data.acknowledgedNote===input.note',
     'if(!["blocked","dead_letter","retry_wait","error","paused_global"].includes(String(data.status??"")))',

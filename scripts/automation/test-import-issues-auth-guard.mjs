@@ -5,6 +5,7 @@ const read=p=>fs.readFileSync(new URL('../../'+p,import.meta.url),'utf8').replac
 const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^import .*;\n/gm,'');
 const modules={previewStaffImport:'staff-import',syncStaffDirectoryReadOnly:'staff-import',previewShiftImport:'shift-import',syncShiftSheetsReadOnly:'shift-import',retrySheetWriteIssue:'admin-operations',acknowledgeSheetWriteIssue:'admin-operations'};
 const sources=Object.fromEntries([...new Set([...Object.values(modules),'sheet-reader','case-list-source','case-list-source-core','case-list-monthly-worker'])].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
+sources['functions/src/case-list-monthly-controller.cjs']=read('functions/src/case-list-monthly-controller.cjs');
 let cases=0;
 function run(name,change){
  const files={...sources};change?.(files);
@@ -13,7 +14,7 @@ function run(name,change){
  return {passed:lines.includes('SOURCE_GUARD_STATUS=PASS'),exitCode:process.exitCode};
 }
 function reject(name,before,after,{whole=false,module=modules[name]}={}){
- const p='functions/src/'+module+'.ts',source=sources[p],start=whole?0:source.indexOf('export const '+name+' =');
+ const p='functions/src/'+module+(module.endsWith('.cjs')?'':'.ts'),source=sources[p],start=whole?0:source.indexOf('export const '+name+' =');
  const marker=module==='admin-operations'?'\n});':'\n);',end=whole?source.length:source.indexOf(marker,start)+marker.length;
  const block=source.slice(start,end);assert.ok(block.includes(before),name+': mutation target '+before);
  assert.deepEqual(run(name,files=>{files[p]=source.slice(0,start)+block.replace(before,after)+source.slice(end);}),{passed:false,exitCode:1},name+': '+before);cases++;
@@ -119,6 +120,43 @@ for(const [before,after]of [
  ['need(!owner, "OWNER_RECONCILIATION_GOOGLE_WRITE_FORBIDDEN");',''],
  ['result = await core.reconcileSource(request);','result = await core.applySource(request);'],
 ]) reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-monthly-worker'});
+// Every new selection boundary must fail closed independently of read-only
+// reconciliation. These mutations remove actual checks, not test-only flags.
+for(const [before,after]of [
+ ['clientNameUpConfirmed: z.literal(true).optional()','clientNameUpConfirmed: z.boolean().optional()'],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true});
+for(const [before,after]of [
+ ['if (!input.reviewKey || input.clientNameUpConfirmed !== true)','if (false)'],
+ ['await assertProductionOperational(companyId);',''],
+ ['selectCaseListMonthlyTransfer(ref, session.uid, session.token, input.reviewKey, true)','selectCaseListMonthlyTransfer(ref, "untrusted-owner", session.token, input.reviewKey, true)'],
+ ['selectCaseListMonthlyTransfer(ref, session.uid, session.token, input.reviewKey, true)','selectCaseListMonthlyTransfer(ref, session.uid, request.data.token, input.reviewKey, true)'],
+ ['selectCaseListMonthlyTransfer(ref, session.uid, session.token, input.reviewKey, true)','selectCaseListMonthlyTransfer(ref, session.uid, session.token, "unreviewed", true)'],
+ ['selectCaseListMonthlyTransfer(ref, session.uid, session.token, input.reviewKey, true)','selectCaseListMonthlyTransfer(ref, session.uid, session.token, input.reviewKey, false)'],
+ ['if (data.operation === "case_list.assign") throw new HttpsError(','if (false) throw new HttpsError('],
+])reject('acknowledgeSheetWriteIssue',before,after);
+for(const [before,after]of [
+ ['assertExecutive(token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");',''],
+ ['(token.uid ?? token.sub) === actorUid && HASH.test(reviewKey) && clientNameUpConfirmed === true','true'],
+ ['initial.companyId === token.companyId','true'],
+ ['sourceControlHeader !== "キャンセル" || row.cells[0].userEnteredValue?.boolValue === false','true'],
+ ['fingerprint(queue) === fingerprint(initial)','true'],
+ ['assertCaseListMonthlyAuthority(queueRef.id, queue, job, staff, day, currentConfig, approval)','unchecked(queueRef.id, queue, job, staff, day, currentConfig, approval)'],
+ ['queue.caseListPhase.continuationHash === reviewKey','true'],
+ ['assertKnownCaseListContinuation(queueRef.id, queue, operation, records, spreadsheetId);',''],
+ ['!records.INTENT && !records.MONTHLY_WRITE_STARTED && !records.ACCEPTED','true'],
+ ['hashCaseList(writable) === projected.postMonthlyContentHash','true'],
+ ['canonical(selectedCatalog) === canonical(projected.postCatalog)','true'],
+ ['selectedBy: actorUid, selectedAt: Date.now(), reviewKey','selectedBy: "untrusted", selectedAt: Date.now(), reviewKey'],
+ ['const waitForOwner = next === "MONTHLY_PREPARE";','const waitForOwner = false;'],
+ ['ownerTransferSelection.selected === true && ownerTransferSelection.clientNameUpConfirmed === true','true'],
+ ['authorizeMonthlyTransfer: async () => clone((await authorize()).ownerTransferSelection)','authorizeMonthlyTransfer: async () => request.data'],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-monthly-worker'});
+for(const [before,after]of [
+ ['assertOwnerTransfer(snapshot,row,intent.assignment,intent.ownerTransfer,services,intent.operationId);',''],
+ ["need(typeof services.authorizeMonthlyTransfer==='function','OWNER_TRANSFER_SELECTION_REQUIRED');",''],
+ ['selection.selected===true&&selection.clientNameUpConfirmed===true','true'],
+ ['selection.sourceContentHash===contentHash(services,row.cells)','true'],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-monthly-controller.cjs'});
 reject('retrySheetWriteIssue','data.operation === "case_list.assign" || !canManuallyRetrySheetWrite({','!canManuallyRetrySheetWrite({');
 const allowed=JSON.parse(read('config/automation/staging-safety.json')).allowedFunctions;
 assert.ok(Object.keys(modules).every(n=>allowed.includes(n)));assert.ok(!allowed.includes('syncStaffDirectoryScheduled')&&!allowed.includes('syncShiftSheetsScheduled'));cases++;

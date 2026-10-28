@@ -7,7 +7,7 @@ import {resubmissionNotificationId,readResubmissionNotification} from "./resubmi
 import {useShiftNotificationRoute} from "./useShiftNotificationRoute";
 import PastShiftHistory from "./PastShiftHistoryEntry";
 import { firestorePastShiftReader } from "./past-shift-reader";
-import MonthlyShiftCalendar from "./MonthlyShiftCalendar";
+import MonthlyShiftCalendar from "./MonthlyShiftCalendarEntry";
 import ShiftJobCards,{shiftDateLabel,shiftTextLabel,shiftPage} from './ShiftJobCards';
 import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {

@@ -323,6 +323,24 @@ for(const assigned of [true,false])await test("restoring "+(assigned?"assigned":
  assert.equal(h.job().publishable,false);assert.equal(h.job().recruitmentStopped,true);
  for(const key of ["caseId","assignedStaffId","assignedStaffName","dateKey"])assert.deepEqual(h.job()[key],before[key]);
 });
+for(const change of [null,"publishable","recruitmentStopped"])await test("stopped restore queue requires closed recruitment "+change,async()=>{
+ const h=cancellationHarness();Object.assign(h.job(),{assignedStaffId:null,assignedStaffName:"",status:"open"});h.cells.set("B2","");
+ await h.cancel();const restore=await h.restore();
+ assert.equal(h.job().status,"stopped");assert.equal(h.job().publishable,false);assert.equal(h.job().recruitmentStopped,true);
+ if(change)h.job()[change]=change==="publishable"?true:false;
+ await h.runQueue(restore);
+ assert.equal(h.q(restore).status,change?"blocked":"completed");
+ if(change)assert.equal(h.writes.length,0);else assert.equal(h.cells.get("V2"),false);
+});
+for(const kind of ["cancel","legacyCancel"])await test("pending CaseList "+kind+" retains owned lock until Source ACK",async()=>{
+ const h=cancellationHarness(),caseId="LKCASE_00000000-0000-0000-0000-000000000001";
+ delete h.job().sheetRef;
+ Object.assign(h.job(),{caseId,applicationUnconfirmed:true,caseListSource:{version:1,sheetId:2026101601,caseId,sourceRevision:"1".repeat(64),rowRevision:"2".repeat(64),ledgerRevision:"3".repeat(64),bindingHash:"4".repeat(64)},caseListManualPending:{staffId,dateKey,sourceRevision:"1".repeat(64),observationHash:"6".repeat(64)}});
+ const lockPath=`staffDayLocks/${companyId}_${staffId}_${dateKey}`,lock={companyId,staffId,jobId,dateKey,active:true};h.records.set(lockPath,lock);
+ const id=await h[kind]();assert.equal(h.job().cancelled,true);assert.equal(h.job().cancellationSheetWrite.sourceAckPending,true);assert.equal(h.job().sourceCancellationClosed,true);
+ assert.equal(h.records.get(lockPath).active,true);assert.equal(h.job().assignedStaffId,staffId);
+ await h.runQueue(id);assert.equal(h.q(id).status,"blocked");assert.equal(h.writes.length,0);assert.equal(h.records.get(lockPath).active,true);
+});
 await test("recancelled job rejects delayed restore",async()=>{const h=cancellationHarness();await h.cancel();const old=await h.restore();const next=await h.cancel("next");await h.runQueue(old);assert.equal(h.writes.length,0);await h.runQueue(next);assert.equal(h.q(next).status,"completed");assert.equal(h.cells.get("V2"),true);});
 await test("new cancellation reason rejects earlier reason",async()=>{const h=cancellationHarness();const old=await h.cancel("first"),next=await h.cancel("second");await h.runQueue(old);assert.equal(h.writes.length,0);await h.runQueue(next);assert.equal(h.cells.get("W2"),h.job().cancellationReason);});
 for(const [name,change]of [

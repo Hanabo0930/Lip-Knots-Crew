@@ -416,7 +416,49 @@ function checkCaseListOwnerReconciliation(block, whole) {
   return ['result=awaitcore.reconcileSource(request);','result=awaitcore.reconcile(request);'].every(part => readOnly.includes(part)) && !/core\.(?:prepare|apply)/.test(readOnly);
 }
 
+function checkCaseListManualSelection(block, whole) {
+  const action='"select-case-list-manual-monthly"';
+  if(!whole.includes('constManualSelectionSchema=')&&!whole.includes(action))return true;
+  const compact=text=>text.replace(/\s+/g,''),start=block.indexOf('if(request.data?.action==="select-case-list-manual-monthly"){'),end=block.indexOf('constinput=AcknowledgeQueueSchema.parse(');
+  if(start<0||end<=start)return false;
+  const route=block.slice(start,end);
+  if(!['constmanualInput=ManualSelectionSchema.parse(request.data);','awaitassertProductionOperational(companyId);','returnawaitworker.selectCaseListManualMonthlyTransfer(companyId,session.uid,session.token,manualInput);'].every(part=>route.includes(part))||/\.(?:add|set|create|update|delete|commit)\(/.test(route))return false;
+  const schema=whole.slice(whole.indexOf('constManualSelectionSchema='),whole.indexOf('constJobSchema='));
+  if(!['action:z.literal("select-case-list-manual-monthly")','jobId:z.string().regex(/^[A-Za-z0-9_-]{1,200}$/)','observationHash:z.string().regex(/^[a-f0-9]{64}$/)','expectedJobRevision:z.number().int().min(1)','expectedSourceRevision:z.string().regex(/^[a-f0-9]{64}$/)','clientNameUpConfirmed:z.literal(true)','confirmedFields:z.object({arrival:z.literal(true),execution:z.literal(true),headcount:z.literal(true),dateMode:z.literal(true),payOffer:z.literal(true)}).strict()','dailyWageJPY:z.number().int().min(1).max(1000000)','}).strict(),}).strict();'].every(part=>schema.includes(part))||schema.includes('vacancy'))return false;
+  const worker=compact(sourceFile('functions/src/case-list-monthly-worker.ts'));
+  const registration=worker.slice(worker.indexOf('exportasyncfunctionselectCaseListManualMonthlyTransfer('),worker.indexOf('exportasyncfunctionprocessCaseListMonthlyAssignment('));
+  if(![
+    'assertExecutive(token,process.env.EXECUTIVE_APPROVER_EMAILS??"");',
+    'token.companyId===companyId&&(token.uid??token.sub)===actorUid',
+    'input.clientNameUpConfirmed===true',
+    'canonical(confirmedFields)===canonical({arrival:true,execution:true,headcount:true,dateMode:true,payOffer:true})',
+    '(awaitgetProductionOperationalState(companyId)).operational',
+    'observed.companyId===companyId&&observed.jobId===input.jobId&&observed.observationHash===input.observationHash',
+    'job.revision===input.expectedJobRevision',
+    'job.caseListManualPending?.observationHash===input.observationHash',
+    'job.caseListManualPending?.sourceRevision===input.expectedSourceRevision',
+    'row.staffIdentityVerified===true&&row.staffId===observed.staffId',
+    'row.cells[0]?.userEnteredValue?.boolValue===false&&row.cells[63]?.userEnteredValue?.boolValue===false',
+    'sourceStaffName:observed.sourceStaffName',
+    'schema:"LK_CASE_LIST_MANUAL_ASSIGN_V1",origin:"SOURCE_MANUAL"',
+    'stage:"SOURCE_MANUAL_OBSERVED"',
+    'phaseHash(queueId,queue,"MONTHLY_PREPARE",nonce,"SOURCE_MANUAL_OBSERVED",proofHash)',
+    'manualEvent.observationProofHash=hashCaseList({...manualEvent,createdAt:0})',
+    'assertKnownCaseListContinuation(queueId,queue,operation,records,spreadsheetId)',
+    'previewCore.preview({operationId:queueId,caseId:a.sourceCaseId})',
+    'canonical(currentJob)===canonical(job)&&canonical(currentObservation)===canonical(observed)&&canonical(currentStaff)===canonical(staff)',
+    'day&&day.active===true&&day.jobId===input.jobId&&day.companyId===companyId&&day.staffId===a.staffId&&day.dateKey===dateKey',
+    'assertCaseListMonthlyAuthority(queueId,queue,nextJob,currentStaff,dayLock,config,manualConditions)',
+    'tx.create(queueRef,queue)',
+    'tx.create(operationRef.collection("events").doc("SOURCE_MANUAL_OBSERVED")',
+  ].every(part=>registration.includes(part))||/(?:batchUpdate|\.values\.(?:append|update|clear)|core\.(?:apply|prepare))\(/.test(registration))return false;
+  if(!['a.schema==="LK_CASE_LIST_MANUAL_ASSIGN_V1"&&a.origin==="SOURCE_MANUAL"','"MANUAL_SOURCE_WRITE_PROOF_FORBIDDEN"','"MANUAL_SOURCE_OBSERVATION_INVALID"','"MANUAL_OWNER_APPROVAL_CHANGED"','!Object.hasOwn(confirmation,"vacancy")'].every(part=>worker.includes(part)))return false;
+  const source=compact(sourceFile('functions/src/case-list-source.ts'));
+  return ['manualPendingAssignmentFields(manualObservation)','currentStaff.active!==true','currentStaff.displayName!==manualObservation.canonicalStaffName','old.assignmentSheetWrite?.queueId!==priorManual.queueId'].every(part=>source.includes(part));
+}
+
 function checkCaseListOwnerSelection(block, whole) {
+  if (!checkCaseListManualSelection(block, whole)) return false;
   // Historical sources have no selection action. Keep their exact legacy
   // schema/read-only checks; a new selection route must pass every new guard.
   if (whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list"]).default("note"),});') && !whole.includes('"select-case-list-monthly"')) return true;
@@ -431,7 +473,8 @@ function checkCaseListOwnerSelection(block, whole) {
   ].every(part => route.includes(part)) || /\.(?:add|create|set|update|delete|commit)\(/.test(route) ||
       !block.includes('if(data.operation==="case_list.assign")thrownewHttpsError(')) return false;
   const worker = sourceFile('functions/src/case-list-monthly-worker.ts').replace(/\s+/g, '');
-  const selection = worker.slice(worker.indexOf('exportasyncfunctionselectCaseListMonthlyTransfer('), worker.indexOf('exportasyncfunctionprocessCaseListMonthlyAssignment('));
+  const manualStart = worker.indexOf('exportasyncfunctionselectCaseListManualMonthlyTransfer(');
+  const selection = worker.slice(worker.indexOf('exportasyncfunctionselectCaseListMonthlyTransfer('), manualStart >= 0 ? manualStart : worker.indexOf('exportasyncfunctionprocessCaseListMonthlyAssignment('));
   if (![
     'assertExecutive(token,process.env.EXECUTIVE_APPROVER_EMAILS??"");',
     'ID.test(actorUid)&&(token.uid??token.sub)===actorUid&&HASH.test(reviewKey)&&clientNameUpConfirmed===true',

@@ -1,3 +1,4 @@
+await import("./test-admin-manual-source-transfer.mjs");
 await import("./test-admin-case-list-archive.mjs");
 await import('./test-admin-edit-panel.mjs');
 import {timelineModule} from './admin-timeline-test-module.mjs';

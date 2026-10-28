@@ -1,57 +1,61 @@
-# Sourceへの直接入力：共通月別転記への接続契約
+# Source直接入力と共通月別転記
 
-## 現在の実装範囲
+## 入力と選択の順序
 
-案件リストC列に直接入った名前は、既存の `executeCaseListImport` が原本を読み取る際に、`caseListManualObservations/{jobId}` へ非公開の観測記録を保存する。`jobId` は既存の固定案件IDと会社IDから作り、スタッフ名は既存workerと同じ `buildCaseListStaffResolver` で既存スタッフIDに照合する。同名・別名が複数IDへ一致する場合、非稼働スタッフ、数式名、表示値との不一致、取消、既存担当、月別リンクは保留する。
+案件リストC列へ直接名前を入れた案件は、**既存の案件リスト同期／取込commit**で観測する。新しいonEdit、GAS配備、自動トリガー、連携有効化は追加していない。単にC列を編集した瞬間にアプリを更新する実装ではない。
 
-この記録は `LK_CASE_LIST_MANUAL_OBSERVATION_V1` であり、常に `blocked_requires_owner_review`、`selected:false`、`clientNameUpConfirmed:false`、Source/月別の予定書込件数とも0。**転記選択済み・担当確定・月別転記の継続権限ではない。** `SOURCE_PROJECTED`、`SOURCE_WRITE_STARTED`、`SOURCE_MANUAL_OBSERVED` の実行証跡も生成しない。新規担当、勤務日ロック、転記queueを自動作成しない。名前を消した際は `cleared`、行が原本から消えた際は `source_missing` にし、既知の選択済み記録を通常取込で上書きしない。同じ観測の再取込は記録を重複させない。
+観測後は既存スタッフ名簿と同じresolverで固定スタッフIDへ一意に照合し、既存の勤務日ロックとともに「確認待ちの手配」を保存する。案件IDは固定IDと会社から導出する。公開jobの担当名はSourceの文字列をそのまま保ち、正規プロフィール名は `caseListManualPending.canonicalStaffName` とprivate情報へ分ける。aliasをスタッフIDに使わず、管理者UIDをスタッフUIDと偽らない（`assignedUid:null`）。この段階では転記queue、月別書込、Source書込、選択済みreceiptを作らない。確定シフト・次のシフト・カレンダーへは出さない。
 
-新規・未担当案件は既存の非公開draft／募集停止のまま。既存アプリ応募の担当・履歴・勤務日ロックは既存保護を維持する。観測時に読んだ65列は値と有効値だけなので、`observedValuesHash` はセル書式・注記を含む完全な書込前スナップショットとは扱わない。将来の選択時には既存のbounded readerで全書込属性を読み直す。
+本人がクライアントへネームアップした後、管理アプリ **「概要 → 書戻しの確認 → この案件を選択してシフト表へ移行」**で案件と5項目の勤務・支給条件を確認する。A列「キャンセル」／BL列「取消」は転記選択に兼用しない。選択API自体もGoogle Sheetsへ書かず、既存 `case_list.assign` の同じ月別engineへ登録する。書込みと読戻し照合ACKが揃うまで `applicationUnconfirmed:true` を維持する。
 
-`caseListManualObservations` にクライアント用Rulesは追加しない。既存の最後の `allow read, write: if false` によりクライアント直接アクセスは拒否される。実際の公開・配備・原本操作・GAS・Rules・IAM変更は実施しない。**手入力経路全体は未完了**であり、以下の接続と受入が必要。
+## 観測と担当保護
 
-## 次に既存管理APIへ追加する契約
+`caseListManualObservations/{jobId}` は既存default-deny Rules下の非公開観測。`LK_CASE_LIST_MANUAL_OBSERVATION_V1` は選択権限や月別継続証跡ではない。値・有効値のhashを、書式・注記を含む全CellDataのhashと取り違えない。選択時は既存bounded readerで完全なSource・台帳・月別・依存情報を再読込する。
 
-画面は既存の「概要 → 書戻しの確認」。アプリ応募と同じ案件単位の「この案件を選択してシフト表へ移行」ボタンとネームアップ済み確認を使う。A列「キャンセル」／BL列「取消」は選択に兼用しない。
+曖昧な同名・alias、非稼働、数式名、表示値不一致、取消、別担当、既存月別リンク、未対応案件は保留する。待機担当の作成時もtransaction内で現在のプロフィール・alias・会社・active、既存勤務日ロックの所有関係を再確認する。同じ観測は重複せず、名前・日付変更時に古い担当とロックを勝手に取り替えない。名前削除は観測を `cleared`、行削除は `source_missing` にし、既知の担当・履歴を保持する。
 
-推奨APIは既存の `acknowledgeSheetWriteIssue` への厳密な新action。別の転記ライターや別の管理画面を作らない。
+選択済み観測はprivate receiptとして残し、正しいqueue・スタッフIDに結び付いている場合は通常の同一Source再取込で上書きしない。cancelled状態の未担当行もdraftへ戻さず、募集停止を維持する。新規研修・OJT・ラウンダー・出口調査・グレイス、複数日、2026年11／12月以外、未対応金額・配置・数式は受入済みと扱わない。
+
+## 既存APIのmanual action
+
+`acknowledgeSheetWriteIssue` に厳密なmanual actionを追加。別の月別ライターは作らない。
 
 ```ts
 {
   action: "select-case-list-manual-monthly",
   jobId: string,
-  observationHash: string,          // 画面で見たprivate観測の64hex
+  observationHash: string,
   expectedJobRevision: number,
   expectedSourceRevision: string,
   clientNameUpConfirmed: true,
-  confirmedFields: {
-    arrival: true, execution: true, headcount: true,
-    dateMode: true, payOffer: true
-  },
-  payOffer: {
-    dailyWageJPY: number,
-    travelExpenses: "全額支給",
-    communicationExpenses: "全額支給"
+  manualConfirmation: {
+    confirmedFields: {
+      arrival: true, execution: true, headcount: true,
+      dateMode: true, payOffer: true
+    },
+    payOffer: {
+      dailyWageJPY: number,
+      travelExpenses: "全額支給",
+      communicationExpenses: "全額支給"
+    }
   }
 }
 ```
 
-これは次段階の**未実装案**。所有者がすでに確認した勤務条件・支給条件を既存の確認機構で再利用し、直接入力済みの案件に `vacancy:true` を要求・保存しない。条件の確認が存在しない／不一致なら、ボタンを有効化しない。`getSheetWriteIssues` はexec向けの安全な案件情報と観測hashを返し、生のSource行、金額計算、私用メモを公開jobへコピーしない。
+既存exec本人だけが実行し、会社・actor・停止状態・Source／台帳／月別・スタッフID・プロフィール・本人の勤務日ロック・案件版・観測hashを再確認する。既存の公開用空き枠承認を流用せず、manual条件には `vacancy` を持たせない。支給日額は現在Sourceの計算値と共通controllerで照合し、不一致で止める。二重操作は安定したqueueIDとprivate request hashで元の受付結果を返す。未知の結果を自動再送しない。
 
-サーバー側は既存exec本人、会社、停止状態、現在のSource／台帳／月別、スタッフID・active・勤務日ロック、案件revision、観測hash、既存queue／完了receiptを再確認する。取消・コピーID・二重担当・新しいSource変更・同時操作は停止する。選択と条件確認をprivate receiptに束縛し、同じ入力の二重操作は同じqueue/結果を返す。サーバーが安定したqueue IDを決め、`case_list.assign` の既存処理へ登録する。選択API自体はGoogle Sheetsに書かない。
+`getSheetWriteIssues` のmanual issueは `operation:"case_list.manual"`、`manualSourcePending:true`、観測hash・現在job/source版・安全な案件情報を返す。私用メモや原本の管理JSON・生金額計算は公開jobへ入れない。`manualCursor`／`manualNextCursor` で会社別にページングし、古い選択済み観測に新規手配を隠させない。
 
-## 同じengineで扱うための証跡変更
+## 共通engineの証跡
 
-- 手入力originをサーバーのprivate選択receiptと登録transactionでのみ確定する。callerの `origin` や「手入力済み」フラグだけで分岐しない。
-- 月別workerの前に、原本へ書かずに現在の完全Source／台帳／依存情報を照合した `SOURCE_MANUAL_OBSERVED` をprivate immutable eventへ保存する。Source Cが空欄だった／アプリがCへ書いたという証跡を作らない。
-- 手入力originは `SOURCE_PREPARE` / `SOURCE_APPLY` を通らず、同じ既存 `MONTHLY_PREPARE` / `MONTHLY_APPLY` / `MONTHLY_RECONCILE`、adapter、配置・金額・セル保全・最終preflightを使う。
-- 現行のCrew向けguardは `SOURCE_INTENT → SOURCE_WRITE_STARTED/DISPATCHED → SOURCE_PROJECTED` とSource revision変化を引き続き要求する。手入力だけ、厳密な新event＋私用選択receiptが揃ったときにSource pre/post同一を認める。全originに対する一律のguard緩和をしない。
-- actor UIDは手入力担当本人と選択した管理者を分ける。管理者UIDを担当スタッフのUIDと偽らない。案件・スタッフの照合は固定IDで行う。
-- `applicationUnconfirmed` は月別の書込みと読戻し照合ACKまでtrue。選択APIの成功で確定・カレンダー反映にしない。完了後に既存のprivate sheetRef／native ACKと募集停止・履歴状態を保存する。
-- 不明な書込結果は既存のowner読取再照合へ。自動再送や重複行追加をしない。
+manual assignmentは `LK_CASE_LIST_MANUAL_ASSIGN_V1` / `SOURCE_MANUAL`。登録transactionがprivate条件承認・選択receipt・完全65列の `SOURCE_MANUAL_OBSERVED`・pending queueを原子的に保存する。元Sourceは既に手入力されているので、`SOURCE_INTENT`／`SOURCE_WRITE_STARTED`／`SOURCE_PROJECTED` を偽造せず、Source prepare/apply/reconcileの呼出しを禁止する。
 
-## 残る受入試験
+manualは同じ `MONTHLY_PREPARE → MONTHLY_APPLY → MONTHLY_RECONCILE`、adapter、配置・ID・金額・セル保全・最終preflightを使う。Crewの空欄C書込と変更後Source証明は従来どおり必要。manualだけ、厳密なprivate観測・選択・条件・hashが揃うときSource pre/postが同一であることを許す。混在したCrew Source書込証跡は拒否する。
 
-現在の合成試験は、実Source importのpreview無変更、手入力の非公開観測、既存IDへのalias照合、曖昧／非稼働／取消／数式名保留、二重取込、名前削除、行削除、選択済み履歴保全、固定IDコピーの停止を確認する。勤務日ロックや月別queue／原本書込を作らないことも確認する。
+月別ACK後のprivate参照・金融読取も同じmanual証跡を検査する。read-only owner復旧は既存monthly intentとwrite-startがあるときだけ読戻しへ進み、Sourceを書き直さない。ACK応答不明・途中停止は二重書込せず保留する。
 
-次の接続を完成とする前に、実際の新actionから共通workerを通し、選択前停止、選択後転記、readback確定、同時操作、失われた応答、取消、本人一覧・月間calendar、Source/月別二重表示の一貫した隔離試験が必要。表示用の手入力fixture成功を、この経路の受入証拠に代用しない。
+## 取消と受入の境界
+
+取消受付は本人への直接連絡のみ。アプリの管理者取消は通常表示・再募集を止める。Sourceに名が残るpending手配ではSource確認が終わるまで勤務日ロックを解放しない。まだ月別選択していないmanual手配に限り、既存Source取込が取消後の新しい原本で固定ID・日付・ネイティブ取消チェック・C氏名空欄・同じ台帳・現在取消queue・元revision/identity・正しい所有ロックをすべて読戻し確認した場合、共有 `importedCaseListCancellationSourceAck` を通して既存のSource ACK証跡を保存し、本人のロックだけを解放する。古い読取・名が残る行・別queue・別所有ロックは保持する。月別選択済み／書込不明の手配はSourceだけで解放しない。元Sourceへ取消・氏名消去を書くnative adapterは、この変更で新たに有効化・配備していない。Source取消の実書込、既存GASの本番稼働、原本や権限の変更は別であり、アプリの取消メタデータ成功をnative取消ACK成功とは報告しない。
+
+ローカルでは実Source importer、既存管理API、manual登録、共通worker／adapter、private ACK／金融参照を合成Google／Firestore境界で検証する。名前だけで月別0書込、選択後の月別1書込・Source0書込、実readback public ACK、二重操作、alias、取消、名簿・ロック・Source変化、不明ACKのread-only回復、混在証跡拒否を含む。正式CI、公開／配備、実原本の運用受入は別々に報告する。新IAM・Rules・GAS・本番変更や実データ操作の追加許可とは扱わない。

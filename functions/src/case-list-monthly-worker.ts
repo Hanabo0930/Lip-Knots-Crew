@@ -6,6 +6,7 @@ import { createJobIdFromPersistedCaseId } from "./case-id";
 import { cancellationSheetWriteIdentity } from "./sheet-write-core";
 import { configuredCaseListSource, publicCaseListSource, assertExecutive, hashCaseList, canonical, caseListMonthlyContentHash } from "./case-list-source-core";
 import { readCaseListMonthlySnapshot } from "./case-list-monthly-reader";
+import { manualOwnerReviewCanProceed } from "./case-list-manual-origin-core";
 import { getProductionOperationalState } from "./system-safety";
 
 type Data = FirebaseFirestore.DocumentData;
@@ -14,7 +15,7 @@ type Tx = FirebaseFirestore.Transaction;
 type SourceRevision = { rowRevision: string; ledgerRevision: string; sourceRevision: string };
 type PayOffer = { dailyWageJPY: number; travelExpenses: "全額支給"; communicationExpenses: "全額支給" };
 type Assignment = {
-  schema: "LK_CASE_LIST_ASSIGN_V1"; queueId: string; operationId: string;
+  schema: "LK_CASE_LIST_ASSIGN_V1" | "LK_CASE_LIST_MANUAL_ASSIGN_V1"; origin?: "SOURCE_MANUAL"; canonicalStaffName?: string; observationHash?: string; ownerConditionsHash?: string; selectorUid?: string; queueId: string; operationId: string;
   companyId: string; jobId: string; sourceCaseId: string; sourceRowRevision: string;
   sourceLedgerRevision: string; sourceRevision: string; preMonthlyContentHash: string;
   expectedJobRevision: number; assignedJobRevision: number; staffId: string; staffName: string; dateKey: string;
@@ -51,6 +52,7 @@ function need(ok: unknown, code: string): asserts ok { if (!ok) stop(code); }
 function validDate(date: unknown): date is string {
   return typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date + "T00:00:00Z")) && new Date(date + "T00:00:00Z").toISOString().slice(0, 10) === date && date >= "2026-11-01";
 }
+const isManual = (a: Data): boolean => a.schema === "LK_CASE_LIST_MANUAL_ASSIGN_V1" && a.origin === "SOURCE_MANUAL";
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 function fingerprint(queue: Data): string {
   return hashCaseList({ companyId: queue.companyId ?? null, jobId: queue.jobId ?? null, operation: queue.operation ?? null, dateKey: queue.dateKey ?? null,
@@ -73,7 +75,7 @@ function publicPayOffer(job: Data): PayOffer {
 export function assertCaseListMonthlyAuthority(queueId: string, queue: Data, job: Data, staff: Data, dayLock: Data, config: Data, approval: Data, ownerReadOnly = false): { assignment: Assignment; spreadsheetId: string; payOffer: PayOffer } {
   need(ID.test(queueId) && queue.operation === "case_list.assign" && ID.test(queue.companyId ?? "") && ID.test(queue.jobId ?? "") && ID.test(queue.actorStaffId ?? "") && ID.test(queue.actorUid ?? ""), "QUEUE_IDENTITY_INVALID");
   const a = object(queue.caseListAssignment);
-  need(a.schema === "LK_CASE_LIST_ASSIGN_V1" && a.queueId === queueId && a.operationId === queueId && a.companyId === queue.companyId && a.jobId === queue.jobId && CASE.test(a.sourceCaseId ?? "") &&
+  need((a.schema === "LK_CASE_LIST_ASSIGN_V1" && !a.origin || isManual(a)) && a.queueId === queueId && a.operationId === queueId && a.companyId === queue.companyId && a.jobId === queue.jobId && CASE.test(a.sourceCaseId ?? "") &&
     a.staffId === queue.actorStaffId && a.staffName === queue.updates?.staffName && a.dateKey === queue.dateKey && validDate(a.dateKey) &&
     Number.isSafeInteger(a.expectedJobRevision) && a.expectedJobRevision >= 0 && Number.isSafeInteger(a.assignedJobRevision) && a.assignedJobRevision === a.expectedJobRevision + 1 &&
     [a.sourceRowRevision, a.sourceLedgerRevision, a.sourceRevision, a.preMonthlyContentHash].every(v => typeof v === "string" && HASH.test(v)), "ASSIGNMENT_CONTRACT_INVALID");
@@ -85,16 +87,25 @@ export function assertCaseListMonthlyAuthority(queueId: string, queue: Data, job
     source.rowRevision === a.sourceRowRevision && source.ledgerRevision === a.sourceLedgerRevision && source.sourceRevision === a.sourceRevision,
   "JOB_SOURCE_BINDING_CHANGED");
   need(job.status === "assigned" && job.cancelled !== true && job.sourceMissing !== true && job.assignmentUnresolved !== true && job.applicationUnconfirmed === true &&
-    job.assignedStaffId === a.staffId && job.assignedStaffName === a.staffName && job.assignedUid === queue.actorUid && job.dateKey === a.dateKey && job.revision === a.assignedJobRevision &&
+    job.assignedStaffId === a.staffId && job.assignedStaffName === a.staffName && (isManual(a) ? job.assignedUid == null : job.assignedUid === queue.actorUid) && job.dateKey === a.dateKey && job.revision === a.assignedJobRevision &&
     saved.operation === "case_list.assign" && saved.queueId === queueId && saved.sourceRevision === a.sourceRevision && saved.assignedJobRevision === a.assignedJobRevision &&
     saved.identity === cancellationSheetWriteIdentity(job), "ASSIGNMENT_JOB_CHANGED");
-  need(typeof staff.displayName === "string" && staff.displayName.trim() && staff.displayName === a.staffName && staff.companyId === queue.companyId && staff.active === true &&
+  need(typeof staff.displayName === "string" && staff.displayName.trim() && staff.displayName === (isManual(a) ? a.canonicalStaffName : a.staffName) && staff.companyId === queue.companyId && staff.active === true &&
     dayLock.companyId === queue.companyId && dayLock.jobId === queue.jobId && dayLock.staffId === a.staffId && dayLock.dateKey === a.dateKey && dayLock.active === true,
   "STAFF_OR_DAY_LOCK_CHANGED");
-  need(canonical(queue.updates ?? {}) === canonical({ staffName: staff.displayName }) && canonical(queue.expected ?? {}) === canonical({ staffName: { mode: "blank" } }) &&
+  need(canonical(queue.updates ?? {}) === canonical({ staffName: a.staffName }) && canonical(queue.expected ?? {}) === canonical({ staffName: isManual(a) ? { mode: "equals", value: a.staffName } : { mode: "blank" } }) &&
     canonical(queue.styles ?? {}) === "{}" && queue.idempotencyKey === `case_list.assign:${queue.jobId}:${queueId}`, "QUEUE_MUTATION_CHANGED");
   const payOffer = publicPayOffer(job), confirmation = object(approval.confirmedFields);
-  need(approval.companyId === queue.companyId && approval.jobId === queue.jobId && approval.expectedSourceRevision === a.sourceRevision && typeof approval.actorUid === "string" && approval.actorUid.trim() &&
+  if (isManual(a)) {
+    const body = { ...approval }; delete body.ownerConditionsHash;
+    need(approval.schema === "LK_CASE_LIST_MANUAL_CONDITIONS_V1" && approval.companyId === queue.companyId && approval.jobId === queue.jobId && approval.queueId === queueId &&
+      approval.expectedSourceRevision === a.sourceRevision && approval.actorUid === queue.actorUid && a.selectorUid === queue.actorUid && ID.test(a.selectorUid ?? "") &&
+      approval.staffId === a.staffId && approval.sourceStaffName === a.staffName && approval.canonicalStaffName === a.canonicalStaffName && approval.observationHash === a.observationHash &&
+      HASH.test(a.observationHash ?? "") && HASH.test(a.ownerConditionsHash ?? "") && approval.ownerConditionsHash === a.ownerConditionsHash && hashCaseList(body) === a.ownerConditionsHash &&
+      ["arrival", "execution", "headcount", "dateMode", "payOffer"].every(key => confirmation[key] === true) && !Object.hasOwn(confirmation, "vacancy") &&
+      hashCaseList(approval.payOffer) === hashCaseList(payOffer) && job.caseListManualSelection?.queueId === queueId && job.caseListManualSelection?.ownerConditionsHash === a.ownerConditionsHash,
+    "MANUAL_OWNER_APPROVAL_CHANGED");
+  } else need(approval.companyId === queue.companyId && approval.jobId === queue.jobId && approval.expectedSourceRevision === a.sourceRevision && typeof approval.actorUid === "string" && approval.actorUid.trim() &&
     ["arrival", "execution", "headcount", "dateMode", "payOffer", "vacancy"].every(key => confirmation[key] === true) &&
     hashCaseList(approval.payOffer) === hashCaseList(payOffer) && job.caseListPublication?.sourceRevision === a.sourceRevision, "OWNER_APPROVAL_CHANGED");
   return { assignment: clone(a) as Assignment, spreadsheetId, payOffer };
@@ -117,10 +128,10 @@ export function buildCaseListStaffResolver(profiles: Array<{ id: string; data: D
 }
 
 function nativeAssignment(a: Assignment, payOffer: PayOffer): Data {
-  return { schema: a.schema, authority: "CREW_QUEUE", queueId: a.queueId, operationId: a.operationId, companyId: a.companyId, jobId: a.jobId, caseId: a.sourceCaseId,
+  return { schema: a.schema, authority: isManual(a) ? "SOURCE_MANUAL" : "CREW_QUEUE", queueId: a.queueId, operationId: a.operationId, companyId: a.companyId, jobId: a.jobId, caseId: a.sourceCaseId,
     staffId: a.staffId, staffName: a.staffName, dateKey: a.dateKey, assignedJobRevision: a.assignedJobRevision,
     preCatalog: { rowRevision: a.sourceRowRevision, ledgerRevision: a.sourceLedgerRevision, sourceRevision: a.sourceRevision }, preMonthlyContentHash: a.preMonthlyContentHash,
-    publicPayOffer: payOffer };
+    publicPayOffer: payOffer, ...(isManual(a) ? { canonicalStaffName: a.canonicalStaffName, observationHash: a.observationHash, ownerConditionsHash: a.ownerConditionsHash } : {}) };
 }
 
 /** Only an exact native readback bound to this current assignment can finish it. */
@@ -144,8 +155,8 @@ export function assertCaseListMonthlyAck(queueId: string, a: Assignment, payOffe
     ack.companyId === a.companyId && ack.jobId === a.jobId && ack.sourceCaseId === a.sourceCaseId && ack.assignedJobRevision === a.assignedJobRevision && ack.staffId === a.staffId && ack.staffName === a.staffName && ack.dateKey === a.dateKey && ack.preserveSource === true &&
     sameRevisions(pre, expectedPre) && pre.version === 1 && post.version === 1 && pre.spreadsheetId === spreadsheetId && post.spreadsheetId === spreadsheetId &&
     pre.caseId === a.sourceCaseId && post.caseId === a.sourceCaseId && pre.sheetId === 2026101601 && post.sheetId === 2026101601 &&
-    post.ledgerRevision === pre.ledgerRevision && post.rowRevision !== pre.rowRevision && post.sourceRevision === hashCaseList({ schema: "LK_CASE_LIST_AUTHORITY_REVISION_V1", caseId: a.sourceCaseId, rowRevision: post.rowRevision, ledgerRevision: post.ledgerRevision }) &&
-    ack.preMonthlyContentHash === a.preMonthlyContentHash && HASH.test(ack.postMonthlyContentHash ?? "") && ack.postMonthlyContentHash !== ack.preMonthlyContentHash && HASH.test(ack.financialReadbackHash ?? "") &&
+    post.ledgerRevision === pre.ledgerRevision && (isManual(a) ? sameRevisions(post, pre) : post.rowRevision !== pre.rowRevision) && post.sourceRevision === hashCaseList({ schema: "LK_CASE_LIST_AUTHORITY_REVISION_V1", caseId: a.sourceCaseId, rowRevision: post.rowRevision, ledgerRevision: post.ledgerRevision }) &&
+    ack.preMonthlyContentHash === a.preMonthlyContentHash && HASH.test(ack.postMonthlyContentHash ?? "") && (isManual(a) ? ack.postMonthlyContentHash === ack.preMonthlyContentHash : ack.postMonthlyContentHash !== ack.preMonthlyContentHash) && HASH.test(ack.financialReadbackHash ?? "") &&
     target.fixedId === a.sourceCaseId && target.title === a.dateKey.slice(0, 4) + "." + Number(a.dateKey.slice(5, 7)) && Number.isInteger(target.sheetId) && target.sheetId >= 0 && Number.isInteger(target.rowHint) && target.rowHint >= 2 && HASH.test(target.readbackHash ?? ""),
   "MONTHLY_ACK_BINDING_INVALID");
   return { target, post: sourceRevisions(post), caseIdColumn: month.width === 56 ? "BD" : "BC" };
@@ -191,9 +202,46 @@ function phaseHash(queueId: string, queue: Data, phase: Phase, nonce: string, pr
   return hashCaseList({ schema: PHASE_SCHEMA, queueId, companyId: queue.companyId, jobId: queue.jobId, caseId: queue.caseListAssignment?.sourceCaseId,
     assignedJobRevision: queue.caseListAssignment?.assignedJobRevision, queueFingerprint: fingerprint(queue), phase, nonce, proofStage, proofHash });
 }
+function checkedManualObservation(queueId: string, queue: Data, payOffer: PayOffer, records: Record<string, Data | undefined>, spreadsheetId: string): Data {
+  const a = object(queue.caseListAssignment) as Assignment;
+  need(isManual(a) && !["SOURCE_INTENT", "SOURCE_PROJECTED", "SOURCE_WRITE_STARTED", "SOURCE_DISPATCHED", "SOURCE_UNKNOWN", "SOURCE_DEFERRED"].some(stage => records[stage]), "MANUAL_SOURCE_WRITE_PROOF_FORBIDDEN");
+  const observed = checkedEvent(records.SOURCE_MANUAL_OBSERVED, "SOURCE_MANUAL_OBSERVED", queueId, queue, spreadsheetId), body: Data = { ...observed, createdAt: 0 };
+  delete body.observationProofHash;
+  const catalog = { version: 1, spreadsheetId, sheetId: 2026101601, caseId: a.sourceCaseId, rowRevision: a.sourceRowRevision, ledgerRevision: a.sourceLedgerRevision, sourceRevision: a.sourceRevision };
+  need(observed.schema === "LK_SOURCE_MANUAL_OBSERVED_V1" && observed.observationProofHash === hashCaseList(body) &&
+    canonical(observed.assignment) === canonical(nativeAssignment(a, payOffer)) && observed.assignmentHash === hashCaseList(nativeAssignment(a, payOffer)) &&
+    canonical(observed.preCatalog) === canonical(catalog) && canonical(observed.postCatalog) === canonical(catalog) &&
+    observed.observationHash === a.observationHash && observed.ownerConditionsHash === a.ownerConditionsHash &&
+    Array.isArray(observed.sourceSnapshot) && observed.sourceSnapshot.length === 65 && hashCaseList(observed.sourceSnapshot) === a.preMonthlyContentHash &&
+    observed.preMonthlyContentHash === a.preMonthlyContentHash && observed.postMonthlyContentHash === a.preMonthlyContentHash &&
+    observed.sourceSnapshot[2]?.userEnteredValue?.stringValue === a.staffName && observed.sourceSnapshot[60]?.userEnteredValue?.stringValue === a.sourceCaseId &&
+    observed.sourceSnapshot[0]?.userEnteredValue?.boolValue === false && observed.sourceSnapshot[63]?.userEnteredValue?.boolValue === false &&
+    observed.sourceSnapshot.every((cell: Data) => cell && !Array.isArray(cell) && Object.keys(cell).every(key => ["userEnteredValue", "note", "userEnteredFormat", "dataValidation", "textFormatRuns", "chipRuns"].includes(key))) && HASH.test(observed.dependencyHash ?? "") &&
+    a.sourceRevision === hashCaseList({ schema: "LK_CASE_LIST_AUTHORITY_REVISION_V1", caseId: a.sourceCaseId, rowRevision: a.sourceRowRevision, ledgerRevision: a.sourceLedgerRevision }), "MANUAL_SOURCE_OBSERVATION_INVALID");
+  return observed;
+}
+function assertManualMonthlyProof(queueId: string, queue: Data, payOffer: PayOffer, records: Record<string, Data | undefined>, spreadsheetId: string, requireMonthly: boolean): void {
+  const a = object(queue.caseListAssignment) as Assignment, observed = checkedManualObservation(queueId, queue, payOffer, records, spreadsheetId);
+  need(!requireMonthly || records.INTENT, "MONTHLY_INTENT_PROOF_REQUIRED");
+  if (!records.INTENT) return;
+  const intent = checkedEvent(records.INTENT, "INTENT", queueId, queue, spreadsheetId), selected = object(intent.ownerTransfer);
+  need(intent.schema === "LK_MONTHLY_INTENT_V5" && intent.planHash === normalizedHash(intent, "planHash") && intent.assignmentHash === observed.assignmentHash &&
+    canonical(intent.assignment) === canonical(observed.assignment) && canonical(intent.preCatalog) === canonical(observed.preCatalog) && canonical(intent.postCatalog) === canonical(observed.postCatalog) &&
+    intent.preMonthlyContentHash === a.preMonthlyContentHash && intent.sourceContentHash === a.preMonthlyContentHash && intent.postMonthlyContentHash === a.preMonthlyContentHash &&
+    canonical(intent.sourceSnapshot) === canonical(observed.sourceSnapshot) && intent.dependencyHash === observed.dependencyHash, "MANUAL_MONTHLY_PROOF_CHAIN_INVALID");
+  need(selected.schema === "LK_OWNER_MONTHLY_TRANSFER_V1" && selected.selected === true && selected.clientNameUpConfirmed === true && selected.sourceControlHeader === "キャンセル" &&
+    intent.sourceSnapshot[0]?.userEnteredValue?.boolValue === false && selected.operationId === queueId && selected.caseId === a.sourceCaseId && selected.queueFingerprint === fingerprint(queue) &&
+    selected.assignmentHash === observed.assignmentHash && selected.sourceContentHash === a.preMonthlyContentHash && selected.sourceRevision === a.sourceRevision &&
+    selected.selectedBy === a.selectorUid && Number.isFinite(selected.selectedAt) && selected.selectedAt > 0, "MANUAL_MONTHLY_SELECTION_PROOF_REQUIRED");
+  for (const stage of ["MONTHLY_WRITE_STARTED", "MONTHLY_DISPATCHED", "UNKNOWN", "DEFERRED", "ACCEPTED"]) if (records[stage]) {
+    need(checkedEvent(records[stage], stage, queueId, queue, spreadsheetId).planHash === intent.planHash, "MONTHLY_DISPATCH_PROOF_CHAIN_INVALID");
+  }
+}
+
 /** Exact immutable Source-before/only-C-after/projection/monthly-intent
  * lineage. Recovery must not accept a rehashed but inconsistent history. */
 export function assertCaseListMonthlyProofChain(queueId: string, queue: Data, payOffer: PayOffer, records: Record<string, Data | undefined>, spreadsheetId: string, requireProjected = false, requireMonthly = false): void {
+  if (isManual(object(queue.caseListAssignment))) return assertManualMonthlyProof(queueId, queue, payOffer, records, spreadsheetId, requireMonthly);
   const a = object(queue.caseListAssignment) as Assignment, source = checkedEvent(records.SOURCE_INTENT, "SOURCE_INTENT", queueId, queue, spreadsheetId);
   const before = source.sourceBefore, after = source.expectedSourceAfter, assignment = nativeAssignment(a, payOffer);
   const preCatalog = { version: 1, spreadsheetId, sheetId: 2026101601, caseId: a.sourceCaseId,
@@ -241,6 +289,19 @@ export function assertCaseListMonthlyProofChain(queueId: string, queue: Data, pa
  * retry of an unknown request. Its proof lives in immutable private events. */
 export function assertKnownCaseListContinuation(queueId: string, queue: Data, operation: Data, records: Record<string, Data | undefined>, spreadsheetId: string): Phase {
   const next = object(queue.caseListPhase), phase = next.phase as Phase, a = object(queue.caseListAssignment) as Assignment;
+  if (isManual(a)) {
+    need(next.schema === PHASE_SCHEMA && ["MONTHLY_PREPARE", "MONTHLY_APPLY", "MONTHLY_RECONCILE"].includes(phase) && ID.test(next.nonce ?? "") &&
+      operation.schema === "LK_CASE_LIST_MONTHLY_OPERATION_V1" && operation.companyId === queue.companyId && operation.jobId === queue.jobId && operation.queueId === queueId && operation.caseId === a.sourceCaseId &&
+      operation.status === "awaiting_continuation" && operation.phaseState === "ready" && operation.phase === phase && operation.phaseNonce === next.nonce &&
+      operation.queueFingerprint === fingerprint(queue) && operation.continuationHash === next.continuationHash && operation.proofStage === next.proofStage && operation.proofHash === next.proofHash &&
+      (phase === "MONTHLY_PREPARE" ? next.proofStage === "SOURCE_MANUAL_OBSERVED" : PREVIOUS_PROOF[phase] === next.proofStage) && HASH.test(next.proofHash ?? "") &&
+      next.continuationHash === phaseHash(queueId, queue, phase, next.nonce, next.proofStage, next.proofHash), "KNOWN_MANUAL_CONTINUATION_BINDING_REQUIRED");
+    need(!records.UNKNOWN && !records.DEFERRED && !(phase === "MONTHLY_APPLY" && records.MONTHLY_WRITE_STARTED), "UNKNOWN_OPERATION_OWNER_RECONCILIATION_REQUIRED");
+    const payOffer = object(object(records.SOURCE_MANUAL_OBSERVED?.payload).assignment?.publicPayOffer) as PayOffer;
+    assertManualMonthlyProof(queueId, queue, payOffer, records, spreadsheetId, phase !== "MONTHLY_PREPARE");
+    need(operation.publicPayOfferHash === hashCaseList(payOffer) && records[next.proofStage]?.payloadHash === next.proofHash, "MANUAL_CONTINUATION_PROOF_CHANGED");
+    return phase;
+  }
   need(next.schema === PHASE_SCHEMA && Object.hasOwn(PHASES, phase) && phase !== "SOURCE_PREPARE" && ID.test(next.nonce ?? "") &&
     operation.schema === "LK_CASE_LIST_MONTHLY_OPERATION_V1" && operation.companyId === queue.companyId && operation.jobId === queue.jobId && operation.queueId === queueId && operation.caseId === a.sourceCaseId &&
     operation.status === "awaiting_continuation" && operation.phaseState === "ready" && operation.phase === phase && operation.phaseNonce === next.nonce &&
@@ -278,7 +339,7 @@ export function assertKnownCaseListContinuation(queueId: string, queue: Data, op
 }
 
 async function continuationRecords(tx: Tx, operationRef: Ref): Promise<Record<string, Data | undefined>> {
-  const stages = ["SOURCE_INTENT", "SOURCE_DISPATCHED", "SOURCE_PROJECTED", "INTENT", "MONTHLY_DISPATCHED", "SOURCE_UNKNOWN", "UNKNOWN", "SOURCE_DEFERRED", "DEFERRED", "SOURCE_WRITE_STARTED", "MONTHLY_WRITE_STARTED", "ACCEPTED"];
+  const stages = ["SOURCE_MANUAL_OBSERVED", "SOURCE_INTENT", "SOURCE_DISPATCHED", "SOURCE_PROJECTED", "INTENT", "MONTHLY_DISPATCHED", "SOURCE_UNKNOWN", "UNKNOWN", "SOURCE_DEFERRED", "DEFERRED", "SOURCE_WRITE_STARTED", "MONTHLY_WRITE_STARTED", "ACCEPTED"];
   const snapshots = await Promise.all(stages.map(stage => tx.get(operationRef.collection("events").doc(stage))));
   return Object.fromEntries(stages.map((stage, index) => [stage, snapshots[index]!.data()]));
 }
@@ -309,7 +370,7 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
     const [queueSnap, jobSnap, configSnap, approvalSnap, leaseSnap, operationSnap] = await Promise.all([
       tx.get(queueRef), tx.get(jobRef), tx.get(configRef), tx.get(approvalRef), tx.get(syncLockRef), tx.get(operationRef),
     ]);
-    const queue = queueSnap.data(), job = jobSnap.data(), currentConfig = configSnap.data(), approval = approvalSnap.data();
+    const queue = queueSnap.data(), job = jobSnap.data(), currentConfig = configSnap.data(), approval = isManual(object(queueSnap.data()?.caseListAssignment)) ? operationSnap.data()?.manualConditions : approvalSnap.data();
     need(queue && job && currentConfig && approval && queue.companyId === initial!.companyId && queue.jobId === initial!.jobId, "TRUSTED_DOCUMENT_MISSING");
     need(ID.test(queue.actorStaffId ?? "") && ID.test(queue.actorUid ?? "") && validDate(queue.dateKey), "QUEUE_ACTOR_INVALID");
     const [staffSnap, daySnap, identitySnap] = await Promise.all([
@@ -318,7 +379,7 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
       tx.get(db.collection("authIdentities").doc(queue.actorUid)),
     ]);
     const staff = staffSnap.data(), dayLock = daySnap.data(), identity = identitySnap.data();
-    need(staff && dayLock && (!identitySnap.exists || identity?.active === true && identity.companyId === queue.companyId && identity.staffId === queue.actorStaffId), "ACTOR_IDENTITY_REVOKED");
+    need(staff && dayLock && (!identitySnap.exists || identity?.active === true && identity.companyId === queue.companyId && (isManual(object(queue.caseListAssignment)) || identity.staffId === queue.actorStaffId)), "ACTOR_IDENTITY_REVOKED");
     const checked = assertCaseListMonthlyAuthority(queueRef.id, queue, job, staff, dayLock, currentConfig, approval, !!owner);
     if (requireClaim) {
       const lease = leaseSnap.data(), operation = operationSnap.data();
@@ -472,6 +533,14 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
     let result: CoreResult;
     if (owner) {
       const events = await readEvents(queueRef.id);
+      if (isManual(binding.assignment)) {
+        const records = Object.fromEntries(events.map(payload => [payload.stage, { companyId: binding.queue.companyId, queueId: queueRef.id, payload, payloadHash: hashCaseList(payload) }]));
+        checkedManualObservation(queueRef.id, binding.queue, binding.payOffer, records, spreadsheetId);
+        const intent = events.find(event => event.stage === "INTENT"), started = events.find(event => event.stage === "MONTHLY_WRITE_STARTED");
+        if (!intent || !started) { await hold("OWNER_RESUME_REQUIRED"); return { status: "OWNER_RESUME_REQUIRED", snapshotReads, nativeBatches }; }
+        assertManualMonthlyProof(queueRef.id, binding.queue, binding.payOffer, records, spreadsheetId, true);
+        result = await core.reconcile(request);
+      } else {
       const sourceIntent = events.find(event => event.stage === "SOURCE_INTENT");
       need(sourceIntent && sourceIntent.intentHash === normalizedHash(sourceIntent, "intentHash") && sourceIntent.assignmentHash === hashCaseList(nativeAssignment(binding.assignment, binding.payOffer)), "OWNER_SOURCE_INTENT_INVALID");
       const before = sourceIntent.sourceBefore, after = sourceIntent.expectedSourceAfter;
@@ -490,6 +559,7 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
         assertCaseListMonthlyProofChain(queueRef.id, current.queue, current.payOffer, records, spreadsheetId, true, true);
       });
       result = await core.reconcile(request);
+      }
     } else {
       result = await core[PHASES[phase].method](request);
       if (PHASES[phase].next && PHASES[phase].success.includes(result.status)) {
@@ -605,6 +675,101 @@ export async function selectCaseListMonthlyTransfer(queueRef: Ref, actorUid: str
     tx.set(queueRef, { status: "pending", retryAt: null, errorType: FieldValue.delete(), errorMessage: FieldValue.delete(), caseListMonthlyReason: FieldValue.delete(), updatedAt: Timestamp.now() }, { merge: true });
     tx.set(auditRef, { companyId: queue.companyId, actorUid, action: "case-list.monthly.select", queueId: queueRef.id, caseId: a.sourceCaseId, clientNameUpConfirmed: true, reviewKey, createdAt: Timestamp.now() });
     return { status: "OWNER_TRANSFER_SELECTED", selected: true, nativeBatches: 0 };
+  });
+}
+
+/** Explicit executive selection for a Source C name already entered by the
+ * owner. This only registers trusted metadata; Google writes stay in the
+ * existing MONTHLY_* worker/adapter and Source C is never written here. */
+export async function selectCaseListManualMonthlyTransfer(companyId: string, actorUid: string, token: Data, input: Data): Promise<Data> {
+  assertExecutive(token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");
+  need(ID.test(companyId) && ID.test(actorUid) && token.companyId === companyId && (token.uid ?? token.sub) === actorUid, "MANUAL_OWNER_IDENTITY_INVALID");
+  need(ID.test(input.jobId ?? "") && HASH.test(input.observationHash ?? "") && HASH.test(input.expectedSourceRevision ?? "") && Number.isSafeInteger(input.expectedJobRevision) && input.expectedJobRevision >= 1 && input.clientNameUpConfirmed === true, "MANUAL_SELECTION_INPUT_INVALID");
+  const confirmation = object(input.manualConfirmation), confirmedFields = object(confirmation.confirmedFields), payOffer = object(confirmation.payOffer) as PayOffer;
+  need(canonical(confirmedFields) === canonical({ arrival: true, execution: true, headcount: true, dateMode: true, payOffer: true }) &&
+    Number.isSafeInteger(payOffer.dailyWageJPY) && payOffer.dailyWageJPY > 0 && payOffer.dailyWageJPY <= 1_000_000 && payOffer.travelExpenses === "全額支給" && payOffer.communicationExpenses === "全額支給", "MANUAL_CONDITIONS_REQUIRED");
+  need((await getProductionOperationalState(companyId)).operational, "GLOBAL_OPERATION_STOPPED");
+  const requestHash = hashCaseList({ companyId, actorUid, jobId: input.jobId, observationHash: input.observationHash, expectedJobRevision: input.expectedJobRevision, expectedSourceRevision: input.expectedSourceRevision, clientNameUpConfirmed: true, manualConfirmation: confirmation });
+  const queueId = "manual_" + sha256(companyId + "|" + input.jobId + "|" + input.observationHash), queueRef = db.collection("sheetSyncQueue").doc(queueId);
+  const operationRef = db.collection("caseListMonthlyOperations").doc(sha256(companyId + "|" + queueId));
+  const jobRef = db.collection("jobs").doc(input.jobId), observationRef = db.collection("caseListManualObservations").doc(input.jobId), configRef = db.collection("sheetImportConfigs").doc(companyId), syncRef = db.collection("caseListSyncLocks").doc(companyId);
+  const [initialJob, initialObservation, initialOperation, initialQueue] = await Promise.all([jobRef.get(), observationRef.get(), operationRef.get(), queueRef.get()]);
+  if (initialQueue.exists || initialOperation.exists) {
+    need(initialQueue.data()?.companyId === companyId && initialQueue.data()?.jobId === input.jobId && initialOperation.data()?.manualSelectionRequestHash === requestHash && initialOperation.data()?.ownerTransferSelection?.selectedBy === actorUid, "MANUAL_SELECTION_ALREADY_REGISTERED");
+    return { status: "OWNER_TRANSFER_ALREADY_SELECTED", selected: true, queueId, nativeBatches: 0 };
+  }
+  const job = initialJob.data(), observed = initialObservation.data();
+  need(job && observed && job.companyId === companyId && observed.companyId === companyId && observed.jobId === input.jobId && observed.observationHash === input.observationHash &&
+    observed.schema === "LK_CASE_LIST_MANUAL_OBSERVATION_V1" && observed.state === "blocked_requires_owner_review" && observed.selected === false && ID.test(observed.staffId ?? "") &&
+    manualOwnerReviewCanProceed(observed.holdReasons), "MANUAL_OBSERVATION_NOT_READY");
+  need(job.revision === input.expectedJobRevision && job.caseId === observed.caseId && job.caseListSource?.sourceRevision === input.expectedSourceRevision && job.sourceMissing !== true && job.cancelled !== true && job.status === "assigned" && job.applicationUnconfirmed === true && job.assignmentUnresolved !== true && !job.assignmentSheetWrite &&
+    job.assignedStaffId === observed.staffId && job.assignedStaffName === observed.sourceStaffName && job.assignedUid == null && job.caseListManualPending?.observationHash === input.observationHash &&
+    job.caseListManualPending?.sourceRevision === input.expectedSourceRevision && job.caseListManualPending?.staffId === observed.staffId, "MANUAL_JOB_CHANGED");
+  const resolver = await loadResolver(companyId);
+  const snapshot = await readCaseListMonthlySnapshot(companyId, job.caseId, { includeDependencies: true, resolveStaff: resolver });
+  const spreadsheetId = snapshot.spreadsheetId, row = snapshot.source.rows.find(row => row.caseId === job.caseId);
+  need(snapshot.isolated === false && row && row.cells.length === 65 && snapshot.catalog && snapshot.catalog.sourceRevision === input.expectedSourceRevision && canonical(publicCaseListSource(snapshot.catalog)) === canonical(observed.source) &&
+    row.cells[2]?.userEnteredValue?.stringValue === observed.sourceStaffName && row.cells[2]?.effectiveValue?.stringValue === observed.sourceStaffName && row.staffIdentityVerified === true && row.staffId === observed.staffId && resolver(observed.sourceStaffName)?.staffId === observed.staffId &&
+    snapshot.source.headers[0] === "キャンセル" && row.cells[0]?.userEnteredValue?.boolValue === false && row.cells[63]?.userEnteredValue?.boolValue === false, "MANUAL_SOURCE_CHANGED");
+  const profileRef = db.collection("staffProfiles").doc(observed.staffId), staff = (await profileRef.get()).data();
+  need(staff && staff.companyId === companyId && staff.active === true && typeof staff.displayName === "string" && staff.displayName.trim() && staff.displayName === observed.canonicalStaffName, "MANUAL_STAFF_CHANGED");
+  const dateKey = String(observed.dateKey ?? ""), assignedRevision = input.expectedJobRevision + 1;
+  need(validDate(dateKey) && job.dateKey === dateKey && hashCaseList(row.cells.map(cell => ({ userEnteredValue: cell.userEnteredValue ?? {}, effectiveValue: cell.effectiveValue ?? {} }))) === observed.observedValuesHash, "MANUAL_SOURCE_CHANGED");
+  const conditionsBody = { schema: "LK_CASE_LIST_MANUAL_CONDITIONS_V1", companyId, jobId: input.jobId, queueId, actorUid, expectedSourceRevision: input.expectedSourceRevision, expectedJobRevision: input.expectedJobRevision,
+    staffId: observed.staffId, sourceStaffName: observed.sourceStaffName, canonicalStaffName: staff.displayName, observationHash: input.observationHash, confirmedFields, payOffer, selectedAt: Date.now() };
+  const ownerConditionsHash = hashCaseList(conditionsBody), manualConditions = { ...conditionsBody, ownerConditionsHash };
+  const a: Assignment = { schema: "LK_CASE_LIST_MANUAL_ASSIGN_V1", origin: "SOURCE_MANUAL", selectorUid: actorUid, canonicalStaffName: staff.displayName, observationHash: input.observationHash, ownerConditionsHash,
+    queueId, operationId: queueId, companyId, jobId: input.jobId, sourceCaseId: job.caseId, sourceRowRevision: snapshot.catalog.rowRevision, sourceLedgerRevision: snapshot.catalog.ledgerRevision, sourceRevision: snapshot.catalog.sourceRevision,
+    preMonthlyContentHash: caseListMonthlyContentHash(row.cells), expectedJobRevision: input.expectedJobRevision, assignedJobRevision: assignedRevision, staffId: observed.staffId, staffName: observed.sourceStaffName, dateKey };
+  const native = nativeAssignment(a, payOffer), sourceSnapshot = row.cells.map(cell => Object.fromEntries(["userEnteredValue", "note", "userEnteredFormat", "dataValidation", "textFormatRuns", "chipRuns"].filter(key => Object.hasOwn(cell, key)).map(key => [key, (cell as Data)[key]])));
+  const manualEvent: Data = { schema: "LK_SOURCE_MANUAL_OBSERVED_V1", stage: "SOURCE_MANUAL_OBSERVED", spreadsheetId, operationId: queueId, caseId: a.sourceCaseId,
+    assignment: native, assignmentHash: hashCaseList(native), preCatalog: snapshot.catalog, postCatalog: snapshot.catalog, preMonthlyContentHash: a.preMonthlyContentHash, postMonthlyContentHash: a.preMonthlyContentHash,
+    sourceSnapshot, dependencyHash: snapshot.dependencyHash, observationHash: a.observationHash, ownerConditionsHash, createdAt: Date.now() };
+  manualEvent.observationProofHash = hashCaseList({ ...manualEvent, createdAt: 0 });
+  const now = Timestamp.now(), nonce = randomUUID(), proofHash = hashCaseList(manualEvent), queue: Data = { companyId, jobId: input.jobId, operation: "case_list.assign", actorUid, actorStaffId: a.staffId, dateKey,
+    updates: { staffName: a.staffName }, expected: { staffName: { mode: "equals", value: a.staffName } }, styles: {}, idempotencyKey: `case_list.assign:${input.jobId}:${queueId}`, caseListAssignment: a,
+    status: "pending", attempts: 0, retryAt: null, writeVerificationRequired: false, createdAt: now, updatedAt: now };
+  const continuationHash = phaseHash(queueId, queue, "MONTHLY_PREPARE", nonce, "SOURCE_MANUAL_OBSERVED", proofHash), phaseData = { schema: PHASE_SCHEMA, phase: "MONTHLY_PREPARE", nonce, proofStage: "SOURCE_MANUAL_OBSERVED", proofHash, continuationHash };
+  queue.caseListPhase = phaseData;
+  const selection = { schema: "LK_OWNER_MONTHLY_TRANSFER_V1", companyId, jobId: input.jobId, operationId: queueId, caseId: a.sourceCaseId, selected: true, clientNameUpConfirmed: true, sourceControlHeader: "キャンセル",
+    selectedBy: actorUid, selectedAt: conditionsBody.selectedAt, reviewKey: continuationHash, queueFingerprint: fingerprint(queue), assignmentHash: hashCaseList(native), sourceContentHash: a.preMonthlyContentHash, sourceRevision: a.sourceRevision };
+  const operation: Data = { schema: "LK_CASE_LIST_MONTHLY_OPERATION_V1", companyId, jobId: input.jobId, queueId, caseId: a.sourceCaseId, status: "awaiting_continuation", phaseState: "ready", phase: "MONTHLY_PREPARE", phaseNonce: nonce,
+    proofStage: "SOURCE_MANUAL_OBSERVED", proofHash, continuationHash, queueFingerprint: fingerprint(queue), publicPayOfferHash: hashCaseList(payOffer), manualConditions, manualSelectionRequestHash: requestHash, ownerTransferSelection: selection, createdAt: now, updatedAt: now };
+  const records = { SOURCE_MANUAL_OBSERVED: { companyId, queueId, payload: manualEvent, payloadHash: proofHash } };
+  assertKnownCaseListContinuation(queueId, queue, operation, records, spreadsheetId);
+  // Preview invokes only the same controller's validations; no mutation
+  // callback or journal persistence is supplied or reachable here.
+  const previewCore = (controller as unknown as { create(services: Data): { preview(request: Data): Promise<CoreResult> } }).create({ spreadsheetId, sha256, now: () => Date.now(), authorize: async () => {}, withLock: async (fn: () => Promise<unknown>) => fn(), readSnapshot: async () => snapshot,
+    readEvents: async () => [manualEvent], appendEvent: async () => stop("MANUAL_PREVIEW_JOURNAL_WRITE_FORBIDDEN"), applySourceAssignment: async () => stop("MANUAL_PREVIEW_GOOGLE_WRITE_FORBIDDEN"), applyMonthly: async () => stop("MANUAL_PREVIEW_GOOGLE_WRITE_FORBIDDEN"), resolveAssignment: async () => native, authorizeMonthlyTransfer: async () => selection });
+  const preview = await previewCore.preview({ operationId: queueId, caseId: a.sourceCaseId });
+  need(preview.status === "MONTHLY_PREVIEW_READY", "MANUAL_MONTHLY_PREVIEW_REQUIRED");
+  need((await getProductionOperationalState(companyId)).operational, "GLOBAL_OPERATION_STOPPED");
+  const dayRef = db.collection("staffDayLocks").doc(`${companyId}_${a.staffId}_${dateKey}`), auditRef = db.collection("auditLogs").doc();
+  return db.runTransaction(async tx => {
+    const [jobSnap, observationSnap, configSnap, profileSnap, daySnap, queueSnap, operationSnap, leaseSnap] = await Promise.all([tx.get(jobRef), tx.get(observationRef), tx.get(configRef), tx.get(profileRef), tx.get(dayRef), tx.get(queueRef), tx.get(operationRef), tx.get(syncRef)]);
+    const currentJob = jobSnap.data(), currentObservation = observationSnap.data(), config = configSnap.data(), currentStaff = profileSnap.data(), day = daySnap.data();
+    if (queueSnap.exists || operationSnap.exists) {
+      need(queueSnap.data()?.companyId === companyId && queueSnap.data()?.jobId === input.jobId && operationSnap.data()?.manualSelectionRequestHash === requestHash, "MANUAL_SELECTION_ALREADY_REGISTERED");
+      return { status: "OWNER_TRANSFER_ALREADY_SELECTED", selected: true, queueId, nativeBatches: 0 };
+    }
+    need(currentJob && currentObservation && currentStaff && config && canonical(currentJob) === canonical(job) && canonical(currentObservation) === canonical(observed) && canonical(currentStaff) === canonical(staff), "MANUAL_SELECTION_CHANGED");
+    need(config.companyId === companyId && config.caseListEnabled === true && config.caseListAssignmentsEnabled === true && configuredCaseListSource(config.spreadsheetId).spreadsheetId === spreadsheetId, "CASE_LIST_WRITER_DISABLED");
+    need(!(leaseSnap.data()?.activeUntil instanceof Timestamp && leaseSnap.data()!.activeUntil.toMillis() > Date.now()), "OWNER_TRANSFER_LEASE_ACTIVE");
+    need(!day || day.companyId === companyId && day.staffId === a.staffId && day.dateKey === dateKey, "MANUAL_DAY_LOCK_IDENTITY_CHANGED");
+    need(day && day.active === true && day.jobId === input.jobId && day.companyId === companyId && day.staffId === a.staffId && day.dateKey === dateKey, "MANUAL_STAFF_DAY_ALREADY_ASSIGNED");
+    const nextJob: Data = { ...currentJob, status: "assigned", assignedStaffId: a.staffId, assignedStaffName: a.staffName, assignedUid: null, assignedAt: now, dateKey, revision: assignedRevision, basePay: payOffer.dailyWageJPY, publicPayOffer: payOffer,
+      applicationUnconfirmed: true, assignmentUnresolved: false, sourceReady: false, publishable: false, recruitmentStopped: true, caseListManualSelection: { queueId, ownerConditionsHash, observationHash: a.observationHash }, updatedAt: now };
+    nextJob.assignmentSheetWrite = { operation: "case_list.assign", queueId, sourceRevision: a.sourceRevision, assignedJobRevision: assignedRevision, identity: cancellationSheetWriteIdentity(nextJob), pending: true };
+    const dayLock = { companyId, staffId: a.staffId, jobId: input.jobId, dateKey, active: true, updatedAt: now };
+    assertCaseListMonthlyAuthority(queueId, queue, nextJob, currentStaff, dayLock, config, manualConditions);
+    tx.update(jobRef, nextJob);
+    tx.set(dayRef, dayLock);
+    tx.create(queueRef, queue);
+    tx.create(operationRef, operation);
+    tx.create(operationRef.collection("events").doc("SOURCE_MANUAL_OBSERVED"), { ...records.SOURCE_MANUAL_OBSERVED, createdAt: now });
+    tx.set(observationRef, { ...currentObservation, state: "selected", selected: true, clientNameUpConfirmed: true, queueId, selectedBy: actorUid, selectedAt: now, ownerConditionsHash });
+    tx.set(auditRef, { companyId, actorUid, action: "case-list.manual.monthly.select", jobId: input.jobId, queueId, observationHash: input.observationHash, clientNameUpConfirmed: true, createdAt: now });
+    return { status: "OWNER_TRANSFER_SELECTED", selected: true, queueId, nativeBatches: 0 };
   });
 }
 

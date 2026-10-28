@@ -1,0 +1,6 @@
+.issue-list article.manual-source-transfer-card{flex-wrap:wrap}
+.manual-source-transfer-review{flex:1 0 100%;min-width:0;max-width:100%;border-top:1px solid #eadfe4;padding-top:.75rem}
+.manual-source-transfer-review label{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;min-height:44px;margin:.5rem 0}
+.manual-source-transfer-review input[type=checkbox]{width:22px;height:22px;flex:0 0 22px}
+.manual-source-transfer-review input[type=number]{width:12rem;max-width:100%;box-sizing:border-box}
+.manual-source-transfer-review button{white-space:normal;overflow-wrap:anywhere;max-width:100%;min-height:44px}

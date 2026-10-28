@@ -32,6 +32,27 @@ async function accepted(options={}){x.reset();const f=x.fixture(),before=Array.f
  const docs=x.getDocuments(),op=require('node:crypto').createHash('sha256').update(f.companyId+'|'+f.queueId).digest('hex');
  docs.set('jobs/'+f.jobId,job);docs.set('sheetImportConfigs/'+f.companyId,records.config);docs.set('caseListSheetRefs/'+f.jobId,records.privateRef);docs.set('sheetSyncQueue/'+f.queueId,records.queue);docs.set('caseListMonthlyOperations/'+op,records.operation);for(const [stage,key]of [['ACCEPTED','accepted'],['INTENT','intent'],['SOURCE_INTENT','sourceIntent']])docs.set('caseListMonthlyOperations/'+op+'/events/'+stage,records[key]);
  return {h:{f},job,records,docs};}
+async function acceptedManual(){
+ const f=await accepted(),hash=x.helper.hashCaseList,q=f.records.queue,a=q.caseListAssignment,ack=f.records.accepted.payload.ack,intent=f.records.intent.payload;
+ a.schema='LK_CASE_LIST_MANUAL_ASSIGN_V1';a.origin='SOURCE_MANUAL';a.canonicalStaffName=a.staffName;a.observationHash=hash('manual-import');a.ownerConditionsHash=hash('manual-conditions');a.selectorUid='manual-owner';q.actorUid=a.selectorUid;
+ const snapshot=x.copy(f.records.sourceIntent.payload.expectedSourceAfter);snapshot[0]={userEnteredValue:{boolValue:false}};snapshot[63]={userEnteredValue:{boolValue:false}};
+ a.preMonthlyContentHash=hash(snapshot);ack.postCatalog=x.copy(ack.preCatalog);ack.preMonthlyContentHash=a.preMonthlyContentHash;ack.postMonthlyContentHash=a.preMonthlyContentHash;
+ const assignment={schema:a.schema,authority:'SOURCE_MANUAL',queueId:a.queueId,operationId:a.operationId,companyId:a.companyId,jobId:a.jobId,caseId:a.sourceCaseId,staffId:a.staffId,staffName:a.staffName,dateKey:a.dateKey,assignedJobRevision:a.assignedJobRevision,preCatalog:{rowRevision:a.sourceRowRevision,ledgerRevision:a.sourceLedgerRevision,sourceRevision:a.sourceRevision},preMonthlyContentHash:a.preMonthlyContentHash,publicPayOffer:f.h.f.pay,canonicalStaffName:a.canonicalStaffName,observationHash:a.observationHash,ownerConditionsHash:a.ownerConditionsHash};
+ const observed={schema:'LK_SOURCE_MANUAL_OBSERVED_V1',stage:'SOURCE_MANUAL_OBSERVED',spreadsheetId:f.h.f.book,operationId:a.queueId,caseId:a.sourceCaseId,assignment,assignmentHash:hash(assignment),preCatalog:x.copy(ack.preCatalog),postCatalog:x.copy(ack.preCatalog),preMonthlyContentHash:a.preMonthlyContentHash,postMonthlyContentHash:a.preMonthlyContentHash,sourceSnapshot:x.copy(snapshot),dependencyHash:hash('manual-dependencies'),observationHash:a.observationHash,ownerConditionsHash:a.ownerConditionsHash,createdAt:123};
+ observed.observationProofHash=hash({...observed,createdAt:0});
+ intent.assignment=x.copy(assignment);intent.assignmentHash=hash(assignment);intent.preCatalog=x.copy(ack.preCatalog);intent.postCatalog=x.copy(ack.postCatalog);intent.sourceContentHash=a.preMonthlyContentHash;intent.preMonthlyContentHash=a.preMonthlyContentHash;intent.postMonthlyContentHash=a.preMonthlyContentHash;intent.sourceSnapshot=x.copy(snapshot);intent.dependencyHash=observed.dependencyHash;
+ const fingerprint=hash({companyId:q.companyId??null,jobId:q.jobId??null,operation:q.operation??null,dateKey:q.dateKey??null,actorUid:q.actorUid??null,actorStaffId:q.actorStaffId??null,idempotencyKey:q.idempotencyKey??null,updates:q.updates??{},expected:q.expected??{},styles:q.styles??{},caseListAssignment:q.caseListAssignment??null});
+ intent.ownerTransfer={schema:'LK_OWNER_MONTHLY_TRANSFER_V1',selected:true,clientNameUpConfirmed:true,sourceControlHeader:'キャンセル',operationId:a.queueId,caseId:a.sourceCaseId,queueFingerprint:fingerprint,assignmentHash:observed.assignmentHash,sourceContentHash:a.preMonthlyContentHash,sourceRevision:a.sourceRevision,selectedBy:a.selectorUid,selectedAt:124};
+ f.records.accepted.payload.sourceContentHash=a.preMonthlyContentHash;f.records.accepted.payload.assignmentHash=observed.assignmentHash;
+ x.rehashDocuments({ack,accepted:f.records.accepted,intentDocument:f.records.intent});
+ const ackHash=hash(ack);f.records.privateRef.acceptedAckHash=ackHash;f.records.operation.acceptedAckHash=ackHash;q.caseListMonthlyAckHash=ackHash;
+ f.job.caseListSource=x.helper.publicCaseListSource(ack.postCatalog);f.job.assignmentSheetWrite.nativeAck=x.worker.publicCaseListMonthlyAck(ack,f.h.f.book);
+ delete f.records.sourceIntent;f.records.manualObserved={companyId:f.h.f.companyId,queueId:a.queueId,payload:observed,payloadHash:hash(observed)};
+ const op=require('node:crypto').createHash('sha256').update(f.h.f.companyId+'|'+a.queueId).digest('hex');
+ f.docs.delete('caseListMonthlyOperations/'+op+'/events/SOURCE_INTENT');f.docs.set('caseListMonthlyOperations/'+op+'/events/SOURCE_MANUAL_OBSERVED',f.records.manualObserved);
+ return f;
+}
+function rehashManual(f){const p=f.records.manualObserved.payload,u={...p,createdAt:0};delete u.observationProofHash;p.observationProofHash=x.helper.hashCaseList(u);f.records.manualObserved.payloadHash=x.helper.hashCaseList(p);}
 function check(f){return helper.assertCaseListPrivateSheetRef(f.h.f.companyId,f.h.f.jobId,f.job,f.records);}
 function sheets(ref,options={}){let calls=0;const values=options.values??[['連絡_固定案件ID'],[],[],[ref.caseId]];native={spreadsheets:{get:async request=>{calls++;assert.equal(request.spreadsheetId,ref.spreadsheetId);return {data:{spreadsheetId:options.book??ref.spreadsheetId,properties:{timeZone:options.timeZone??'Asia/Tokyo'},sheets:[{properties:{sheetId:ref.sheetId,title:ref.sheetName,gridProperties:{rowCount:8,columnCount:options.width??(ref.caseIdColumn==='BD'?56:55)}}}]}};},values:{get:async request=>{calls++;assert.equal(request.range,`'${ref.sheetName}'!${ref.caseIdColumn}1:${ref.caseIdColumn}8`);return {data:{values}};}}}};return ()=>calls;}
 
@@ -40,6 +61,31 @@ const adminRequest=f=>({auth:{uid:'owner',token:{role:'admin',companyId:f.h.f.co
 function rehashSource(f,internal=true){const p=f.records.sourceIntent.payload;if(internal){const u={...p,createdAt:0};delete u.intentHash;p.intentHash=x.helper.hashCaseList(u);}f.records.sourceIntent.payloadHash=x.helper.hashCaseList(p);}
 
 (async()=>{
+ await test('manual private helper accepts unchanged Source lineage without a counterfeit Source intent',async()=>{const f=await acceptedManual(),ref=check(f),resolved=await helper.resolveCaseListPrivateSheetRef(f.h.f.companyId,f.h.f.jobId,f.job);assert.equal(ref.caseIdColumn,'BC');assert.equal(JSON.stringify(resolved),JSON.stringify(ref));assert.equal(f.records.sourceIntent,undefined);assert(!JSON.stringify(f.job).includes(f.h.f.book));});
+ await test('manual finance hydration uses accepted manual proof and existing private financial observation',async()=>{const f=await acceptedManual();seedFinance(f);const result=await helper.resolveCaseListPrivateFinancialJob(f.h.f.companyId,f.h.f.jobId,f.job);assert.equal(result.basePay,10000);assert.equal(result.expenses.purchase8,0);assert.equal(result.expenses.transportation,null);assert.equal(result.sheetRef.spreadsheetId,f.h.f.book);assert.equal(f.job.expenses,undefined);});
+ await test('manual private helper refuses absent observation instead of falling back to Crew source proof',async()=>{const f=await acceptedManual();delete f.records.manualObserved;assert.throws(()=>check(f),e=>e.code==='failed-precondition');const op=require('node:crypto').createHash('sha256').update(f.h.f.companyId+'|'+f.h.f.queueId).digest('hex');f.docs.delete('caseListMonthlyOperations/'+op+'/events/SOURCE_MANUAL_OBSERVED');await assert.rejects(helper.resolveCaseListPrivateSheetRef(f.h.f.companyId,f.h.f.jobId,f.job),e=>e.code==='failed-precondition');});
+ for(const [name,mutate,rehash]of [
+ ['wrong company envelope',f=>f.records.manualObserved.companyId='foreign',false],
+ ['wrong queue envelope',f=>f.records.manualObserved.queueId='foreign',false],
+ ['wrong normalized proof hash',f=>f.records.manualObserved.payload.observationProofHash='0'.repeat(64),false],
+ ['changed observed Source snapshot',f=>f.records.manualObserved.payload.sourceSnapshot[4]={note:'changed'},true],
+ ['changed observed Source pre catalog',f=>f.records.manualObserved.payload.preCatalog.rowRevision='0'.repeat(64),true],
+ ['changed observed Source post catalog',f=>f.records.manualObserved.payload.postCatalog.rowRevision='0'.repeat(64),true],
+ ['changed owner conditions',f=>f.records.manualObserved.payload.ownerConditionsHash='0'.repeat(64),true],
+ ['changed import observation',f=>f.records.manualObserved.payload.observationHash='0'.repeat(64),true],
+ ['changed dependency hash',f=>f.records.manualObserved.payload.dependencyHash='0'.repeat(64),true],
+ ['wrong Source fixed ID cell',f=>f.records.manualObserved.payload.sourceSnapshot[60]={userEnteredValue:{stringValue:'other'}},true],
+ ['cancelled Source A checkbox',f=>f.records.manualObserved.payload.sourceSnapshot[0]={userEnteredValue:{boolValue:true}},true],
+ ['cancelled Source BL flag',f=>f.records.manualObserved.payload.sourceSnapshot[63]={userEnteredValue:{boolValue:true}},true],
+ ['effective values in writable snapshot',f=>f.records.manualObserved.payload.sourceSnapshot[3]={effectiveValue:{stringValue:'private'}},true],
+ ['wrong stable staff ID',f=>f.records.manualObserved.payload.assignment.staffId='other',true],
+ ['manual intent missing authority',f=>delete f.records.intent.payload.assignment.authority,false],
+ ['mixed Crew assignment schema',f=>f.records.queue.caseListAssignment.schema='LK_CASE_LIST_ASSIGN_V1',false],
+ ['missing native manual origin',f=>delete f.records.queue.caseListAssignment.origin,false],
+ ['owner name-up not confirmed',f=>{f.records.intent.payload.ownerTransfer.clientNameUpConfirmed=false;x.rehashDocuments({ack:f.records.accepted.payload.ack,accepted:f.records.accepted,intentDocument:f.records.intent});},false],
+ ['counterfeit Crew Source INTENT',f=>f.records.sourceIntent={companyId:f.h.f.companyId,queueId:f.h.f.queueId,payload:{}},false],
+ ])await test('manual private hydration holds '+name,async()=>{const f=await acceptedManual();mutate(f);if(rehash)rehashManual(f);assert.throws(()=>check(f),e=>e.code==='failed-precondition');});
+ for(const stage of ['SOURCE_PROJECTED','SOURCE_WRITE_STARTED','SOURCE_DISPATCHED','SOURCE_UNKNOWN','SOURCE_DEFERRED'])await test('manual read path rejects counterfeit '+stage+' even without Source intent',async()=>{const f=await acceptedManual(),record={companyId:f.h.f.companyId,queueId:f.h.f.queueId,payload:{stage}};f.records.sourceWriteRecords={[stage]:record};assert.throws(()=>check(f),e=>e.code==='failed-precondition');const op=require('node:crypto').createHash('sha256').update(f.h.f.companyId+'|'+f.h.f.queueId).digest('hex');f.docs.set('caseListMonthlyOperations/'+op+'/events/'+stage,record);await assert.rejects(helper.resolveCaseListPrivateSheetRef(f.h.f.companyId,f.h.f.jobId,f.job),e=>e.code==='failed-precondition');});
  await test('November private helper binds actual worker ACK guard and read-only resolver',async()=>{const f=await accepted(),ref=check(f),resolved=await helper.resolveCaseListPrivateSheetRef(f.h.f.companyId,f.h.f.jobId,f.job);assert.equal(ref.caseIdColumn,'BC');assert.equal(ref.spreadsheetId,f.h.f.book);assert.equal(JSON.stringify(resolved),JSON.stringify(ref));});
  await test('completed December helper binds BD and locates current row without public book leakage',async()=>{const f=await accepted({december:true}),ref=check(f);assert.equal(ref.caseIdColumn,'BD');assert(!JSON.stringify(f.job).includes(f.h.f.book));sheets(ref);assert.equal((await helper.locateCaseListPrivateSheetRow(ref)).currentRow,4);});
  for(const [name,mutate]of [

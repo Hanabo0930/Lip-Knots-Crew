@@ -3,7 +3,7 @@ import { HttpsError } from "firebase-functions/v2/https";
 import { db } from "./firebase";
 import { createJobIdFromPersistedCaseId } from "./case-id";
 import { configuredCaseListSource, caseListBindingHash, canonical, hashCaseList } from "./case-list-source-core";
-import { assertCaseListMonthlyAck, publicCaseListMonthlyAck } from "./case-list-monthly-worker";
+import { assertCaseListMonthlyAck, assertCaseListMonthlyProofChain, publicCaseListMonthlyAck } from "./case-list-monthly-worker";
 import { createReadOnlySheetsClient } from "./sheet-reader";
 
 type Data = FirebaseFirestore.DocumentData;
@@ -11,9 +11,10 @@ export type CaseListPrivateSheetRef = {
   spreadsheetId: string; sheetId: number; sheetName: string; headerRow: 1;
   currentRow: number; caseId: string; caseIdColumn: "BC" | "BD"; bindingHash: string;
 };
-type PrivateRecords = { config: Data; privateRef: Data; operation: Data; queue: Data; accepted: Data; intent: Data; sourceIntent: Data };
+type PrivateRecords = { config: Data; privateRef: Data; operation: Data; queue: Data; accepted: Data; intent: Data; sourceIntent?: Data; manualObserved?: Data; sourceWriteRecords?: Record<string, Data> };
 const ID = /^[A-Za-z0-9_-]{1,200}$/;
 const HASH = /^[a-f0-9]{64}$/;
+const MANUAL_FORBIDDEN_SOURCE_STAGES = ["SOURCE_PROJECTED", "SOURCE_WRITE_STARTED", "SOURCE_DISPATCHED", "SOURCE_UNKNOWN", "SOURCE_DEFERRED"];
 function unavailable(reason: string): never {
   throw new HttpsError("failed-precondition", "原本との対応を確認できません。案件を再読込して確認してください。", { reason });
 }
@@ -26,7 +27,7 @@ export function assertCaseListPrivateSheetRef(companyId: string, jobId: string, 
   need(ID.test(companyId) && ID.test(jobId) && job.companyId === companyId && typeof job.caseId === "string" &&
     createJobIdFromPersistedCaseId(companyId, job.caseId) === jobId, "case_list_private_job_mismatch");
   const source = object(job.caseListSource), publicRef = object(job.sheetRef), write = object(job.assignmentSheetWrite), publicAck = object(write.nativeAck);
-  const { config, privateRef, operation, queue, accepted, intent, sourceIntent } = records;
+  const { config, privateRef, operation, queue, accepted, intent, sourceIntent, manualObserved } = records;
   need(config.companyId === companyId, "case_list_private_config_mismatch");
   let bookId: string;
   try { bookId = configuredCaseListSource(config.spreadsheetId).spreadsheetId; } catch { unavailable("case_list_private_book_unavailable"); }
@@ -37,11 +38,28 @@ export function assertCaseListPrivateSheetRef(companyId: string, jobId: string, 
     queue.caseListAssignment?.queueId === queueId && queue.caseListAssignment?.sourceCaseId === job.caseId &&
     operation.schema === "LK_CASE_LIST_MONTHLY_OPERATION_V1" && operation.companyId === companyId && operation.jobId === jobId &&
     operation.queueId === queueId && operation.caseId === job.caseId && operation.status === "completed", "case_list_private_operation_unconfirmed");
-  const fullAck = object(accepted.payload?.ack), ackHash = hashCaseList(fullAck), sourceIntentPayload = object(sourceIntent.payload);
-  const nativeAssignment = object(sourceIntentPayload.assignment);
+  const fullAck = object(accepted.payload?.ack), ackHash = hashCaseList(fullAck), sourceIntentPayload = object(sourceIntent?.payload);
+  const manual = queue.caseListAssignment?.origin === "SOURCE_MANUAL" || queue.caseListAssignment?.schema === "LK_CASE_LIST_MANUAL_ASSIGN_V1" || intent.payload?.assignment?.authority === "SOURCE_MANUAL";
+  const nativeAssignment = manual ? object(manualObserved?.payload?.assignment) : object(sourceIntentPayload.assignment);
+  if (manual) {
+    const observed = object(manualObserved?.payload), snapshot = observed.sourceSnapshot;
+    need(queue.caseListAssignment?.origin === "SOURCE_MANUAL" && queue.caseListAssignment.schema === "LK_CASE_LIST_MANUAL_ASSIGN_V1" &&
+      intent.payload?.assignment?.authority === "SOURCE_MANUAL" && intent.payload.assignment.schema === "LK_CASE_LIST_MANUAL_ASSIGN_V1" &&
+      Array.isArray(snapshot) && snapshot.length === 65 && snapshot.every(cell => cell && typeof cell === "object" && !Array.isArray(cell) && !Object.hasOwn(cell, "effectiveValue") && cell.$unknown !== true) &&
+      snapshot[60]?.userEnteredValue?.stringValue === job.caseId && snapshot[2]?.userEnteredValue?.stringValue === queue.caseListAssignment.staffName &&
+      snapshot[0]?.userEnteredValue?.boolValue === false && snapshot[63]?.userEnteredValue?.boolValue === false &&
+      nativeAssignment.publicPayOffer && typeof nativeAssignment.publicPayOffer === "object" && operation.publicPayOfferHash === hashCaseList(nativeAssignment.publicPayOffer), "case_list_private_manual_observation_mismatch");
+    try {
+      assertCaseListMonthlyProofChain(queueId, queue, nativeAssignment.publicPayOffer, {
+        SOURCE_MANUAL_OBSERVED: manualObserved, INTENT: intent, ACCEPTED: accepted,
+        ...(sourceIntent ? { SOURCE_INTENT: sourceIntent } : {}),
+        ...Object.fromEntries(MANUAL_FORBIDDEN_SOURCE_STAGES.filter(stage => records.sourceWriteRecords?.[stage]).map(stage => [stage, records.sourceWriteRecords![stage]])),
+      }, bookId, true, true);
+    } catch { unavailable("case_list_private_manual_observation_mismatch"); }
+  } else {
   const unhashedSourceIntent: Data = { ...sourceIntentPayload, createdAt: 0 }; delete unhashedSourceIntent.intentHash;
   const before = sourceIntentPayload.sourceBefore, after = sourceIntentPayload.expectedSourceAfter;
-  need(sourceIntent.companyId === companyId && sourceIntent.queueId === queueId && sourceIntent.payloadHash === hashCaseList(sourceIntentPayload) &&
+  need(sourceIntent && sourceIntent.companyId === companyId && sourceIntent.queueId === queueId && sourceIntent.payloadHash === hashCaseList(sourceIntentPayload) &&
     sourceIntentPayload.schema === "LK_SOURCE_ASSIGNMENT_INTENT_V1" && sourceIntentPayload.stage === "SOURCE_INTENT" &&
     sourceIntentPayload.spreadsheetId === bookId && sourceIntentPayload.operationId === queueId && sourceIntentPayload.caseId === job.caseId &&
     HASH.test(sourceIntentPayload.intentHash ?? "") && sourceIntentPayload.intentHash === hashCaseList(unhashedSourceIntent) &&
@@ -55,6 +73,7 @@ export function assertCaseListPrivateSheetRef(companyId: string, jobId: string, 
     sourceIntentPayload.assignmentHash === hashCaseList(nativeAssignment) && intent.payload?.assignmentHash === sourceIntentPayload.assignmentHash &&
     nativeAssignment.publicPayOffer && typeof nativeAssignment.publicPayOffer === "object" &&
     operation.publicPayOfferHash === hashCaseList(nativeAssignment.publicPayOffer), "case_list_private_source_intent_mismatch");
+  }
   need(HASH.test(privateRef.acceptedAckHash ?? "") && privateRef.companyId === companyId && privateRef.jobId === jobId &&
     privateRef.sourceBindingHash === sourceBinding && privateRef.acceptedAckHash === ackHash && operation.acceptedAckHash === ackHash &&
     queue.caseListMonthlyAckHash === ackHash, "case_list_private_ack_hash_mismatch");
@@ -82,13 +101,18 @@ async function readPrivateRecords(companyId: string, jobId: string, job: Data, t
   need(typeof queueId === "string" && ID.test(queueId), "case_list_private_queue_unavailable");
   const ref = db.collection("caseListMonthlyOperations").doc(operationId(companyId, queueId));
   const get = (document: FirebaseFirestore.DocumentReference) => tx ? tx.get(document) : document.get();
-  const [config, privateRef, operation, queue, accepted, intent, sourceIntent] = await Promise.all([
+  const [config, privateRef, operation, queue, accepted, intent, sourceIntent, manualObserved] = await Promise.all([
     get(db.collection("sheetImportConfigs").doc(companyId)), get(db.collection("caseListSheetRefs").doc(jobId)),
     get(ref), get(db.collection("sheetSyncQueue").doc(queueId)), get(ref.collection("events").doc("ACCEPTED")), get(ref.collection("events").doc("INTENT")),
-    get(ref.collection("events").doc("SOURCE_INTENT")),
+    get(ref.collection("events").doc("SOURCE_INTENT")), get(ref.collection("events").doc("SOURCE_MANUAL_OBSERVED")),
   ]);
-  need([config, privateRef, operation, queue, accepted, intent, sourceIntent].every(snapshot => snapshot.exists), "case_list_private_ref_unavailable");
-  return { config: config.data()!, privateRef: privateRef.data()!, operation: operation.data()!, queue: queue.data()!, accepted: accepted.data()!, intent: intent.data()!, sourceIntent: sourceIntent.data()! };
+  need([config, privateRef, operation, queue, accepted, intent].every(snapshot => snapshot.exists), "case_list_private_ref_unavailable");
+  const assignment = object(queue.data()?.caseListAssignment), manual = assignment.origin === "SOURCE_MANUAL" || assignment.schema === "LK_CASE_LIST_MANUAL_ASSIGN_V1" || intent.data()?.payload?.assignment?.authority === "SOURCE_MANUAL";
+  need(manual ? manualObserved.exists : sourceIntent.exists, "case_list_private_ref_unavailable");
+  const forbiddenSourceSnapshots = manual ? await Promise.all(MANUAL_FORBIDDEN_SOURCE_STAGES.map(stage => get(ref.collection("events").doc(stage)))) : [];
+  const sourceWriteRecords = Object.fromEntries(forbiddenSourceSnapshots.flatMap((snapshot, index) => snapshot.exists ? [[MANUAL_FORBIDDEN_SOURCE_STAGES[index]!, snapshot.data()!]] : []));
+  return { config: config.data()!, privateRef: privateRef.data()!, operation: operation.data()!, queue: queue.data()!, accepted: accepted.data()!, intent: intent.data()!,
+    ...(sourceIntent.exists ? { sourceIntent: sourceIntent.data()! } : {}), ...(manualObserved.exists ? { manualObserved: manualObserved.data()! } : {}), ...(manual ? { sourceWriteRecords } : {}) };
 }
 
 export async function resolveCaseListPrivateSheetRef(companyId: string, jobId: string, job: Data): Promise<CaseListPrivateSheetRef> {

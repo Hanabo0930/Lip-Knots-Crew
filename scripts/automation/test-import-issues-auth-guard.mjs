@@ -97,7 +97,8 @@ for(const [before,after]of [
  ['await assertProductionOperational(companyId);',''],
  ['if (data.operation === "case_list.assign" || !canManuallyRetrySheetWrite({','if (unchecked({'],
  ['writeVerificationRequired: data.writeVerificationRequired','writeVerificationRequired: false'],
-])reject('retrySheetWriteIssue',before,after);
+])
+reject('retrySheetWriteIssue',before,after);
 for(const [before,after]of [
  ['sourceWriteVerified: false','sourceWriteVerified: true'],
  ['data.acknowledgedBy === session.uid','true'],
@@ -157,6 +158,44 @@ for(const [before,after]of [
  ['selection.selected===true&&selection.clientNameUpConfirmed===true','true'],
  ['selection.sourceContentHash===contentHash(services,row.cells)','true'],
 ])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-monthly-controller.cjs'});
+// The manual-origin route must independently retain strict executive selection,
+// current pending identity and same-engine observation lineage.
+for(const [before,after]of [
+ ['clientNameUpConfirmed: z.literal(true),','clientNameUpConfirmed: z.boolean(),'],
+ ['observationHash: z.string().regex(/^[a-f0-9]{64}$/)','observationHash: z.string()'],
+ ['expectedJobRevision: z.number().int().min(1)','expectedJobRevision: z.number()'],
+ ['expectedSourceRevision: z.string().regex(/^[a-f0-9]{64}$/)','expectedSourceRevision: z.string()'],
+ ['arrival: z.literal(true), execution: z.literal(true), headcount: z.literal(true), dateMode: z.literal(true), payOffer: z.literal(true)','arrival: z.boolean(), execution: z.boolean(), headcount: z.boolean(), dateMode: z.boolean(), payOffer: z.boolean()'],
+ ['dailyWageJPY: z.number().int().min(1).max(1000000)','dailyWageJPY: z.number()'],
+ ['const manualInput = ManualSelectionSchema.parse(request.data);','const manualInput = request.data;'],
+ ['selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, manualInput)','selectCaseListManualMonthlyTransfer(request.data.companyId, session.uid, session.token, manualInput)'],
+ ['selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, manualInput)','selectCaseListManualMonthlyTransfer(companyId, request.data.uid, session.token, manualInput)'],
+ ['selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, manualInput)','selectCaseListManualMonthlyTransfer(companyId, session.uid, request.data.token, manualInput)'],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true});
+for(const [before,after]of [
+ ['token.companyId === companyId && (token.uid ?? token.sub) === actorUid','true'],
+ ['input.clientNameUpConfirmed === true','true'],
+ ['canonical(confirmedFields) === canonical({ arrival: true, execution: true, headcount: true, dateMode: true, payOffer: true })','true'],
+ ['observed.companyId === companyId && observed.jobId === input.jobId && observed.observationHash === input.observationHash','true'],
+ ['job.revision === input.expectedJobRevision','true'],
+ ['job.caseListManualPending?.observationHash === input.observationHash','true'],
+ ['job.caseListManualPending?.sourceRevision === input.expectedSourceRevision','true'],
+ ['row.staffIdentityVerified === true && row.staffId === observed.staffId','true'],
+ ['row.cells[0]?.userEnteredValue?.boolValue === false && row.cells[63]?.userEnteredValue?.boolValue === false','true'],
+ ['phaseHash(queueId, queue, "MONTHLY_PREPARE", nonce, "SOURCE_MANUAL_OBSERVED", proofHash)','phaseHash(queueId, queue, "SOURCE_APPLY", nonce, "SOURCE_MANUAL_OBSERVED", proofHash)'],
+ ['manualEvent.observationProofHash = hashCaseList({ ...manualEvent, createdAt: 0 });',''],
+ ['canonical(currentJob) === canonical(job) && canonical(currentObservation) === canonical(observed) && canonical(currentStaff) === canonical(staff)','true'],
+ ['day && day.active === true && day.jobId === input.jobId && day.companyId === companyId && day.staffId === a.staffId && day.dateKey === dateKey','true'],
+ ['assertCaseListMonthlyAuthority(queueId, queue, nextJob, currentStaff, dayLock, config, manualConditions);',''],
+ ['tx.create(queueRef, queue);','tx.set(queueRef, queue);'],
+ ['!Object.hasOwn(confirmation, "vacancy")','true'],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-monthly-worker'});
+for(const [before,after]of [
+ ['currentStaff.active !== true','false'],
+ ['currentStaff.displayName !== manualObservation.canonicalStaffName','false'],
+ ['old.assignmentSheetWrite?.queueId !== priorManual.queueId','false'],
+ ['manualPendingAssignmentFields(manualObservation)','manualPendingAssignmentFields(request.data)'],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-source'});
 reject('retrySheetWriteIssue','data.operation === "case_list.assign" || !canManuallyRetrySheetWrite({','!canManuallyRetrySheetWrite({');
 const allowed=JSON.parse(read('config/automation/staging-safety.json')).allowedFunctions;
 assert.ok(Object.keys(modules).every(n=>allowed.includes(n)));assert.ok(!allowed.includes('syncStaffDirectoryScheduled')&&!allowed.includes('syncShiftSheetsScheduled'));cases++;

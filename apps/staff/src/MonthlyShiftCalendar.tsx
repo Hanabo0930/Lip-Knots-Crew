@@ -18,7 +18,7 @@ export default function MonthlyShiftCalendar<T extends CalendarShift>({jobs,onSe
       <button className="secondary" onClick={()=>{setMonth(today.slice(0,7));setSelectedDay('');}}>今月</button>
     </div>
     <p>転記と照合が終わった確定シフトを表示します。確認待ちの応募と取消案件は含みません。</p>
-    <p className="muted">読み込んだシフトを表示しています。続きや過去のシフトは下の一覧から読み込めます。</p>
+    <p className="muted">読み込んだシフトを表示しています。今後の続きは下の一覧から読み込めます。過去のシフトは一覧で選択した案件を表示できます。</p>
     {state.error?<p role="alert">{state.error}</p>:state.value&&<>
       <table aria-labelledby={heading}><thead><tr>{['日','月','火','水','木','金','土'].map(day=><th scope="col" key={day}>{day}</th>)}</tr></thead>
         <tbody>{Array.from({length:state.value.days.length/7},(_,week)=><tr key={week}>{state.value!.days.slice(week*7,week*7+7).map((date,index)=>{

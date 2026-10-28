@@ -89,7 +89,15 @@ for (const moduleName of ['jobs', 'analytics']) {
       if(mode==='staff-inactive')test.records.get('staffProfiles/'+staffId).active=false;
       if(mode==='staff-active-missing')delete test.records.get('staffProfiles/'+staffId).active;
       if(mode==='date-missing')test.records.get('jobs/old-job').dateKey='';
-      if(['valid','missing-lock','inactive-lock','unassigned'].includes(mode)){await test.restore();assert.equal(test.records.get('jobs/old-job').status,mode==='unassigned'?'open':'assigned');if(mode!=='unassigned')assert.equal(test.records.get(lockPath).active,true);}
+      if(['valid','missing-lock','inactive-lock','unassigned'].includes(mode)){
+        const beforeLock=test.records.has(lockPath)?JSON.stringify(test.records.get(lockPath)):null;
+        await test.restore();const restored=test.records.get('jobs/old-job');
+        assert.equal(restored.status,mode==='unassigned'?'stopped':'assigned');
+        assert.equal(restored.publishable,false,'Restoring cancellation does not approve recruitment');
+        assert.equal(restored.recruitmentStopped,true,'Explicit publication is required before reopening');
+        if(mode!=='unassigned')assert.equal(test.records.get(lockPath).active,true);
+        else assert.equal(JSON.stringify(test.records.get(lockPath)),beforeLock,'Unassigned restore cannot reoccupy or release the historical staff day');
+      }
       else{await assert.rejects(test.restore(),{code:'failed-precondition'},mode);assert.equal(test.committed.length,0,mode);}
       passed++;
     }

@@ -11,8 +11,8 @@ export default function CaseListImportPanel({ functions, demo, onRefresh }: { fu
     if (!activeUser || busy) return;
     const current = () => auth?.currentUser === activeUser;
     if (action !== "preview" && !window.confirm(action === "assignments"
-      ? "案件リストからの応募・月別シフトへの連携を有効にします。募集開始は、案件ごとの社長確認が済んだ場合だけ行います。"
-      : "案件リストの連携を有効にし、アプリへ下書きとして取り込みます。既存の担当・シフト・手入力は保持します。")) return;
+      ? "応募・月別連携を有効にします。名前入力や応募だけでは月別へ移しません。クライアントへのネームアップ後、概要の「書戻しの確認」で社長が対象案件を選択した場合だけ月別へ転記します。"
+      : "案件リストを読み取り、未手配は下書きへ、照合できた手入力の手配は確認待ちへ取り込みます。既存の担当・シフト・手入力は保持し、この取込では原本を変更しません。")) return;
     setBusy(true); setMessage("");
     try {
       const response = await httpsCallable(functions, action === "preview" ? "previewShiftImport" : "syncShiftSheetsReadOnly")({
@@ -22,16 +22,18 @@ export default function CaseListImportPanel({ functions, demo, onRefresh }: { fu
       if (!current()) return;
       if (!result?.counts || !Array.isArray(result.rows)) throw new Error("読取結果を確認できません。もう一度確認してください。");
       setPreview(result);
-      setMessage(action === "preview" ? "原本の読取を確認しました。" : action === "assignments" ? "応募・月別連携を有効にしました。募集開始は案件ごとの確認後に行ってください。" : "下書きとして取り込みました。募集条件を確認してから公開してください。");
+      setMessage(action === "preview" ? "原本の読取を確認しました。" : action === "assignments" ? "応募・月別連携を有効にしました。月別転記はネームアップ後、概要の「書戻しの確認」で対象を選択してください。" : "案件を取り込みました。未手配は募集条件を確認し、手入力の手配はネームアップ後に対象を選択してください。");
       if (action !== "preview") await onRefresh(current);
     } catch (error) { if (current()) setMessage(error instanceof Error ? error.message : "案件リストを確認できません。"); }
     finally { if (current()) setBusy(false); }
   }
   return <section aria-label="案件リストの連携" aria-busy={busy}>
     <h3>案件リストから連携</h3>
-    <p>案件リストを下書きとして取り込み、条件を確認した案件を募集できます。既に担当が決まっている案件は保留します。</p>
+    <p>未手配は下書きへ、スタッフ名を照合できた手入力の手配は確認待ちへ取り込みます。照合できない担当や既存シフトとの重複は保留します。</p>
+    <p>名前入力・応募 → クライアントへネームアップ → 概要の「書戻しの確認」で対象を選択 → 月別へ転記・照合、の順です。取消チェックは転記選択には使いません。</p>
+    <p>対応範囲は2026年11月・12月の通常の単日1名枠です。複数日・グループ、研修・OJT・ラウンダー・出口調査・グレイス／グレース、未対応の金額条件・対象月外は保留します。</p>
     <div className="sync-actions"><button className="ghost" disabled={busy} onClick={() => void run("preview")}>案件リストを確認</button>
-      <button disabled={busy} onClick={() => void run("import")}>連携を有効化・下書き取込</button>
+      <button disabled={busy} onClick={() => void run("import")}>連携を有効化・案件を取込</button>
       <button className="ghost" disabled={busy} onClick={() => void run("assignments")}>応募・月別連携を有効化</button></div>
     {message && <p role="status">{message}</p>}
     {preview && <><p>登録 {preview.counts.total}件／確認待ち {preview.counts.held}件／既存シフトとの対応あり {preview.counts.existingMonthlyLinks}件</p>

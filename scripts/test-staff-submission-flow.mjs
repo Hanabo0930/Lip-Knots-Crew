@@ -1070,7 +1070,7 @@ try {
   assert.equal(await page.locator('.open-job').count(),0);
   await page.getByRole('button',{name:'応募したシフトを確認',exact:true}).click();
   assert.equal(await page.locator('.shift-card-button').count(),1);
-  const pendingApplications=page.getByRole('region',{name:'確認待ちの応募',exact:true});
+  const pendingApplications=page.getByRole('region',{name:'確認待ちの手配',exact:true});
   await pendingApplications.getByText(/デモ募集店舗/).waitFor();
   assert.equal(await page.getByRole('button',{name:/デモ募集店舗 .*のシフトを確認/}).count(),0);
   assert.equal(await page.getByRole('region',{name:'選択したシフトの詳細',exact:true}).count(),0);
@@ -1178,7 +1178,7 @@ try {
   await page.locator('.bottom-nav').getByRole('button',{name:/案件/}).click();
   await page.getByRole('button',{name:'この案件に応募する',exact:true}).click();
   await page.getByRole('button',{name:'応募したシフトを確認',exact:true}).click();
-  await page.getByRole('region',{name:'確認待ちの応募',exact:true}).waitFor();
+  await page.getByRole('region',{name:'確認待ちの手配',exact:true}).waitFor();
   assert.equal(await page.getByRole('region',{name:'選択したシフトの詳細',exact:true}).count(),0);
   await page.evaluate(()=>window.__monthlyReadbackFixture());
   await page.getByRole('button',{name:/デモ募集店舗 .*のシフトを確認/}).click();

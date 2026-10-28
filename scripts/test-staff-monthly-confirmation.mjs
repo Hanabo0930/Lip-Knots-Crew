@@ -47,9 +47,13 @@ function renderPending(pendingApplications){
 }
 assert.equal(renderPending([]),'');
 const html=renderPending([{id:'one',dateKey:'2026-11-02',storeName:'<script>private</script>'}]);
-assert.ok(html.includes('aria-label="確認待ちの応募"'));
+assert.ok(html.includes('aria-label="確認待ちの手配"'));
 assert.ok(html.includes('2026-11-02'));
 assert.ok(html.includes('&lt;script&gt;private&lt;/script&gt;'));
 assert.ok(html.includes('管理者へ直接ご連絡'));
 assert.ok(!html.includes('<button'));
 console.log('Actual pending application section: PASS (separate label, escaped business details, direct-contact cancellation, no confirmation action)');
+
+const manualHtml=renderPending([{id:'manual',dateKey:'2026-11-03',storeName:'合成手入力',caseListManualPending:{observationHash:'a'.repeat(64)}}]);
+assert.ok(manualHtml.includes('手入力の手配・確認待ち'));
+assert.ok(!manualHtml.includes('応募受付・確認待ち'));

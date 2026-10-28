@@ -5,7 +5,7 @@ const suites = [
   "test-monthly-compact.cjs", "test-worker-binding.cjs", "test-private-ref.cjs",
   "test-post-ack-sync.cjs", "test-public-binding.cjs", "test-owner-reconcile-route.cjs",
   "test-private-job-consumers.cjs",
-  "test-worker-hooks.cjs",
+  "test-worker-hooks.cjs", "test-manual-controller.cjs",
 ];
 for (const suite of suites) {
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("./case-list-tests/" + suite, import.meta.url))], { encoding: "utf8" });

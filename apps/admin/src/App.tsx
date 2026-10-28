@@ -1,3 +1,4 @@
+import {currentStaffPerformanceYearRange,validStaffPerformanceRange} from "./staff-performance-range";
 import AdminAtmosphere, { LiquidOrb } from "./AdminAtmosphere";
 import AdminNavigation, { adminWorkspaces, workspaceViews, viewKey, type AdminWorkspace } from "./AdminNavigation";
 import { parseShiftImportPreview, previewSheetNames, type ShiftImportPreview } from "./shift-import-preview";
@@ -200,6 +201,7 @@ export type DashboardData = {
 export type StaffPerformanceData = {
   profile:{id:string;displayName:string;rank:string;areaLabels:string[];nearestStation:string};
   performance:{from?:string;through?:string;
+    requestHistory?:{basis:"caseId+staffId";complete:boolean;totalRequests:number|null;knownUniqueRequests:number;duplicateRows:number;issues:string[]};
     totals:{assignedJobs:number;implementedJobs:number;scheduledJobs:number;cancelledJobs:number;preContactLate:number;reportLate:number;salesFloorLate:number;invoice:number;payment:number;grossProfit:number};
     clients:NamedCount[]; makers:NamedCount[]; menus:NamedCount[]; stores:NamedCount[]; months:NamedCount[];
     recentJobs:Array<{id:string;dateKey:string;clientName:string;storeName:string;makerName:string;menuName:string;cancelled:boolean}>;
@@ -3039,7 +3041,8 @@ async function previewRowCreation() {
     await runAdminOperation("cancellation","adminRestoreCancelledJob",{jobId:job.id,note,...(job.mailIntake?{expectedRevision:job.revision}:{})},"キャンセルを解除しました。","cancellation");
   }
 
-  async function loadStaffPerformance(profile: StaffProfile,range={from:"2025-10-01",through:"2099-12-31"}) {
+  async function loadStaffPerformance(profile: StaffProfile,range=currentStaffPerformanceYearRange()) {
+    if(!validStaffPerformanceRange(range)){setMessage("集計期間の開始日・終了日を確認してください。");return;}
     if(firebaseConfigured&&(!functions||!auth?.currentUser||!adminSessionReady))return;
     openWorkspace("staff","performance");
     const version=++performanceVersionRef.current,user=auth?.currentUser;
@@ -4312,7 +4315,7 @@ function downloadCsv(filename:string,content:string) {
 
 
       <WorkspacePanel view="performance" activeView={workspaceView} visitedViews={visitedViews} group="staff" active={workspace} visited={visitedWorkspaces} ready={true}>{!performance&&<section className="panel empty-workspace"><h2>{performanceBusy?"稼働実績を読み込んでいます…":"スタッフを選んでください"}</h2><p>スタッフ一覧の「実績」から対象者を選ぶと、ここに表示します。</p><button onClick={()=>openWorkspace("staff")}>スタッフ一覧へ</button></section>}{performance && (
-        <Suspense fallback={<p role="status">稼働実績を準備中…</p>}><AdminStaffPerformancePanel performance={performance} onClose={closeStaffPerformance}/></Suspense>
+        <Suspense fallback={<p role="status">稼働実績を準備中…</p>}><AdminStaffPerformancePanel performance={performance} busy={performanceBusy} onRangeChange={range=>{const profile=staff.find(item=>item.id===performance?.profile.id);if(!profile){setMessage("スタッフ一覧を更新してから、もう一度実績を開いてください。");return;}void loadStaffPerformance(profile,range);}} onClose={closeStaffPerformance}/></Suspense>
       )}</WorkspacePanel>
 
       <WorkspacePanel view="devices" activeView={workspaceView} visitedViews={visitedViews} group="staff" active={workspace} visited={visitedWorkspaces} ready={true}>{!deviceStaffName&&<section className="panel empty-workspace"><h2>スタッフを選んでください</h2><p>スタッフ一覧から端末を確認する対象者を選びます。</p><button onClick={()=>openWorkspace("staff")}>スタッフ一覧へ</button></section>}{!!deviceStaffName && <Suspense fallback={<p role="status">端末画面を準備中…</p>}><AdminStaffDevicePanel name={deviceStaffName} devices={staffDevices} status={staffDeviceStatus} onClose={closeStaffDevices} onReload={reloadStaffDevices}/></Suspense>}</WorkspacePanel>

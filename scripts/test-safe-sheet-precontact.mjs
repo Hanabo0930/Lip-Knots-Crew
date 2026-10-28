@@ -307,7 +307,22 @@ function cancellationHarness(){
  return h;
 }
 for(const kind of ["cancel","legacyCancel"])await test("current "+kind+" reaches sheet",async()=>{const h=cancellationHarness(),id=await h[kind]();await h.runQueue(id);assert.equal(h.q(id).status,"completed");assert.equal(h.cells.get("V2"),true);});
+for(const kind of ["cancel","legacyCancel"])await test("shared "+kind+" closes recruitment without changing historical identity",async()=>{
+ const h=cancellationHarness(),before={...h.job()};await h[kind]();
+ assert.equal(h.job().status,"cancelled");assert.equal(h.job().cancelled,true);
+ assert.equal(h.job().publishable,false);assert.equal(h.job().recruitmentStopped,true);
+ for(const key of ["caseId","assignedStaffId","assignedStaffName","dateKey"])assert.deepEqual(h.job()[key],before[key]);
+ assert.equal(h.job().cancellationSheetWrite.identity,h.core("./sheet-write-core","cancellationSheetWriteIdentity",before));
+});
 for(const kind of ["cancel","legacyCancel"])await test("restored job rejects delayed "+kind,async()=>{const h=cancellationHarness(),old=await h[kind]();const restore=await h.restore();await h.runQueue(old);assert.equal(h.writes.length,0);assert.equal(h.q(old).status,"blocked");await h.runQueue(restore);assert.equal(h.q(restore).status,"completed");assert.equal(h.cells.get("V2"),false);});
+for(const assigned of [true,false])await test("restoring "+(assigned?"assigned":"unassigned")+" cancellation never republishes recruitment",async()=>{
+ const h=cancellationHarness();
+ if(!assigned)Object.assign(h.job(),{assignedStaffId:null,assignedStaffName:"",status:"open"});
+ const before={...h.job()};await h.cancel();await h.restore();
+ assert.equal(h.job().status,assigned?"assigned":"stopped");assert.equal(h.job().cancelled,false);
+ assert.equal(h.job().publishable,false);assert.equal(h.job().recruitmentStopped,true);
+ for(const key of ["caseId","assignedStaffId","assignedStaffName","dateKey"])assert.deepEqual(h.job()[key],before[key]);
+});
 await test("recancelled job rejects delayed restore",async()=>{const h=cancellationHarness();await h.cancel();const old=await h.restore();const next=await h.cancel("next");await h.runQueue(old);assert.equal(h.writes.length,0);await h.runQueue(next);assert.equal(h.q(next).status,"completed");assert.equal(h.cells.get("V2"),true);});
 await test("new cancellation reason rejects earlier reason",async()=>{const h=cancellationHarness();const old=await h.cancel("first"),next=await h.cancel("second");await h.runQueue(old);assert.equal(h.writes.length,0);await h.runQueue(next);assert.equal(h.cells.get("W2"),h.job().cancellationReason);});
 for(const [name,change]of [

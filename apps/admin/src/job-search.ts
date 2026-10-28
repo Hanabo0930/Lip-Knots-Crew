@@ -1,10 +1,41 @@
-export type JobListFilter = "all" | "unassigned" | "precontact" | "assigned" | "cancelled" | "report-completed" | "report-unconfirmed";
+export type JobListFilter = "all" | "monthly-transferred" | "unassigned" | "precontact" | "assigned" | "cancelled" | "report-completed" | "report-unconfirmed";
 type SearchableJob = {
+  id?:string; companyId?:string; caseId?:string; assignedStaffId?:string;
+  caseListSource?:{version?:number;sheetId?:number;caseId?:string;sourceRevision?:string;bindingHash?:string};
+  sheetRef?:{sheetId?:number;sheetName?:string;caseId?:string;bindingHash?:string};
+  recruitmentStopped?:boolean; publishable?:boolean;
+  assignmentSheetWrite?:{operation?:string;queueId?:string;assignedJobRevision?:number;pending?:boolean;nativeAck?:{
+    schema?:string;status?:string;operationId?:string;queueId?:string;companyId?:string;jobId?:string;
+    sourceCaseId?:string;staffId?:string;dateKey?:string;assignedJobRevision?:number;bindingHash?:string;preserveSource?:boolean;
+    postCatalog?:{caseId?:string;sourceRevision?:string;bindingHash?:string};
+    target?:{sheetId?:number;title?:string;fixedId?:string;bindingHash?:string};
+  }};
   workDate:string; dateKey?:string; assignedStaffName?:string; storeName:string;
   makerName:string; clientName:string; status:string; cancelled?:boolean; preContact?:unknown; applicationUnconfirmed?:boolean; sourceMissing?:boolean; assignmentUnresolved?:boolean; submissionStatus?:{report?:{completed?:boolean;deadlineReviewRequired?:boolean}};
 };
 export function isCancelledJob(job:Pick<SearchableJob,"status"|"cancelled">):boolean{
   return job.status==="cancelled"||job.cancelled===true;
+}
+/** Display-only archive state derived from the server's verified monthly ACK.
+ * Missing or mismatched proof remains in the normal list for review. This does
+ * not authorize writes, hide the physical Source row or grant history access. */
+export function isTransferredCaseListJob(job:SearchableJob):boolean{
+  const source=job.caseListSource,write=job.assignmentSheetWrite,ack=write?.nativeAck,target=ack?.target,ref=job.sheetRef;
+  const nonempty=(value:unknown):value is string=>typeof value==="string"&&value.trim().length>0;
+  return !isCancelledJob(job)&&job.status==="assigned"&&job.applicationUnconfirmed===false&&
+    job.sourceMissing!==true&&job.assignmentUnresolved!==true&&job.recruitmentStopped===true&&job.publishable===false&&
+    source?.version===1&&source.sheetId===2026101601&&nonempty(job.id)&&nonempty(job.companyId)&&nonempty(job.caseId)&&
+    nonempty(job.assignedStaffId)&&nonempty(job.dateKey)&&source.caseId===job.caseId&&nonempty(source.sourceRevision)&&nonempty(source.bindingHash)&&
+    write?.operation==="case_list.assign"&&write.pending===false&&nonempty(write.queueId)&&
+    Number.isSafeInteger(write.assignedJobRevision)&&Number(write.assignedJobRevision)>0&&
+    ack?.schema==="LK_CASE_LIST_MONTHLY_ACK_V1"&&ack.status==="MONTHLY_READBACK_VERIFIED"&&ack.preserveSource===true&&
+    ack.operationId===write.queueId&&ack.queueId===write.queueId&&ack.jobId===job.id&&ack.companyId===job.companyId&&
+    ack.sourceCaseId===job.caseId&&ack.staffId===job.assignedStaffId&&ack.dateKey===job.dateKey&&
+    ack.assignedJobRevision===write.assignedJobRevision&&ack.bindingHash===source.bindingHash&&
+    ack.postCatalog?.caseId===job.caseId&&ack.postCatalog.sourceRevision===source.sourceRevision&&ack.postCatalog.bindingHash===source.bindingHash&&
+    nonempty(target?.fixedId)&&target.fixedId===job.caseId&&Number.isInteger(target.sheetId)&&Number(target.sheetId)>=0&&
+    nonempty(target.title)&&target.title===job.dateKey.slice(0,4)+"."+Number(job.dateKey.slice(5,7))&&nonempty(target.bindingHash)&&
+    ref?.caseId===job.caseId&&ref.sheetId===target.sheetId&&ref.sheetName===target.title&&ref.bindingHash===target.bindingHash;
 }
 export function isUnassignedJob(job:SearchableJob):boolean{
   return job.status==="open"&&!isCancelledJob(job)&&job.sourceMissing!==true&&job.assignmentUnresolved!==true;
@@ -20,6 +51,7 @@ export function reportCompletionLabel(job:SearchableJob){
 }
 export function jobReadinessLabel(job:SearchableJob):string{
   if(isCancelledJob(job))return "キャンセル";
+  if(isTransferredCaseListJob(job))return "月別へ転記済み";
   if(job.sourceMissing===true)return "取込元の案件を確認中";
   if(job.assignmentUnresolved===true)return "担当者の照合待ち";
   if(job.status==="assigned")return job.applicationUnconfirmed===true?"原本の担当確認待ち":job.preContact?"事前連絡あり":"事前連絡待ち";
@@ -33,7 +65,11 @@ export function buildJobSearchIndex<T extends SearchableJob>(jobs:T[]){
 export function filterJobSearchIndex<T extends SearchableJob>(index:ReturnType<typeof buildJobSearchIndex<T>>,query:string,filter:JobListFilter){
   const terms=normalize(query).trim().split(/\s+/u).filter(Boolean);
   return index.filter(({job,text})=>{
-    const cancelled=isCancelledJob(job);
+    const cancelled=isCancelledJob(job),transferred=isTransferredCaseListJob(job);
+    // Histories are explicit views; ordinary cases never include either state.
+    if(cancelled&&filter!=="cancelled")return false;
+    if(transferred&&filter!=="monthly-transferred")return false;
+    if(filter==="monthly-transferred"&&!transferred)return false;
     if(filter==="unassigned"&&!isUnassignedJob(job))return false;
     if(filter==="cancelled"&&!cancelled)return false;
     if((filter==="assigned"||filter==="precontact")&&(cancelled||job.status!=="assigned"))return false;

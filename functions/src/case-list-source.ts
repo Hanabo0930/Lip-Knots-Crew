@@ -7,6 +7,7 @@ import { createJobIdFromPersistedCaseId } from "./case-id";
 import { assertProductionOperational } from "./system-safety";
 import { verifyCaseListTransferCapability } from "./case-list-transfer-capability";
 import { readCaseListMonthlySnapshot } from "./case-list-monthly-reader";
+import { observeCaseListManualOrigin, sameManualObservation, sourceHasManualName } from "./case-list-manual-origin-core";
 import { CASE_LIST_SOURCE, configuredCaseListSource, assertExecutive, assertCaseListJobBinding, inspectCaseList, confirmedCaseListCandidate, hashCaseList, caseListMonthlyContentHash, publicCaseListSource, type Cell, type CaseListConfirmation, type CaseListSource } from "./case-list-source-core";
 
 type Tx = FirebaseFirestore.Transaction;
@@ -97,6 +98,20 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
     counts: { total: snapshot.inspected.jobs.length, held: snapshot.inspected.jobs.filter(job => job.holdReasons.length).length, existingMonthlyLinks: snapshot.inspected.jobs.filter(job => job.ledgerLinked).length },
     rows: snapshot.inspected.jobs.map(job => ({ caseId: job.caseId, jobId: createJobIdFromPersistedCaseId(companyId, job.caseId), ...job.fields, sourceRevision: job.source.sourceRevision, holdReasons: job.holdReasons, reviewIssues: job.reviewIssues, ownerReviewRequired: job.ownerReviewRequired })) };
   if (mode === "preview") return { ...preview, writes: 0, publications: 0 };
+  // An occupied Source C is observed privately, never converted into an
+  // application or a native-write queue. Reuse the worker's stable-ID resolver.
+  const manualRows = snapshot.rows.slice(1).filter(sourceHasManualName);
+  const manualProfiles = new Map<string, Record<string, unknown>>();
+  let resolveManualStaff: (name: string) => { staffId: string; identityVerified: true } | null = () => null;
+  if (manualRows.length) {
+    const directory = await db.collection("staffProfiles").where("companyId", "==", companyId).limit(2001).get();
+    if (directory.size > 2000) throw new HttpsError("failed-precondition", "スタッフ照合の対象が多いため手入力の観測を停止しました。");
+    const profiles = directory.docs.map(doc => ({ id: doc.id, data: doc.data() }));
+    for (const profile of profiles) manualProfiles.set(profile.id, profile.data);
+    const { buildCaseListStaffResolver } = require("./case-list-monthly-worker") as { buildCaseListStaffResolver(profiles: Array<{ id: string; data: Record<string, unknown> }>): typeof resolveManualStaff };
+    try { resolveManualStaff = buildCaseListStaffResolver(profiles); }
+    catch { throw new HttpsError("failed-precondition", "既存スタッフ名簿を一意に照合できないため手入力の観測を停止しました。"); }
+  }
   const leaseRef = db.collection("caseListSyncLocks").doc(companyId), tokenId = randomUUID();
   await db.runTransaction(async tx => {
     const lease = (await tx.get(leaseRef)).data();
@@ -129,8 +144,25 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
         const old = current.data();
         if (old && (old.companyId !== companyId || old.caseId !== entry.caseId || !old.caseListSource)) { heldLinked++; return; }
         if (!old && entry.ledgerLinked) { heldLinked++; return; }
-        if (old?.caseListSource?.sourceRevision === entry.source.sourceRevision && old.sourceMissing !== true && !old.caseListSource?.spreadsheetId && !old.source?.spreadsheetId) return;
-        const preserveAssignment = Boolean(old && (old.assignedStaffId || old.assignedStaffName || old.applicationUnconfirmed === true || old.assignmentUnresolved === true || old.status === "assigned"));
+        const manualRef = db.collection("caseListManualObservations").doc(jobId), priorManual = (await tx.get(manualRef)).data();
+        const rawRow = snapshot.rows.find(row => row[60]?.userEnteredValue?.stringValue === entry.caseId);
+        if (!rawRow) throw new HttpsError("aborted", "手入力の観測対象が変わりました。");
+        const manualObservation = observeCaseListManualOrigin({ companyId, jobId, entry, row: rawRow,
+          resolveStaff: resolveManualStaff, staffProfiles: manualProfiles, existingJob: old });
+        // Private observations cannot overwrite a future selected/active receipt.
+        // The transfer driver remains held until that distinct contract exists.
+        if (priorManual && (priorManual.companyId !== companyId || priorManual.jobId !== jobId || priorManual.caseId !== entry.caseId || priorManual.schema !== "LK_CASE_LIST_MANUAL_OBSERVATION_V1")) throw new HttpsError("failed-precondition", "手入力の既存観測と案件の対応を確認できません。記録を保持して停止しました。");
+        if (priorManual?.selected === true) throw new HttpsError("failed-precondition", "選択済み手入力案件の履歴を保持して取込を停止しました。");
+        const manualPatch = manualObservation && !sameManualObservation(priorManual, manualObservation)
+          ? { ...manualObservation, observedBy: actorUid, observedAt: Timestamp.now() }
+          : !manualObservation && priorManual && priorManual.state !== "cleared"
+            ? { ...priorManual, state: "cleared", source: publicCaseListSource(entry.source), selected: false,
+              clientNameUpConfirmed: false, clearedBy: actorUid, clearedAt: Timestamp.now() } : null;
+        if (old?.caseListSource?.sourceRevision === entry.source.sourceRevision && old.sourceMissing !== true && !old.caseListSource?.spreadsheetId && !old.source?.spreadsheetId) {
+          if (manualPatch) tx.set(manualRef, manualPatch);
+          return;
+        }
+        const preserveAssignment = Boolean(old && (old.assignedStaffId || old.assignedStaffName || old.applicationUnconfirmed === true || old.assignmentUnresolved === true || old.status === "assigned" || old.status === "cancelled" || old.cancelled === true));
         const pendingQueueId = old?.applicationUnconfirmed === true && old.assignmentSheetWrite?.operation === "case_list.assign" && typeof old.assignmentSheetWrite?.queueId === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(old.assignmentSheetWrite.queueId) ? old.assignmentSheetWrite.queueId : null;
         let ownPendingProjection = false;
         if (old && pendingQueueId && old.caseListSource?.rowRevision !== entry.source.rowRevision) {
@@ -165,6 +197,7 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
           ...(assignedSourceChanged || pendingLedgerChanged ? { assignmentUnresolved: true, applicationUnconfirmed: true, caseListAssignmentReviewRequired: true } : {}),
           ...(ownPendingProjection ? { caseListPendingSourceWriteObserved: true } : {}),
           revision, updatedAt: Timestamp.now(), ...(!old ? { createdAt: Timestamp.now(), basePay: null, assignedStaffId: null, assignedStaffName: "", applicationUnconfirmed: false } : {}) };
+        if (manualPatch) tx.set(manualRef, manualPatch);
         if (old) tx.update(jobRef, update);
         else tx.set(jobRef, update);
         if (preserveAssignment) tx.set(db.collection("caseListSourceObservations").doc(jobId), { companyId, jobId, sourceRevision: entry.source.sourceRevision,
@@ -181,6 +214,11 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
         if (lease.data()?.tokenId !== tokenId || config.data()?.caseListEnabled !== true) throw new HttpsError("aborted", "案件リスト取込の設定または処理権限が変わりました。");
         const job = current.data();
         if (!job || job.companyId !== companyId || !job.caseListSource) return;
+        const manualRef = db.collection("caseListManualObservations").doc(ref.id), priorManual = (await tx.get(manualRef)).data();
+        if (priorManual && priorManual.selected !== true && priorManual.state !== "source_missing") tx.set(manualRef, {
+          ...priorManual, state: "source_missing", selected: false, clientNameUpConfirmed: false,
+          missingObservedBy: actorUid, missingObservedAt: Timestamp.now(),
+        });
         tx.update(ref, { sourceMissing: true, publishable: false, recruitmentStopped: true, caseListHoldReasons: ["SOURCE_MISSING_RETAINED"], updatedAt: Timestamp.now() });
       });
     }

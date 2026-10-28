@@ -1,5 +1,5 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { assertAcknowledgedCancellationCanChange } from "./cancellation-history-retention-core";
+import { assertAcknowledgedCancellationCanChange, cancelledRecruitmentState } from "./cancellation-history-retention-core";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { z } from "zod";
 import { db } from "./firebase";
@@ -291,7 +291,7 @@ export const adminCancelJob = onCall(async (request) => {
       ...(cancellationSourceLinked(job) ? { sourceCancellationClosed: true } : {}),
       assignmentSheetWrite: null,
       cancellationReason: input.reason,
-      publishable: false,
+      ...cancelledRecruitmentState(),
       appOverride: { type: "cancel", active: true, createdAt: now },
       cancellationSheetWrite: { queueId: queueRef.id, operation: "job.cancel", identity: cancellationSheetWriteIdentity(job), ...sourceAck },
       cancelledAt: now,

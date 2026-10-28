@@ -14,6 +14,7 @@ export type CancellationFinancialTreatment =
 
 export type AnalyticsJob = {
   id?: string;
+  caseId?: string;
   dateKey?: string;
   workDate?: string;
   status?: string;
@@ -88,7 +89,17 @@ export type MonthlyDashboard = {
   }>;
 };
 
+export type StaffRequestHistory = {
+  basis: "caseId+staffId";
+  complete: boolean;
+  totalRequests: number | null;
+  knownUniqueRequests: number;
+  duplicateRows: number;
+  issues: string[];
+};
+
 export type StaffPerformance = {
+  requestHistory: StaffRequestHistory;
   staffId: string;
   from: string;
   through: string;
@@ -276,6 +287,48 @@ export function buildMonthlyDashboard(
   };
 }
 
+/** Owner-only analytics projection. A cancellation remains a request; names,
+ * document IDs and row numbers never substitute for a persisted case/staff ID.
+ * Missing/conflicting identity makes the total unknown, not a smaller total. */
+export function buildStaffRequestHistory(
+  jobs: AnalyticsJob[], staffId: string, from: string, through: string
+): StaffRequestHistory {
+  const validDate = (value: string): boolean => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const parsed = new Date(value + "T00:00:00.000Z");
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  };
+  if (!staffId.trim() || !validDate(from) || !validDate(through) || from > through) {
+    throw new Error("依頼数の対象スタッフ・集計期間を確認できません。");
+  }
+  const requests = new Map<string, { caseId: string; dateKey: string; cancelled: boolean }>();
+  const issues = new Set<string>();
+  let duplicateRows = 0;
+  for (const job of jobs) {
+    if (job.assignedStaffId !== staffId || !(job.status === "assigned" || isCancelled(job))) continue;
+    const date = dateKey(job);
+    if (!validDate(date)) { issues.add("invalid_request_date"); continue; }
+    if (date < from || date > through) continue;
+    const caseId = job.caseId;
+    if (typeof caseId !== "string" || !caseId.trim() || caseId.trim() !== caseId) {
+      issues.add("missing_or_invalid_case_id"); continue;
+    }
+    const key = JSON.stringify([caseId.normalize("NFKC").toLowerCase(), staffId]);
+    const previous = requests.get(key), cancelled = isCancelled(job);
+    if (previous) {
+      duplicateRows++;
+      if (previous.caseId !== caseId || previous.dateKey !== date || previous.cancelled !== cancelled) {
+        issues.add("conflicting_duplicate_request");
+      }
+    } else requests.set(key, { caseId, dateKey: date, cancelled });
+  }
+  return {
+    basis: "caseId+staffId", complete: issues.size === 0,
+    totalRequests: issues.size === 0 ? requests.size : null,
+    knownUniqueRequests: requests.size, duplicateRows, issues: [...issues].sort(),
+  };
+}
+
 export function buildStaffPerformance(
   jobs: AnalyticsJob[],
   staffId: string,
@@ -298,6 +351,7 @@ export function buildStaffPerformance(
   const finance = sumFinance(selected);
 
   return {
+    requestHistory: buildStaffRequestHistory(jobs, staffId, from, through),
     staffId,
     from,
     through,

@@ -1,5 +1,5 @@
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
-import { assertCancelledAssignmentCanRestore, assertAcknowledgedCancellationCanChange } from "./cancellation-history-retention-core";
+import { assertCancelledAssignmentCanRestore, assertAcknowledgedCancellationCanChange, cancelledRecruitmentState } from "./cancellation-history-retention-core";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { z } from "zod";
 import { db } from "./firebase";
@@ -167,7 +167,7 @@ export const adminSetJobCancellation = onCall(async (request) => {
       revision: nextAssignmentRevision(job),
       status: "cancelled",
       cancelled: true,
-      publishable: false,
+      ...cancelledRecruitmentState(),
       ...(cancellationSourceLinked(job) ? { sourceCancellationClosed: true } : {}),
       cancellationReasonCategory: reasonCategory,
       cancellationReason: reason,
@@ -272,7 +272,8 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
       : "";
     const dateKey = String(job.dateKey ?? "");
     const now = Timestamp.now();
-    let restoredStatus = "open";
+    // Undoing cancellation is not approval to advertise the case again.
+    let restoredStatus = "stopped";
 
     if (assignedStaffId && !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) throw new HttpsError("failed-precondition", "復帰するシフトの日付を確認できません。");
     if (assignedStaffId && dateKey) {
@@ -311,7 +312,7 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
       status: restoredStatus,
       cancelled: false,
       sourceCancellationClosed: false,
-      recruitmentStopped: Boolean(job.mailIntake),
+      ...cancelledRecruitmentState(),
       ...(job.mailIntake ? { mailPublication: FieldValue.delete() } : {}),
       cancellationReasonCategory: FieldValue.delete(),
       cancellationReason: FieldValue.delete(),
@@ -325,7 +326,6 @@ export const adminRestoreCancelledJob = onCall(async (request) => {
       restoredAt: now,
       restoredBy: session.uid,
       restoreNote: input.note.trim() || FieldValue.delete(),
-      publishable: !job.mailIntake && restoredStatus === "open",
       appOverride: { type: "restore", active: true, createdAt: now },
       updatedAt: now,
     }, { merge: true });

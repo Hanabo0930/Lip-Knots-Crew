@@ -5,6 +5,12 @@ const present=(value:unknown):value is string=>typeof value==="string"&&value.tr
 const integer=(value:unknown):value is number=>Number.isSafeInteger(value)&&Number(value)>=0;
 function refuse():never{throw new Error("取消の履歴担当と原本確認記録を照合できません。担当履歴と勤務枠を保持して停止しました。");}
 
+/** Shared public lifecycle only. Keep historical identity and Source ACK proofs
+ * intact; this is not a private-history archive or permission change. */
+export function cancelledRecruitmentState() {
+  return { publishable: false, recruitmentStopped: true } as const;
+}
+
 /** Logical historical assignee only; never use this to occupy a cancelled day or fill a physical name cell. */
 export function retainedCancellationAssignment(old:Data|undefined,incoming:Data,freshlyConfirmed:boolean){
   if(!old||old.sourceCancellationClosed!==true||old.status!=="cancelled"||old.cancelled!==true||

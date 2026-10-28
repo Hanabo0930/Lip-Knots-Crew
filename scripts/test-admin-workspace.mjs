@@ -1,3 +1,4 @@
+await import("./test-admin-case-list-archive.mjs");
 await import('./test-admin-edit-panel.mjs');
 import {timelineModule} from './admin-timeline-test-module.mjs';
 await import('./test-admin-job-export.mjs');
@@ -41,7 +42,7 @@ const {buildJobSearchIndex,filterJobSearchIndex,jobListPage}=searchScope.exports
 verifyAdminPrecontactCounter(source,{buildJobSearchIndex,filterJobSearchIndex});
 const synthetic=Array.from({length:10000},(_,id)=>({id,workDate:'2026-09-05',storeName:'店舗 ＡＢＣ',makerName:'メーカー',clientName:'取引先',assignedStaffName:`担当${id}`,status:id%5===0?'cancelled':'assigned',preContact:id%2?{}:undefined}));
 const index=buildJobSearchIndex(synthetic);
-assert.equal(filterJobSearchIndex(index,' abc　２０２６-０９ ','all').length,10000);
+assert.equal(filterJobSearchIndex(index,' abc　２０２６-０９ ','all').length,8000,'normal cases exclude 2000 cancelled records; explicit cancellation history is checked below');
 assert.equal(filterJobSearchIndex(index,'存在しない','all').length,0);
 assert.equal(filterJobSearchIndex(index,'  ','cancelled').length,2000);
 assert.equal(filterJobSearchIndex(index,'','assigned').length,8000);
@@ -270,7 +271,14 @@ try{
   assert.equal(await list.locator('tbody tr').count(),0);
   assert.match(await list.getByRole('status').innerText(),/該当する案件はありません/);
   await list.getByRole('button',{name:'条件をクリア',exact:true}).click();
-  assert.equal(await list.locator('tbody tr').count(),4);
+  assert.equal(await list.locator('tbody tr').count(),3,'normal cases exclude the cancelled demo job');
+  assert.ok(!(await list.locator('tbody').innerText()).includes('イオン幕張'));
+  await page.getByLabel('案件の絞り込み',{exact:true}).selectOption('cancelled');
+  assert.equal(await list.locator('tbody tr').count(),1);
+  assert.ok((await list.locator('tbody').innerText()).includes('イオン幕張'),'cancelled row remains in explicit admin history');
+  await page.getByLabel('案件の絞り込み',{exact:true}).selectOption('monthly-transferred');
+  assert.equal(await list.locator('tbody tr').count(),0,'ordinary monthly demo jobs do not become verified CaseList history');
+  await list.getByRole('button',{name:'条件をクリア',exact:true}).click();
   await page.getByLabel('案件の絞り込み',{exact:true}).selectOption('precontact');
   assert.equal(await list.locator('tbody tr').count(),2);
   await nav.getByRole('button',{name:'スタッフ',exact:true}).click();
@@ -285,7 +293,7 @@ try{
   assert.match(await list.locator('tbody').innerText(),/完了未確認/);
   await list.getByRole('button',{name:'条件をクリア',exact:true}).click();
   await search.fill('ａさん ２０２６-０７');
-  assert.equal(await list.locator('tbody tr').count(),2);
+  assert.equal(await list.locator('tbody tr').count(),1,'normal name/date search excludes cancelled Aさん job');
   assert.equal(await list.getByRole('button',{name:'次の50件',exact:true}).isDisabled(),true);
   await list.getByRole('button',{name:'条件をクリア',exact:true}).click();
   await search.fill('船橋');

@@ -634,6 +634,26 @@ function checkAtomicMutationAudit(source, block, action, close) {
     && !helper.includes('db.batch(') && !helper.includes('.commit(');
 }
 
+// Keep the original queue projection and each added manual projection in
+// separate regions. A matching company guard in a neighbouring projection
+// must never satisfy a removed guard in this one.
+function checkSheetIssueCompanyRegions(block) {
+  const issuesStart = block.indexOf('issues:');
+  const queueStart = block.indexOf('snap.docs.map(', issuesStart);
+  if (issuesStart < 0 || queueStart < issuesStart || !block.slice(queueStart).includes('job:job?.companyId===companyId?{') || !block.slice(queueStart).includes('sourceWriteVerified:false')) return false;
+  const hasManualQuery = block.includes('db.collection("caseListManualObservations")');
+  const manualStart = block.indexOf('constmanualIssues=');
+  if (!hasManualQuery && manualStart < 0) return true; // exact legacy queue-only shape
+  if (!hasManualQuery || manualStart < 0 || manualStart >= issuesStart) return false;
+  const query = block.slice(block.indexOf('letmanualQuery='), manualStart);
+  const manual = block.slice(manualStart, issuesStart);
+  const readyStart = manual.indexOf('constready='), readyEnd = manual.indexOf('constoffer=', readyStart);
+  if (readyStart < 0 || readyEnd <= readyStart) return false;
+  return query.includes('db.collection("caseListManualObservations").where("companyId","==",companyId).orderBy("__name__").limit(input.limit+1)') &&
+    manual.slice(readyStart, readyEnd).startsWith('constready=job?.companyId===companyId&&') &&
+    manual.slice(readyEnd).includes('job:job?.companyId===companyId?{') && manual.slice(readyEnd).includes('sourceWriteVerified:false');
+}
+
 function checkAdminCore(name) {
   const modules = { getSheetWriteIssues: "admin-operations", getOperationsDashboard: "analytics", getStaffPerformance: "analytics", createAdminJobGroup: "job-management", updateJobPublication: "job-management", adminEditJobInputs: "job-management", generateJobExport: "job-management", updateNetPrintNumbers: "netprint", adminSetJobCancellation: "analytics", adminRestoreCancelledJob: "analytics" };
   const source = sourceFile("functions/src/" + modules[name] + ".ts");
@@ -650,11 +670,12 @@ function checkAdminCore(name) {
   const readOnly = ["getSheetWriteIssues", "getOperationsDashboard", "getStaffPerformance"].includes(name);
   if (readOnly && /\.(?:add|create|update|delete|set|commit)\(/.test(block)) return false;
   if (!readOnly && (!has(["awaitassertProductionOperational(companyId);"]) || !source.includes('from "./system-safety";'))) return false;
+  if (name === "getSheetWriteIssues" && !checkSheetIssueCompanyRegions(block)) return false;
   const requirements = {
     getSheetWriteIssues: [
       'IssueQuerySchema.parse(request.data??{})', 'db.collection("sheetSyncQueue").where("companyId","==",companyId)',
       '.where("status","in",["blocked","dead_letter","retry_wait","acknowledged","error","paused_global"])',
-      '.orderBy("updatedAt","desc").limit(input.limit)', 'job?.companyId===companyId?',
+      '.orderBy("updatedAt","desc").limit(input.limit)',
       ...(compact(source).includes('AcknowledgeQueueSchema') ? ['canReconcile:data.operation==="case_list.assign"','canRetry:data.operation!=="case_list.assign"&&canManuallyRetrySheetWrite({'] : ['canRetry:canManuallyRetrySheetWrite({']), 'sourceWriteVerified:false',
     ],
     getOperationsDashboard: [

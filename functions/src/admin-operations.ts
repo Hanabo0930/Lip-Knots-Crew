@@ -29,7 +29,9 @@ const QueueActionSchema = z.object({
 });
 
 const AcknowledgeQueueSchema = QueueActionSchema.extend({
-  action: z.enum(["note", "reconcile-case-list"]).default("note"),
+  action: z.enum(["note", "reconcile-case-list", "select-case-list-monthly"]).default("note"),
+  reviewKey: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  clientNameUpConfirmed: z.literal(true).optional(),
 });
 
 const JobSchema = z.object({
@@ -71,12 +73,15 @@ export const getSheetWriteIssues = onCall(async (request) => {
 
   const jobIds = [...new Set(snap.docs.map((doc) => String(doc.data().jobId ?? "")).filter(Boolean))];
   const jobs = await getDocuments("jobs", jobIds);
+  let executive = false;
+  try { const core: typeof import("./case-list-source-core") = require("./case-list-source-core"); core.assertExecutive(session.token, process.env.EXECUTIVE_APPROVER_EMAILS ?? ""); executive = true; } catch { /* Other admins cannot select transfers. */ }
 
   return {
     count: snap.size,
     issues: snap.docs.map((doc) => {
       const data = doc.data();
       const job = jobs.get(String(data.jobId ?? ""));
+      const manualTransferPending = data.operation === "case_list.assign" && data.status === "blocked" && data.errorType === "owner_transfer_required" && data.caseListPhase?.phase === "MONTHLY_PREPARE";
       return {
         id: doc.id,
         companyId: data.companyId,
@@ -94,7 +99,10 @@ export const getSheetWriteIssues = onCall(async (request) => {
         sourceWriteVerified: false,
         acknowledgedAt: serializeTimestamp(data.acknowledgedAt),
         acknowledgedNote: typeof data.acknowledgedNote === "string" ? data.acknowledgedNote : "",
-        canReconcile: data.operation === "case_list.assign",
+        canReconcile: data.operation === "case_list.assign" && !manualTransferPending,
+        manualTransferPending,
+        canSelectMonthlyTransfer: executive && manualTransferPending,
+        manualTransferReviewKey: manualTransferPending && /^[a-f0-9]{64}$/.test(data.caseListPhase?.continuationHash ?? "") ? data.caseListPhase.continuationHash : null,
         canRetry: data.operation !== "case_list.assign" && canManuallyRetrySheetWrite({
           status: String(data.status ?? ""),
           errorType: String(data.errorType ?? ""),
@@ -146,6 +154,24 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
   const companyId = companyFromClaims(session.token);
   const input = AcknowledgeQueueSchema.parse(request.data ?? {});
   const ref = db.collection("sheetSyncQueue").doc(input.queueId);
+  if (input.action === "select-case-list-monthly") {
+    if (!input.reviewKey || input.clientNameUpConfirmed !== true) throw new HttpsError("invalid-argument", "ネームアップ済みの確認と移行対象の選択が必要です。");
+    await assertProductionOperational(companyId);
+    const snapshot = await ref.get();
+    if (!snapshot.exists || snapshot.data()?.companyId !== companyId) throw new HttpsError("not-found", "移行対象が見つかりません。");
+    if (snapshot.data()?.operation !== "case_list.assign") throw new HttpsError("failed-precondition", "この依頼は案件リストからの移行対象ではありません。");
+    const worker: typeof import("./case-list-monthly-worker") = require("./case-list-monthly-worker");
+    try { return await worker.selectCaseListMonthlyTransfer(ref, session.uid, session.token, input.reviewKey, true); }
+    catch (error) {
+      const reason = error instanceof Error ? error.message : "";
+      if (reason === "CASE_LIST_EXECUTIVE_REQUIRED") throw new HttpsError("permission-denied", "移行対象の確定は責任者のみ実行できます。");
+      if (reason === "SOURCE_CANCELLED_OR_INVALID") throw new HttpsError("failed-precondition", "キャンセル扱いの案件は移行できません。案件リストを確認してください。");
+      if (["OWNER_TRANSFER_CHANGED", "OWNER_TRANSFER_REVIEW_CHANGED", "OWNER_TRANSFER_SOURCE_CHANGED"].includes(reason)) throw new HttpsError("failed-precondition", "確認中に案件の内容が変わりました。再読込して移行対象を確認してください。");
+      if (reason === "OWNER_TRANSFER_LEASE_ACTIVE") throw new HttpsError("failed-precondition", "別の処理が進行中です。再読込して状態を確認してください。");
+      if (reason === "GLOBAL_OPERATION_STOPPED") throw new HttpsError("failed-precondition", "現在、移行処理は停止されています。");
+      throw new HttpsError("internal", "移行指示の受付結果を確定できませんでした。繰り返し実行せず、再読込して状態を確認してください。");
+    }
+  }
   if (input.action === "reconcile-case-list") {
     const snapshot = await ref.get();
     if (!snapshot.exists || snapshot.data()?.companyId !== companyId) throw new HttpsError("not-found", "書込エラーが見つかりません。");
@@ -162,6 +188,7 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
       throw new HttpsError("not-found", "書込エラーが見つかりません。");
     }
     const data = snap.data()!;
+    if (data.operation === "case_list.assign") throw new HttpsError("failed-precondition", "案件リストの移行待ちは確認メモで完了にできません。対象を選択して移行してください。");
     if (data.status === "acknowledged") {
       if (data.acknowledgedBy === session.uid && data.acknowledgedNote === input.note) return;
       throw new HttpsError("failed-precondition", "既に確認メモが記録されています。再読込して確認してください。");

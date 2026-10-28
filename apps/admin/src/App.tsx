@@ -2809,6 +2809,7 @@ async function previewRowCreation() {
         const status=(data as {status?:string})?.status;
         if(status==="MONTHLY_READBACK_VERIFIED"||status==="NO_OP_ALREADY_ACCEPTED")return "保存済みの原本を照合し、応募の反映を確認しました。";
         if(status==="OWNER_RESUME_REQUIRED")return "案件リストの担当者反映まで確認できました。月別への保存は未完了のため保留しています。";
+        if(status==="OWNER_TRANSFER_SELECTION_REQUIRED")return "ネームアップ後の移行選択待ちです。担当名だけでシフト表には移行しません。";
         return "保存結果を確定できませんでした。現在のデータを保持して保留しています。";
       },false);
       return;
@@ -2819,6 +2820,13 @@ async function previewRowCreation() {
 
   async function runSheetIssueAction(issue:SheetWriteIssue,action:string,note:string) {
     await runAdminOperation("issue:"+issue.id,action,{queueId:issue.id,note},action==="retrySheetWriteIssue"?"再試行を受け付けました。":"確認メモを記録しました。",false);
+  }
+
+  async function selectMonthlyTransfer(issue:SheetWriteIssue) {
+    if(!issue.manualTransferPending||!issue.canSelectMonthlyTransfer||!/^([a-f0-9]{64})$/.test(issue.manualTransferReviewKey??""))return;
+    const label=issue.job?[issue.job.workDate,issue.job.clientName,issue.job.storeName,issue.job.assignedStaffName].filter(Boolean).join(" "):"案件 "+issue.jobId;
+    if(!window.confirm(label+"\n\nクライアントへのネームアップは済みましたか？\n表示したこの1件を移行対象に選択して、シフト表への移行を指示します。"))return;
+    await runAdminOperation("issue:"+issue.id,"acknowledgeSheetWriteIssue",{queueId:issue.id,action:"select-case-list-monthly",reviewKey:issue.manualTransferReviewKey,clientNameUpConfirmed:true},"選択した案件の移行指示を受け付けました。完了は案件一覧の反映状態で確認してください。",false);
   }
 
   async function confirmJobApplication(job:Job) {
@@ -2851,7 +2859,7 @@ async function previewRowCreation() {
         if(profile&&profile.id===payload.staffId){if(firebaseConfigured)await openStaffDevices(profile,true);else setStaffDevices(current=>current.map(device=>({...device,active:false})));}
       }
       else if(firebaseConfigured&&application==="cancellation")await Promise.all([loadJobs(isCurrent),loadDashboard(undefined,isCurrent,true)]);
-      else if(firebaseConfigured&&payload.action==="reconcile-case-list")await Promise.all([loadJobs(isCurrent),loadSheetIssues(isCurrent,true)]);
+      else if(firebaseConfigured&&["reconcile-case-list","select-case-list-monthly"].includes(String(payload.action)))await Promise.all([loadJobs(isCurrent),loadSheetIssues(isCurrent,true)]);
       else if(firebaseConfigured){if(application)await loadJobs(isCurrent);else await loadSheetIssues(isCurrent,true);}
       else if(application==="netprint")setJobs(current=>current.map(job=>job.id===payload.jobId?{...job,netPrint:{items:(payload.numbers as string[]).filter(Boolean).map((number,index)=>({id:`demo_np_${index}`,number,printed:false}))}}:job));
       else if(application)setJobs(current=>current.map(job=>job.id===payload.jobId?{...job,applicationAdminConfirmed:true}:job));
@@ -3888,7 +3896,7 @@ function downloadCsv(filename:string,content:string) {
         <article><small>書込エラー</small><strong>{sheetIssues.length}件</strong></article>
       </section></WorkspacePanel>
 
-      <WorkspacePanel view="issues" activeView={workspaceView} visitedViews={visitedViews} group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">書込エラーを読込中…</p>}><AdminSheetIssuePanel sheetIssues={sheetIssues} issuesBusy={issuesBusy} operationKeys={operationKeys} loadSheetIssues={loadSheetIssues} retrySheetIssue={retrySheetIssue} acknowledgeSheetIssue={acknowledgeSheetIssue}/></Suspense></WorkspacePanel>
+      <WorkspacePanel view="issues" activeView={workspaceView} visitedViews={visitedViews} group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">書込エラーを読込中…</p>}><AdminSheetIssuePanel sheetIssues={sheetIssues} issuesBusy={issuesBusy} operationKeys={operationKeys} loadSheetIssues={loadSheetIssues} retrySheetIssue={retrySheetIssue} acknowledgeSheetIssue={acknowledgeSheetIssue} selectMonthlyTransfer={selectMonthlyTransfer}/></Suspense></WorkspacePanel>
 
 
 

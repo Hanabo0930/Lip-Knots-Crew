@@ -4,7 +4,7 @@ import { google } from "googleapis";
 import { db } from "./firebase";
 import { createJobIdFromPersistedCaseId } from "./case-id";
 import { cancellationSheetWriteIdentity } from "./sheet-write-core";
-import { configuredCaseListSource, publicCaseListSource, assertExecutive, hashCaseList, canonical } from "./case-list-source-core";
+import { configuredCaseListSource, publicCaseListSource, assertExecutive, hashCaseList, canonical, caseListMonthlyContentHash } from "./case-list-source-core";
 import { readCaseListMonthlySnapshot } from "./case-list-monthly-reader";
 import { getProductionOperationalState } from "./system-safety";
 
@@ -19,7 +19,7 @@ type Assignment = {
   sourceLedgerRevision: string; sourceRevision: string; preMonthlyContentHash: string;
   expectedJobRevision: number; assignedJobRevision: number; staffId: string; staffName: string; dateKey: string;
 };
-type Trusted = { queue: Data; job: Data; config: Data; staff: Data; dayLock: Data; approval: Data; assignment: Assignment; spreadsheetId: string; payOffer: PayOffer };
+type Trusted = { queue: Data; job: Data; config: Data; staff: Data; dayLock: Data; approval: Data; assignment: Assignment; spreadsheetId: string; payOffer: PayOffer; ownerTransferSelection: Data };
 type CoreResult = { status: string; reason?: string; ack?: Data };
 type Phase = "SOURCE_PREPARE" | "SOURCE_APPLY" | "SOURCE_RECONCILE" | "MONTHLY_PREPARE" | "MONTHLY_APPLY" | "MONTHLY_RECONCILE";
 type CoreMethod = "prepareSource" | "applySource" | "reconcileSource" | "prepareMonthly" | "applyMonthly" | "reconcile";
@@ -224,6 +224,12 @@ export function assertCaseListMonthlyProofChain(queueId: string, queue: Data, pa
     need(intent.schema === "LK_MONTHLY_INTENT_V5" && intent.planHash === normalizedHash(intent, "planHash") && intent.assignmentHash === source.assignmentHash && canonical(intent.assignment) === canonical(assignment) &&
       canonical(intent.preCatalog) === canonical(preCatalog) && canonical(intent.postCatalog) === canonical(projected.postCatalog) && intent.preMonthlyContentHash === a.preMonthlyContentHash &&
       intent.sourceContentHash === source.expectedPostMonthlyContentHash && intent.postMonthlyContentHash === source.expectedPostMonthlyContentHash && canonical(intent.sourceSnapshot) === canonical(after), "MONTHLY_PROOF_CHAIN_INVALID");
+    const selected = object(intent.ownerTransfer);
+    need(selected.schema === "LK_OWNER_MONTHLY_TRANSFER_V1" && selected.selected === true && selected.clientNameUpConfirmed === true &&
+      ["キャンセル", "月別転記"].includes(selected.sourceControlHeader) && (selected.sourceControlHeader !== "キャンセル" || intent.sourceSnapshot[0]?.userEnteredValue?.boolValue === false) &&
+      selected.operationId === queueId && selected.caseId === a.sourceCaseId && selected.queueFingerprint === fingerprint(queue) && selected.assignmentHash === source.assignmentHash &&
+      selected.sourceContentHash === intent.sourceContentHash && selected.sourceRevision === object(intent.postCatalog).sourceRevision && ID.test(selected.selectedBy ?? "") && Number.isFinite(selected.selectedAt) && selected.selectedAt > 0,
+    "MONTHLY_SELECTION_PROOF_REQUIRED");
     for (const stage of ["MONTHLY_WRITE_STARTED", "MONTHLY_DISPATCHED", "UNKNOWN", "DEFERRED", "ACCEPTED"]) if (records[stage]) {
       const event = checkedEvent(records[stage], stage, queueId, queue, spreadsheetId);
       need(event.planHash === intent.planHash, "MONTHLY_DISPATCH_PROOF_CHAIN_INVALID");
@@ -287,6 +293,7 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
     assertExecutive(owner.token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");
     need(ID.test(owner.actorUid) && owner.token.companyId === initial.companyId && (owner.token.uid ?? owner.token.sub) === owner.actorUid, "OWNER_RECONCILIATION_IDENTITY_INVALID");
     need(initial.status !== "completed", "OWNER_RECONCILIATION_ALREADY_COMPLETED");
+    if (initial.errorType === "owner_transfer_required" && initial.caseListPhase?.phase === "MONTHLY_PREPARE") return { status: "OWNER_TRANSFER_SELECTION_REQUIRED", snapshotReads: 0, nativeBatches: 0 };
   } else if (initial.status !== "pending") return { status: "QUEUE_NOT_PENDING" };
   if (!ID.test(initial.companyId ?? "") || !ID.test(initial.jobId ?? "")) return { status: "QUEUE_IDENTITY_INVALID" };
   const configRef = db.collection("sheetImportConfigs").doc(initial.companyId), config = (await configRef.get()).data();
@@ -322,7 +329,11 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
         operation.phase === (owner ? "OWNER_RECONCILE" : phase) && operation.phaseNonce === phaseNonce &&
         (owner ? operation.reconciliationActorUid === owner.actorUid : queue.caseListPhase?.phase === phase && queue.caseListPhase?.nonce === phaseNonce), "MONTHLY_LEASE_OR_AUTHORITY_CHANGED");
     }
-    return { queue, job, config: currentConfig, staff, dayLock, approval, ...checked };
+    const ownerTransferSelection = object(operationSnap.data()?.ownerTransferSelection);
+    if (requireClaim && !owner && phase.startsWith("MONTHLY_")) need(ownerTransferSelection.schema === "LK_OWNER_MONTHLY_TRANSFER_V1" &&
+      ownerTransferSelection.queueFingerprint === fingerprint(queue) && ownerTransferSelection.selected === true && ownerTransferSelection.clientNameUpConfirmed === true,
+    "OWNER_TRANSFER_SELECTION_REQUIRED");
+    return { queue, job, config: currentConfig, staff, dayLock, approval, ownerTransferSelection, ...checked };
   }
   async function authorize(): Promise<Trusted> {
     need((await getProductionOperationalState(initial!.companyId)).operational, "GLOBAL_OPERATION_STOPPED");
@@ -453,7 +464,9 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
       resolveAssignment: async () => {
         const current = await authorize(), a = current.assignment;
         return nativeAssignment(a, current.payOffer);
-      }, ...mutation,
+      },
+      authorizeMonthlyTransfer: async () => clone((await authorize()).ownerTransferSelection),
+      ...mutation,
     };
     const core = controller.create(services), request = { operationId: queueRef.id, caseId: binding.assignment.sourceCaseId };
     let result: CoreResult;
@@ -492,12 +505,15 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
           // Verify the proof we are about to publish through the same guard used
           // by the next invocation. Pending+phase+own-lease release are atomic.
           assertKnownCaseListContinuation(queueRef.id, { ...current.queue, caseListPhase: phaseData }, nextOperation, records, spreadsheetId);
-          tx.set(queueRef, { status: "pending", caseListPhase: phaseData, retryAt: null, writeVerificationRequired: false,
-            errorType: FieldValue.delete(), errorMessage: FieldValue.delete(), caseListMonthlyReason: FieldValue.delete(), updatedAt: now }, { merge: true });
+          const waitForOwner = next === "MONTHLY_PREPARE";
+          tx.set(queueRef, { status: waitForOwner ? "blocked" : "pending", caseListPhase: phaseData, retryAt: null, writeVerificationRequired: false,
+            errorType: waitForOwner ? "owner_transfer_required" : FieldValue.delete(),
+            errorMessage: waitForOwner ? "担当名を案件リストへ反映しました。クライアントへのネームアップ後、対象を選択してシフト表への移行を実行してください。" : FieldValue.delete(),
+            caseListMonthlyReason: waitForOwner ? "OWNER_TRANSFER_SELECTION_REQUIRED" : FieldValue.delete(), updatedAt: now }, { merge: true });
           tx.set(operationRef, { ...nextOperation, budget: { phase, snapshotReads, nativeBatches, elapsedMs: Math.max(0, Date.now() - invocationStartedAt) }, updatedAt: now }, { merge: true });
           tx.delete(syncLockRef);
         });
-        return { status: "KNOWN_PHASE_READY", completedPhase: phase, nextPhase: next, snapshotReads, nativeBatches };
+        return { status: next === "MONTHLY_PREPARE" ? "OWNER_TRANSFER_SELECTION_REQUIRED" : "KNOWN_PHASE_READY", completedPhase: phase, nextPhase: next, snapshotReads, nativeBatches };
       }
     }
     if (!["MONTHLY_READBACK_VERIFIED", "NO_OP_ALREADY_ACCEPTED"].includes(result.status) || !result.ack) { await hold(result.reason ?? result.status); return { ...result, snapshotReads, nativeBatches }; }
@@ -534,6 +550,62 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
   } finally {
     if (acquired) await db.runTransaction(async tx => { if ((await tx.get(syncLockRef)).data()?.tokenId === claimToken) tx.delete(syncLockRef); });
   }
+}
+
+/** Record one executive-selected case after client name-up. This action never
+ * writes Sheets and never selects a different queue or the cancellation box. */
+export async function selectCaseListMonthlyTransfer(queueRef: Ref, actorUid: string, token: Data, reviewKey: string, clientNameUpConfirmed: boolean): Promise<Data> {
+  assertExecutive(token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");
+  need(ID.test(actorUid) && (token.uid ?? token.sub) === actorUid && HASH.test(reviewKey) && clientNameUpConfirmed === true, "OWNER_TRANSFER_CONFIRMATION_REQUIRED");
+  const initial = (await queueRef.get()).data();
+  need(initial?.operation === "case_list.assign" && initial.companyId === token.companyId, "OWNER_TRANSFER_COMPANY_MISMATCH");
+  need((await getProductionOperationalState(initial.companyId)).operational, "GLOBAL_OPERATION_STOPPED");
+  const a = object(initial.caseListAssignment) as Assignment;
+  const operationRef = db.collection("caseListMonthlyOperations").doc(sha256(initial.companyId + "|" + queueRef.id));
+  const configRef = db.collection("sheetImportConfigs").doc(initial.companyId), config = (await configRef.get()).data();
+  need(config && config.companyId === initial.companyId, "OWNER_TRANSFER_CONFIG_REQUIRED");
+  const spreadsheetId = configuredCaseListSource(config.spreadsheetId).spreadsheetId;
+  const snapshot = await readCaseListMonthlySnapshot(initial.companyId, a.sourceCaseId, { resolveStaff: await loadResolver(initial.companyId) });
+  need(snapshot.spreadsheetId === spreadsheetId && snapshot.catalog, "OWNER_TRANSFER_SOURCE_REQUIRED");
+  const row = snapshot.source.rows.find(row => row.caseId === a.sourceCaseId);
+  need(row && row.cells.length === 65 && typeof row.cells[0]?.userEnteredValue?.boolValue === "boolean", "TRANSFER_CONTROL_INVALID");
+  const sourceControlHeader = snapshot.source.headers[0];
+  need(typeof sourceControlHeader === "string" && ["キャンセル", "月別転記"].includes(sourceControlHeader) && (sourceControlHeader !== "キャンセル" || row.cells[0].userEnteredValue?.boolValue === false), "SOURCE_CANCELLED_OR_INVALID");
+  const selectedContentHash = caseListMonthlyContentHash(row.cells), selectedCatalog = snapshot.catalog, auditRef = db.collection("auditLogs").doc();
+  return db.runTransaction(async tx => {
+    const [queueSnap, jobSnap, configSnap, approvalSnap, operationSnap, leaseSnap] = await Promise.all([
+      tx.get(queueRef), tx.get(db.collection("jobs").doc(initial.jobId)), tx.get(configRef),
+      tx.get(db.collection("caseListApprovals").doc(initial.jobId)), tx.get(operationRef), tx.get(db.collection("caseListSyncLocks").doc(initial.companyId)),
+    ]);
+    const queue = queueSnap.data(), job = jobSnap.data(), currentConfig = configSnap.data(), approval = approvalSnap.data(), operation = operationSnap.data();
+    need(queue && job && currentConfig && approval && operation && queue.companyId === token.companyId && fingerprint(queue) === fingerprint(initial), "OWNER_TRANSFER_CHANGED");
+    const prior = object(operation.ownerTransferSelection);
+    if (prior.schema === "LK_OWNER_MONTHLY_TRANSFER_V1" && prior.reviewKey === reviewKey && prior.selectedBy === actorUid && prior.queueFingerprint === fingerprint(queue) &&
+      prior.operationId === queueRef.id && prior.caseId === a.sourceCaseId && prior.selected === true && prior.clientNameUpConfirmed === true && prior.sourceControlHeader === sourceControlHeader &&
+      prior.sourceContentHash === selectedContentHash && prior.sourceRevision === selectedCatalog.sourceRevision) return { status: "OWNER_TRANSFER_ALREADY_SELECTED", selected: true, nativeBatches: 0 };
+    const [staffSnap, daySnap, identitySnap] = await Promise.all([
+      tx.get(db.collection("staffProfiles").doc(queue.actorStaffId)), tx.get(db.collection("staffDayLocks").doc(`${queue.companyId}_${queue.actorStaffId}_${queue.dateKey}`)),
+      tx.get(db.collection("authIdentities").doc(queue.actorUid)),
+    ]);
+    const staff = staffSnap.data(), day = daySnap.data(), identity = identitySnap.data();
+    need(staff && day && (!identitySnap.exists || identity?.active === true && identity.companyId === queue.companyId && identity.staffId === queue.actorStaffId), "ACTOR_IDENTITY_REVOKED");
+    const trusted = assertCaseListMonthlyAuthority(queueRef.id, queue, job, staff, day, currentConfig, approval);
+    need(trusted.spreadsheetId === spreadsheetId && !(leaseSnap.data()?.activeUntil instanceof Timestamp && leaseSnap.data()!.activeUntil.toMillis() > Date.now()), "OWNER_TRANSFER_LEASE_ACTIVE");
+    need(queue.status === "blocked" && queue.errorType === "owner_transfer_required" && queue.caseListPhase?.phase === "MONTHLY_PREPARE" && queue.caseListPhase.continuationHash === reviewKey, "OWNER_TRANSFER_REVIEW_CHANGED");
+    const records = await continuationRecords(tx, operationRef);
+    assertKnownCaseListContinuation(queueRef.id, queue, operation, records, spreadsheetId);
+    need(!records.INTENT && !records.MONTHLY_WRITE_STARTED && !records.ACCEPTED, "OWNER_TRANSFER_ALREADY_STARTED");
+    const source = checkedEvent(records.SOURCE_INTENT, "SOURCE_INTENT", queueRef.id, queue, spreadsheetId), projected = checkedEvent(records.SOURCE_PROJECTED, "SOURCE_PROJECTED", queueRef.id, queue, spreadsheetId);
+    const writable = row.cells.map(cell => Object.fromEntries(["userEnteredValue", "note", "userEnteredFormat", "dataValidation", "textFormatRuns", "chipRuns"].filter(key => Object.hasOwn(cell, key)).map(key => [key, (cell as Data)[key]])));
+    need(hashCaseList(writable) === projected.postMonthlyContentHash && canonical(selectedCatalog) === canonical(projected.postCatalog) && snapshot.dependencyHash === source.dependencyHash, "OWNER_TRANSFER_SOURCE_CHANGED");
+    const selection = { schema: "LK_OWNER_MONTHLY_TRANSFER_V1", operationId: queueRef.id, caseId: a.sourceCaseId, companyId: queue.companyId, jobId: queue.jobId,
+      selected: true, clientNameUpConfirmed: true, sourceControlHeader, selectedBy: actorUid, selectedAt: Date.now(), reviewKey,
+      queueFingerprint: fingerprint(queue), assignmentHash: source.assignmentHash, sourceContentHash: selectedContentHash, sourceRevision: selectedCatalog.sourceRevision };
+    tx.set(operationRef, { ownerTransferSelection: selection, updatedAt: Timestamp.now() }, { merge: true });
+    tx.set(queueRef, { status: "pending", retryAt: null, errorType: FieldValue.delete(), errorMessage: FieldValue.delete(), caseListMonthlyReason: FieldValue.delete(), updatedAt: Timestamp.now() }, { merge: true });
+    tx.set(auditRef, { companyId: queue.companyId, actorUid, action: "case-list.monthly.select", queueId: queueRef.id, caseId: a.sourceCaseId, clientNameUpConfirmed: true, reviewKey, createdAt: Timestamp.now() });
+    return { status: "OWNER_TRANSFER_SELECTED", selected: true, nativeBatches: 0 };
+  });
 }
 
 /** Each trigger performs one known phase; old operation types keep their pause. */

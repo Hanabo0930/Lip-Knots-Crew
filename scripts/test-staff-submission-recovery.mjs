@@ -596,3 +596,6 @@ for(const scope of ['file','submission',undefined]){
  const invalid=selectFiles([photo('too-large.pdf',50*1024*1024+1,'application/pdf')],{scope});assert.equal(invalid.files[0],original);assert.equal(invalid.confirmed,true);
 }
 console.log('Resubmission scope: file remains one; explicitly whole-submission supports twenty 50MiB file descriptors and append without lowering the limit.');
+
+// The monthly confirmation boundary is shared by all shift entry origins.
+await import("./test-staff-monthly-confirmation.mjs");

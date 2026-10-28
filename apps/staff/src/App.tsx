@@ -47,6 +47,7 @@ import {
   localDateKey,
   nextShiftJob,
   orderAssignedJobs,
+  pendingAssignedJobs,
   splitAssignedJobs,
 } from "./job-list";
 import { sleep, useAsyncAction } from "./useAsyncAction";
@@ -363,6 +364,7 @@ export default function App(){
   const contactShiftText=selectedAssignedJob?contactShiftSummary(selectedAssignedJob):"";
   const shiftCopyContextRef=useRef("");
   shiftCopyContextRef.current=JSON.stringify([selectedJob?.id??"",shiftTextLabel(selectedJob?.storeAddress,""),contactShiftText]);
+  const pendingApplications=useMemo(()=>pendingAssignedJobs(myJobs,businessDate),[myJobs,businessDate]);
   const {upcoming:upcomingShifts,past:pastShifts}=useMemo(()=>splitAssignedJobs(myJobs,businessDate),[myJobs,businessDate]);
   useEffect(()=>{const upcomingIndex=upcomingShifts.findIndex(job=>job.id===selectedJob?.id);if(upcomingIndex>=0)setUpcomingPage(Math.floor(upcomingIndex/50));},[selectedJob?.id,shiftFocusRequest]);
   const draftOwner=firebaseConfigured?(user&&companyId?JSON.stringify([companyId,user.uid]):""):"demo";
@@ -2045,6 +2047,12 @@ export default function App(){
       <div className="section-heading"><h2 ref={shiftHeadingRef} tabIndex={-1}>自分のシフト</h2><button className="secondary" onClick={()=>void refreshBusinessData(true)} disabled={businessRefreshing||businessDataStatus==="loading"||submissionEditPending||applicationPending} aria-busy={businessRefreshing}>{businessRefreshing?"更新中…":"シフトを更新"}</button></div>
       <p className="muted">応募結果が分からないときは、更新して日付と店舗を確認してください。表示に続きがある場合は、追加で読み込めます。</p>
       {businessDataFallback??<>
+        {pendingApplications.length>0&&<section aria-label="確認待ちの応募" className="panel">
+          <h3>確認待ちの応募（{pendingApplications.length}件）</h3>
+          <p>応募を受け付けています。管理者がネームアップ後に対象を選び、月別シフトへの転記と照合が終わるまで、確定シフトには表示されません。</p>
+          <ul>{pendingApplications.map(job=><li key={job.id}>{shiftDateLabel(job)} / {shiftTextLabel(job.storeName,"店舗確認中")} / 確認待ち</li>)}</ul>
+          <p className="muted">取消のご希望は管理者へ直接ご連絡ください。</p>
+        </section>}
         <div className="shift-list-heading"><h3>これからのシフト</h3><span>{upcomingShifts.length}件</span></div>
         {upcomingShifts.length
           ? <ShiftJobCards jobs={upcomingShifts} page={upcomingPage} onPageChange={setUpcomingPage} selectedId={selectedJob?.id} onSelect={openShiftJob} label="これからのシフト" accent={jobAccent} kind={jobKind} summary={prepSummary} submissionSummary={submissionSummary}/>

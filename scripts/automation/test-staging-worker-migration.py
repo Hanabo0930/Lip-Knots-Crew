@@ -118,6 +118,35 @@ class FakeApi:
         self.calls.append(("PUT", url, data))
 
 
+class ReadFixtureApi:
+    def __init__(self, fail=None, message="API_HTTP_403"):
+        self.calls = []
+        self.fail = fail
+        self.message = message
+        before = fixture()
+        self.responses = {}
+        for name, fn in before["functions"].items():
+            self.responses[("GET", m.CF + fn["name"])] = fn
+        for name in m.TARGETS:
+            url = m.RUN + before["services"][name]["name"]
+            self.responses[("GET", url)] = before["services"][name]
+            self.responses[("GET", url + ":getIamPolicy?options.requestedPolicyVersion=3")] = before["iam"][name]
+        self.responses[("GET", m.SCHED + m.PREFIX + "/jobs?pageSize=500")] = {"jobs": list(before["jobs"].values())}
+        for name in m.EVENT_TARGETS:
+            self.responses[("GET", m.EVENT + before["triggers"][name]["name"])] = before["triggers"][name]
+            self.responses[("GET", m.PUBSUB + before["subscriptions"][name]["name"])] = before["subscriptions"][name]
+        self.responses[("POST", f"https://cloudresourcemanager.googleapis.com/v1/projects/{m.PROJECT}:getIamPolicy")] = before["projectIam"]
+
+    def headers(self):
+        return {}
+
+    def json(self, method, url, body=None):
+        self.calls.append((method, url, body))
+        if (method, url) == self.fail:
+            raise ValueError(self.message)
+        return copy.deepcopy(self.responses[(method, url)])
+
+
 class MigrationTests(unittest.TestCase):
     def setUp(self):
         self.before = fixture()
@@ -385,6 +414,109 @@ class MigrationTests(unittest.TestCase):
             archive = zipfile.ZipFile(io.BytesIO(m.archive_source(root)))
             self.assertEqual(set(archive.namelist()), {"package.json", "tsconfig.json", "src/index.ts",
                                                      "lib/index.js", "case-mail-runtime/provider.cjs"})
+
+
+class InspectionDiagnosticsTests(unittest.TestCase):
+    def test_collection_retains_exact_read_scope_and_results(self):
+        api = ReadFixtureApi()
+        self.assertEqual(m.collect(api), fixture())
+        self.assertEqual(len(api.calls), 29)
+        self.assertEqual(sum(method == "GET" for method, _, _ in api.calls), 28)
+        self.assertEqual([(method, url, body) for method, url, body in api.calls if method != "GET"], [
+            ("POST", f"https://cloudresourcemanager.googleapis.com/v1/projects/{m.PROJECT}:getIamPolicy",
+             {"options": {"requestedPolicyVersion": 3}})])
+
+    def test_every_read_stage_identifies_only_fixed_labels(self):
+        before = fixture()
+        cases = [
+            ("function", TARGET, "GET", m.CF + before["functions"][TARGET]["name"]),
+            ("runService", TARGET, "GET", m.RUN + before["services"][TARGET]["name"]),
+            ("runIam", TARGET, "GET", m.RUN + before["services"][TARGET]["name"] + ":getIamPolicy?options.requestedPolicyVersion=3"),
+            ("schedulerJobs", None, "GET", m.SCHED + m.PREFIX + "/jobs?pageSize=500"),
+            ("eventarcTrigger", TARGET, "GET", m.EVENT + before["triggers"][TARGET]["name"]),
+            ("pubsubSubscription", TARGET, "GET", m.PUBSUB + before["subscriptions"][TARGET]["name"]),
+            ("projectIam", None, "POST", f"https://cloudresourcemanager.googleapis.com/v1/projects/{m.PROJECT}:getIamPolicy"),
+        ]
+        for kind, worker, method, url in cases:
+            api = ReadFixtureApi(fail=(method, url))
+            with self.subTest(kind=kind), self.assertRaises(m.MetadataReadError) as raised:
+                m.collect(api)
+            self.assertEqual(raised.exception.diagnostic, {
+                "resourceType": kind, "worker": worker, "method": method, "code": "API_HTTP_403"})
+            self.assertEqual(str(raised.exception), "API_HTTP_403")
+            self.assertNotIn(url, json.dumps(raised.exception.diagnostic))
+
+    def test_untrusted_exception_text_is_not_published(self):
+        url = m.CF + m.PREFIX + "/functions/" + TARGET
+        api = ReadFixtureApi(fail=("GET", url), message="Bearer private-token https://private.invalid?signature=secret IAM secret")
+        with self.assertRaises(m.MetadataReadError) as raised:
+            m.collect(api)
+        self.assertEqual(raised.exception.diagnostic["code"], "METADATA_READ_FAILED")
+        self.assertNotIn("private", json.dumps(raised.exception.diagnostic))
+        self.assertNotIn("secret", str(raised.exception))
+
+    def test_invalid_labels_or_write_methods_stop_before_api(self):
+        api = ReadFixtureApi()
+        for kind, worker, method in (("private-value", TARGET, "GET"), ("function", "private-value", "GET"),
+                                     ("function", TARGET, "PATCH"), ("projectIam", None, "GET")):
+            with self.subTest(kind=kind, worker=worker, method=method), self.assertRaises(ValueError):
+                m.read_metadata(api, kind, worker, method, "https://private.invalid")
+        self.assertEqual(api.calls, [])
+
+    def run_main(self, folder, api, inspect):
+        argv = ["migration", "--target", TARGET, "--source-sha", SOURCE_SHA, "--evidence", folder]
+        if inspect:
+            argv.append("--inspect")
+        env = {"GITHUB_ACTIONS": "true", "GITHUB_REF": "refs/heads/main", "GITHUB_RUN_ATTEMPT": "1",
+               "LKC_CONFIRMATION": m.CONFIRMATION, "GITHUB_SHA": SOURCE_SHA}
+        with patch.object(m.sys, "argv", argv), patch.dict(os.environ, env), patch.object(m, "Api", return_value=api), \
+             patch.object(m.subprocess, "check_output", side_effect=[SOURCE_SHA, SOURCE_SHA + "\trefs/heads/main", ""]), \
+             patch.object(m, "migrate") as migrate, patch("sys.stdout", new_callable=io.StringIO) as output:
+            try:
+                m.main()
+            finally:
+                migrate.assert_not_called()
+        return output.getvalue()
+
+    def test_incomplete_inspection_writes_safe_summary_and_still_fails(self):
+        url = m.CF + m.PREFIX + "/functions/" + TARGET
+        with tempfile.TemporaryDirectory() as folder:
+            evidence = Path(folder) / "evidence"
+            with self.assertRaisesRegex(m.MetadataReadError, "API_HTTP_403"):
+                self.run_main(str(evidence), ReadFixtureApi(fail=("GET", url)), True)
+            report = json.loads((evidence / "summary.json").read_text())
+            self.assertEqual(report["status"], "INSPECTION_INCOMPLETE")
+            self.assertFalse(report["configurationComplete"])
+            self.assertFalse(report["cloudMutation"])
+            self.assertFalse(report["executionDrainProven"])
+            self.assertFalse(report["deliveryScopeVerified"])
+            self.assertNotIn("beforeSha256", report)
+            self.assertEqual(report["failedRead"], {
+                "resourceType": "function", "worker": TARGET, "method": "GET", "code": "API_HTTP_403"})
+            self.assertEqual(set(p.name for p in evidence.iterdir()), {"summary.json"})
+
+    def test_deploy_read_failure_still_stops_without_readiness_summary(self):
+        url = m.CF + m.PREFIX + "/functions/" + TARGET
+        with tempfile.TemporaryDirectory() as folder:
+            evidence = Path(folder) / "evidence"
+            with self.assertRaises(m.MetadataReadError):
+                self.run_main(str(evidence), ReadFixtureApi(fail=("GET", url)), False)
+            self.assertEqual(list(evidence.iterdir()), [])
+
+    def test_complete_inspection_keeps_private_snapshot_out_of_summary(self):
+        with tempfile.TemporaryDirectory() as folder:
+            evidence = Path(folder) / "evidence"
+            api = ReadFixtureApi()
+            output = self.run_main(str(evidence), api, True)
+            report = json.loads((evidence / "summary.json").read_text())
+            self.assertEqual(report["status"], "CONFIGURATION_READY_NOT_AUTHORIZED")
+            self.assertFalse(report["cloudMutation"])
+            self.assertFalse(report["executionDrainProven"])
+            self.assertIn("beforeSha256", report)
+            self.assertEqual(json.loads(output), report)
+            self.assertNotIn("environmentVariables", output)
+            self.assertNotIn("bindings", output)
+            self.assertEqual(len(api.calls), 29)
 
 
 if __name__ == "__main__":

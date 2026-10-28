@@ -327,29 +327,59 @@ class Api:
             raise ValueError("UPLOAD_HTTP_" + str(error.code)) from None
 
 
+READ_WORKERS = {
+    "function": TARGETS + SENTINELS,
+    "runService": TARGETS, "runIam": TARGETS,
+    "schedulerJobs": (None,), "eventarcTrigger": EVENT_TARGETS,
+    "pubsubSubscription": EVENT_TARGETS, "projectIam": (None,),
+}
+
+
+class MetadataReadError(ValueError):
+    def __init__(self, kind, worker, method, code):
+        require(kind in READ_WORKERS and worker in READ_WORKERS[kind], "READ_LABEL_REJECTED")
+        require(method == ("POST" if kind == "projectIam" else "GET"), "READ_METHOD_REJECTED")
+        # 応答本文・URL・環境変数・IAMを例外から公開しない。
+        safe_code = code if re.fullmatch(
+            r"API_HTTP_[1-5][0-9]{2}|API_RESULT_UNKNOWN_READ_BEFORE_RETRY|AUTH_FAILED|API_SCOPE_REJECTED",
+            code) else "METADATA_READ_FAILED"
+        self.diagnostic = {"resourceType": kind, "worker": worker, "method": method, "code": safe_code}
+        super().__init__(safe_code)
+
+
+def read_metadata(api, kind, worker, method, url, body=None):
+    require(kind in READ_WORKERS and worker in READ_WORKERS[kind], "READ_LABEL_REJECTED")
+    require(method == ("POST" if kind == "projectIam" else "GET"), "READ_METHOD_REJECTED")
+    try:
+        return api.json(method, url, body)
+    except ValueError as error:
+        raise MetadataReadError(kind, worker, method, str(error)) from None
+
+
 def collect(api):
     def function(name):
-        return name, api.json("GET", CF + f"{PREFIX}/functions/{name}")
+        return name, read_metadata(api, "function", name, "GET", CF + f"{PREFIX}/functions/{name}")
     with ThreadPoolExecutor(max_workers=4) as pool:
         functions = dict(pool.map(function, TARGETS + SENTINELS))
     result = {"functions": functions, "services": {}, "iam": {}, "triggers": {}, "subscriptions": {}}
     for name in TARGETS:
         url = RUN + f"{PREFIX}/services/{name.lower()}"
-        result["services"][name] = api.json("GET", url)
-        result["iam"][name] = api.json("GET", url + ":getIamPolicy?options.requestedPolicyVersion=3")
-    jobs = api.json("GET", SCHED + f"{PREFIX}/jobs?pageSize=500")
+        result["services"][name] = read_metadata(api, "runService", name, "GET", url)
+        result["iam"][name] = read_metadata(api, "runIam", name, "GET", url + ":getIamPolicy?options.requestedPolicyVersion=3")
+    jobs = read_metadata(api, "schedulerJobs", None, "GET", SCHED + f"{PREFIX}/jobs?pageSize=500")
     require(not jobs.get("nextPageToken"), "SCHEDULER_INVENTORY_INCOMPLETE")
     result["jobs"] = {job["name"]: stable_job(job) for job in jobs.get("jobs", [])}
     for name in EVENT_TARGETS:
         trigger_name = functions[name].get("eventTrigger", {}).get("trigger", "")
         require(trigger_name.startswith(f"{PREFIX}/triggers/"), "TRIGGER_MISSING")
-        trigger = api.json("GET", EVENT + trigger_name)
+        trigger = read_metadata(api, "eventarcTrigger", name, "GET", EVENT + trigger_name)
         sub_name = trigger["transport"]["pubsub"]["subscription"]
         require(sub_name.startswith(f"projects/{PROJECT}/subscriptions/"), "SUBSCRIPTION_OUT_OF_SCOPE")
         result["triggers"][name] = trigger
-        result["subscriptions"][name] = api.json("GET", PUBSUB + sub_name)
-    result["projectIam"] = api.json("POST", f"https://cloudresourcemanager.googleapis.com/v1/projects/{PROJECT}:getIamPolicy",
-                                    {"options": {"requestedPolicyVersion": 3}})
+        result["subscriptions"][name] = read_metadata(api, "pubsubSubscription", name, "GET", PUBSUB + sub_name)
+    result["projectIam"] = read_metadata(api, "projectIam", None, "POST",
+                                         f"https://cloudresourcemanager.googleapis.com/v1/projects/{PROJECT}:getIamPolicy",
+                                         {"options": {"requestedPolicyVersion": 3}})
     return result
 
 
@@ -435,7 +465,16 @@ def main():
     evidence.mkdir(parents=True, mode=0o700)
     api = Api()
     api.headers()
-    before = collect(api)
+    try:
+        before = collect(api)
+    except MetadataReadError as error:
+        if args.inspect:
+            report = {"status": "INSPECTION_INCOMPLETE", "target": args.target, "sourceSha": head,
+                      "cloudMutation": False, "executionDrainProven": False, "configurationComplete": False,
+                      "deliveryScopeVerified": False, "requiredHeldEvents": None, "deliveryReadiness": [],
+                      "failedRead": error.diagnostic}
+            (evidence / "summary.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        raise
     # 生の構成・環境変数・IAMは公開artifactへ出さない。
     (evidence / "before-private.json").write_text(json.dumps(before), encoding="utf-8")
     if args.inspect:

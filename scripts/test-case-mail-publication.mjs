@@ -108,9 +108,10 @@ for(const assigned of [false,true])await test("取消復帰でも募集停止を
  if(assigned){h.job().assignedStaffId="staff-1";h.job().assignedStaffName="合成スタッフ";h.records.set("staffProfiles/staff-1",{companyId,active:true});}
  await h.load("./analytics").adminRestoreCancelledJob({auth:h.auth,data:{jobId:h.jobId,note:"合成復帰",expectedRevision:h.job().revision}});
  assert.equal(h.job().publishable,false);assert.equal(h.job().recruitmentStopped,true);assert.equal(h.job().cancelled,false);
- assert.equal(h.job().status,assigned?"assigned":"open");assert.equal(h.job().mailPublication,undefined);
+ assert.equal(h.job().status,assigned?"assigned":"stopped");assert.equal(h.job().mailPublication,undefined);
  assert.equal((await h.publishNow()).blocked.length,1);
- if(!assigned){await h.importRow();assert.equal(h.job().status,"stopped");assert.equal((await h.publishNow()).updated.length,1);}
+ if(!assigned){await h.importRow();assert.equal(h.job().status,"stopped");assert.equal(h.job().publishable,false);assert.equal(h.job().recruitmentStopped,true);assert.equal((await h.publishNow()).updated.length,1);assert.equal(h.job().status,"open");}
+ else{assert.equal(h.job().status,"assigned");assert.equal(h.job().publishable,false);assert.equal(h.job().recruitmentStopped,true);}
 });
 await test("複数募集の追加読取は全書込より前に行う",async()=>{
  const h=await setup();h.records.set("jobs/native",{companyId,status:"draft",sourceReady:true,revision:1});

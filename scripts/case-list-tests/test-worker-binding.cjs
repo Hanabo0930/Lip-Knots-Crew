@@ -32,6 +32,19 @@ const manualCore=load('case-list-manual-origin-core');
 const helper=load('case-list-source-core'),caseId=load('case-id'),sheet=load('sheet-write-core'),worker=load('case-list-monthly-worker');
 process.env.EXECUTIVE_APPROVER_EMAILS='owner@example.invalid';
 const results=[];async function test(name,fn){await fn();results.push({name,passed:true});}
+// Pass the worker's actual public ACK through the real frontend selectors.
+const uiCache=new Map();
+function loadUiModel(relative){
+  const file=path.resolve(__dirname,'../../',relative);
+  if(uiCache.has(file))return uiCache.get(file);
+  const ts=require('typescript'),module={exports:{}};
+  const code=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
+  vm.runInNewContext(code,{module,exports:module.exports,require:specifier=>{
+    if(!specifier.startsWith('./'))throw Error('Unexpected frontend dependency '+specifier);
+    return loadUiModel(path.relative(path.resolve(__dirname,'../../'),path.resolve(path.dirname(file),specifier+'.ts')));
+  }},{filename:file});
+  uiCache.set(file,module.exports);return module.exports;
+}
 function fixture(){
   const companyId='company_fixture',sourceCaseId='LKCASE_00000000-0000-0000-0000-000000000001',jobId=caseId.createJobIdFromPersistedCaseId(companyId,sourceCaseId),queueId='queue_fixture',staffId='staff_fixture',staffName='架空担当',book='SERVER_BOOK_FIXTURE001';
   const pre={version:1,spreadsheetId:book,sheetId:2026101601,caseId:sourceCaseId,rowRevision:sha('before-row'),ledgerRevision:sha('before-ledger')};pre.sourceRevision=helper.hashCaseList({schema:'LK_CASE_LIST_AUTHORITY_REVISION_V1',caseId:sourceCaseId,rowRevision:pre.rowRevision,ledgerRevision:pre.ledgerRevision});
@@ -112,6 +125,45 @@ function journey(options={}){
   return {f,cells,month,catalog,get queueRef(){return queueRef;},prepareManual,selectManual,step,budgets,reconcile,snapshots:()=>snapshots,counts:()=>({sourceCalls,monthCalls}),run,confirmNameUpAndSelect,completeSelected};
 }
 async function main(){
+  for(const origin of ['application','manual'])await test(origin+' actual worker ACK gates staff shifts, calendar and Admin archive together',async()=>{
+    const h=journey(),staffUi=loadUiModel('apps/staff/src/job-list.ts'),calendarUi=loadUiModel('apps/staff/src/monthly-shift-calendar.ts'),adminUi=loadUiModel('apps/admin/src/job-search.ts');
+    const today='2026-11-01',month='2026-11';
+    const publicJob=()=>({id:h.f.jobId,...copy(documents.get('jobs/'+h.f.jobId))});
+    const listed=(job,filter)=>adminUi.filterJobSearchIndex(adminUi.buildJobSearchIndex([job]),'',filter);
+    if(origin==='manual')h.prepareManual();else await h.run();
+    const pending=publicJob();
+    assert.equal(pending.applicationUnconfirmed,true);
+    assert.equal(staffUi.pendingAssignedJobs([pending],today).length,1);
+    assert.equal(staffUi.splitAssignedJobs([pending],today).upcoming.length,0);
+    assert.equal(staffUi.nextShiftJob([pending],today),null);
+    assert.equal(calendarUi.monthCalendar([pending],month).jobs.size,0);
+    assert.equal(listed(pending,'all').length,1);
+    assert.equal(listed(pending,'monthly-transferred').length,0);
+    assert.equal(h.counts().monthCalls,0);
+    if(origin==='manual')await h.selectManual();else await h.confirmNameUpAndSelect();
+    assert.equal(publicJob().applicationUnconfirmed,true);
+    assert.equal(calendarUi.monthCalendar([publicJob()],month).jobs.size,0);
+    await h.run();
+    const confirmed=publicJob();
+    assert.equal(confirmed.assignmentSheetWrite.nativeAck.status,'MONTHLY_READBACK_VERIFIED');
+    assert.equal(confirmed.applicationUnconfirmed,false);
+    assert.equal(staffUi.pendingAssignedJobs([confirmed],today).length,0);
+    assert.equal(staffUi.splitAssignedJobs([confirmed],today).upcoming[0].id,h.f.jobId);
+    assert.equal(staffUi.nextShiftJob([confirmed],today).id,h.f.jobId);
+    assert.equal(calendarUi.monthCalendar([confirmed],month).jobs.get(confirmed.dateKey)[0].id,h.f.jobId);
+    assert.equal(adminUi.isTransferredCaseListJob(confirmed),true);
+    assert.equal(listed(confirmed,'all').length,0);
+    assert.equal(listed(confirmed,'monthly-transferred').length,1);
+    await h.run();
+    assert.deepEqual(h.counts(),{sourceCalls:origin==='manual'?0:1,monthCalls:1});
+    // Projection checks do not prove cancellation callable or Rules privacy.
+    const cancelled={...confirmed,status:'cancelled',cancelled:true,publishable:false,recruitmentStopped:true};
+    assert.equal(staffUi.pendingAssignedJobs([cancelled],today).length,0);
+    assert.equal(staffUi.splitAssignedJobs([cancelled],today).upcoming.length,0);
+    assert.equal(calendarUi.monthCalendar([cancelled],month).jobs.size,0);
+    assert.equal(listed(cancelled,'all').length,0);
+    assert.equal(listed(cancelled,'cancelled').length,1);
+  });
   await test('manual name stays outside queue until explicit owner selection then same engine confirms with zero Source writes',async()=>{const h=journey();h.prepareManual();await h.run();assert.deepEqual(h.counts(),{sourceCalls:0,monthCalls:0});const before=helper.caseListMonthlyContentHash(h.cells);const selection=await h.selectManual();assert.equal(selection.status,'OWNER_TRANSFER_SELECTED');assert.equal(selection.nativeBatches,0);assert.equal(documents.get('jobs/'+h.f.jobId).applicationUnconfirmed,true);await h.run();const q=documents.get(h.queueRef.path),job=documents.get('jobs/'+h.f.jobId);assert.equal(q.status,'completed',q.caseListMonthlyReason);assert.equal(job.applicationUnconfirmed,false);assert.equal(job.assignmentSheetWrite.nativeAck.status,'MONTHLY_READBACK_VERIFIED');assert.equal(job.assignmentSheetWrite.nativeAck.preMonthlyContentHash,job.assignmentSheetWrite.nativeAck.postMonthlyContentHash);assert.equal(helper.caseListMonthlyContentHash(h.cells),before);assert.deepEqual(h.counts(),{sourceCalls:0,monthCalls:1});});
 
 

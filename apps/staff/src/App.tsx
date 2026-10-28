@@ -7,6 +7,7 @@ import {resubmissionNotificationId,readResubmissionNotification} from "./resubmi
 import {useShiftNotificationRoute} from "./useShiftNotificationRoute";
 import PastShiftHistory from "./PastShiftHistoryEntry";
 import { firestorePastShiftReader } from "./past-shift-reader";
+import { isShiftAccessDenied } from "./shift-access";
 import MonthlyShiftCalendar from "./MonthlyShiftCalendarEntry";
 import ShiftJobCards,{shiftDateLabel,shiftTextLabel,shiftPage} from './ShiftJobCards';
 import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
@@ -612,8 +613,12 @@ export default function App(){
       void registerCurrentDevice(authLoadVersion).catch(()=>{if(isCurrentAuthLoad())setMessage("端末情報を登録できませんでした。再読み込みしてください。");});
       void refreshOpenJobs(false,cid);
       void refreshPushStatus(true);
-    }catch{
+    }catch(error){
       if(!isCurrentAuthLoad())return;
+      if(isShiftAccessDenied(error)){
+        forgetInaccessibleShifts(undefined,current.uid,restoredScope?.companyId??"",restoredScope?.staffId??"");
+        restoredCachedData=false;
+      }
       if(restoredCachedData&&sessionVerified){
         setBusinessDataStatus("ready");
         setBusinessDataSource("cached");
@@ -712,8 +717,8 @@ export default function App(){
     const authVersion=authLoadVersionRef.current;
     // 過去の件数が増えても今後のシフトが取得上限から押し出されないようにする。
     const reads=[
-      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(301))),
-      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey","<",today),orderBy("dateKey","asc"),limit(51))),
+      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("status","==","assigned"),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(301))),
+      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("status","==","assigned"),where("dateKey","<",today),orderBy("dateKey","asc"),limit(51))),
       companionRead,
     ] as const;
     await Promise.allSettled(reads);
@@ -736,7 +741,7 @@ export default function App(){
     setUpcomingShiftMessage("");
     try{
       await run("upcoming-shifts",async()=>{
-        const page=await getDocs(query(collection(db!,"jobs"),where("companyId","==",companyId),where("assignedStaffId","==",staffId),where("dateKey",">=",today),orderBy("dateKey","asc"),startAfter(cursor),limit(51)));
+        const page=await getDocs(query(collection(db!,"jobs"),where("companyId","==",companyId),where("assignedStaffId","==",staffId),where("status","==","assigned"),where("dateKey",">=",today),orderBy("dateKey","asc"),startAfter(cursor),limit(51)));
         if(!isCurrent())return;
         const rows=page.docs.slice(0,50);
         const additions=rows.map(d=>({...d.data(),id:d.id} as Job));
@@ -744,7 +749,17 @@ export default function App(){
         upcomingShiftCursorRef.current=rows.at(-1)??cursor;
         setHasMoreUpcomingShifts(page.docs.length>50);
       });
-    }catch{if(isCurrent())setUpcomingShiftMessage("これからのシフトを読み込めませんでした。続きを読み込むボタンで再試行できます。");}
+    }catch(error){if(isCurrent()){if(isShiftAccessDenied(error))forgetInaccessibleShifts();setUpcomingShiftMessage("これからのシフトを読み込めませんでした。続きを読み込むボタンで再試行できます。");}}
+  }
+
+  function forgetInaccessibleShifts(jobId?:string,uid=user?.uid??"",cid=companyId,sid=staffId){
+    pastShiftVersionRef.current++;tasksReadVersionRef.current++;
+    clearBusinessSnapshot(uid,cid,sid);
+    setMyJobs(jobs=>jobId?jobs.filter(job=>job.id!==jobId):[]);
+    setTasks(rows=>jobId?rows.filter(task=>task.jobId!==jobId):[]);
+    setSelectedJob(job=>!jobId||job?.id===jobId?null:job);
+    setOpenJobs(jobs=>jobId?jobs.filter(job=>job.id!==jobId):[]);
+    mailPanelVersion.current++;setShowMailApplications(false);
   }
 
   async function loadTaskJob(jobId:string):Promise<Job|null>{
@@ -755,11 +770,13 @@ export default function App(){
     await run("task-job",async()=>{
       const snapshot=await getDocFromServer(doc(db!,"jobs",jobId)).catch(error=>{
         if(authVersion!==authLoadVersionRef.current||version!==pastShiftVersionRef.current)return null;
+        if(isShiftAccessDenied(error)){forgetInaccessibleShifts(jobId);return null;}
         throw error;
       });
-      if(!snapshot||authVersion!==authLoadVersionRef.current||version!==pastShiftVersionRef.current||!snapshot.exists())return;
+      if(!snapshot||authVersion!==authLoadVersionRef.current||version!==pastShiftVersionRef.current)return;
+      if(!snapshot.exists()){forgetInaccessibleShifts(jobId);return;}
       const candidate={...snapshot.data(),id:snapshot.id} as Job;
-      if(candidate.companyId!==companyId||candidate.assignedStaffId!==staffId||candidate.status!=="assigned"||candidate.cancelled===true)return;
+      if(candidate.companyId!==companyId||candidate.assignedStaffId!==staffId||candidate.status!=="assigned"||candidate.cancelled===true){forgetInaccessibleShifts(jobId);return;}
       job=candidate;
       pastShiftVersionRef.current++;
       setMyJobs(current=>orderAssignedJobs([...current.filter(item=>item.id!==candidate.id),candidate]));
@@ -891,9 +908,13 @@ export default function App(){
       setBusinessRefreshMs(Math.round(performance.now()-started));
       if(showFailure)setMessage("シフトを更新しました。応募した日付と店舗を確認してください。");
       if(openJobsStatus!=="idle")void refreshOpenJobs(false,companyId);
-    }catch{
+    }catch(error){
       if(authLoadVersion!==authLoadVersionRef.current)return;
       lastBusinessDataRefreshAt=0;
+      if(isShiftAccessDenied(error)){
+        forgetInaccessibleShifts();setBusinessDataSource("none");setBusinessDataStatus("error");setHomeLoadedFromCache(false);
+        setMessage("シフトを表示できません。再読み込みしてください。");return;
+      }
       setBusinessDataSource("stale");
       if(showFailure)setMessage(businessDataStatus==="ready"?"シフトの最新情報を確認できませんでした。前の一覧を表示しています。応募結果は未確認です。通信状態を確認して、もう一度更新してください。":"シフト一覧を取得できませんでした。応募結果は未確認です。通信状態を確認して、もう一度更新してください。");
     }finally{
@@ -1023,14 +1044,14 @@ export default function App(){
     const version=++pastShiftVersionRef.current;
     const snap=await getDocFromServer(doc(db,"jobs",jobId)).catch(error=>{
       if(authLoadVersion!==authLoadVersionRef.current||version!==pastShiftVersionRef.current)return null;
+      if(isShiftAccessDenied(error)){forgetInaccessibleShifts(jobId);return null;}
       throw error;
     });
     if(!snap||authLoadVersion!==authLoadVersionRef.current||version!==pastShiftVersionRef.current)return false;
     pastShiftVersionRef.current++;
     const updated=snap.exists()?{...snap.data(),id:snap.id} as Job:null;
     if(!updated||updated.companyId!==companyId||updated.assignedStaffId!==staffId||updated.status!=="assigned"||updated.cancelled===true){
-      setMyJobs(jobs=>jobs.filter(job=>job.id!==jobId));
-      setSelectedJob(current=>current?.id===jobId?null:current);
+      forgetInaccessibleShifts(jobId);
       return false;
     }
     setMyJobs(jobs=>jobs.map(job=>job.id===jobId?updated:job));
@@ -2070,7 +2091,7 @@ export default function App(){
           {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list">
             {(!firebaseConfigured||!!user?.uid&&!!companyId&&!!staffId)&&<PastShiftHistory key={JSON.stringify([user?.uid,companyId,staffId,pastHistoryAuthVersion,businessDate])}
               scope={{uid:user?.uid??"demo",companyId:companyId||"demo",staffId:staffId||"demo",today:businessDate}}
-              scopeVersion={pastHistoryAuthVersion} selectionRequest={shiftFocusRequest} reader={pastHistoryReader}
+              scopeVersion={pastHistoryAuthVersion} selectionRequest={shiftFocusRequest} reader={pastHistoryReader} onAccessDenied={forgetInaccessibleShifts}
               isCurrent={()=>pastHistoryAuthVersion===authLoadVersionRef.current}
               selectedId={selectedJob?.id} selectedDateKey={selectedJob?.dateKey} onSelect={job=>{
                 setMyJobs(current=>orderAssignedJobs([...new Map([...current,job].map(row=>[row.id,row])).values()]));

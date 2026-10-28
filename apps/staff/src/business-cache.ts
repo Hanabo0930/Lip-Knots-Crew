@@ -1,4 +1,4 @@
-const BUSINESS_CACHE_VERSION = 1;
+const BUSINESS_CACHE_VERSION = 2;
 const BUSINESS_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const BUSINESS_SCOPE_VERSION = 1;
 
@@ -38,6 +38,7 @@ function validRows(value:unknown,check:(row:Record<string,unknown>)=>boolean):bo
   return value.every(row=>{if(!isRecord(row)||!text(row.id)||ids.has(row.id)||!check(row))return false;ids.add(row.id);return true;});
 }
 function validCachedJob(job:Record<string,unknown>):boolean{
+  if(job.status==="cancelled"||job.cancelled===true)return false;
   if(!text(job.dateKey)||!text(job.status)||typeof job.menuName!=="string"||
      !optionalFields(job,["workDate","clientName","makerName","storeName","workTime","storeAddress","storeNearestStation","materialStatus","companyId","assignedStaffId"],"string")||
      !optionalFields(job,["cancelled"],"boolean"))return false;
@@ -140,6 +141,10 @@ export function saveBusinessSnapshot<Job, Task>(
   tasks: Task[],
 ): void {
   if (!uid || !companyId || !staffId) return;
+  if(jobs.some(job => isRecord(job) && (job.status === "cancelled" || job.cancelled === true))){
+    clearBusinessSnapshot(uid, companyId, staffId);
+    return;
+  }
   const snapshot: BusinessSnapshot<Job, Task> = {
     version: BUSINESS_CACHE_VERSION,
     savedAt: Date.now(),

@@ -8,14 +8,14 @@ export function firestorePastShiftReader<T extends PastShiftRecord>(database: Fi
   return {
     async oldest(scope) {
       const result = await getDocsFromServer(query(collection(database, "jobs"),
-        where("companyId", "==", scope.companyId), where("assignedStaffId", "==", scope.staffId),
+        where("companyId", "==", scope.companyId), where("assignedStaffId", "==", scope.staffId), where("status", "==", "assigned"),
         where("dateKey", "<", scope.today), orderBy("dateKey", "asc"), limit(1)));
       const first = result.docs[0];
       return first ? { ...first.data(), id: first.id } as T : null;
     },
     async page(range, cursor) {
       const result = await getDocsFromServer(query(collection(database, "jobs"),
-        where("companyId", "==", range.companyId), where("assignedStaffId", "==", range.staffId),
+        where("companyId", "==", range.companyId), where("assignedStaffId", "==", range.staffId), where("status", "==", "assigned"),
         where("dateKey", ">=", range.start), where("dateKey", "<", range.end),
         orderBy("dateKey", "asc"), ...(cursor ? [startAfter(cursor)] : []), limit(PAST_SHIFT_PAGE_SIZE + 1)));
       return result.docs.map(doc => ({ row: { ...doc.data(), id: doc.id } as T, cursor: doc }));

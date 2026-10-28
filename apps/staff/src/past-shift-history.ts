@@ -1,4 +1,5 @@
 import { hasValidDateKey } from "./job-list";
+import { isShiftAccessDenied } from "./shift-access";
 
 export const PAST_SHIFT_PAGE_SIZE = 50;
 export type PastShiftScope = { uid: string; companyId: string; staffId: string; today: string };
@@ -40,7 +41,7 @@ export function initialPastShiftState<T>(today: string): PastShiftState<T> {
 /** Read-only, owner/year-scoped paging. Neither cached business rows nor financial documents are used. */
 export function createPastShiftHistory<T extends PastShiftRecord, C>(
   scope: PastShiftScope, reader: PastShiftReader<T, C>, publish: (state: PastShiftState<T>) => void,
-  isCurrent: () => boolean = () => true,
+  isCurrent: () => boolean = () => true, onAccessDenied: () => void = () => {},
 ) {
   checkedScope(scope);
   let state = initialPastShiftState<T>(scope.today), cursor: C | null = null;
@@ -84,9 +85,14 @@ export function createPastShiftHistory<T extends PastShiftRecord, C>(
       const ordered = [...rows.values()];
       emit({ ...state, rows: ordered, status: "ready", loadingMore: false,
         hasMore: entries.length > PAST_SHIFT_PAGE_SIZE, error: "" });
-    } catch {
-      if (current(version)) emit({ ...state, status: append ? "ready" : "error", loadingMore: false,
-        error: "過去のシフトを読み込めませんでした。通信状態を確認して、もう一度読み込んでください。" });
+    } catch (error) {
+      if (current(version)) {
+        const denied=isShiftAccessDenied(error);
+        if(denied)cursor=null;
+        emit({ ...state, ...(denied?{rows:[],hasMore:false}:{}), status: append&&!denied ? "ready" : "error", loadingMore: false,
+          error: "過去のシフトを読み込めませんでした。通信状態を確認して、もう一度読み込んでください。" });
+        if(denied)onAccessDenied();
+      }
     } finally { if (current(version)) pending = false; }
   }
   async function initialize(preference?: () => number | undefined) {
@@ -106,10 +112,11 @@ export function createPastShiftHistory<T extends PastShiftRecord, C>(
       if (!first) { pending = false; emit({ ...state, status: "ready" }); return; }
       const preferred = preferredYear();
       await read(preferred !== undefined && years.includes(preferred) ? preferred : currentYear, false, version);
-    } catch {
+    } catch (error) {
       if (current(version)) {
         pending = false;
         emit({ ...state, status: "error", error: "選べる年を読み込めませんでした。もう一度読み込んでください。" });
+        if(isShiftAccessDenied(error))onAccessDenied();
       }
     }
   }

@@ -196,8 +196,8 @@ export const adminSetJobCancellation = onCall(async (request) => {
       tx.set(db.collection("notificationQueue").doc(), queueDocumentData({
         companyId,
         targetStaffId: job.assignedStaffId,
-        title: "案件がキャンセルになりました",
-        body: reason,
+        title: "シフトの予定が変更されました",
+        body: "詳細は管理者へ直接ご連絡ください。",
         route: `/shifts/${input.jobId}`,
         category: "job_cancelled",
         dedupeKey: `${input.jobId}_cancelled_${now.toMillis()}`,

@@ -115,6 +115,11 @@ for (const moduleName of ['jobs', 'analytics']) {
     const test = setup(lock);
     await test.cancel();
     assert.equal(test.records.get('jobs/old-job').cancelled, true, label);
+    assert.equal(test.records.get('jobs/old-job').status, 'cancelled', 'Cancellation status/flag must be atomic');
+    const notice=test.committed.find(item=>item.path.startsWith('notificationQueue/')).data;
+    assert.equal(notice.title,'シフトの予定が変更されました');
+    assert.equal(notice.body,'詳細は管理者へ直接ご連絡ください。');
+    assert.ok(!notice.body.includes('合成取消'),'Private reason must stay in Admin history, never the staff notice');
     assert.equal(test.committed.filter(item => item.path === lockPath).length, release ? 1 : 0, label);
     if (release) assert.equal(test.records.get(lockPath).active, false, label);
     else assert.deepEqual(test.records.get(lockPath), lock ?? undefined, label);

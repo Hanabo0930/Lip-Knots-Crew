@@ -435,6 +435,15 @@ const server = await createServer({
   server:{host:"127.0.0.1",port:0},
   plugins:[{
     name:"submission-browser-fixture",
+    enforce:"pre",
+    transform(code,id){
+      if(!id.endsWith('/src/App.tsx'))return;
+      const anchor='  const pendingApplications=';
+      assert.ok(code.includes(anchor));
+      return code.replace(anchor,`  // Test-only synthetic readback; never shipped in the app.
+  window.__monthlyReadbackFixture=()=>setMyJobs(previous=>previous.map(job=>({...job,applicationUnconfirmed:false})));
+${anchor}`);
+    },
     configureServer(devServer){
       // SPAのフォールバックより先に検証用ページを配信する。
       devServer.middlewares.use(async(req,res,next)=>{
@@ -1060,10 +1069,23 @@ try {
   await page.getByRole('button',{name:'募集案件を更新',exact:true}).click();
   assert.equal(await page.locator('.open-job').count(),0);
   await page.getByRole('button',{name:'応募したシフトを確認',exact:true}).click();
+  assert.equal(await page.locator('.shift-card-button').count(),1);
+  const pendingApplications=page.getByRole('region',{name:'確認待ちの応募',exact:true});
+  await pendingApplications.getByText(/デモ募集店舗/).waitFor();
+  assert.equal(await page.getByRole('button',{name:/デモ募集店舗 .*のシフトを確認/}).count(),0);
+  assert.equal(await page.getByRole('region',{name:'選択したシフトの詳細',exact:true}).count(),0);
+  await page.getByRole('button',{name:'シフトを更新',exact:true}).click();
+  await pendingApplications.waitFor();
+  assert.equal(await page.locator('.shift-card-button').count(),1);
+  // Only the isolated fixture simulates a verified server monthly-readback ACK.
+  // This proves display transition, not real manual intake or native transfer.
+  await page.evaluate(()=>window.__monthlyReadbackFixture());
+  await page.getByRole('button',{name:/デモ募集店舗 .*のシフトを確認/}).click();
+  assert.equal(await pendingApplications.count(),0);
   assert.equal(await page.locator('.shift-card-button').count(),2);
   assert.equal(await page.getByRole('button',{name:/デモ募集店舗 .*のシフトを確認/}).getAttribute('aria-pressed'),'true');
   await page.getByRole('region',{name:'選択したシフトの詳細',exact:true}).getByRole('heading',{name:'デモ募集店舗',exact:true}).waitFor();
-  console.log('Demo application passed: listing removed, refresh preserves acceptance, two shifts and assigned detail available.');
+  console.log('Demo application passed: listing removed, refresh preserves acceptance, pending remains separate through refresh; synthetic readback ACK exposes the second confirmed shift and detail.');
   for(const width of [320,390,1280])for(const fail of [false,true]){
     await page.setViewportSize({width,height:844});
     await page.getByRole('button',{name:/デモ募集店舗 .*のシフトを確認/}).click();
@@ -1243,3 +1265,5 @@ if(process.argv.includes("--browser"))await import("./test-staff-day-rollover.mj
 
 if(process.argv.includes("--browser"))await import("./test-staff-receipt-recovery.mjs");
 if(process.argv.includes("--browser"))await import("./test-staff-login-accessibility.mjs");
+
+await import("./test-staff-monthly-calendar.mjs");

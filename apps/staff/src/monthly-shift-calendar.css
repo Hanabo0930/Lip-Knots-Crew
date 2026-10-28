@@ -1,0 +1,10 @@
+.monthly-shift-calendar{margin:1rem 0;padding:1rem;border:1px solid #94a3b8;border-radius:12px;min-width:0}
+.calendar-month-navigation{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+.monthly-shift-calendar table{width:100%;table-layout:fixed;border-collapse:collapse;margin:1rem 0}
+.monthly-shift-calendar th,.monthly-shift-calendar td{border:1px solid #cbd5e1;padding:.25rem;text-align:center;vertical-align:top;overflow-wrap:anywhere}
+.monthly-shift-calendar td{height:4.5rem}
+.monthly-shift-calendar td[aria-current=date]{background:#e0f2fe;outline:2px solid #0369a1;outline-offset:-2px}
+.calendar-day-shifts{display:block;width:100%;min-height:44px;padding:.25rem;margin:.25rem 0;font-size:1rem;white-space:normal;overflow-wrap:anywhere}
+.calendar-day-details article{padding:1rem 0;border-top:1px solid #cbd5e1;overflow-wrap:anywhere}
+.calendar-day-details dl{margin:.5rem 0}.calendar-day-details dd{margin:0 0 .5rem}
+@media(max-width:390px){.monthly-shift-calendar{padding:.5rem}.monthly-shift-calendar th,.monthly-shift-calendar td{padding:.125rem}.calendar-day-shifts{font-size:.875rem}}

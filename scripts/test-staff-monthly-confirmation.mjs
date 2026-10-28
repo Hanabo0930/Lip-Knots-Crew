@@ -37,7 +37,7 @@ const React=await import('react');
 const {renderToStaticMarkup}=await import('react-dom/server');
 const app=readFileSync('apps/staff/src/App.tsx','utf8');
 const start=app.indexOf('{pendingApplications.length>0&&<section');
-const end=app.indexOf('\n        <div className="shift-list-heading">',start);
+const end=app.indexOf('\n        <MonthlyShiftCalendar',start);
 assert.ok(start>0&&end>start);
 const jsx=app.slice(start+1,end).trim().slice(0,-1);
 function renderPending(pendingApplications){

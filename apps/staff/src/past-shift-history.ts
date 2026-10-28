@@ -4,7 +4,7 @@ export const PAST_SHIFT_PAGE_SIZE = 50;
 export type PastShiftScope = { uid: string; companyId: string; staffId: string; today: string };
 export type PastShiftRecord = {
   id: string; dateKey: string; companyId?: string; assignedStaffId?: string;
-  status: string; cancelled?: boolean;
+  status: string; cancelled?: boolean; applicationUnconfirmed?: boolean;
 };
 export type PastShiftRange = PastShiftScope & { year: number; start: string; end: string };
 export type PastShiftReader<T, C> = {
@@ -77,7 +77,7 @@ export function createPastShiftHistory<T extends PastShiftRecord, C>(
       cursor = page.at(-1)?.cursor ?? cursor;
       const rows = new Map((append ? state.rows : []).map(row => [row.id, row]));
       for (const { row } of page) {
-        if (row.status === "assigned" && row.cancelled !== true) rows.set(row.id, row);
+        if (row.status === "assigned" && row.cancelled !== true && row.applicationUnconfirmed !== true) rows.set(row.id, row);
         else rows.delete(row.id);
       }
       // Keep server cursor order, including document-ID ties; locale collation moves rows between display pages.

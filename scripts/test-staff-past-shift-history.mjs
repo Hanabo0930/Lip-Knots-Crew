@@ -165,6 +165,13 @@ await test("Cancelled rows advance the raw cursor without falsely declaring an e
   x.control.loadMore(); await tick();
   assert.equal(x.state().rows[0].id, "row-050"); assert.equal(x.state().hasMore, false);
 });
+await test("Pending applications advance history cursor without appearing as confirmed", async () => {
+  records = Array.from({ length: 51 }, (_, i) => row("pending-" + String(i).padStart(3, "0"), "2026-01-01", { applicationUnconfirmed: i < 50 }));
+  const x = instance(); await x.control.initialize();
+  assert.equal(x.state().rows.length, 0); assert.equal(x.state().hasMore, true);
+  x.control.loadMore(); await tick();
+  assert.equal(x.state().rows[0].id, "pending-050"); assert.equal(x.state().hasMore, false);
+});
 await test("Year switching ignores old responses and same-year duplicate requests", async () => {
   records = [row("old", "2025-01-01"), row("new", "2026-01-01")];
   const x = instance(); await x.control.initialize();

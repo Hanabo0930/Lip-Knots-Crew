@@ -7,6 +7,7 @@ import {resubmissionNotificationId,readResubmissionNotification} from "./resubmi
 import {useShiftNotificationRoute} from "./useShiftNotificationRoute";
 import PastShiftHistory from "./PastShiftHistoryEntry";
 import { firestorePastShiftReader } from "./past-shift-reader";
+import MonthlyShiftCalendar from "./MonthlyShiftCalendar";
 import ShiftJobCards,{shiftDateLabel,shiftTextLabel,shiftPage} from './ShiftJobCards';
 import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -60,6 +61,7 @@ type SubmissionType = "report" | "sales_floor";
 type PushAction = "enable" | "disable" | "test" | "status";
 type NetPrintItem = { id: string; number: string; printed?: boolean };
 type Job = {
+  entryTime?: string;
   revision?: number; menuConditions?: string[];
   caseListSource?: { sourceRevision: string };
   mailIntake?: unknown; mailIntakeReviewRequired?: boolean; pendingSourceWrite?: boolean; adminEditSheetWrite?: {pending?:boolean};
@@ -280,7 +282,7 @@ export default function App(){
   useEffect(()=>{if(view==="shifts")shiftHeadingRef.current?.focus({preventScroll:true});},[view]);
   const shiftDetailRef=useRef<HTMLElement>(null);
   useEffect(()=>{if(shiftFocusRequest){shiftDetailRef.current?.focus({preventScroll:true});shiftDetailRef.current?.scrollIntoView({block:'start'});}},[shiftFocusRequest]);
-  function openShiftJob(job:Job){if(splitAssignedJobs([job]).past.length)setShowPastShifts(true);setSelectedJob(job);setShiftFocusRequest(value=>value+1);}
+  function openShiftJob(job:Job){if(job.applicationUnconfirmed===true){setSelectedJob(null);return;}if(splitAssignedJobs([job]).past.length)setShowPastShifts(true);setSelectedJob(job);setShiftFocusRequest(value=>value+1);}
   function togglePastShifts(){
     if(showPastShifts&&selectedJob&&upcomingShifts.length&&pastShifts.some(job=>job.id===selectedJob.id))setSelectedJob(upcomingShifts[0]);
     setShowPastShifts(!showPastShifts);
@@ -548,7 +550,7 @@ export default function App(){
         setCompanyId(cid); setStaffId(sid);
         setMyJobs(jobs);
         setTasks(snapshot.tasks);
-        setSelectedJob(jobs[0]??null);
+        setSelectedJob(nextShiftJob(jobs)??jobs.find(job=>job.applicationUnconfirmed!==true)??null);
         setBusinessDataStatus("ready");
         setBusinessDataSource("cached");
         setHomeDisplayMs(Math.round(performance.now()-loadStarted));
@@ -794,7 +796,7 @@ export default function App(){
     if(version!==pastShiftVersionRef.current||tasksVersion!==tasksReadVersionRef.current)return false;
     setMyJobs(jobs);
     setTasks(nextTasks);
-    setSelectedJob(current=>jobs.find(job=>job.id===current?.id)??nextShiftJob(jobs)??jobs[0]??null);
+    setSelectedJob(current=>jobs.find(job=>job.id===current?.id&&job.applicationUnconfirmed!==true)??nextShiftJob(jobs)??jobs.find(job=>job.applicationUnconfirmed!==true)??null);
     saveBusinessSnapshot(uid,cid,sid,jobs,nextTasks);
     return true;
   }
@@ -2053,6 +2055,7 @@ export default function App(){
           <ul>{pendingApplications.map(job=><li key={job.id}>{shiftDateLabel(job)} / {shiftTextLabel(job.storeName,"店舗確認中")} / 確認待ち</li>)}</ul>
           <p className="muted">取消のご希望は管理者へ直接ご連絡ください。</p>
         </section>}
+        <MonthlyShiftCalendar jobs={myJobs} onSelect={openShiftJob} today={businessDate}/>
         <div className="shift-list-heading"><h3>これからのシフト</h3><span>{upcomingShifts.length}件</span></div>
         {upcomingShifts.length
           ? <ShiftJobCards jobs={upcomingShifts} page={upcomingPage} onPageChange={setUpcomingPage} selectedId={selectedJob?.id} onSelect={openShiftJob} label="これからのシフト" accent={jobAccent} kind={jobKind} summary={prepSummary} submissionSummary={submissionSummary}/>

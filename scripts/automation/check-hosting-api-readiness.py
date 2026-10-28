@@ -34,7 +34,7 @@ def expected_files(root):
     files = [base / "package.json"]
     if (base / "package-lock.json").is_file():
         files.append(base / "package-lock.json")
-    for folder, suffixes in (("lib", {".js"}), ("src", {".ts"}), ("case-mail-runtime", {".js", ".cjs", ".json"})):
+    for folder, suffixes in (("lib", {".js"}), ("src", {".ts", ".cjs"}), ("case-mail-runtime", {".js", ".cjs", ".json"})):
         found = [p for p in (base / folder).rglob("*") if p.is_file() and p.suffix in suffixes]
         require(bool(found), "LOCAL_PACKAGE_INCOMPLETE")
         files.extend(found)

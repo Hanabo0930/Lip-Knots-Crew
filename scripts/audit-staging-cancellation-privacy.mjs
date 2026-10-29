@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {PROJECT,createReadTransport} from './read-staging-shift-integrity.mjs';
-const knownStatuses=['draft','scheduled','open','assigned','stopped','cancelled','archived'];
+// The existing submission acceptance kit also stores completed synthetic jobs.
+const knownStatuses=['draft','scheduled','open','assigned','stopped','cancelled','archived','completed'];
 class UnknownJobStatusError extends Error{
  constructor(statusAudit){super('UNKNOWN_JOB_STATUS');this.statusAudit=statusAudit;}
 }

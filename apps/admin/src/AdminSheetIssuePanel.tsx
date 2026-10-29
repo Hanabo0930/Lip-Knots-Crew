@@ -3,7 +3,7 @@ import type {ManualSourceTransferConfirmation} from "./manual-source-transfer";
 import SheetWriteReviewEntry from "./SheetWriteReviewEntry";
 export type SheetWriteIssue = {
  id:string;jobId:string;operation:string;status:string;errorType:string;errorMessage:string;attempts:number;canRetry:boolean;
- canReconcile?:boolean;writeVerificationRequired?:boolean;sourceWriteVerified?:false;acknowledgedAt?:string|null;acknowledgedNote?:string;
+ sourceCancellation?:boolean;canReconcile?:boolean;writeVerificationRequired?:boolean;sourceWriteVerified?:false;acknowledgedAt?:string|null;acknowledgedNote?:string;
  manualSourceStaffName?:string;manualCanonicalStaffName?:string;
  manualSourcePending?:boolean;manualObservationHash?:string|null;manualExpectedJobRevision?:number|null;manualExpectedSourceRevision?:string|null;
  suggestedPayOffer?:{dailyWageJPY:number;travelExpenses:"全額支給";communicationExpenses:"全額支給"}|null;
@@ -22,6 +22,7 @@ export default function AdminSheetIssuePanel({sheetIssues,issuesBusy,operationKe
  <div className="issue-list">{sheetIssues.map(issue=>{
   const reviewed=issue.status==="acknowledged",busy=issuesBusy||operationKeys.includes("issue:"+issue.id);
   const manualSource=issue.operation==="case_list.manual",caseList=issue.operation==="case_list.assign"||manualSource;
+  const sourceCancellation=issue.sourceCancellation===true;
   const retry=!caseList&&issue.canRetry&&!issue.writeVerificationRequired&&!reviewed&&["blocked","dead_letter","retry_wait"].includes(issue.status);
   return <article key={issue.id} className={"sheet-review-card "+(issue.errorType==="conflict"?"conflict-issue":"")+(manualSource?" manual-source-transfer-card":"")}>
    <div className="sheet-review-summary">
@@ -29,6 +30,7 @@ export default function AdminSheetIssuePanel({sheetIssues,issuesBusy,operationKe
     <p className="sheet-review-state">{issue.manualTransferPending?"新規手配・ネームアップ後の移行選択待ち":reviewed?"確認メモあり・反映未確認":"反映結果の確認が必要"}</p>
     <p>{issue.errorMessage||"依頼の状態とシフト表を確認してください。"}</p>
     {caseList&&!issue.manualTransferPending&&<p className="sheet-review-help">原本を読み取って保存結果を照合します。再書込は行いません。月別への保存が未完了の場合は保留を続けます。</p>}
+    {sourceCancellation&&issue.canReconcile&&<p className="sheet-review-help">案件リストの取消結果を読み取り、氏名消去と取消状態を照合します。再書込は行いません。</p>}
     {issue.manualTransferPending&&<p className="sheet-review-help">担当名の入力だけではシフト表へ移行しません。クライアントへのネームアップ後、日付・店舗・担当者を確認し、移行する案件だけ個別に選択してください。</p>}
     {issue.writeVerificationRequired&&!caseList&&<p className="sheet-review-help">手動での再試行はできません。原本と依頼の照合が必要です。</p>}
     {issue.status==="paused_global"&&<p className="sheet-review-help">運用設定によって処理が停止されています。</p>}
@@ -39,7 +41,7 @@ export default function AdminSheetIssuePanel({sheetIssues,issuesBusy,operationKe
    </div>
    <div className="row-actions">{retry&&<button className="ghost compact" disabled={busy} onClick={()=>void retrySheetIssue(issue)}>再試行</button>}
     {!manualSource&&issue.manualTransferPending&&issue.canSelectMonthlyTransfer&&<button className="compact" disabled={busy} onClick={()=>void selectMonthlyTransfer(issue)}>この案件を選択してシフト表へ移行</button>}
-    {!manualSource&&!issue.manualTransferPending&&<button className="ghost compact" disabled={busy||reviewed&&!caseList} onClick={()=>void acknowledgeSheetIssue(issue)}>{caseList?"保存結果を再照合":reviewed?"メモ記録済み":"確認メモを記録"}</button>}
+    {!manualSource&&!issue.manualTransferPending&&(!sourceCancellation||issue.canReconcile)&&<button className="ghost compact" disabled={busy||reviewed&&!caseList&&!sourceCancellation} onClick={()=>void acknowledgeSheetIssue(issue)}>{caseList||sourceCancellation?"保存結果を再照合":reviewed?"メモ記録済み":"確認メモを記録"}</button>}
    </div>
    {manualSource&&<ManualSourceTransferReview key={[issue.id,issue.manualObservationHash,issue.manualExpectedJobRevision,issue.manualExpectedSourceRevision].join(":")} issue={issue} busy={busy} onSelect={confirmation=>void selectMonthlyTransfer(issue,confirmation)}/>}
   </article>;

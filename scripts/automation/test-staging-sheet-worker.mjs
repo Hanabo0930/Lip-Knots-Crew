@@ -60,6 +60,10 @@ try {
     ['functions/src/case-list-monthly-reader.ts', 'metadata.spreadsheetId !== spreadsheetId', 'false'],
     ['functions/src/sheet-write-core.ts', 'if (!nativeBoolean(row[63]!) || row[63]!.userEnteredValue.boolValue !== true ||', 'if (!nativeBoolean(row[63]!) || !(row[0]?.userEnteredValue?.boolValue || row[63]!.userEnteredValue.boolValue) ||'],
     ['functions/src/sheet-write-core.ts', 'if (!nativeBoolean(row[63]!) || row[63]!.userEnteredValue.boolValue !== true ||', 'if (false ||'],
+    ['functions/src/sheet-write-core.ts', 'if (saved && Object.hasOwn(saved, "caseListCancellation")) return false;', 'if (false) return false;'],
+    ['functions/src/case-list-source-cancellation.ts', 'if (!owner) {', 'if (true) {'],
+    ['functions/src/case-list-source-cancellation.ts', 'startColumnIndex: 63, endColumnIndex: 64', 'startColumnIndex: 0, endColumnIndex: 1'],
+    ['functions/src/case-list-source-cancellation.ts', 'need(++nativeBatches === 1, "SOURCE_CANCEL_NATIVE_BUDGET");', 'nativeBatches++;'],
   ]) {
     assert.ok(sources[file].includes(before));
     check(() => assert.throws(() => assertRetryWorkerSource(name => name === file ? sources[name].replace(before, after) : sources[name]), /SOURCE_NOT_REVIEWED/));

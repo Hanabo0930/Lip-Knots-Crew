@@ -654,6 +654,15 @@ function checkSheetIssueCompanyRegions(block) {
     manual.slice(readyEnd).includes('job:job?.companyId===companyId?{') && manual.slice(readyEnd).includes('sourceWriteVerified:false');
 }
 
+function checkCapturedSourceCancellation(block) {
+  const capture = 'caseListCancellation=captureCaseListSourceCancellation(job,input.jobId,queueRef.id,session.uid,nextAssignmentRevision(job));';
+  const revision = 'if(job.caseListSource&&(!Number.isSafeInteger(job.revision)||Number(job.revision)<1||input.expectedRevision!==job.revision))';
+  const pointerClear = block.indexOf('assignmentSheetWrite:null,');
+  return block.includes(revision) && block.indexOf(revision) < block.indexOf(capture) &&
+    block.includes(capture) && pointerClear > block.indexOf(capture) &&
+    block.split('...(caseListCancellation?{caseListCancellation}:{})').length === 3;
+}
+
 function checkAdminCore(name) {
   const modules = { getSheetWriteIssues: "admin-operations", getOperationsDashboard: "analytics", getStaffPerformance: "analytics", createAdminJobGroup: "job-management", updateJobPublication: "job-management", adminEditJobInputs: "job-management", generateJobExport: "job-management", updateNetPrintNumbers: "netprint", adminSetJobCancellation: "analytics", adminRestoreCancelledJob: "analytics" };
   const source = sourceFile("functions/src/" + modules[name] + ".ts");
@@ -755,7 +764,7 @@ function checkAdminCore(name) {
       'if(lockRef&&ownsActiveLock&&sourceAck.sourceAckPending!==true)',
       'constsourceAck=cancellationSourceAckFields(job,ownsActiveLock,now.toMillis(),nextAssignmentRevision(job));',
       'assertAcknowledgedCancellationCanChange(job);',
-      'cancellationSheetWrite:{queueId:queueRef.id,operation:"job.cancel.v2",identity:cancellationSheetWriteIdentity(job),...sourceAck}',
+      'cancellationSheetWrite:{queueId:queueRef.id,operation:"job.cancel.v2",identity:cancellationSheetWriteIdentity(job),...sourceAck,...(caseListCancellation?{caseListCancellation}:{})}',
       'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.cancel.v2",', 'actorUid:session.uid,',
     ],
     adminRestoreCancelledJob: [
@@ -770,6 +779,7 @@ function checkAdminCore(name) {
     ],
   };
   if (!has(requirements[name])) return false;
+  if (name === "adminSetJobCancellation" && !checkCapturedSourceCancellation(block)) return false;
   if (["updateJobPublication","adminEditJobInputs"].includes(name) && !checkAtomicMutationAudit(source, block, name === "updateJobPublication" ? "job.publication.update" : "job.admin_edit", name === "updateJobPublication" ? "return{updated,blocked};});" : "returnresult;});")) return false;
   if (name === "createAdminJobGroup" && !checkNativeCreationRetry(source, block, "create")) return false;
   if (name === "createAdminJobGroup" && block.includes("stageAdminJobGroup(") && !checkAtomicCreationAudit(source, block, "job.group.create")) return false;
@@ -978,7 +988,7 @@ function checkBusinessRecovery(name) {
     'tx.update(jobRef,', 'tx.create(queueRef,{companyId,jobId:input.jobId,operation:"netprint.printed",',
     'actorUid:session.uid,actorStaffId:staffId',
   ]);
-  if (name === 'adminCancelJob') return has([
+  if (name === 'adminCancelJob') return checkCapturedSourceCancellation(block) && has([
     'CancelSchema.parse(request.data)', 'awaitdb.runTransaction(async(tx)=>{', 'constjobSnap=awaittx.get(jobRef);',
     'if(job.companyId!==companyId)', 'lockRef?awaittx.get(lockRef):null',
     'lock.jobId===input.jobId&&lock.companyId===companyId&&lock.staffId===job.assignedStaffId&&lock.dateKey===job.dateKey',
@@ -986,7 +996,7 @@ function checkBusinessRecovery(name) {
     'if(lockRef&&ownsActiveLock&&sourceAck.sourceAckPending!==true){tx.set(lockRef,', 'tx.update(jobRef,',
     'constsourceAck=cancellationSourceAckFields(job,ownsActiveLock,now.toMillis(),nextAssignmentRevision(job));',
     'assertAcknowledgedCancellationCanChange(job);',
-    'cancellationSheetWrite:{queueId:queueRef.id,operation:"job.cancel",identity:cancellationSheetWriteIdentity(job),...sourceAck}',
+    'cancellationSheetWrite:{queueId:queueRef.id,operation:"job.cancel",identity:cancellationSheetWriteIdentity(job),...sourceAck,...(caseListCancellation?{caseListCancellation}:{})}',
     'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.cancel",', 'actorUid:session.uid',
     'tx.set(db.collection("notificationQueue").doc(),queueDocumentData({companyId,targetStaffId:job.assignedStaffId,',
   ]);

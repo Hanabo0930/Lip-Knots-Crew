@@ -23,7 +23,7 @@ type Queue = {
   companyId: string; jobId: string; operation: string; dateKey?: string;
   updates?: Record<string, unknown>; styles?: Record<string, { background?: string }>;
   expected?: Record<string, ExpectedValue>; idempotencyKey?: string; attempts?: number;
-  status?: string; actorUid?: string; actorStaffId?: string; claimToken?: string;
+  status?: string; actorUid?: string; actorStaffId?: string; claimToken?: string; caseListCancellation?: Record<string, unknown>;
 };
 type Mapping = {
   enabled?: boolean; spreadsheetId: string; idColumn?: string; allowVerifiedFallbackRow?: boolean;
@@ -127,7 +127,7 @@ function queueFingerprint(queue: Queue): string {
   return JSON.stringify(sort({
     companyId: queue.companyId, jobId: queue.jobId, operation: queue.operation, dateKey: queue.dateKey,
     updates: queue.updates, styles: queue.styles, expected: queue.expected, idempotencyKey: queue.idempotencyKey,
-    actorUid: queue.actorUid, actorStaffId: queue.actorStaffId,
+    actorUid: queue.actorUid, actorStaffId: queue.actorStaffId, caseListCancellation: queue.caseListCancellation,
   }));
 }
 async function finishOwned(ref: FirebaseFirestore.DocumentReference, queue: Queue, data: FirebaseFirestore.DocumentData) {
@@ -375,13 +375,17 @@ async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
     if (!jobSnap.exists || !mapSnap.exists) throw new BlockedError("案件または列マッピングが見つかりません。");
     const job = jobSnap.data()!;
     const savedMapping = mapSnap.data() as Mapping;
+    if (job.caseListSource && ["job.cancel", "job.cancel.v2", "job.restore"].includes(queue.operation) && !job.sheetRef) {
+      assertCancellation(ref, queue, job);
+      if (queue.operation === "job.restore" || !queue.caseListCancellation) throw new BlockedError("案件リストの取消前の手配履歴がありません。原本と勤務枠を保持して照合を停止しました。");
+      const cancellation: typeof import("./case-list-source-cancellation") = require("./case-list-source-cancellation");
+      await cancellation.processCaseListSourceCancellation(ref, queue);
+      return;
+    }
     const mapping = resolveSheetCaseIdMapping(savedMapping, String(job.sheetRef?.sheetName ?? ""));
     assertSheetCaseIdColumn(job.sheetRef?.caseIdColumn, mapping.idColumn);
     if (mapping.enabled !== true) throw new BlockedError("安全書込がまだ有効化されていません。");
     if (job.companyId !== queue.companyId) throw new BlockedError("会社情報が一致しません。");
-    if (job.caseListSource && ["job.cancel", "job.cancel.v2", "job.restore"].includes(queue.operation) && !job.sheetRef) {
-      throw new BlockedError("月別へ未転記の案件リスト取消は、原本で氏名空欄・取消状態を読取照合するまで勤務枠を保持します。原本への取消書込みは実行していません。");
-    }
     if (job.caseListSource ? !caseListBookMatches(job, mapping) : job.sheetRef?.spreadsheetId && job.sheetRef.spreadsheetId !== mapping.spreadsheetId) throw new BlockedError("元のシフト表が一致しません。");
     await verifyAssignment(job, mapping);
     assertAdminEdit(ref, queue, job, mapping);

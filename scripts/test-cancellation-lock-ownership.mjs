@@ -71,8 +71,41 @@ for (const moduleName of ['jobs', 'analytics']) {
     };
     const exports = {};
     runInNewContext(compiled, { exports, require: (name) => { assert.ok(Object.hasOwn(mocks, name), `Unexpected import ${name}`); return mocks[name]; } }, { timeout: 3000 });
-    const cancel = (role = 'admin', changes = {}) => exports[moduleName === 'jobs' ? 'adminCancelJob' : 'adminSetJobCancellation']({ auth: { uid: 'synthetic-admin', token: { companyId, role } }, data: { jobId: 'old-job', reason: '合成取消', reasonCategory: 'other', financialTreatment: 'neither', ...changes } });
+    const cancel = (role = 'admin', changes = {}) => exports[moduleName === 'jobs' ? 'adminCancelJob' : 'adminSetJobCancellation']({ auth: { uid: 'synthetic-admin', token: { companyId, role } }, data: { jobId: 'old-job', expectedRevision: records.get('jobs/old-job')?.revision, reason: '合成取消', reasonCategory: 'other', financialTreatment: 'neither', ...changes } });
     return { records, committed, reads, cancel, restore:()=>exports.adminRestoreCancelledJob({auth:{uid:"synthetic-admin",token:{companyId,role:"admin"}},data:{jobId:"old-job",note:"合成復帰"}}) };
+  }
+  for(const mode of ['omitted','stale','staff-reassigned-after-display','invalid-stored-revision']){
+    const caseId='LKCASE_00000000-0000-5000-8000-000000000001',revision='a'.repeat(64),source={version:1,sheetId:2026101601,caseId,sourceRevision:revision,rowRevision:revision,ledgerRevision:revision,bindingHash:revision};
+    const test=setup(ownLock,{caseId,workDate:dateKey,assignedStaffName:'確認時の担当',revision:1,caseListSource:source,source:{type:'case_list',sheetId:2026101601,bindingHash:revision}});
+    const job=test.records.get('jobs/old-job');
+    if(mode==='staff-reassigned-after-display'){job.revision=2;job.assignedStaffId='replacement-staff';job.assignedStaffName='差替え後担当';}
+    if(mode==='invalid-stored-revision')job.revision='1';
+    const expectedRevision=mode==='omitted'?undefined:mode==='stale'?0:1,before=JSON.stringify([...test.records]);
+    await assert.rejects(()=>test.cancel('admin',{expectedRevision}),{code:'failed-precondition'},'CaseList '+mode+' must stop before capture or lock access');
+    assert.equal(JSON.stringify([...test.records]),before);assert.equal(test.committed.length,0);assert.equal(test.reads.join(','),'jobs/old-job');passed++;
+  }
+  for(const origin of ['manual','application']){
+    const caseId='LKCASE_00000000-0000-5000-8000-000000000001',revision='a'.repeat(64),source={version:1,sheetId:2026101601,caseId,sourceRevision:revision,rowRevision:revision,ledgerRevision:revision,bindingHash:revision};
+    const prior={operation:'case_list.assign',queueId:'prior-assignment-queue',identity:'prior-identity',sourceRevision:revision,assignedJobRevision:4,nativeAck:{private:'must-not-be-copied'}};
+    const test=setup(ownLock,{caseId,workDate:dateKey,assignedStaffName:'合成手入力担当',assignedUid:origin==='manual'?null:'synthetic-staff-uid',applicationUnconfirmed:true,revision:4,caseListSource:source,
+      source:{type:'case_list',sheetId:2026101601,bindingHash:revision},...(origin==='manual'?{caseListManualPending:{observationHash:revision,sourceRevision:revision,staffId,dateKey,canonicalStaffName:'合成手入力担当'}}:{assignmentSheetWrite:prior})});
+    await test.cancel();const job=test.records.get('jobs/old-job'),queue=test.committed.find(entry=>entry.path.startsWith('sheetSyncQueue/')).data,capture=job.cancellationSheetWrite.caseListCancellation;
+    assert.equal(job.assignmentSheetWrite,null);assert.equal(capture.schema,'LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1');assert.equal(capture.beforeJobRevision,4);assert.equal(capture.cancelledJobRevision,5);assert.equal(job.revision,5);assert.equal(capture.actorUid,'synthetic-admin');assert.equal(capture.caseId,caseId);assert.equal(capture.staffId,staffId);assert.equal(JSON.stringify(queue.caseListCancellation),JSON.stringify(capture));
+    if(origin==='manual'){assert.equal(capture.priorAssignment,null);assert.equal(capture.manualPending.staffId,staffId);}else{assert.equal(capture.priorAssignment.queueId,'prior-assignment-queue');assert.equal(capture.priorAssignment.identity,'prior-identity');assert.equal(capture.priorAssignment.nativeAck,undefined);assert.equal(capture.manualPending,null);}
+    const before=JSON.stringify([...test.records]),writes=test.committed.length;
+    await assert.rejects(()=>test.cancel('admin',{reason:'変更後の理由',reasonNote:'変更後の理由'}),{code:'failed-precondition'},'Pending native cancellation retains its original capture and queue');assert.equal(JSON.stringify([...test.records]),before);assert.equal(test.committed.length,writes);passed++;
+  }
+  for(const rawName of [undefined,null]){
+    const caseId='LKCASE_00000000-0000-5000-8000-000000000001',revision='a'.repeat(64);
+    const test=setup(ownLock,{caseId,workDate:dateKey,assignedStaffName:'合成手入力担当',assignedUid:null,applicationUnconfirmed:true,revision:1,...(rawName===undefined?{}:{rawStaffName:rawName}),
+      caseListSource:{version:1,sheetId:2026101601,caseId,sourceRevision:revision,rowRevision:revision,ledgerRevision:revision,bindingHash:revision},source:{type:'case_list',sheetId:2026101601,bindingHash:revision},
+      caseListManualPending:{observationHash:revision,sourceRevision:revision,staffId,dateKey,canonicalStaffName:'合成手入力担当'}});
+    await test.cancel();const cancelled=test.records.get('jobs/old-job'),intent=cancelled.cancellationSheetWrite;
+    // Reconstruct an earlier Source-import ACK, before native capture existed.
+    delete intent.caseListCancellation;cancelled.cancellationSheetWrite={...intent,sourceAckPending:false,sourceAckProof:{readStartedAtMs:1300,confirmedAtMs:1400,runId:'synthetic-import',originalRevision:cancelled.revision,originalIdentity:intent.identity,staffId,dateKey}};
+    test.records.get(lockPath).active=false;const before=JSON.stringify([...test.records]),writes=test.committed.length;
+    await assert.rejects(()=>test.cancel('admin',{reason:'変更後の理由',reasonNote:'変更後の理由'}),{code:'failed-precondition'},'Earlier manual Source ACK reason/proof remains immutable without rawStaffName');
+    assert.equal(JSON.stringify([...test.records]),before);assert.equal(test.committed.length,writes);assert.equal(test.records.get(lockPath).active,false);passed++;
   }
   if(moduleName==='analytics'){
     for(const rawName of [undefined,null]){

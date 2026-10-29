@@ -468,3 +468,6 @@ try{
 }finally{await browser?.close();await new Promise(resolve=>server.httpServer.close(resolve));}
 
 if(process.argv.includes("--browser")){const {verifyStaffOfflineNavigation}=await import("./test-staff-offline-navigation.mjs");await verifyStaffOfflineNavigation("admin");}
+
+// Recruitment draft is a real UI flow; keep it in the existing Chromium job.
+if(process.argv.includes("--browser")) await import("./test-admin-recruitment-draft-browser.mjs");

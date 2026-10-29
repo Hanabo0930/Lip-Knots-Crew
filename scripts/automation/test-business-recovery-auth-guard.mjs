@@ -30,6 +30,10 @@ for(const name of Object.keys(files)) {
  reject(name,'from "./utils"','from "./other"',true);
  if(!['getExpenseReview','getJobSheetLink'].includes(name)) reject(name,'await assertProductionOperational(companyId);','');
 }
+reject('adminCancelJob','captureCaseListSourceCancellation(job, input.jobId, queueRef.id, session.uid, nextAssignmentRevision(job))','request.data.caseListCancellation');
+reject('adminCancelJob','...(caseListCancellation ? { caseListCancellation } : {})','');
+reject('adminCancelJob','assignmentSheetWrite: null,','assignmentSheetWrite: job.assignmentSheetWrite,');
+reject('adminCancelJob','if (job.caseListSource && (!Number.isSafeInteger(job.revision) || Number(job.revision) < 1 || input.expectedRevision !== job.revision))','if (false)');
 const mutations={
  getExpenseReview:[
   ['JobSchema.parse(request.data ?? {})','request.data'],

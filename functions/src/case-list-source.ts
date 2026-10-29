@@ -155,7 +155,10 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
         // The transfer driver remains held until that distinct contract exists.
         if (priorManual && (priorManual.companyId !== companyId || priorManual.jobId !== jobId || priorManual.caseId !== entry.caseId || priorManual.schema !== "LK_CASE_LIST_MANUAL_OBSERVATION_V1")) throw new HttpsError("failed-precondition", "手入力の既存観測と案件の対応を確認できません。記録を保持して停止しました。");
         if (priorManual?.selected === true && (!old || old.companyId !== companyId || old.assignedStaffId !== priorManual.staffId || old.assignmentSheetWrite?.queueId !== priorManual.queueId)) throw new HttpsError("failed-precondition", "選択済み手入力案件の履歴を保持して取込を停止しました。");
-        let manualPatch: Record<string, unknown> | null = priorManual?.selected === true ? null : manualObservation && !sameManualObservation(priorManual, manualObservation)
+        const nativeCancellationPending = old?.cancellationSheetWrite?.sourceAckPending === true && Object.hasOwn(old.cancellationSheetWrite, "caseListCancellation");
+        // Keep the native cancel's original private observation until its own
+        // full-writable before/after-image reconciliation settles the queue.
+        let manualPatch: Record<string, unknown> | null = priorManual?.selected === true || nativeCancellationPending ? null : manualObservation && !sameManualObservation(priorManual, manualObservation)
           ? { ...manualObservation, observedBy: actorUid, observedAt: Timestamp.now() }
           : !manualObservation && priorManual && priorManual.state !== "cleared"
             ? { ...priorManual, state: "cleared", source: publicCaseListSource(entry.source), selected: false,
@@ -232,7 +235,11 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
         if (sourceCancellationConfirmed && cancellationDayRef && old) {
           const sourceAckProof = { readStartedAtMs: sourceReadStartedAtMs, confirmedAtMs: Date.now(), runId: tokenId,
             originalRevision: old.revision, originalIdentity: old.cancellationSheetWrite.identity, staffId: old.assignedStaffId, dateKey: old.dateKey };
-          Object.assign(update, { cancellationSheetWrite: { ...old.cancellationSheetWrite, sourceAckPending: false, sourceAckProof }, caseListCancellationReviewRequired: false });
+          Object.assign(update, { rawStaffName: "", cancellationSheetWrite: { ...old.cancellationSheetWrite, sourceAckPending: false, sourceAckProof }, caseListCancellationReviewRequired: false });
+          // Only legacy captures reach this value-only ACK guard. Settle the
+          // exact queue already read and matched above; no native proof is made.
+          tx.set(db.collection("sheetSyncQueue").doc(old.cancellationSheetWrite.queueId), { status: "completed", retryAt: null, writeVerificationRequired: false,
+            sourceCancellationVerifiedBy: "source-import", completedAt: Timestamp.now(), updatedAt: Timestamp.now() }, { merge: true });
           tx.set(cancellationDayRef, { active: false, releasedAt: Timestamp.now(), releaseReason: "sheet.import.assignment_changed", jobId }, { merge: true });
           tx.set(db.collection("auditLogs").doc(), { companyId, jobId, action: "job.cancel.source.confirm", queueId: old.cancellationSheetWrite.queueId,
             staffId: old.assignedStaffId, dateKey: old.dateKey, confirmation: sourceAckProof, createdAt: Timestamp.now() });
@@ -297,10 +304,31 @@ export async function readCaseListPublication(tx: Tx, companyId: string, jobId: 
   let candidate: Record<string, unknown>;
   try { candidate = confirmedCaseListCandidate(snapshot.rows, snapshot.ledgerRows, entry.caseId, approval, new Date().toISOString(), owner, snapshot.spreadsheetId); }
   catch { throw new HttpsError("failed-precondition", "募集条件・担当の照合が完了していません。原本の確認事項を解消してください。"); }
+  // A newly reviewed region must be the exact current Source BE value. It
+  // cannot fill a blank Source cell or substitute for a Source publication.
+  const confirmedRegion = (approval as CaseListConfirmation & { confirmedRegion?: string }).confirmedRegion;
+  if (confirmedRegion !== undefined && (typeof confirmedRegion !== "string" || !confirmedRegion.trim() || confirmedRegion !== confirmedRegion.trim() || confirmedRegion.length > 100 || confirmedRegion !== candidate.region)) throw new HttpsError("failed-precondition", "原本の地域と社長が確認した地域が一致しません。原本を確認してください。");
   await verifyCaseListTransferCapability(companyId, entry.source, monthlySnapshot);
   const jobFields = { dateKey: candidate.date, workDate: candidate.date, clientName: candidate.client, storeName: candidate.store, makerName: candidate.manufacturer, menuName: candidate.menu, entryTime: candidate.arrival, workTime: candidate.execution, region: candidate.region };
   if (!confirmation && (Object.entries(jobFields).some(([key, value]) => job[key] !== value) || job.basePay !== (candidate.payOffer as { dailyWageJPY: number }).dailyWageJPY || !job.publicPayOffer || hashCaseList(job.publicPayOffer) !== hashCaseList(candidate.payOffer))) throw new HttpsError("failed-precondition", "アプリと案件リストの募集条件が一致しません。取り込み直して確認してください。");
   const row = snapshot.rows.find(row => row[60]?.userEnteredValue?.stringValue === entry.caseId);
   if (!row) throw new HttpsError("failed-precondition", "元の募集枠を確認できません。");
-  return { candidate, jobFields, source: entry.source, preMonthlyContentHash: caseListMonthlyContentHash(row), approval: { ...approval, actorUid: owner }, observedAt: snapshot.observedAt };
+  // This mail bridge has no owner-reviewed public-note/extra-allowance
+  // contract yet. A populated or formula-based BM must not silently vanish.
+  const recruitmentNotice = row[64];
+  const publicNoteUnreviewed = [recruitmentNotice?.userEnteredValue, recruitmentNotice?.effectiveValue].some(raw => raw && Object.entries(raw).some(([key, value]) => key !== "stringValue" || typeof value !== "string" || value.trim() !== ""));
+  const typeHints = [row[10], row[13], row[16]].flatMap(cell => [cell?.userEnteredValue?.stringValue, cell?.effectiveValue?.stringValue]).filter(value => typeof value === "string").join(" ");
+  // AF:AJ were public extra-pay labels in the existing mail adapter. Until
+  // those per-label conditions have an owner-reviewed receipt, do not omit
+  // a nonzero/unknown amount or derive a new public amount from private pay.
+  const noExtraPay = (raw?: Record<string, unknown>) => !raw || Object.entries(raw).every(([key, value]) => key === "numberValue" && value === 0 || key === "stringValue" && typeof value === "string" && ["", "0"].includes(value.trim()));
+  const additionalPayUnreviewed = row.slice(31, 36).some(cell => Object.hasOwn(cell.userEnteredValue ?? {}, "formulaValue")
+    ? cell.effectiveValue?.numberValue !== 0
+    : !noExtraPay(cell.userEnteredValue) || !noExtraPay(cell.effectiveValue));
+  const recruitmentTextHoldReasons = [
+    ...(publicNoteUnreviewed ? ["PUBLIC_RECRUITMENT_NOTES_UNREVIEWED"] : []),
+    ...(additionalPayUnreviewed ? ["PUBLIC_ADDITIONAL_PAY_UNREVIEWED"] : []),
+    ...(/研修|OJT|ラウンダー|出口調査|グレイス|グレース/i.test(typeHints) ? ["UNSUPPORTED_RECRUITMENT_TYPE"] : []),
+  ];
+  return { candidate, jobFields, source: entry.source, preMonthlyContentHash: caseListMonthlyContentHash(row), approval: { ...approval, actorUid: owner }, observedAt: snapshot.observedAt, recruitmentTextHoldReasons };
 }

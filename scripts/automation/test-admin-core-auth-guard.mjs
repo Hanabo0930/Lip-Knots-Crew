@@ -35,6 +35,10 @@ const mutations={
  adminRestoreCancelledJob:[['jobSnap.data()?.companyId !== companyId','false'],['staffSnap.data()?.companyId !== companyId','false'],['currentLock.staffId !== assignedStaffId','false'],['lockSnap.data()?.jobId !== input.jobId','false'],['job.cancelled !== true && job.status !== "cancelled"','false'],['assertCancelledAssignmentCanRestore(job);','']],
 };
 for(const [name,pairs]of Object.entries(mutations))for(const [before,after]of pairs)reject(name,before,after);
+reject('adminSetJobCancellation','captureCaseListSourceCancellation(job, input.jobId, queueRef.id, session.uid, nextAssignmentRevision(job))','request.data.caseListCancellation');
+reject('adminSetJobCancellation','...(caseListCancellation ? { caseListCancellation } : {})','');
+reject('adminSetJobCancellation','assignmentSheetWrite: null,','assignmentSheetWrite: job.assignmentSheetWrite,');
+reject('adminSetJobCancellation','if (job.caseListSource && (!Number.isSafeInteger(job.revision) || Number(job.revision) < 1 || input.expectedRevision !== job.revision))','if (false)');
 // Mutate each queue/manual company gate inside its own projection. A broad
 // first replacement cannot prove that the other repeated gates are checked.
 function rejectIssueRegion(label, begin, end, before, after) {

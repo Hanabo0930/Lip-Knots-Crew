@@ -53,6 +53,28 @@ export function cancellationSourceAckFields(job: Record<string, unknown>, ownsLo
     sourceAckRequestedAtMs: requestedAtMs, sourceAckJobRevision: expectedJobRevision } : {};
 }
 
+/** Server-captured before cancellation clears the current assignment pointer.
+ * This is evidence to inspect; it never authorizes a Source write by itself. */
+export function captureCaseListSourceCancellation(job: Record<string, any>, jobId: string, queueId: string,
+  actorUid: string, cancelledJobRevision: number): Record<string, unknown> | null {
+  if (!job.caseListSource || job.sheetRef != null) return null;
+  if (job.cancelled === true && job.cancellationSheetWrite?.caseListCancellation) {
+    throw new Error("案件リストの取消結果を確認中です。結果の照合が終わるまで取消内容を変更できません。");
+  }
+  const pick = (value: any, keys: string[]) => value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(keys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])) : null;
+  return {
+    schema: "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1", companyId: job.companyId ?? null, jobId, queueId, actorUid,
+    caseId: job.caseId ?? null, staffId: job.assignedStaffId ?? null, staffName: job.assignedStaffName ?? null,
+    assignedUid: job.assignedUid ?? null, dateKey: job.dateKey ?? null, workDate: job.workDate ?? null,
+    beforeJobRevision: job.revision ?? null, cancelledJobRevision, identity: cancellationSheetWriteIdentity(job),
+    source: pick(job.caseListSource, ["version", "sheetId", "caseId", "sourceRevision", "rowRevision", "ledgerRevision", "bindingHash"]),
+    priorAssignment: pick(job.assignmentSheetWrite, ["operation", "queueId", "identity", "sourceRevision", "assignedJobRevision", "pending"]),
+    manualPending: pick(job.caseListManualPending, ["observationHash", "sourceRevision", "staffId", "dateKey", "canonicalStaffName"]),
+    ownerSelected: job.caseListManualSelection != null || job.caseListMonthlyAck != null,
+  };
+}
+
 export function cancellationSourceAckPending(job: Record<string, unknown>): boolean {
   const intent = job.cancellationSheetWrite as Record<string, unknown> | undefined;
   return intent?.sourceAckPending === true;
@@ -97,6 +119,9 @@ export function importedCaseListCancellationSourceAck(old: Record<string, any> |
   readStartedAtMs: number, hash: (value: unknown) => string): boolean {
   if (!old) return false;
   const saved = old.cancellationSheetWrite;
+  // Native cancellation owns its immutable full-CellData before-image. The
+  // legacy value-only importer must not bypass its strict after-image proof.
+  if (saved && Object.hasOwn(saved, "caseListCancellation")) return false;
   if (saved?.sourceAckPending !== true || !old?.caseListManualPending || old.sheetRef != null ||
     old.caseListManualSelection != null || old.assignmentSheetWrite != null) return false;
   const refuse = (): never => { throw new Error("取消後の案件リストで氏名空欄・取消・同じ案件と勤務枠を確認できません。勤務枠を保持しました。"); };

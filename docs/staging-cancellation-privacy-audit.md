@@ -25,3 +25,7 @@
 監査の既知状態へ、既存 `functions/src/automation-bridge-core.ts` が宣言する `archived` を含める。これを取消扱いへ変換せず、archivedかつcancelled=trueも矛盾としてHOLDにする。実行40802270788の原因がarchivedだったとは推測しない。
 
 未宣言状態・状態欠落・型不正は引き続きINCOMPLETEとして拒否する。完全な読取スナップショットを走査できた場合だけ、既知の固定状態別件数とunknown/missing/invalid件数を補足する。未知の実値、案件ID、氏名、理由、トークンは出さない。診断件数をzeroConflictsや配備許可として利用しない。途中の応答不備・上限超過・rollback失敗では診断集計も出さない。
+
+実行40806372992（main8883d26、正式40804904519全3成功後）は認証/読取成功、全4件を走査してassigned3件・未知1件、欠落0・型不正0を記録しINCOMPLETEで停止した。既存権限のFirebase consoleを読取で確認すると、未知1件は既存 `scripts/submission-acceptance-kit.mjs` の合成提出受入キットと会社・日付2000-01-01・合成店舗/取引先が一致し、statusはcompletedだった。データ変更や削除は行わない。
+
+その既存状態completedも全件監査の対象へ含める。completedをassignedへ読み替えず、cancelled=trueならHOLD。合成案件を除外するqueryや会社別例外は追加しない。未知/欠落/型不正の拒否・rollback・deploymentReady=falseを維持する。この補足のソース検証と、修正後の実監査成功は別工程とする。

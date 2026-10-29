@@ -300,6 +300,10 @@ export const updateJobPublication = onCall(async (request) => {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
+  if (request.data && Object.hasOwn(request.data, "sourceTransition")) {
+    const sourcePublication: typeof import("./case-list-publication") = require("./case-list-publication");
+    return sourcePublication.updateCaseListSourcePublication(request.data, companyId, session.uid, session.token as Record<string, unknown>);
+  }
   const input = PublicationSchema.parse(request.data ?? {});
   if (input.action === "schedule" &&
       (!input.publishAt || !isValidPublicationDateTime(input.publishAt))) {
@@ -315,6 +319,14 @@ export const updateJobPublication = onCall(async (request) => {
     // 全候補の追加読取を先に終え、複数案件でもtransactionの読取後書込を守る。
     const mailChecks = new Map<string, Awaited<ReturnType<typeof readMailPublication>>>();
     const caseListChecks = new Map<string, CaseListPublicationCheck>();
+    if (["stop", "draft"].includes(input.action)) for (const snap of snapshots) {
+      const pendingJob = snap.data();
+      if (!snap.exists || pendingJob?.companyId !== companyId || !pendingJob.caseListPublicationWrite) continue;
+      const publicationState: typeof import("./case-list-publication-state") = require("./case-list-publication-state");
+      if (!publicationState.caseListPublicationPending(pendingJob)) continue;
+      caseListSourceModule().requireCaseListExecutive({ ...session.token });
+      if (!Number.isSafeInteger(pendingJob.revision) || input.expectedRevisions?.[snap.id] !== pendingJob.revision) throw new HttpsError("failed-precondition", "原本反映依頼の確認版が変わりました。一覧を更新して停止対象を選び直してください。");
+    }
     if (input.action === "publish") for (const snap of snapshots) {
       if (snap.exists && snap.data()?.companyId === companyId && snap.data()?.mailIntake) {
         mailChecks.set(snap.id, await readMailPublication(tx, snap.id, snap.data()!, input.expectedRevisions?.[snap.id], now.toDate()));
@@ -391,6 +403,12 @@ export const updateJobPublication = onCall(async (request) => {
         nowIso: now.toDate().toISOString(),
       });
 
+      if (caseListCheck) {
+        const finalizer: typeof import("./case-list-publication-finalizer") = require("./case-list-publication-finalizer");
+        finalizer.stageVerifiedCaseListPublication(tx, snap.ref, caseListCheck, session.uid, now, companyId);
+        updated.push(snap.id);
+        continue;
+      }
       tx.set(snap.ref, {
         status: publication.status,
         publishable: publication.publishable,
@@ -400,12 +418,9 @@ export const updateJobPublication = onCall(async (request) => {
           : FieldValue.delete(),
         publicationBlockedReason: publication.blockedReason ?? FieldValue.delete(),
         ...(job.mailIntake ? { mailPublication: { ...mailCheck!.confirmation!, actorUid: session.uid, confirmedAt: now } } : {}),
-        ...(caseListCheck ? { ...caseListCheck.jobFields, sourceReady: true, basePay: (caseListCheck.candidate.payOffer as { dailyWageJPY: number }).dailyWageJPY, publicPayOffer: caseListCheck.candidate.payOffer,
-          caseListPublication: { sourceRevision: caseListCheck.source.sourceRevision, confirmedAt: now }, caseListHoldReasons: [] } : {}),
         updatedAt: now,
         revision: FieldValue.increment(1),
       }, { merge: true });
-      if (caseListCheck) tx.set(db.collection("caseListApprovals").doc(snap.id), { companyId, jobId: snap.id, ...caseListCheck.approval, confirmedAt: now });
 
       if (publication.blockedReason) blocked.push(snap.id);
       else updated.push(snap.id);

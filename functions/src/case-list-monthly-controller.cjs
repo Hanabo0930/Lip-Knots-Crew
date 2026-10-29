@@ -248,9 +248,12 @@ var LK_MONTHLY_V5 = (() => {
   }
   function sameCatalog(a,b){return a&&b&&['rowRevision','ledgerRevision','sourceRevision'].every(k=>a[k]===b[k]);}
   function checkPromisedPay(row,assignment){if(['CREW_QUEUE','SOURCE_MANUAL'].includes(assignment.authority))need(typeof row.cells[36]?.effectiveValue?.numberValue==='number'&&row.cells[36].effectiveValue.numberValue===assignment.publicPayOffer.dailyWageJPY,'PUBLIC_PAY_OFFER_SOURCE_BASIC_MISMATCH');}
-  function assertOwnerTransfer(snapshot,row,assignment,selection,services,operationId){
+  function assertTransferControl(snapshot,row){
     need(typeof row.cells[0]?.userEnteredValue?.boolValue==='boolean','TRANSFER_CONTROL_INVALID');
     if(snapshot.source.headers[0]==='キャンセル')need(row.cells[0].userEnteredValue.boolValue===false,'SOURCE_CANCELLED_OR_INVALID');
+  }
+  function assertOwnerTransfer(snapshot,row,assignment,selection,services,operationId){
+    assertTransferControl(snapshot,row);
     need(selection?.schema==='LK_OWNER_MONTHLY_TRANSFER_V1'&&selection.selected===true&&selection.clientNameUpConfirmed===true&&
       selection.sourceControlHeader===snapshot.source.headers[0]&&selection.operationId===operationId&&selection.caseId===row.caseId&&selection.assignmentHash===sha(services,assignment)&&
       selection.sourceContentHash===contentHash(services,row.cells)&&selection.sourceRevision===(snapshot.catalog?.sourceRevision||null)&&
@@ -261,6 +264,7 @@ var LK_MONTHLY_V5 = (() => {
     try{
       assertSnapshotCoverage(snapshot,row?.caseId,null);
       sourceSchema(snapshot.source.headers);need(row?.cells?.length===65&&row.caseId,'CAPABILITY_SOURCE_ROW_REQUIRED');
+      assertTransferControl(snapshot,row);
       need(row.cells[63].userEnteredValue?.boolValue===false&&!cancellation(text(row.cells[10])),'SOURCE_CANCELLED_OR_INVALID');
       need(['単日','SINGLE'].includes(text(row.cells[58]))&&!text(row.cells[59]),'GROUP_REQUIRES_SEPARATE_POLICY');
       const date=serialDate(num(row.cells[1]));need(date>='2026-11-01','OCTOBER_OR_PAST_SCOPE');
@@ -443,6 +447,6 @@ var LK_MONTHLY_V5 = (() => {
     }
     return {preview:request=>locked(()=>previewInside(request)),prepareSource:request=>locked(()=>prepareSourceInside(request)),applySource:request=>locked(()=>applySourceInside(request)),reconcileSource:request=>locked(()=>reconcileSourceInside(request)),prepareMonthly:request=>locked(()=>prepareMonthlyInside(request)),applyMonthly:request=>locked(()=>applyMonthlyInside(request)),reconcile:request=>locked(()=>reconcileInside(request)),execute:request=>locked(()=>executeInside(request))};
   }
-  return {create,canonical,contentHash,translateFormula,mapSource,choosePosition,verifyPostPlacement,transferCapability,assertSnapshotCoverage,assertSourceAssignmentPreflight,assertMonthlyWritePreflight,monthLayoutHash,SOURCE_INDEX_COLUMNS,monthIndexColumns,COMPACT_COVERAGE,STRUCTURAL_LAYOUT,LEGACY_LAYOUT,SOURCE_HEADERS:SOURCE,BUSINESS_HEADERS:BUSINESS,FINANCIAL_COLUMNS:FEE};
+  return {create,canonical,contentHash,translateFormula,mapSource,choosePosition,verifyPostPlacement,transferCapability,checkPromisedPay,assertSnapshotCoverage,assertSourceAssignmentPreflight,assertMonthlyWritePreflight,monthLayoutHash,SOURCE_INDEX_COLUMNS,monthIndexColumns,COMPACT_COVERAGE,STRUCTURAL_LAYOUT,LEGACY_LAYOUT,SOURCE_HEADERS:SOURCE,BUSINESS_HEADERS:BUSINESS,FINANCIAL_COLUMNS:FEE};
 })();
 if(typeof module!=='undefined')module.exports=LK_MONTHLY_V5;

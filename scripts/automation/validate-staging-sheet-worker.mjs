@@ -11,8 +11,12 @@ const OLD_WORKER = "processSafeSheetWrite";
 // 明示opt-in処理だけが旧停止判定の前に進むため、その実行依存も固定する。
 // この固定値はソース検査用であり、実行時IAMや本番有効化の承認ではない。
 export const retryWorkerSourcePins = Object.freeze({
+  // Reviewed Source BD/BE continuation: existing queue/lease/transport, both modes default paused.
+  "functions/src/case-list-publication-core.ts": "14cd481606974d29c65af44d804eb2199cc3ac220d230be5d9ea4f3f585287ac",
+  "functions/src/case-list-publication-finalizer.ts": "fe2773482dc6a79ffe0e416ca4dbf4f3a4ae0821e67ae4c78b88831a0c43f0ac",
+  "functions/src/case-list-publication-worker.ts": "a16375e7056ce176cfb54751c2d35cc240458c7413be92d353823fd529798b14",
   "functions/src/case-list-manual-origin-core.ts": "c4747e7ab535185e3aa10a089385a2240f314eaaeded6247e59277df67a3c3cd",
-  "functions/src/safe-sheet-writes.ts": "91d61ab0299424b7973e3e6c37c87e4286c8e03275b46bbba4743533b26ee7b8",
+  "functions/src/safe-sheet-writes.ts": "a99dc707a8fe04f03be70b6579cc22dd3ebbb0e3a35b7b65cbb614e2f1411370",
   // Reviewed native Source cancellation is reachable only after the existing pause/claim boundary.
   "functions/src/case-list-source-cancellation.ts": "c492d93fe8e4ca7bafd699d6293b3f413c03f76da571f4522c69b3a85b8c97ad",
   "functions/src/sheet-write-control.ts": "a57db6a895c42ed58655a42ae67d84754fb679c2f0751d11b5b65edff0387f08",
@@ -20,8 +24,8 @@ export const retryWorkerSourcePins = Object.freeze({
   "functions/src/case-list-monthly-worker.ts": "baf7fcd668fd8befb8c986752e32fbab3e9d94fb915d5ed2f8b768908be054fa",
   "functions/src/case-list-monthly-reader.ts": "7a0cfe841bde8fe9b9e12e41eb4f7b58ff0fbfe14620812cc3fd216bac98021a",
   "functions/src/case-list-source-core.ts": "40eb55c72ed7a861524b48d191e5237e4f31b1d02b03652b3c3893acf53de82c",
-  "functions/src/case-list-monthly-controller.cjs": "d58e35dc1cf675aaba78691ee8d5ab3dff856691410c18528937e057b8ca8d68",
-  "functions/src/case-list-monthly-adapter.cjs": "1b46d9854ec9cd428eeed784c32f86a8af3a2f642c1a633b2967d249e5a88821",
+  "functions/src/case-list-monthly-controller.cjs": "d2c82e3e01a09bab126a8b58b4842df12e462234e12d5ee4408f3df029660ca4",
+  "functions/src/case-list-monthly-adapter.cjs": "2d56999a4bc6b99424c16ebffd15a2c76d7800b69775906b9c365a99be648845",
   "functions/src/case-list-monthly-compact.cjs": "6d40516a62f7d0d7938b060d229f7e6a142ba174b37e494bcec0a051c8144d87",
   "functions/src/case-list-projection.cjs": "059f39d152981e9e9566c276332f9db7da6442dd99fe3ec12e28c587ff9a3326",
   "functions/src/case-id.ts": "7c03676a32947d8c7a81a8a5b7600c1870ccd2c41b036362bf3e8dd475422d87",

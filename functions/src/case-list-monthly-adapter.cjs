@@ -35,6 +35,26 @@ function monthlyRequests(intent,snapshot){
   if(width===56)need(requests.slice(1).every(r=>r.updateCells.range.startColumnIndex!==54),'DECEMBER_BC_VALUE_WRITE_FORBIDDEN');
   return requests;
 }
+// Publication is a continuation of the existing owner publisher. Its native
+// adapter is deliberately limited to these two Source values; the fixed-ID
+// indexes and the full before-image are rechecked at the last native read.
+function publicationRequests(intent,snapshot){
+  const plan=intent?.plan;
+  need(intent?.schema==='LK_CASE_LIST_PUBLICATION_INTENT_V1'&&intent.stage==='INTENT'&&plan?.schema==='LK_CASE_LIST_PUBLICATION_PLAN_V1','PUBLICATION_INTENT_SCOPE');
+  need(intent.spreadsheetId&&intent.spreadsheetId===snapshot.spreadsheetId&&plan.caseId===intent.caseId&&plan.preCatalog?.spreadsheetId===intent.spreadsheetId,'PUBLICATION_BOUND_BOOK_MISMATCH');
+  Core.assertSnapshotCoverage(snapshot,intent.caseId,null);
+  const rows=snapshot.source.rows.filter(r=>r.caseId===intent.caseId);
+  need(snapshot.source.sheetId===2026101601&&rows.length===1&&rows[0].row>=2&&rows[0].fullWritable===true&&rows[0].cells.length===65,'PUBLICATION_SOURCE_ROW_SCOPE');
+  need(Core.transferCapability(snapshot,rows[0]).supported,'PUBLICATION_FINAL_TRANSFER_NOT_SUPPORTED');
+  need(Core.canonical(snapshot.catalog)===Core.canonical(plan.preCatalog),'PUBLICATION_SOURCE_REVISION_CHANGED');
+  const before=rows[0].cells.map(cell=>Object.fromEntries(WRITABLE.filter(key=>Object.hasOwn(cell,key)).map(key=>[key,cell[key]])));
+  need(Array.isArray(plan.sourceBefore)&&plan.sourceBefore.length===65&&Core.canonical(before)===Core.canonical(plan.sourceBefore)&&Core.canonical(rows[0].cells.map(cell=>({userEnteredValue:cell.userEnteredValue||{},effectiveValue:cell.effectiveValue||{}})))===Core.canonical(plan.sourceBeforeValues),'PUBLICATION_NATIVE_PREIMAGE_CHANGED');
+  need(Array.isArray(plan.postSourceValues)&&plan.postSourceValues.length===65&&plan.postSourceValues.every((cell,i)=>[55,56].includes(i)||Core.canonical(cell)===Core.canonical(plan.sourceBeforeValues[i])),'PUBLICATION_PATCH_OUTSIDE_BD_BE');
+  const state=plan.postSourceValues[55],region=plan.postSourceValues[56];
+  need(Core.canonical(before[55].userEnteredValue||{})===Core.canonical({stringValue:'確認待ち'})&&Object.keys(before[56].userEnteredValue||{}).every(key=>key==='stringValue')&&!(before[56].userEnteredValue?.stringValue||''),'PUBLICATION_NATIVE_CONTROL_CHANGED');
+  need(Core.canonical(state.userEnteredValue||{})===Core.canonical({stringValue:'募集中'})&&Core.canonical(state.effectiveValue||{})===Core.canonical({stringValue:'募集中'})&&typeof region.userEnteredValue?.stringValue==='string'&&region.userEnteredValue.stringValue.trim()&&region.userEnteredValue.stringValue===region.userEnteredValue.stringValue.trim()&&region.userEnteredValue.stringValue.length<=100&&!/[\u0000-\u001f\u007f]/.test(region.userEnteredValue.stringValue)&&Core.canonical(region.effectiveValue||{})===Core.canonical(region.userEnteredValue),'PUBLICATION_TARGET_CONTROL_INVALID');
+  return [{updateCells:{range:{sheetId:2026101601,startRowIndex:rows[0].row-1,endRowIndex:rows[0].row,startColumnIndex:55,endColumnIndex:57},rows:[{values:[{userEnteredValue:clone(state.userEnteredValue)},{userEnteredValue:clone(region.userEnteredValue)}]}],fields:'userEnteredValue'}}];
+}
 function snapshotFromNative({metadata,cells,dependencyHash,catalog,resolveStaff,isolated=false}){
   const bookId=metadata.spreadsheetId;need(bookId&&cells.spreadsheetId===bookId,'SNAPSHOT_BOOK_MISMATCH');
   need(typeof dependencyHash==='string'&&/^[0-9a-f]{64}$/.test(dependencyHash),'DEPENDENCY_HASH_REQUIRED');
@@ -92,6 +112,14 @@ function createGoogleSheetsMutationAdapter({spreadsheetId,transport,readSnapshot
     const requests=monthlyRequests(intent,snapshot);snapshot=null;row=null;month=null;
     return transport.batchUpdate({spreadsheetId,requests});
   }
-  return {applySourceAssignment:source,applyMonthly:monthly};
+  async function publication(intent){
+    let snapshot=await readSnapshot({operationId:intent.operationId,caseId:intent.caseId});
+    need(snapshot.spreadsheetId===spreadsheetId&&intent.spreadsheetId===spreadsheetId,'PUBLICATION_BOUND_BOOK_MISMATCH');
+    Core.assertSnapshotCoverage(snapshot,intent.caseId,{sha256:hash});
+    const {reviewPlanHash,...unhashed}=intent.plan||{};need(hash(Core.canonical(unhashed))===reviewPlanHash,'PUBLICATION_PLAN_HASH_CHANGED');
+    const requests=publicationRequests(intent,snapshot);snapshot=null;
+    return transport.batchUpdate({spreadsheetId,requests});
+  }
+  return {applySourceAssignment:source,applyMonthly:monthly,applySourcePublication:publication};
 }
-module.exports={sourceRequests,monthlyRequests,snapshotFromNative,createGoogleSheetsMutationAdapter};
+module.exports={sourceRequests,monthlyRequests,publicationRequests,snapshotFromNative,createGoogleSheetsMutationAdapter};

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   buildMonthlyDashboard,
   buildStaffPerformance,
+  buildStaffRequestHistory,
   computeJobFinance,
   inferCancellationTreatment,
 } from "../src/analytics-core";
@@ -140,3 +141,41 @@ for (const status of ["open", "draft", undefined]) {
   assert.deepEqual(actual, expected, "Unassigned jobs must not inflate staff work, finance, lateness or recent jobs.");
 }
 console.log("Staff performance excludes open/draft/missing status with stale staff identity.");
+
+
+// Request totals include cancellation and deduplicate the persisted case/staff
+// identity, never the mutable row/document ID or a display name.
+const yearFrom = "2026-01-01", yearThrough = "2026-12-31";
+const requestA = { ...base, id: "source-row", caseId: "LKCASE_request_a" };
+const requestB = { ...base, id: "cancelled-row", caseId: "LKCASE_request_b", status: "cancelled", cancelled: true };
+const annual = buildStaffRequestHistory([
+  requestA, { ...requestA, id: "monthly-row" }, requestB,
+  { ...requestA, caseId: "another-person", assignedStaffId: "staff_2" },
+  { ...requestA, caseId: "old-year", dateKey: "2025-12-31" },
+  { ...requestA, caseId: "new-year", dateKey: "2027-01-01" },
+  { ...requestA, caseId: "unaccepted", status: "open" },
+], "staff_1", yearFrom, yearThrough);
+assert.deepEqual(annual, { basis: "caseId+staffId", complete: true, totalRequests: 2,
+  knownUniqueRequests: 2, duplicateRows: 1, issues: [] });
+assert.deepEqual(buildStaffPerformance([requestA, requestB], "staff_1", yearFrom, yearThrough, "2026-12-31").requestHistory,
+  { ...annual, duplicateRows: 0 });
+for (const changed of [
+  { ...requestA, dateKey: "2026-07-11" },
+  { ...requestA, cancelled: true, status: "cancelled" },
+  { ...requestA, caseId: "lkcase_request_a" },
+]) {
+  const result = buildStaffRequestHistory([requestA, changed], "staff_1", yearFrom, yearThrough);
+  assert.equal(result.complete, false); assert.equal(result.totalRequests, null);
+  assert.deepEqual(result.issues, ["conflicting_duplicate_request"]);
+}
+for (const changed of [ { ...base }, { ...base, caseId: "   " },
+  { ...requestA, caseId: " LKCASE_request_a" }, { ...requestA, dateKey: "2026-02-30" } ]) {
+  const result = buildStaffRequestHistory([changed], "staff_1", yearFrom, yearThrough);
+  assert.equal(result.complete, false); assert.equal(result.totalRequests, null);
+}
+assert.deepEqual(buildStaffRequestHistory([], "staff_1", yearFrom, yearThrough),
+  { basis: "caseId+staffId", complete: true, totalRequests: 0, knownUniqueRequests: 0, duplicateRows: 0, issues: [] });
+for (const range of [["2026-02-30", yearThrough], [yearThrough, yearFrom]]) {
+  assert.throws(() => buildStaffRequestHistory([], "staff_1", range[0], range[1]));
+}
+console.log("Staff request history: annual cancellation inclusion, stable identity deduplication and incomplete/conflicting identity fail-closed totals passed.");

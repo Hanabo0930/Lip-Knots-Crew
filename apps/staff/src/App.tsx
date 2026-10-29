@@ -7,6 +7,8 @@ import {resubmissionNotificationId,readResubmissionNotification} from "./resubmi
 import {useShiftNotificationRoute} from "./useShiftNotificationRoute";
 import PastShiftHistory from "./PastShiftHistoryEntry";
 import { firestorePastShiftReader } from "./past-shift-reader";
+import { isShiftAccessDenied } from "./shift-access";
+import MonthlyShiftCalendar from "./MonthlyShiftCalendarEntry";
 import ShiftJobCards,{shiftDateLabel,shiftTextLabel,shiftPage} from './ShiftJobCards';
 import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -47,6 +49,7 @@ import {
   localDateKey,
   nextShiftJob,
   orderAssignedJobs,
+  pendingAssignedJobs,
   splitAssignedJobs,
 } from "./job-list";
 import { sleep, useAsyncAction } from "./useAsyncAction";
@@ -59,6 +62,8 @@ type SubmissionType = "report" | "sales_floor";
 type PushAction = "enable" | "disable" | "test" | "status";
 type NetPrintItem = { id: string; number: string; printed?: boolean };
 type Job = {
+  entryTime?: string;
+  caseListManualPending?: {observationHash?:string;sourceRevision?:string;staffId?:string};
   revision?: number; menuConditions?: string[];
   caseListSource?: { sourceRevision: string };
   mailIntake?: unknown; mailIntakeReviewRequired?: boolean; pendingSourceWrite?: boolean; adminEditSheetWrite?: {pending?:boolean};
@@ -279,7 +284,7 @@ export default function App(){
   useEffect(()=>{if(view==="shifts")shiftHeadingRef.current?.focus({preventScroll:true});},[view]);
   const shiftDetailRef=useRef<HTMLElement>(null);
   useEffect(()=>{if(shiftFocusRequest){shiftDetailRef.current?.focus({preventScroll:true});shiftDetailRef.current?.scrollIntoView({block:'start'});}},[shiftFocusRequest]);
-  function openShiftJob(job:Job){if(splitAssignedJobs([job]).past.length)setShowPastShifts(true);setSelectedJob(job);setShiftFocusRequest(value=>value+1);}
+  function openShiftJob(job:Job){if(job.applicationUnconfirmed===true){setSelectedJob(null);return;}if(splitAssignedJobs([job]).past.length)setShowPastShifts(true);setSelectedJob(job);setShiftFocusRequest(value=>value+1);}
   function togglePastShifts(){
     if(showPastShifts&&selectedJob&&upcomingShifts.length&&pastShifts.some(job=>job.id===selectedJob.id))setSelectedJob(upcomingShifts[0]);
     setShowPastShifts(!showPastShifts);
@@ -363,6 +368,7 @@ export default function App(){
   const contactShiftText=selectedAssignedJob?contactShiftSummary(selectedAssignedJob):"";
   const shiftCopyContextRef=useRef("");
   shiftCopyContextRef.current=JSON.stringify([selectedJob?.id??"",shiftTextLabel(selectedJob?.storeAddress,""),contactShiftText]);
+  const pendingApplications=useMemo(()=>pendingAssignedJobs(myJobs,businessDate),[myJobs,businessDate]);
   const {upcoming:upcomingShifts,past:pastShifts}=useMemo(()=>splitAssignedJobs(myJobs,businessDate),[myJobs,businessDate]);
   useEffect(()=>{const upcomingIndex=upcomingShifts.findIndex(job=>job.id===selectedJob?.id);if(upcomingIndex>=0)setUpcomingPage(Math.floor(upcomingIndex/50));},[selectedJob?.id,shiftFocusRequest]);
   const draftOwner=firebaseConfigured?(user&&companyId?JSON.stringify([companyId,user.uid]):""):"demo";
@@ -546,7 +552,7 @@ export default function App(){
         setCompanyId(cid); setStaffId(sid);
         setMyJobs(jobs);
         setTasks(snapshot.tasks);
-        setSelectedJob(jobs[0]??null);
+        setSelectedJob(nextShiftJob(jobs)??jobs.find(job=>job.applicationUnconfirmed!==true)??null);
         setBusinessDataStatus("ready");
         setBusinessDataSource("cached");
         setHomeDisplayMs(Math.round(performance.now()-loadStarted));
@@ -607,8 +613,12 @@ export default function App(){
       void registerCurrentDevice(authLoadVersion).catch(()=>{if(isCurrentAuthLoad())setMessage("端末情報を登録できませんでした。再読み込みしてください。");});
       void refreshOpenJobs(false,cid);
       void refreshPushStatus(true);
-    }catch{
+    }catch(error){
       if(!isCurrentAuthLoad())return;
+      if(isShiftAccessDenied(error)){
+        forgetInaccessibleShifts(undefined,current.uid,restoredScope?.companyId??"",restoredScope?.staffId??"");
+        restoredCachedData=false;
+      }
       if(restoredCachedData&&sessionVerified){
         setBusinessDataStatus("ready");
         setBusinessDataSource("cached");
@@ -707,8 +717,8 @@ export default function App(){
     const authVersion=authLoadVersionRef.current;
     // 過去の件数が増えても今後のシフトが取得上限から押し出されないようにする。
     const reads=[
-      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(301))),
-      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("dateKey","<",today),orderBy("dateKey","asc"),limit(51))),
+      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("status","==","assigned"),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(301))),
+      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("status","==","assigned"),where("dateKey","<",today),orderBy("dateKey","asc"),limit(51))),
       companionRead,
     ] as const;
     await Promise.allSettled(reads);
@@ -731,7 +741,7 @@ export default function App(){
     setUpcomingShiftMessage("");
     try{
       await run("upcoming-shifts",async()=>{
-        const page=await getDocs(query(collection(db!,"jobs"),where("companyId","==",companyId),where("assignedStaffId","==",staffId),where("dateKey",">=",today),orderBy("dateKey","asc"),startAfter(cursor),limit(51)));
+        const page=await getDocs(query(collection(db!,"jobs"),where("companyId","==",companyId),where("assignedStaffId","==",staffId),where("status","==","assigned"),where("dateKey",">=",today),orderBy("dateKey","asc"),startAfter(cursor),limit(51)));
         if(!isCurrent())return;
         const rows=page.docs.slice(0,50);
         const additions=rows.map(d=>({...d.data(),id:d.id} as Job));
@@ -739,7 +749,17 @@ export default function App(){
         upcomingShiftCursorRef.current=rows.at(-1)??cursor;
         setHasMoreUpcomingShifts(page.docs.length>50);
       });
-    }catch{if(isCurrent())setUpcomingShiftMessage("これからのシフトを読み込めませんでした。続きを読み込むボタンで再試行できます。");}
+    }catch(error){if(isCurrent()){if(isShiftAccessDenied(error))forgetInaccessibleShifts();setUpcomingShiftMessage("これからのシフトを読み込めませんでした。続きを読み込むボタンで再試行できます。");}}
+  }
+
+  function forgetInaccessibleShifts(jobId?:string,uid=user?.uid??"",cid=companyId,sid=staffId){
+    pastShiftVersionRef.current++;tasksReadVersionRef.current++;
+    clearBusinessSnapshot(uid,cid,sid);
+    setMyJobs(jobs=>jobId?jobs.filter(job=>job.id!==jobId):[]);
+    setTasks(rows=>jobId?rows.filter(task=>task.jobId!==jobId):[]);
+    setSelectedJob(job=>!jobId||job?.id===jobId?null:job);
+    setOpenJobs(jobs=>jobId?jobs.filter(job=>job.id!==jobId):[]);
+    mailPanelVersion.current++;setShowMailApplications(false);
   }
 
   async function loadTaskJob(jobId:string):Promise<Job|null>{
@@ -750,11 +770,13 @@ export default function App(){
     await run("task-job",async()=>{
       const snapshot=await getDocFromServer(doc(db!,"jobs",jobId)).catch(error=>{
         if(authVersion!==authLoadVersionRef.current||version!==pastShiftVersionRef.current)return null;
+        if(isShiftAccessDenied(error)){forgetInaccessibleShifts(jobId);return null;}
         throw error;
       });
-      if(!snapshot||authVersion!==authLoadVersionRef.current||version!==pastShiftVersionRef.current||!snapshot.exists())return;
+      if(!snapshot||authVersion!==authLoadVersionRef.current||version!==pastShiftVersionRef.current)return;
+      if(!snapshot.exists()){forgetInaccessibleShifts(jobId);return;}
       const candidate={...snapshot.data(),id:snapshot.id} as Job;
-      if(candidate.companyId!==companyId||candidate.assignedStaffId!==staffId||candidate.status!=="assigned"||candidate.cancelled===true)return;
+      if(candidate.companyId!==companyId||candidate.assignedStaffId!==staffId||candidate.status!=="assigned"||candidate.cancelled===true){forgetInaccessibleShifts(jobId);return;}
       job=candidate;
       pastShiftVersionRef.current++;
       setMyJobs(current=>orderAssignedJobs([...current.filter(item=>item.id!==candidate.id),candidate]));
@@ -792,7 +814,7 @@ export default function App(){
     if(version!==pastShiftVersionRef.current||tasksVersion!==tasksReadVersionRef.current)return false;
     setMyJobs(jobs);
     setTasks(nextTasks);
-    setSelectedJob(current=>jobs.find(job=>job.id===current?.id)??nextShiftJob(jobs)??jobs[0]??null);
+    setSelectedJob(current=>jobs.find(job=>job.id===current?.id&&job.applicationUnconfirmed!==true)??nextShiftJob(jobs)??jobs.find(job=>job.applicationUnconfirmed!==true)??null);
     saveBusinessSnapshot(uid,cid,sid,jobs,nextTasks);
     return true;
   }
@@ -886,9 +908,13 @@ export default function App(){
       setBusinessRefreshMs(Math.round(performance.now()-started));
       if(showFailure)setMessage("シフトを更新しました。応募した日付と店舗を確認してください。");
       if(openJobsStatus!=="idle")void refreshOpenJobs(false,companyId);
-    }catch{
+    }catch(error){
       if(authLoadVersion!==authLoadVersionRef.current)return;
       lastBusinessDataRefreshAt=0;
+      if(isShiftAccessDenied(error)){
+        forgetInaccessibleShifts();setBusinessDataSource("none");setBusinessDataStatus("error");setHomeLoadedFromCache(false);
+        setMessage("シフトを表示できません。再読み込みしてください。");return;
+      }
       setBusinessDataSource("stale");
       if(showFailure)setMessage(businessDataStatus==="ready"?"シフトの最新情報を確認できませんでした。前の一覧を表示しています。応募結果は未確認です。通信状態を確認して、もう一度更新してください。":"シフト一覧を取得できませんでした。応募結果は未確認です。通信状態を確認して、もう一度更新してください。");
     }finally{
@@ -1018,14 +1044,14 @@ export default function App(){
     const version=++pastShiftVersionRef.current;
     const snap=await getDocFromServer(doc(db,"jobs",jobId)).catch(error=>{
       if(authLoadVersion!==authLoadVersionRef.current||version!==pastShiftVersionRef.current)return null;
+      if(isShiftAccessDenied(error)){forgetInaccessibleShifts(jobId);return null;}
       throw error;
     });
     if(!snap||authLoadVersion!==authLoadVersionRef.current||version!==pastShiftVersionRef.current)return false;
     pastShiftVersionRef.current++;
     const updated=snap.exists()?{...snap.data(),id:snap.id} as Job:null;
     if(!updated||updated.companyId!==companyId||updated.assignedStaffId!==staffId||updated.status!=="assigned"||updated.cancelled===true){
-      setMyJobs(jobs=>jobs.filter(job=>job.id!==jobId));
-      setSelectedJob(current=>current?.id===jobId?null:current);
+      forgetInaccessibleShifts(jobId);
       return false;
     }
     setMyJobs(jobs=>jobs.map(job=>job.id===jobId?updated:job));
@@ -2045,6 +2071,13 @@ export default function App(){
       <div className="section-heading"><h2 ref={shiftHeadingRef} tabIndex={-1}>自分のシフト</h2><button className="secondary" onClick={()=>void refreshBusinessData(true)} disabled={businessRefreshing||businessDataStatus==="loading"||submissionEditPending||applicationPending} aria-busy={businessRefreshing}>{businessRefreshing?"更新中…":"シフトを更新"}</button></div>
       <p className="muted">応募結果が分からないときは、更新して日付と店舗を確認してください。表示に続きがある場合は、追加で読み込めます。</p>
       {businessDataFallback??<>
+        {pendingApplications.length>0&&<section aria-label="確認待ちの手配" className="panel">
+          <h3>確認待ちの手配（{pendingApplications.length}件）</h3>
+          <p>名前入力・応募を受け付けています。管理者がネームアップ後に対象を選び、月別シフトへの転記と照合が終わるまで、確定シフトには表示されません。</p>
+          <ul>{pendingApplications.map(job=><li key={job.id}>{shiftDateLabel(job)} / {shiftTextLabel(job.storeName,"店舗確認中")} / {job.caseListManualPending?"手入力の手配・確認待ち":"応募受付・確認待ち"}</li>)}</ul>
+          <p className="muted">取消のご希望は管理者へ直接ご連絡ください。</p>
+        </section>}
+        <MonthlyShiftCalendar jobs={myJobs} onSelect={openShiftJob} today={businessDate}/>
         <div className="shift-list-heading"><h3>これからのシフト</h3><span>{upcomingShifts.length}件</span></div>
         {upcomingShifts.length
           ? <ShiftJobCards jobs={upcomingShifts} page={upcomingPage} onPageChange={setUpcomingPage} selectedId={selectedJob?.id} onSelect={openShiftJob} label="これからのシフト" accent={jobAccent} kind={jobKind} summary={prepSummary} submissionSummary={submissionSummary}/>
@@ -2058,7 +2091,7 @@ export default function App(){
           {(showPastShifts||!upcomingShifts.length)&&<div id="past-shifts-list">
             {(!firebaseConfigured||!!user?.uid&&!!companyId&&!!staffId)&&<PastShiftHistory key={JSON.stringify([user?.uid,companyId,staffId,pastHistoryAuthVersion,businessDate])}
               scope={{uid:user?.uid??"demo",companyId:companyId||"demo",staffId:staffId||"demo",today:businessDate}}
-              scopeVersion={pastHistoryAuthVersion} selectionRequest={shiftFocusRequest} reader={pastHistoryReader}
+              scopeVersion={pastHistoryAuthVersion} selectionRequest={shiftFocusRequest} reader={pastHistoryReader} onAccessDenied={forgetInaccessibleShifts}
               isCurrent={()=>pastHistoryAuthVersion===authLoadVersionRef.current}
               selectedId={selectedJob?.id} selectedDateKey={selectedJob?.dateKey} onSelect={job=>{
                 setMyJobs(current=>orderAssignedJobs([...new Map([...current,job].map(row=>[row.id,row])).values()]));

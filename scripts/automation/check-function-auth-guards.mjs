@@ -395,7 +395,6 @@ function checkCaseListApplyRoute(block) {
 }
 
 function checkCaseListOwnerReconciliation(block, whole) {
-  if (!whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list"]).default("note"),});')) return false;
   const route = block.slice(block.indexOf('if(input.action==="reconcile-case-list"){'), block.indexOf('constauditRef='));
   if (![
     'if(input.action==="reconcile-case-list"){constsnapshot=awaitref.get();',
@@ -415,6 +414,99 @@ function checkCaseListOwnerReconciliation(block, whole) {
   ].every(part => worker.includes(part))) return false;
   const readOnly = worker.slice(worker.indexOf('if(owner){constevents=awaitreadEvents(queueRef.id);'), worker.indexOf('}else{result=awaitcore['));
   return ['result=awaitcore.reconcileSource(request);','result=awaitcore.reconcile(request);'].every(part => readOnly.includes(part)) && !/core\.(?:prepare|apply)/.test(readOnly);
+}
+
+function checkCaseListManualSelection(block, whole) {
+  const action='"select-case-list-manual-monthly"';
+  if(!whole.includes('constManualSelectionSchema=')&&!whole.includes(action))return true;
+  const compact=text=>text.replace(/\s+/g,''),start=block.indexOf('if(request.data?.action==="select-case-list-manual-monthly"){'),end=block.indexOf('constinput=AcknowledgeQueueSchema.parse(');
+  if(start<0||end<=start)return false;
+  const route=block.slice(start,end);
+  if(!['constmanualInput=ManualSelectionSchema.parse(request.data);','awaitassertProductionOperational(companyId);','returnawaitworker.selectCaseListManualMonthlyTransfer(companyId,session.uid,session.token,manualInput);'].every(part=>route.includes(part))||/\.(?:add|set|create|update|delete|commit)\(/.test(route))return false;
+  const schema=whole.slice(whole.indexOf('constManualSelectionSchema='),whole.indexOf('constJobSchema='));
+  if(!['action:z.literal("select-case-list-manual-monthly")','jobId:z.string().regex(/^[A-Za-z0-9_-]{1,200}$/)','observationHash:z.string().regex(/^[a-f0-9]{64}$/)','expectedJobRevision:z.number().int().min(1)','expectedSourceRevision:z.string().regex(/^[a-f0-9]{64}$/)','clientNameUpConfirmed:z.literal(true)','confirmedFields:z.object({arrival:z.literal(true),execution:z.literal(true),headcount:z.literal(true),dateMode:z.literal(true),payOffer:z.literal(true)}).strict()','dailyWageJPY:z.number().int().min(1).max(1000000)','}).strict(),}).strict();'].every(part=>schema.includes(part))||schema.includes('vacancy'))return false;
+  const worker=compact(sourceFile('functions/src/case-list-monthly-worker.ts'));
+  const registration=worker.slice(worker.indexOf('exportasyncfunctionselectCaseListManualMonthlyTransfer('),worker.indexOf('exportasyncfunctionprocessCaseListMonthlyAssignment('));
+  if(![
+    'assertExecutive(token,process.env.EXECUTIVE_APPROVER_EMAILS??"");',
+    'token.companyId===companyId&&(token.uid??token.sub)===actorUid',
+    'input.clientNameUpConfirmed===true',
+    'canonical(confirmedFields)===canonical({arrival:true,execution:true,headcount:true,dateMode:true,payOffer:true})',
+    '(awaitgetProductionOperationalState(companyId)).operational',
+    'observed.companyId===companyId&&observed.jobId===input.jobId&&observed.observationHash===input.observationHash',
+    'job.revision===input.expectedJobRevision',
+    'job.caseListManualPending?.observationHash===input.observationHash',
+    'job.caseListManualPending?.sourceRevision===input.expectedSourceRevision',
+    'row.staffIdentityVerified===true&&row.staffId===observed.staffId',
+    'row.cells[0]?.userEnteredValue?.boolValue===false&&row.cells[63]?.userEnteredValue?.boolValue===false',
+    'sourceStaffName:observed.sourceStaffName',
+    'schema:"LK_CASE_LIST_MANUAL_ASSIGN_V1",origin:"SOURCE_MANUAL"',
+    'stage:"SOURCE_MANUAL_OBSERVED"',
+    'phaseHash(queueId,queue,"MONTHLY_PREPARE",nonce,"SOURCE_MANUAL_OBSERVED",proofHash)',
+    'manualEvent.observationProofHash=hashCaseList({...manualEvent,createdAt:0})',
+    'assertKnownCaseListContinuation(queueId,queue,operation,records,spreadsheetId)',
+    'previewCore.preview({operationId:queueId,caseId:a.sourceCaseId})',
+    'canonical(currentJob)===canonical(job)&&canonical(currentObservation)===canonical(observed)&&canonical(currentStaff)===canonical(staff)',
+    'day&&day.active===true&&day.jobId===input.jobId&&day.companyId===companyId&&day.staffId===a.staffId&&day.dateKey===dateKey',
+    'assertCaseListMonthlyAuthority(queueId,queue,nextJob,currentStaff,dayLock,config,manualConditions)',
+    'tx.create(queueRef,queue)',
+    'tx.create(operationRef.collection("events").doc("SOURCE_MANUAL_OBSERVED")',
+  ].every(part=>registration.includes(part))||/(?:batchUpdate|\.values\.(?:append|update|clear)|core\.(?:apply|prepare))\(/.test(registration))return false;
+  if(!['a.schema==="LK_CASE_LIST_MANUAL_ASSIGN_V1"&&a.origin==="SOURCE_MANUAL"','"MANUAL_SOURCE_WRITE_PROOF_FORBIDDEN"','"MANUAL_SOURCE_OBSERVATION_INVALID"','"MANUAL_OWNER_APPROVAL_CHANGED"','!Object.hasOwn(confirmation,"vacancy")'].every(part=>worker.includes(part)))return false;
+  const source=compact(sourceFile('functions/src/case-list-source.ts'));
+  return ['manualPendingAssignmentFields(manualObservation)','currentStaff.active!==true','currentStaff.displayName!==manualObservation.canonicalStaffName','old.assignmentSheetWrite?.queueId!==priorManual.queueId'].every(part=>source.includes(part));
+}
+
+function checkCaseListOwnerSelection(block, whole) {
+  if (!checkCaseListManualSelection(block, whole)) return false;
+  // Historical sources have no selection action. Keep their exact legacy
+  // schema/read-only checks; a new selection route must pass every new guard.
+  if (whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list"]).default("note"),});') && !whole.includes('"select-case-list-monthly"')) return true;
+  if (!whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list","select-case-list-monthly"]).default("note"),reviewKey:z.string().regex(/^[a-f0-9]{64}$/).optional(),clientNameUpConfirmed:z.literal(true).optional(),});')) return false;
+  const start = block.indexOf('if(input.action==="select-case-list-monthly"){'), end = block.indexOf('if(input.action==="reconcile-case-list"){');
+  if (start < 0 || end <= start) return false;
+  const route = block.slice(start, end);
+  if (![
+    'if(!input.reviewKey||input.clientNameUpConfirmed!==true)', 'awaitassertProductionOperational(companyId);',
+    '!snapshot.exists||snapshot.data()?.companyId!==companyId', 'snapshot.data()?.operation!=="case_list.assign"',
+    'returnawaitworker.selectCaseListMonthlyTransfer(ref,session.uid,session.token,input.reviewKey,true);',
+  ].every(part => route.includes(part)) || /\.(?:add|create|set|update|delete|commit)\(/.test(route) ||
+      !block.includes('if(data.operation==="case_list.assign")thrownewHttpsError(')) return false;
+  const worker = sourceFile('functions/src/case-list-monthly-worker.ts').replace(/\s+/g, '');
+  const manualStart = worker.indexOf('exportasyncfunctionselectCaseListManualMonthlyTransfer(');
+  const selection = worker.slice(worker.indexOf('exportasyncfunctionselectCaseListMonthlyTransfer('), manualStart >= 0 ? manualStart : worker.indexOf('exportasyncfunctionprocessCaseListMonthlyAssignment('));
+  if (![
+    'assertExecutive(token,process.env.EXECUTIVE_APPROVER_EMAILS??"");',
+    'ID.test(actorUid)&&(token.uid??token.sub)===actorUid&&HASH.test(reviewKey)&&clientNameUpConfirmed===true',
+    'initial?.operation==="case_list.assign"&&initial.companyId===token.companyId',
+    '(awaitgetProductionOperationalState(initial.companyId)).operational',
+    'readCaseListMonthlySnapshot(initial.companyId,a.sourceCaseId,',
+    'sourceControlHeader!=="キャンセル"||row.cells[0].userEnteredValue?.boolValue===false',
+    'queue.companyId===token.companyId&&fingerprint(queue)===fingerprint(initial)',
+    'assertCaseListMonthlyAuthority(queueRef.id,queue,job,staff,day,currentConfig,approval)',
+    '"OWNER_TRANSFER_LEASE_ACTIVE"',
+    'queue.status==="blocked"&&queue.errorType==="owner_transfer_required"&&queue.caseListPhase?.phase==="MONTHLY_PREPARE"&&queue.caseListPhase.continuationHash===reviewKey',
+    'assertKnownCaseListContinuation(queueRef.id,queue,operation,records,spreadsheetId);',
+    '!records.INTENT&&!records.MONTHLY_WRITE_STARTED&&!records.ACCEPTED',
+    'hashCaseList(writable)===projected.postMonthlyContentHash&&canonical(selectedCatalog)===canonical(projected.postCatalog)&&snapshot.dependencyHash===source.dependencyHash',
+    'selected:true,clientNameUpConfirmed:true,sourceControlHeader,selectedBy:actorUid,selectedAt:Date.now(),reviewKey,',
+    'queueFingerprint:fingerprint(queue),assignmentHash:source.assignmentHash,sourceContentHash:selectedContentHash,sourceRevision:selectedCatalog.sourceRevision',
+    'tx.set(operationRef,{ownerTransferSelection:selection,', 'tx.set(queueRef,{status:"pending",',
+  ].every(part => selection.includes(part)) || /(?:batchUpdate|\.values\.(?:update|append|clear)|core\.(?:apply|prepare))\(/.test(selection)) return false;
+  if (![
+    'constwaitForOwner=next==="MONTHLY_PREPARE";', 'status:waitForOwner?"blocked":"pending"', 'errorType:waitForOwner?"owner_transfer_required":',
+    'if(requireClaim&&!owner&&phase.startsWith("MONTHLY_"))need(ownerTransferSelection.schema==="LK_OWNER_MONTHLY_TRANSFER_V1"&&ownerTransferSelection.queueFingerprint===fingerprint(queue)&&ownerTransferSelection.selected===true&&ownerTransferSelection.clientNameUpConfirmed===true,',
+    'authorizeMonthlyTransfer:async()=>clone((awaitauthorize()).ownerTransferSelection)',
+  ].every(part => worker.includes(part))) return false;
+  const controller = sourceFile('functions/src/case-list-monthly-controller.cjs').replace(/\s+/g, '');
+  return [
+    'assertOwnerTransfer(snapshot,row,intent.assignment,intent.ownerTransfer,services,intent.operationId);',
+    'need(typeofservices.authorizeMonthlyTransfer===\'function\',\'OWNER_TRANSFER_SELECTION_REQUIRED\');',
+    'selection.selected===true&&selection.clientNameUpConfirmed===true',
+    'selection.operationId===operationId&&selection.caseId===row.caseId&&selection.assignmentHash===sha(services,assignment)',
+    'selection.sourceContentHash===contentHash(services,row.cells)&&selection.sourceRevision===(snapshot.catalog?.sourceRevision||null)',
+    'constc=awaitmonthlyContext(request),intent=one(c.events,\'INTENT\');',
+  ].every(part => controller.includes(part));
 }
 
 function checkImportIssues(name) {
@@ -479,7 +571,7 @@ function checkImportIssues(name) {
     'writeVerificationRequired:data.writeVerificationRequired', 'status:"pending",attempts:0,',
     'manualRetryBy:session.uid', 'action:"sheet.issue.retry"',
   ]);
-  if (ownerReconcile && !checkCaseListOwnerReconciliation(block, whole)) return false;
+  if (ownerReconcile && (!checkCaseListOwnerReconciliation(block, whole) || !checkCaseListOwnerSelection(block, whole))) return false;
   return has([
     'if(data.status==="acknowledged")', 'data.acknowledgedBy===session.uid&&data.acknowledgedNote===input.note',
     'if(!["blocked","dead_letter","retry_wait","error","paused_global"].includes(String(data.status??"")))',
@@ -542,6 +634,26 @@ function checkAtomicMutationAudit(source, block, action, close) {
     && !helper.includes('db.batch(') && !helper.includes('.commit(');
 }
 
+// Keep the original queue projection and each added manual projection in
+// separate regions. A matching company guard in a neighbouring projection
+// must never satisfy a removed guard in this one.
+function checkSheetIssueCompanyRegions(block) {
+  const issuesStart = block.indexOf('issues:');
+  const queueStart = block.indexOf('snap.docs.map(', issuesStart);
+  if (issuesStart < 0 || queueStart < issuesStart || !block.slice(queueStart).includes('job:job?.companyId===companyId?{') || !block.slice(queueStart).includes('sourceWriteVerified:false')) return false;
+  const hasManualQuery = block.includes('db.collection("caseListManualObservations")');
+  const manualStart = block.indexOf('constmanualIssues=');
+  if (!hasManualQuery && manualStart < 0) return true; // exact legacy queue-only shape
+  if (!hasManualQuery || manualStart < 0 || manualStart >= issuesStart) return false;
+  const query = block.slice(block.indexOf('letmanualQuery='), manualStart);
+  const manual = block.slice(manualStart, issuesStart);
+  const readyStart = manual.indexOf('constready='), readyEnd = manual.indexOf('constoffer=', readyStart);
+  if (readyStart < 0 || readyEnd <= readyStart) return false;
+  return query.includes('db.collection("caseListManualObservations").where("companyId","==",companyId).orderBy("__name__").limit(input.limit+1)') &&
+    manual.slice(readyStart, readyEnd).startsWith('constready=job?.companyId===companyId&&') &&
+    manual.slice(readyEnd).includes('job:job?.companyId===companyId?{') && manual.slice(readyEnd).includes('sourceWriteVerified:false');
+}
+
 function checkAdminCore(name) {
   const modules = { getSheetWriteIssues: "admin-operations", getOperationsDashboard: "analytics", getStaffPerformance: "analytics", createAdminJobGroup: "job-management", updateJobPublication: "job-management", adminEditJobInputs: "job-management", generateJobExport: "job-management", updateNetPrintNumbers: "netprint", adminSetJobCancellation: "analytics", adminRestoreCancelledJob: "analytics" };
   const source = sourceFile("functions/src/" + modules[name] + ".ts");
@@ -558,11 +670,12 @@ function checkAdminCore(name) {
   const readOnly = ["getSheetWriteIssues", "getOperationsDashboard", "getStaffPerformance"].includes(name);
   if (readOnly && /\.(?:add|create|update|delete|set|commit)\(/.test(block)) return false;
   if (!readOnly && (!has(["awaitassertProductionOperational(companyId);"]) || !source.includes('from "./system-safety";'))) return false;
+  if (name === "getSheetWriteIssues" && !checkSheetIssueCompanyRegions(block)) return false;
   const requirements = {
     getSheetWriteIssues: [
       'IssueQuerySchema.parse(request.data??{})', 'db.collection("sheetSyncQueue").where("companyId","==",companyId)',
       '.where("status","in",["blocked","dead_letter","retry_wait","acknowledged","error","paused_global"])',
-      '.orderBy("updatedAt","desc").limit(input.limit)', 'job?.companyId===companyId?',
+      '.orderBy("updatedAt","desc").limit(input.limit)',
       ...(compact(source).includes('AcknowledgeQueueSchema') ? ['canReconcile:data.operation==="case_list.assign"','canRetry:data.operation!=="case_list.assign"&&canManuallyRetrySheetWrite({'] : ['canRetry:canManuallyRetrySheetWrite({']), 'sourceWriteVerified:false',
     ],
     getOperationsDashboard: [

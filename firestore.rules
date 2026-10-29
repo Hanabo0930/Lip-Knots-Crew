@@ -60,7 +60,7 @@ service cloud.firestore {
           isAdmin() ||
           (activeStaff() && (
             resource.data.status == 'open' ||
-            resource.data.assignedStaffId == staffId()
+            (resource.data.status == 'assigned' && resource.data.assignedStaffId == staffId())
           ))
         );
       allow write: if false;

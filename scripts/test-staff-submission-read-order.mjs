@@ -6,20 +6,27 @@ import {runInNewContext} from 'node:vm';
 const require=createRequire(path.join(process.env.LKC_TEST_DEPENDENCY_ROOT||process.cwd(),'package.json'));
 const ts=require('typescript');
 const source=fs.readFileSync('apps/staff/src/App.tsx','utf8');
+function loadModule(file,globals={}){const scope={exports:{},...globals};runInNewContext(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,scope);return scope.exports;}
+const access=loadModule('apps/staff/src/shift-access.ts');
+const forgetStart=source.indexOf('  function forgetInaccessibleShifts('),forgetEnd=source.indexOf('  async function loadTaskJob(',forgetStart);
+assert.ok(forgetStart>=0&&forgetEnd>forgetStart);
+const forgetCode=ts.transpileModule(source.slice(forgetStart,forgetEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
 const start=source.indexOf('  async function loadSubmissionHistory('),end=source.indexOf('  async function discardFilesBeforeContextChange(',start);
 assert.ok(start>=0&&end>start);
 const code=ts.transpileModule(source.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
 function setup(){
- const state={calls:[],history:[],detail:null,status:'',messages:[],visibleMessage:'',clears:0,jobRefreshes:0,taskRefreshes:0};
+ const state={calls:[],history:[],detail:null,status:'',messages:[],visibleMessage:'',clears:0,jobRefreshes:0,taskRefreshes:0,tasks:[],openJobs:[]};
+ const cache=new Map(),businessCache=loadModule('apps/staff/src/business-cache.ts',{localStorage:{getItem:key=>cache.get(key)??null,setItem:(key,value)=>cache.set(key,value),removeItem:key=>cache.delete(key)}});
  const ctx={submissionMessage:'',setMessage:fn=>{state.visibleMessage=fn(state.visibleMessage);},refreshSelectedJob:async()=>{state.jobRefreshes++;return true;},loadTasks:async()=>{state.taskRefreshes++;return [];},firebaseConfigured:true,functions:{},resubmissionDetail:null,authLoadVersionRef:{current:1},navigationVersionRef:{current:0},submissionHistoryVersionRef:{current:0},resubmissionDetailVersionRef:{current:0},submissionContextVersionRef:{current:0},previewContextRef:{current:'A'},selectedJob:{id:'A'},submissionType:'report',draftOwner:'user',hydratedDraftKeyRef:{current:''},draftHydratingRef:{current:false},submissionDraftKey:(_owner,job,type,req)=>[job,type,req].join(':'),
  httpsCallable:(_f,name)=>input=>new Promise((resolve,reject)=>state.calls.push({name,input,resolve,reject})),
  setSubmissionHistory:v=>state.history=v,setSubmissionHistoryStatus:v=>state.status=v,setResubmissionDetail:v=>state.detail=v,showSubmissionMessage:v=>{state.visibleMessage=v;if(v)state.messages.push(v);else state.clears++;},
  setDraftHydrating:()=>{},setSelectedJob:v=>ctx.selectedJob=v,setSubmissionType:v=>ctx.submissionType=v,setRequestId:()=>{},setSubmissionConfirmed:()=>{},setSubmissionMessage:()=>{},setFiles:()=>{},navigate:()=>{}};
+ Object.assign(ctx,access,businessCache,{user:{uid:'user'},companyId:'company',staffId:'staff',pastShiftVersionRef:{current:0},tasksReadVersionRef:{current:0},mailPanelVersion:{current:0},setTasks:update=>state.tasks=typeof update==='function'?update(state.tasks):update,setOpenJobs:update=>state.openJobs=typeof update==='function'?update(state.openJobs):update,setShowMailApplications:value=>state.showMailApplications=value});
  const hook={exports:{},require:()=>({useCallback:f=>f,useRef:value=>({current:value}),useState:initial=>[initial(),()=>{}]})};
  runInNewContext(ts.transpileModule(fs.readFileSync('apps/staff/src/useAsyncAction.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,hook);
  Object.assign(ctx,hook.exports.useAsyncAction(),{selectedAssignedJob:{id:'A'},requestId:''});
  ctx.processingSubmission=false;const guardStart=source.indexOf('  function isSubmissionActionPending()'),guardEnd=source.indexOf('\n  }',guardStart)+4;runInNewContext(ts.transpileModule(source.slice(guardStart,guardEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);
- runInNewContext(code,ctx);return{ctx,state};
+ runInNewContext(forgetCode+code,ctx);return{ctx,state};
 }
 const cases=[];const test=(name,fn)=>cases.push({name,fn});
 const detail=(id,jobId="A",type="report")=>({request:{id,jobId,type,reasons:[],note:"",status:"open"},source:null,replacements:[]});

@@ -21,6 +21,7 @@ import {
 
 const IssueQuerySchema = z.object({
   limit: z.number().int().min(1).max(200).default(100),
+  manualCursor: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/).optional(),
 });
 
 const QueueActionSchema = z.object({
@@ -29,8 +30,23 @@ const QueueActionSchema = z.object({
 });
 
 const AcknowledgeQueueSchema = QueueActionSchema.extend({
-  action: z.enum(["note", "reconcile-case-list"]).default("note"),
+  action: z.enum(["note", "reconcile-case-list", "select-case-list-monthly"]).default("note"),
+  reviewKey: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  clientNameUpConfirmed: z.literal(true).optional(),
 });
+
+const ManualSelectionSchema = z.object({
+  action: z.literal("select-case-list-manual-monthly"),
+  jobId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/),
+  observationHash: z.string().regex(/^[a-f0-9]{64}$/),
+  expectedJobRevision: z.number().int().min(1),
+  expectedSourceRevision: z.string().regex(/^[a-f0-9]{64}$/),
+  clientNameUpConfirmed: z.literal(true),
+  manualConfirmation: z.object({
+    confirmedFields: z.object({ arrival: z.literal(true), execution: z.literal(true), headcount: z.literal(true), dateMode: z.literal(true), payOffer: z.literal(true) }).strict(),
+    payOffer: z.object({ dailyWageJPY: z.number().int().min(1).max(1000000), travelExpenses: z.literal("全額支給"), communicationExpenses: z.literal("全額支給") }).strict(),
+  }).strict(),
+}).strict();
 
 const JobSchema = z.object({
   jobId: z.string().min(1),
@@ -69,14 +85,35 @@ export const getSheetWriteIssues = onCall(async (request) => {
     .limit(input.limit)
     .get();
 
-  const jobIds = [...new Set(snap.docs.map((doc) => String(doc.data().jobId ?? "")).filter(Boolean))];
+  let manualQuery = db.collection("caseListManualObservations").where("companyId", "==", companyId).orderBy("__name__").limit(input.limit + 1);
+  if (input.manualCursor) manualQuery = manualQuery.startAfter(input.manualCursor);
+  const manualSnapshot = await manualQuery.get(), manualPage = manualSnapshot.docs.slice(0, input.limit);
+  const jobIds = [...new Set([...snap.docs.map((doc) => String(doc.data().jobId ?? "")), ...manualPage.map(doc => doc.id)].filter(Boolean))];
   const jobs = await getDocuments("jobs", jobIds);
+  let executive = false;
+  try { const core: typeof import("./case-list-source-core") = require("./case-list-source-core"); core.assertExecutive(session.token, process.env.EXECUTIVE_APPROVER_EMAILS ?? ""); executive = true; } catch { /* Other admins cannot select transfers. */ }
 
+  const manualIssues = manualPage.filter(doc => doc.data().state === "blocked_requires_owner_review").map(doc => {
+    const observed = doc.data(), job = jobs.get(doc.id), holdReasons = Array.isArray(observed.holdReasons) ? observed.holdReasons : ["MANUAL_OBSERVATION_INVALID"];
+    const ready = job?.companyId === companyId && observed.schema === "LK_CASE_LIST_MANUAL_OBSERVATION_V1" && observed.selected === false &&
+      observed.source?.sourceRevision === job.caseListSource?.sourceRevision && job.sourceMissing !== true && job.applicationUnconfirmed === true && job.caseListManualPending?.observationHash === observed.observationHash && job.caseListManualPending?.staffId === observed.staffId && job.assignedStaffId === observed.staffId && !job.assignmentSheetWrite && job.cancelled !== true && job.status !== "cancelled" &&
+      /^[A-Za-z0-9_-]{1,200}$/.test(observed.staffId ?? "") && (require("./case-list-manual-origin-core") as typeof import("./case-list-manual-origin-core")).manualOwnerReviewCanProceed(holdReasons);
+    const offer = job?.publicPayOffer;
+    const suggestedPayOffer = offer && Number.isSafeInteger(offer.dailyWageJPY) && offer.dailyWageJPY > 0 && offer.dailyWageJPY <= 1000000 && offer.travelExpenses === "全額支給" && offer.communicationExpenses === "全額支給"
+      ? { dailyWageJPY: offer.dailyWageJPY, travelExpenses: "全額支給", communicationExpenses: "全額支給" } : null;
+    return { id: doc.id, jobId: doc.id, companyId, operation: "case_list.manual", status: "blocked", errorType: "manual_owner_selection_required", errorMessage: ready ? "シートへの手入力を確認しました。ネームアップ後に勤務条件を確認し、この案件を選択してください。" : "手入力の照合事項が残っています。案件リストとスタッフ名簿を確認してください。",
+      attempts: 0, canRetry: false, canReconcile: false, sourceWriteVerified: false, manualSourcePending: true, manualSourceStaffName: typeof observed.sourceStaffName === "string" ? observed.sourceStaffName : "", manualCanonicalStaffName: typeof observed.canonicalStaffName === "string" ? observed.canonicalStaffName : "", manualTransferPending: true, canSelectMonthlyTransfer: executive && ready,
+      manualObservationHash: observed.observationHash, manualExpectedJobRevision: job?.revision ?? null, manualExpectedSourceRevision: observed.source?.sourceRevision ?? null, suggestedPayOffer,
+      desiredUpdates: {}, beforeValues: {}, updatedAt: serializeTimestamp(observed.observedAt), manualHoldReasons: holdReasons.filter(reason => reason !== "MANUAL_TRANSFER_ADAPTER_NOT_ACTIVATED"),
+      job: job?.companyId === companyId ? { workDate: job.workDate ?? job.dateKey ?? "", storeName: job.storeName ?? "", assignedStaffName: observed.canonicalStaffName ?? "", clientName: job.clientName ?? "", makerName: job.makerName ?? "", menuName: job.menuName ?? "", entryTime: job.entryTime ?? "", workTime: job.workTime ?? "" } : null };
+  });
   return {
-    count: snap.size,
-    issues: snap.docs.map((doc) => {
+    count: snap.size + manualIssues.length,
+    manualNextCursor: manualSnapshot.size > input.limit ? manualPage.at(-1)?.id ?? null : null,
+    issues: [...snap.docs.map((doc) => {
       const data = doc.data();
       const job = jobs.get(String(data.jobId ?? ""));
+      const manualTransferPending = data.operation === "case_list.assign" && data.status === "blocked" && data.errorType === "owner_transfer_required" && data.caseListPhase?.phase === "MONTHLY_PREPARE";
       return {
         id: doc.id,
         companyId: data.companyId,
@@ -94,7 +131,10 @@ export const getSheetWriteIssues = onCall(async (request) => {
         sourceWriteVerified: false,
         acknowledgedAt: serializeTimestamp(data.acknowledgedAt),
         acknowledgedNote: typeof data.acknowledgedNote === "string" ? data.acknowledgedNote : "",
-        canReconcile: data.operation === "case_list.assign",
+        canReconcile: data.operation === "case_list.assign" && !manualTransferPending,
+        manualTransferPending,
+        canSelectMonthlyTransfer: executive && manualTransferPending,
+        manualTransferReviewKey: manualTransferPending && /^[a-f0-9]{64}$/.test(data.caseListPhase?.continuationHash ?? "") ? data.caseListPhase.continuationHash : null,
         canRetry: data.operation !== "case_list.assign" && canManuallyRetrySheetWrite({
           status: String(data.status ?? ""),
           errorType: String(data.errorType ?? ""),
@@ -107,7 +147,7 @@ export const getSheetWriteIssues = onCall(async (request) => {
           clientName: job.clientName ?? "",
         } : null,
       };
-    }),
+    }), ...manualIssues],
   };
 });
 
@@ -144,8 +184,38 @@ export const retrySheetWriteIssue = onCall(async (request) => {
 export const acknowledgeSheetWriteIssue = onCall(async (request) => {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
+  if (request.data?.action === "select-case-list-manual-monthly") {
+    const manualInput = ManualSelectionSchema.parse(request.data);
+    await assertProductionOperational(companyId);
+    const worker: typeof import("./case-list-monthly-worker") = require("./case-list-monthly-worker");
+    try { return await worker.selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, manualInput); }
+    catch (error) {
+      const reason = error instanceof Error ? error.message : "";
+      if (reason === "CASE_LIST_EXECUTIVE_REQUIRED") throw new HttpsError("permission-denied", "移行対象の確定は責任者のみ実行できます。");
+      if (/^(MANUAL_|CASE_LIST_WRITER_DISABLED|OWNER_TRANSFER_LEASE_ACTIVE|GLOBAL_OPERATION_STOPPED)/.test(reason)) throw new HttpsError("failed-precondition", "勤務条件・手入力・スタッフ・取消状態を再確認してください。受付結果が不明な場合は繰り返し実行せず、再読込してください。");
+      throw new HttpsError("internal", "移行指示の受付結果を確定できませんでした。繰り返し実行せず、再読込して状態を確認してください。");
+    }
+  }
   const input = AcknowledgeQueueSchema.parse(request.data ?? {});
   const ref = db.collection("sheetSyncQueue").doc(input.queueId);
+  if (input.action === "select-case-list-monthly") {
+    if (!input.reviewKey || input.clientNameUpConfirmed !== true) throw new HttpsError("invalid-argument", "ネームアップ済みの確認と移行対象の選択が必要です。");
+    await assertProductionOperational(companyId);
+    const snapshot = await ref.get();
+    if (!snapshot.exists || snapshot.data()?.companyId !== companyId) throw new HttpsError("not-found", "移行対象が見つかりません。");
+    if (snapshot.data()?.operation !== "case_list.assign") throw new HttpsError("failed-precondition", "この依頼は案件リストからの移行対象ではありません。");
+    const worker: typeof import("./case-list-monthly-worker") = require("./case-list-monthly-worker");
+    try { return await worker.selectCaseListMonthlyTransfer(ref, session.uid, session.token, input.reviewKey, true); }
+    catch (error) {
+      const reason = error instanceof Error ? error.message : "";
+      if (reason === "CASE_LIST_EXECUTIVE_REQUIRED") throw new HttpsError("permission-denied", "移行対象の確定は責任者のみ実行できます。");
+      if (reason === "SOURCE_CANCELLED_OR_INVALID") throw new HttpsError("failed-precondition", "キャンセル扱いの案件は移行できません。案件リストを確認してください。");
+      if (["OWNER_TRANSFER_CHANGED", "OWNER_TRANSFER_REVIEW_CHANGED", "OWNER_TRANSFER_SOURCE_CHANGED"].includes(reason)) throw new HttpsError("failed-precondition", "確認中に案件の内容が変わりました。再読込して移行対象を確認してください。");
+      if (reason === "OWNER_TRANSFER_LEASE_ACTIVE") throw new HttpsError("failed-precondition", "別の処理が進行中です。再読込して状態を確認してください。");
+      if (reason === "GLOBAL_OPERATION_STOPPED") throw new HttpsError("failed-precondition", "現在、移行処理は停止されています。");
+      throw new HttpsError("internal", "移行指示の受付結果を確定できませんでした。繰り返し実行せず、再読込して状態を確認してください。");
+    }
+  }
   if (input.action === "reconcile-case-list") {
     const snapshot = await ref.get();
     if (!snapshot.exists || snapshot.data()?.companyId !== companyId) throw new HttpsError("not-found", "書込エラーが見つかりません。");
@@ -162,6 +232,7 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
       throw new HttpsError("not-found", "書込エラーが見つかりません。");
     }
     const data = snap.data()!;
+    if (data.operation === "case_list.assign") throw new HttpsError("failed-precondition", "案件リストの移行待ちは確認メモで完了にできません。対象を選択して移行してください。");
     if (data.status === "acknowledged") {
       if (data.acknowledgedBy === session.uid && data.acknowledgedNote === input.note) return;
       throw new HttpsError("failed-precondition", "既に確認メモが記録されています。再読込して確認してください。");

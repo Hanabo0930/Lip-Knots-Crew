@@ -1,17 +1,61 @@
-# Case list source integration
+# 案件リストから月別シフトへの連携
 
-The existing authenticated `previewShiftImport` and `syncShiftSheetsReadOnly` callables accept `source: "case-list"`. The source workbook, sheet identity, 65 headers and time zone are server pinned. The separate CaseList import path creates drafts and retains existing assignments, unresolved applications and day locks. Known historical monthly links are held instead of duplicated.
+## 必須の順序と選択場所
 
-The source revision binds all 65 source user-entered/effective values and the corresponding 25-column assignment ledger record. Public jobs contain only safe business fields, public pay conditions and hashes. Source rows, mail, contacts, management JSON and raw financial values are never copied into public job documents. Owner confirmations are stored in `caseListApprovals`, covered by the unchanged default-deny Rules.
+**応募／スタッフ名の入力 → 社長がクライアントへネームアップ → 社長が対象案件を選択 → 月別へ転記・読戻し照合 → 本人の確定シフトへ表示**。
 
-Verified executive identity is required to enable the source or confirm a publication. A new application uses the existing `applyToJob` transaction, day lock and idempotency receipt. The request, receipt and typed `case_list.assign` queue bind the source revision. A previously accepted request returns its saved result before reading a newly changed source. Known precommit source rejection carries an exact request identity so the staff UI can discard only that unaccepted attempt. Unknown network outcomes retain the same retry identity.
+選択場所は管理アプリ **「概要 → 書戻しの確認 → この案件を選択してシフト表へ移行」**。案件ごとに日付・店舗・担当を確認し、ネームアップ済みを明示確認する。手入力案件では勤務条件5項目と公開日給も確認する。SourceのA列「キャンセル」とBL列「取消」は取消専用であり、転記選択とは兼用しない。
 
-Assignments remain disabled by default. The dedicated monthly route is integrated into the existing worker ahead of its legacy pause guard; it requires a separate company opt-in and respects the global operational stop. Historical queued writes remain paused. Owner setup derives November BC and December BD from their actual headers and refuses conflicting saved mappings. Unsupported monthly layouts, dates, identities or formulas are held before publication and application.
+シートへ直接C列の名前を入力した場合は、既存の案件リスト連携画面で **「連携を有効化・案件を取込」** を実行した時に観測する。氏名が既存スタッフIDへ一意に一致する対応案件だけが、本人の「手配確認待ち」へ入る。この取込はSourceや月別へ書き込まず、選択済みにもしない。新しいonEdit、GAS、定期トリガーは追加していない。入力しただけで即時にアプリへ通知される、または即時に月別へ移るとは説明しない。
 
-An accepted application retains its staff day lock and stays unconfirmed while the worker projects only its exact empty Source C cell and inserts one new monthly row with the same Source case ID. The source is retained. The pre-assignment source authority hash and the six-field monthly content hash are separate domains. Full snapshots and immutable stage records stay in private collections. Public jobs expose binding hashes, safe business fields and a minimal readback receipt; verified workbook references and financial observations stay private.
+## 7条件の現在地
 
-The worker executes one known phase per invocation with at most two bounded native snapshots. A private continuation nonce and journal proof authorize each next phase. A durable write-start record is persisted before each Sheets mutation, and SDK write retries are disabled. An unknown or interrupted write is held rather than re-dispatched. The owner’s “保存結果を再照合” action uses Sheets reads only; exact current source/monthly afterimages can settle private receipt and application metadata. A source-only result remains held for a separate reviewed continuation. A confirmation memo cannot acknowledge the native application.
+| 条件 | 実装と受入範囲 |
+|---|---|
+| 選択前の停止 | Crew応募はSource Cへ氏名を反映した後、`owner_transfer_required`で停止。手入力は既存取込で確認待ちと勤務枠を作るが、転記キューは作らない。取消チェック、定期再試行、確認メモでは選択できない。 |
+| 同じ選択ルール | 両経路とも同じ概要の確認画面から社長が案件単位で選ぶ。手入力専用処理は、観測証跡を既存の`case_list.assign`／`MONTHLY_*`へ登録するアダプターであり、別の月別ライターではない。 |
+| 本人の確認待ち・確定・カレンダー | `applicationUnconfirmed`は月別書込・読戻しACKまでtrue。今後／過去／次シフト／月間カレンダーは確認待ちと取消を除外する。手入力は「手入力の手配・確認待ち」、応募は「応募受付・確認待ち」と表示する。カレンダーはアプリ内月間表示でありGoogle Calendar連携ではない。 |
+| 転記済みの二重表示 | 会社・案件・スタッフ・日付・キュー・Source版・月別参照が公開ACKと一致する転記済CaseList案件だけを、通常の案件一覧から外す。「月別へ転記済み（履歴）」で参照できる。不足・不一致の証跡は通常一覧へ残して確認する。通常の月別取込案件全体を消す処理ではない。Source原行は保持し、物理行の非表示や管理列への状態書込はしていない。 |
+| ID・値の保持 | 固定案件IDと既存スタッフIDで照合。重複ID、別人へ解決する名前、別会社、勤務枠競合、古い版、混在する書込証跡は停止。数式・手入力金額・注記の保持範囲は下記。 |
+| 取消・依頼数 | 受付は管理者への直接連絡のみ。管理者の取消API2経路と取消解除で募集停止を維持し、再募集には別の公開操作が必要。取消は通常一覧・本人応募候補・通常シフトから除外。管理者の依頼数は案件ID＋スタッフIDで取消を含め重複排除し、今年の年間／任意期間を選べる。**非公開履歴のアクセス保証は未完**。現行Rulesでは取消担当本人がjobsを読め、既存取消通知にも理由が残る。UI非表示だけで完成とは扱わない。 |
+| 隔離試験と実運用 | 両経路の選択前停止・選択後共通処理・二重操作・取消による停止・公開ACK・本人表示を合成境界で検証。ローカル、正式CI、公開／配備、実運用は別々に報告する。PR239はDraftであり、全7条件を満たした公開・実運用完了とは認定していない。 |
 
-Compact reads cover complete identity and layout indexes but full writable fields only for the selected source and destination. Unknown cells remain explicitly unknown. Monthly reimport can refresh an accepted row hint only when the original private receipt, book, sheet, case and assignment still match; it cannot clear a Source-missing hold. Source business edits hold preparation without changing assignment, history or manual values. New CaseList financial reads use current verified private observations, and unsupported expense completion or business edits return an explicit hold.
+## 氏名・案件・証跡の結び付け
 
-Validation: `node scripts/test-case-list-integration.mjs` runs source, callable, compact-reader, staged-worker, private-reference, resync and recovery tests with fully synthetic data and mocked Google/Firestore boundaries. The release workflow also runs authorization mutations, built CJS asset closure and `node --max-old-space-size=128 scripts/test-case-list-runtime-budget.mjs` with the actual installed SDKs. These checks do not prove native cloud authentication, network latency, deployment or business execution. Full TypeScript and application builds run in the ordinary CI. Before deployment and opt-in, the exact release commit must pass CI, runtime capacity and native acceptance. The authenticated executive action remains available after those release gates, while its flag stays absent or false until explicitly enabled.
+Sourceはサーバー固定の原本、`案件リスト`、65列、Asia/Tokyo。案件IDはSource **BI列**、2026年11月月別 **BC列**、12月 **BD列**。名前の表記や行番号から案件ID／スタッフIDを新設しない。既存名簿の名前・別名が一つのスタッフIDへ解決する場合だけ使い、同名や別名の衝突は保留する。手入力の文字列はSourceと月別で保持し、名簿の正式名は別に保持する。
+
+Source版は65列の入力値／実効値と25列の実績台帳へ結び付く。選択時は新しい完全な書込可能CellDataとSource版を読み、私用選択receiptへ結び付ける。月別書込直前にも再照合する。公開jobsには安全な業務項目、本人向け公開日給、ハッシュ、最小限の読戻しreceiptだけを置き、Source全行・管理JSON・私用メモ・生の金額明細を公開しない。
+
+Crew経路は実際の`SOURCE_INTENT → SOURCE_WRITE_STARTED → SOURCE_PROJECTED`が必要。手入力は別の`SOURCE_MANUAL_OBSERVED`を使い、Sourceを書いたと偽る証跡や「空欄だった」という期待値を作らない。両証跡の混在は拒否する。手入力では在庫／空き枠の`vacancy:true`を捏造せず、社長の5条件確認と公開日給を独立した私用条件receiptへ残す。
+
+両経路は同じ会社lease、勤務日lock、継続nonce、immutable journal、月別controller／native adapterを使う。各起動は既知の1段階だけを実行し、書込開始を永続化してから1回だけSheets APIへ送る。SDKの書込再試行は無効。不明な結果は保留し、盲目的に再送しない。社長の再照合は読取だけであり、完全一致する実際の読戻しだけがACKと本人確定を作れる。
+
+## 引継ぎ範囲と未対応案件
+
+Source **B:BCの54業務列 → 月別A:BB**へ対応付ける。手入力金額、業務の備考・メモ、セル注記、書式、入力規則、テキスト書式・チップ情報を保持する。数式は値へ置き換えず、検証した参照変換だけを行う。未知の参照、動的参照、計算エラーは停止する。
+
+例外は新規月別行の **AS／AT「報告書チェック／原本チェック」**で、未チェックに初期化する。Source取消チェック・管理列を月別業務列へコピーしない。固定案件IDは専用列へ書き、12月の追加BC列は保持する。Sourceの元行・数式・金額・メモは削除しない。
+
+対応は通常の**単日・1名・2026年11月／12月**。研修、OJT、ラウンダー、出口調査、グレイス／グレース、複数日・グループ、対象外月、未対応の金額条件・経費完了は保留。新しい種類を通常案件と推測して処理しない。
+
+月間カレンダーには、読込済み確定案件の日付・店舗・メーカー・業務・入店時間・勤務時間・店舗住所を表示する。不明な値は「確認中」。今後の続きは既存一覧から読み込み、過去は一覧で選んだ案件を表示する。全月・全履歴を自動取得済みとは表示しない。
+
+## 取消と非公開履歴の残件
+
+取消・取消解除は既存管理者APIを使用する。取消解除は担当ありならassigned、未担当ならstoppedとし、publishable=false／recruitmentStopped=trueを維持する。通常の募集へ勝手に戻さない。案件IDと履歴担当IDを残し、管理者向け依頼数へ取消も含める。ID／日付欠落や矛盾する重複は合計をnullにし、「集計未確定」と表示する。
+
+月別参照がまだないCaseList案件もSourceに氏名が存在するため、取消だけで所有勤務枠を解放しない。選択前の手入力案件についてだけ、現行の取消キュー・版・会社・担当・勤務日・所有lockと、新しい65列Source読戻し（取消true・C空欄・固定ID・日付・ハッシュ・同じ台帳版）が一致すれば共有ACKヘルパーで解放する。選択済み、月別書込不明、古いSource、別キュー／別lockは保留を維持する。**Source取消の実書込ライターは追加していない**。読戻しACKの合成試験を、実際のSource取消書込完了と混同しない。
+
+非公開履歴は`cancellation-private-history-review.md`に承認済みの変更範囲と影響を記載した。2026-10-29に本人がSTAGING限定の狭い案を承認し、Rules本人assigned条件・5query・索引1定義・cache v2・拒否時除去・今後の通知一般文言をソース実装した。実Rules82/実App24等の隔離試験に合格し、head1259917の正式CI40793434066全3系統も成功。実環境の監査・索引READY→App→Rules反映は別で、まだ未配備である。IAM／本番／GAS／原本業務write／実送信／停止解除の許可は追加しておらず、履歴担当IDを消して既存Source ACKを壊す方法も取っていない。
+
+独立した監査入口の実行40793656805は、既存GCP federation attribute conditionの認証拒否でデータを読む前に停止した。本人の停止解決指示を受け、監査を同じスクリプトのまま既存の信頼済みFunctions workflowの読取専用モードへ通常CI/mergeで統合した（PR241）。旧独立入口は削除し、権限設定やworkflow_refの偽装で通す方法は取らない。現在の配備済み認証条件は未取得なので、具体的role不足を断定しない。
+
+## CI失敗の調査と共有
+
+PR239の初回失敗は古い認可操作スキーマ、旧2件カード前提、古いworkerハッシュ。検査を省略せず修正しhead685ed1の正式3checkは成功した。その後の変更は別のheadで再検証する。
+
+head773cde0はカレンダー追加で既存350KiB起動上限を超過。遅延読込で348.9KiBへ戻し、上限は変更していない。後続の画面試験では「応募した直後に確定詳細を開く」旧前提を2箇所修正し、確認待ちのまま更新しても確定に混ざらず、テスト専用の合成読戻しACK後だけ確定へ移ることを検証した。製品に合成ACKの口はない。headfef3d65の正式web/securityは成功し、カレンダー3幅・通常一覧と履歴の分離を確認。Functionsの旧「取消解除でopen」期待は、stopped／募集停止／所有枠の保持を確認する試験へ修正した。最新全変更は新しいheadの正式CI待ち。
+
+PR236の4ファイルも実際に照合した。候補の連携画面には「応募後にC列と月別へ順に自動反映」とする文言があり、必須の選択ルールと矛盾するため、そのまま統合しない。PR239の既存連携画面・確認画面・本書で順序を統一する。共有はPR239、MASTER案件58／82と本書を使い、別Dot本人の確認応答を受けたとは主張しない。
+
+ローカル試験とCIは合成Google／Firestoreまたは隔離エミュレータ境界で行う。実クラウドの認証・遅延・旧実行の終了・実業務原本の書込成功の証明ではない。本番、原本、GAS、IAM、Rules、実送信、停止解除は変更していない。既存の19worker移行・到着保持・旧実行drainの独立受入も別であり、ソースハッシュpinの更新だけで配備可能とは扱わない。

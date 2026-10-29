@@ -368,3 +368,9 @@ Standing completion authorization includes the ten admin core callables listed a
 - 実メール読取、業務データ保存、通知、原本変更、本番公開、停止解除は含めない。
 - IAM・秘密設定の追加変更は含めない。CLIが秘密設定の権限付与を要求した場合、既存権限を読取照合し、不足時は変更せず停止する。
 - 受信2件と確認7件を分け、既存設定で配備できる範囲だけ実施する。
+
+## 取消履歴のSTAGING限定非公開化（2026-10-29の明示承認）
+
+- 本人はPR239の `docs/cancellation-private-history-review.md` に提示した範囲に「おけ、進めといて」と回答。jobsのスタッフ読取をopenまたはassignedかつ本人に絞るRules、本人取得5クエリ、対応jobs COLLECTION索引1定義（companyId/assignedStaffId/status/dateKey ASC）、旧キャッシュ破棄・拒否時除去、今後の取消通知の一般文言化を許可する。
+- 対象は `lip-knots-crew-staging` のみ。会社境界・管理者・activeStaff・書込禁止を保持し、案件ID/スタッフID/履歴/所有lockを削除しない。実送信・過去通知の一括削除・データ補正・IAM・GAS・本番・原本業務書込・停止解除は含めない。
+- 隔離試験、全取消writerのstatus/flag同時更新確認、現存する矛盾文書ゼロの読取監査、固定版退避と復元手順を配備前提とする。不完全/拒否/矛盾は停止。索引READY→対応アプリ→Rulesの順にし、旧クエリを先に拒否しない。既存の通常CI/保護/配備経路を迂回しない。

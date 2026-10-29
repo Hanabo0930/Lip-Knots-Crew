@@ -97,6 +97,34 @@ await test("receipt identity cannot include raw email, names or arbitrary job se
  const h=harness();for(const patch of [{email:"synthetic@example.invalid"},{staffId:"other"},{jobId:"other"}]){
  const before=state(h);await assert.rejects(h.receive({...h.incoming,...patch}));assert.equal(state(h),before);}
 });
+for(const changes of [{cancelled:true},{status:"cancelled"}])await test("cancelled candidate is omitted before staff payload "+JSON.stringify(changes),async()=>{
+ const h=harness();h.appMode();await h.receive();Object.assign(h.records.get(h.paths.job),changes,{cancellationReason:"private cancellation reason",storeName:"private cancelled store"});
+ const before=state(h),out=await h.listApplications();
+ assert.equal(out.mode,"app");assert.equal(out.items.length,0);assert.equal(out.nextCursor,null);
+ assert.ok(!JSON.stringify(out).includes("private"));assert.equal(state(h),before);
+});
+await test("cancelled first page still advances raw cursor to a visible assigned candidate",async()=>{
+ const h=harness();h.appMode();await h.receive();const candidate=h.list("automationApplications")[0];
+ h.records.delete("automationApplications/"+candidate.id);
+ Object.assign(h.records.get(h.paths.job),{cancelled:true,status:"cancelled",cancellationReason:"private"});
+ const liveJobId="live-assigned-job";
+ h.records.set("jobs/"+liveJobId,{...h.records.get(h.paths.job),cancelled:false,status:"assigned",assignedStaffId:staffId,storeName:"Visible assigned store"});
+ const ids=Array.from({length:26},(_,i)=>(i+1).toString(16).padStart(64,"0"));
+ for(const [i,id]of ids.entries())h.records.set("automationApplications/"+id,{...candidate,jobId:i<25?jobId:liveJobId});
+ const before=state(h),first=await h.listApplications();
+ assert.equal(first.items.length,0);assert.equal(first.nextCursor,ids[24]);
+ const second=await h.listApplications({cursor:first.nextCursor});
+ assert.equal(second.nextCursor,null);assert.equal(second.items.length,1);assert.equal(second.items[0].id,ids[25]);
+ assert.equal(second.items[0].state,"assigned");assert.equal(second.items[0].job.storeName,"Visible assigned store");
+ assert.equal(state(h),before);
+});
+await test("cancelled omission retains company and active staff authorization",async()=>{
+ const h=harness();h.appMode();await h.receive();Object.assign(h.records.get(h.paths.job),{cancelled:true,companyId:"foreign"});
+ const before=state(h);await assert.rejects(h.listApplications(),{code:"permission-denied"});assert.equal(state(h),before);
+ h.records.get(h.paths.job).companyId=companyId;h.records.get(h.paths.staff).active=false;
+ await assert.rejects(h.listApplications(),{code:"permission-denied"});
+ await assert.rejects(h.listApplications({},h.admin),{code:"permission-denied"});
+});
 console.log(JSON.stringify({scope:"local-synthetic-actual-intake-and-apply-transactions",results,passed:results.filter(r=>r.ok).length,total:results.length,realFirestore:false,realSending:false},null,2));
 process.exitCode=results.every(r=>r.ok)?0:1;
 

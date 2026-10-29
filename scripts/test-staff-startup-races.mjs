@@ -32,7 +32,18 @@ console.log('Startup bootstrap: early rejection observed during delayed token re
 }
 
 {
- const start=app.indexOf('      const loaded=await loadPrimaryBusinessData(sid,cid,current.uid);'),end=app.indexOf('\n    }catch{',start);assert.ok(start>=0&&end>start);const tail=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ const start=app.indexOf('      const loaded=await loadPrimaryBusinessData(sid,cid,current.uid);');
+ const source=ts.createSourceFile('App.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ let startupBlock;
+ function visit(node){
+  if(ts.isTryStatement(node)&&node.tryBlock.getStart(source)<start&&node.tryBlock.end>start&&(!startupBlock||node.tryBlock.end-node.tryBlock.pos<startupBlock.end-startupBlock.pos))startupBlock=node.tryBlock;
+  ts.forEachChild(node,visit);
+ }
+ visit(source);
+ assert.ok(start>=0&&startupBlock,'Startup completion must remain inside its actual try block');
+ const end=startupBlock.end-1;
+ assert.equal(app[end],'}');
+ const tail=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const mode of ['loaded','superseded','auth-changed']){
   const changes=[],followups=[];const ctx={sid:'s',cid:'c',current:{uid:'u'},loadPrimaryBusinessData:async()=>mode!=='superseded',isCurrentAuthLoad:()=>mode!=='auth-changed',setBusinessDataStatus:v=>changes.push(['status',v]),setBusinessDataSource:v=>changes.push(['source',v]),performance:{now:()=>100},loadStarted:10,restoredCachedData:false,setHomeDisplayMs:v=>changes.push(['display',v]),setBusinessRefreshMs:v=>changes.push(['refresh',v]),lastBusinessDataRefreshAt:0,authLoadVersion:1,registerCurrentDevice:async()=>followups.push('device'),refreshOpenJobs:()=>followups.push('jobs'),refreshPushStatus:()=>followups.push('push'),setMessage:()=>assert.fail('Unexpected failure')};
   await Function(...Object.keys(ctx),'return (async()=>{'+tail+'})();')(...Object.values(ctx));

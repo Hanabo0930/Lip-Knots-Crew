@@ -1,5 +1,5 @@
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { assertAcknowledgedCancellationCanChange } from "./cancellation-history-retention-core";
+import { assertAcknowledgedCancellationCanChange, cancelledRecruitmentState } from "./cancellation-history-retention-core";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { z } from "zod";
 import { db } from "./firebase";
@@ -291,7 +291,7 @@ export const adminCancelJob = onCall(async (request) => {
       ...(cancellationSourceLinked(job) ? { sourceCancellationClosed: true } : {}),
       assignmentSheetWrite: null,
       cancellationReason: input.reason,
-      publishable: false,
+      ...cancelledRecruitmentState(),
       appOverride: { type: "cancel", active: true, createdAt: now },
       cancellationSheetWrite: { queueId: queueRef.id, operation: "job.cancel", identity: cancellationSheetWriteIdentity(job), ...sourceAck },
       cancelledAt: now,
@@ -326,8 +326,8 @@ export const adminCancelJob = onCall(async (request) => {
       tx.set(db.collection("notificationQueue").doc(), queueDocumentData({
         companyId,
         targetStaffId: job.assignedStaffId,
-        title: "案件がキャンセルになりました",
-        body: input.reason,
+        title: "シフトの予定が変更されました",
+        body: "詳細は管理者へ直接ご連絡ください。",
         route: `/shifts/${input.jobId}`,
         category: "job_cancelled",
         dedupeKey: `${input.jobId}_cancelled`,

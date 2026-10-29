@@ -2,6 +2,7 @@ type StaffJobListItem = {
   dateKey: string;
   status: string;
   cancelled?: boolean;
+  applicationUnconfirmed?: boolean;
 };
 
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
@@ -39,12 +40,18 @@ export function orderAssignedJobs<T extends StaffJobListItem>(jobs: T[], today =
   });
 }
 
+// Keep pending records in the loaded collection so refresh/recovery can still find
+// them. Only confirmed records belong in the shift list and next-shift summary.
+export function pendingAssignedJobs<T extends StaffJobListItem>(jobs: T[], today = localDateKey()): T[] {
+  return orderAssignedJobs(jobs, today).filter(job => job.applicationUnconfirmed === true);
+}
+
 export function nextShiftJob<T extends StaffJobListItem>(jobs: T[], today = localDateKey()): T | null {
-  return orderAssignedJobs(jobs, today).find((job) => isUpcomingJob(job, today)) ?? null;
+  return orderAssignedJobs(jobs, today).find((job) => job.applicationUnconfirmed !== true && isUpcomingJob(job, today)) ?? null;
 }
 
 export function splitAssignedJobs<T extends StaffJobListItem>(jobs: T[], today = localDateKey()): { upcoming: T[]; past: T[] } {
-  const ordered = orderAssignedJobs(jobs, today);
+  const ordered = orderAssignedJobs(jobs, today).filter(job => job.applicationUnconfirmed !== true);
   return {
     upcoming: ordered.filter((job) => isUpcomingJob(job, today)),
     past: ordered.filter((job) => !isUpcomingJob(job, today)),

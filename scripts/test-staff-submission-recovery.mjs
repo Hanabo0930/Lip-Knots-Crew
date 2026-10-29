@@ -51,6 +51,7 @@ const from=app.indexOf('  async function fetchMyJobs('),to=app.indexOf('  async 
 assert.ok(from>=0&&to>from);
 const jobList=moduleFrom('apps/staff/src/job-list.ts');
 const {orderAssignedJobs}=jobList;
+const {isShiftAccessDenied}=moduleFrom('apps/staff/src/shift-access.ts');
 const today='2026-09-05';
 const jobs=[
  ...Array.from({length:1000},(_,index)=>({id:`past-${index}`,dateKey:'2025-01-01',status:'assigned',companyId:'a',assignedStaffId:'staff'})),
@@ -73,6 +74,7 @@ const queryScope={upcomingShiftCursorRef:{current:null},hasMoreUpcomingShifts:fa
  },
 };
 runInNewContext(ts.transpileModule(app.slice(from,to),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,queryScope);
+Object.assign(queryScope,{isShiftAccessDenied,user:{uid:'fixture-user'},clearBusinessSnapshot:()=>{},tasks:[],selectedJob:null,openJobs:[],mailPanelVersion:{current:0},setShowMailApplications:()=>{},setTasks:fn=>{queryScope.tasks=typeof fn==='function'?fn(queryScope.tasks):fn;},setSelectedJob:fn=>{queryScope.selectedJob=fn(queryScope.selectedJob);},setOpenJobs:fn=>{queryScope.openJobs=fn(queryScope.openJobs);}});
 let serverReads=0;
 queryScope.getDocsFromServer=async filters=>{serverReads++;return queryScope.getDocs(filters);};
 const serverLoaded=await queryScope.fetchMyJobs('staff','a',true);
@@ -99,7 +101,7 @@ const sdk={collection:queryScope.collection,where:queryScope.where,orderBy:query
  getDocs:()=>assert.fail('Yearly history must never fall back to a cached read'),
  getDocsFromServer:filters=>{historyRequests.push(filters);return queryScope.getDocs(filters);},
 };
-const historyModule=moduleFrom('apps/staff/src/past-shift-history.ts',{'./job-list':jobList});
+const historyModule=moduleFrom('apps/staff/src/past-shift-history.ts',{'./job-list':jobList,'./shift-access':{isShiftAccessDenied}});
 const {createPastShiftHistory}=historyModule;
 const {firestorePastShiftReader}=moduleFrom('apps/staff/src/past-shift-reader.ts',{
  'firebase/firestore':sdk,'./past-shift-history':historyModule,
@@ -189,7 +191,7 @@ for(const scenario of ['own','company','staff','cancelled','open','missing','aut
  };
  const job=await queryScope.loadTaskJob('task-job');
  assert.equal(Boolean(job),scenario==='own');
- if(scenario!=='own')assert.equal(queryScope.myJobs,previous);
+ if(scenario!=='own')assert.deepEqual(Array.from(queryScope.myJobs),Array.from(scenario==='auth'?previous:previous.filter(job=>job.id!=='task-job')));
 }
 {const previous=queryScope.myJobs;let cacheReads=0;queryScope.getDoc=async()=>{cacheReads++;return {exists:()=>true,id:'stale-task',data:()=>({companyId:'a',assignedStaffId:'staff',status:'assigned'})};};queryScope.getDocFromServer=async()=>{throw Error('task server offline');};await assert.rejects(queryScope.loadTaskJob('stale-task'),/task server offline/);assert.equal(cacheReads,0);assert.equal(queryScope.myJobs,previous);queryScope.getDocFromServer=async()=>({exists:()=>true,id:'recovered-task',data:()=>({id:'wrong',companyId:'a',assignedStaffId:'staff',status:'assigned',dateKey:today})});const recovered=await queryScope.loadTaskJob('recovered-task');assert.equal(recovered.id,'recovered-task');queryScope.myJobs=previous;}
 console.log('Yearly history paging passed: 1000 equal-date rows, 50-row pages, retry without skipping, auth/refresh isolation, double-click lock, and task ownership checks.');
@@ -409,7 +411,9 @@ console.log('Japan business date: midnight/year/leap boundaries and past/open sh
    fetchMyJobs:()=>{scope.pastShiftVersionRef.current++;return gate.promise;},fetchTasks:async()=>[],
    setMyJobs:value=>state.jobs=typeof value==='function'?value(state.jobs):value,setTasks:()=>{},setSelectedJob:fn=>state.selected=fn(state.selected),saveBusinessSnapshot:()=>state.saved++,nextShiftJob:()=>null,
    getDocFromServer:async()=>({exists:()=>mode!=='missing',id:'A',data:()=>({companyId:'company',assignedStaffId:'staff',status:'assigned',cancelled:mode==='cancelled',storeName:'fresh'})})};
-  runInNewContext(ts.transpileModule(app.slice(primaryStart,primaryEnd)+app.slice(refreshStart,refreshEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,scope);
+  Object.assign(scope,{isShiftAccessDenied,clearBusinessSnapshot:()=>{},setOpenJobs:()=>{},mailPanelVersion:{current:0},setShowMailApplications:()=>{}});
+  const forgetStart=app.indexOf('  function forgetInaccessibleShifts('),forgetEnd=app.indexOf('  async function loadTaskJob(',forgetStart);
+  runInNewContext(ts.transpileModule(app.slice(forgetStart,forgetEnd)+app.slice(primaryStart,primaryEnd)+app.slice(refreshStart,refreshEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,scope);
   const pending=scope.loadPrimaryBusinessData();await scope.refreshSelectedJob('A');gate.resolve([{id:'A',storeName:'old'}]);
   assert.equal(await pending,false,'Individual refresh must invalidate older primary response');
   assert.equal(state.jobs.length,mode==='updated'?1:0);assert.equal(state.saved,0);
@@ -457,10 +461,10 @@ console.log('Japan business date: midnight/year/leap boundaries and past/open sh
  const api=scope.exports,key='lkcBusinessSnapshot:u:c:s';
  const job={id:'j',dateKey:'2026-09-10',status:'assigned',menuName:'demo'},task={id:'t',jobId:'j',kind:'report',title:'Report',body:'',priority:'normal'};
  for(const [jobs,tasks] of [[[null],[task]],[[job],[null]],[[{...job,menuName:{}}],[task]],[[job],[{...task,title:{}}]],[[job],[task,task]],[[job,job],[task]],[[{...job,netPrint:{items:{}}}],[task]],[[{...job,netPrint:{items:[null]}}],[task]],[[{...job,preContact:{arrivalTime:{}}}],[task]],[[{...job,submissionStatus:{report:{completed:'yes'}}}],[task]],[[job],[{...task,priority:'other'}]],[[job],[{...task,priority:['normal']}]]]){
-  stored.set(key,JSON.stringify({version:1,savedAt:1000,jobs,tasks}));assert.equal(api.loadBusinessSnapshot('u','c','s',1001),null,'Malformed cached entries must not restore');
+  stored.set(key,JSON.stringify({version:2,savedAt:1000,jobs,tasks}));assert.equal(api.loadBusinessSnapshot('u','c','s',1001),null,'Malformed cached entries must not restore');
  }
- stored.set(key,JSON.stringify({version:1,savedAt:1000,jobs:[job],tasks:[{...task,metadata:null}]}));assert.ok(api.loadBusinessSnapshot('u','c','s',1001));assert.equal(api.loadBusinessSnapshot('other','c','s',1001),null);
- stored.set(key,JSON.stringify({version:1,savedAt:1000,jobs:[],tasks:[]}));assert.ok(api.loadBusinessSnapshot('u','c','s',1001));
+ stored.set(key,JSON.stringify({version:2,savedAt:1000,jobs:[job],tasks:[{...task,metadata:null}]}));assert.ok(api.loadBusinessSnapshot('u','c','s',1001));assert.equal(api.loadBusinessSnapshot('other','c','s',1001),null);
+ stored.set(key,JSON.stringify({version:2,savedAt:1000,jobs:[],tasks:[]}));assert.ok(api.loadBusinessSnapshot('u','c','s',1001));
  console.log('Business cache entries: 12 malformed nested/list values rejected; valid/null metadata/empty/owner separation preserved.');
 }
 
@@ -596,3 +600,6 @@ for(const scope of ['file','submission',undefined]){
  const invalid=selectFiles([photo('too-large.pdf',50*1024*1024+1,'application/pdf')],{scope});assert.equal(invalid.files[0],original);assert.equal(invalid.confirmed,true);
 }
 console.log('Resubmission scope: file remains one; explicitly whole-submission supports twenty 50MiB file descriptors and append without lowering the limit.');
+
+// The monthly confirmation boundary is shared by all shift entry origins.
+await import("./test-staff-monthly-confirmation.mjs");

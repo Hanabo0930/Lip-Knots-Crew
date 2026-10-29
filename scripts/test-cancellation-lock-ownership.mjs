@@ -75,6 +75,26 @@ for (const moduleName of ['jobs', 'analytics']) {
     return { records, committed, reads, cancel, restore:()=>exports.adminRestoreCancelledJob({auth:{uid:"synthetic-admin",token:{companyId,role:"admin"}},data:{jobId:"old-job",note:"合成復帰"}}) };
   }
   if(moduleName==='analytics'){
+    for(const rawName of [undefined,null]){
+      const caseId='LKCASE_00000000-0000-5000-8000-000000000001',revision='a'.repeat(64);
+      const test=setup(ownLock,{caseId,workDate:dateKey,assignedStaffName:'合成手入力担当',assignedUid:null,
+        applicationUnconfirmed:true,revision:1,...(rawName===undefined?{}:{rawStaffName:rawName}),
+        caseListSource:{version:1,sheetId:2026101601,caseId,sourceRevision:revision,rowRevision:revision,ledgerRevision:revision,bindingHash:revision},
+        source:{type:'case_list',sheetId:2026101601,bindingHash:revision},
+        caseListManualPending:{observationHash:revision,sourceRevision:revision,staffId,dateKey,canonicalStaffName:'合成手入力担当'}});
+      await test.cancel();
+      const cancelled=test.records.get('jobs/old-job'),intent=cancelled.cancellationSheetWrite;
+      assert.equal(intent.sourceAckPending,true);assert.equal(cancelled.rawStaffName,rawName);
+      // Match the real Source importer ACK: it records fresh C-empty/BL-true
+      // proof and releases the lock, but does not add legacy rawStaffName.
+      cancelled.cancellationSheetWrite={...intent,sourceAckPending:false,sourceAckProof:{readStartedAtMs:1300,confirmedAtMs:1400,runId:'synthetic-import',originalRevision:cancelled.revision,originalIdentity:intent.identity,staffId,dateKey}};
+      test.records.get(lockPath).active=false;
+      const before=JSON.stringify([...test.records]),writes=test.committed.length;
+      await assert.rejects(test.restore(),{code:'failed-precondition'},'Verified manual Source cancellation cannot restore an unwritten historical name');
+      assert.equal(JSON.stringify([...test.records]),before);assert.equal(test.committed.length,writes);
+      assert.equal(test.records.get(lockPath).active,false);assert.equal(cancelled.publishable,false);assert.equal(cancelled.recruitmentStopped,true);
+      passed++;
+    }
     for(const mode of ['valid','missing-lock','inactive-lock','unassigned','other-job','lock-company','lock-staff','lock-date','staff-missing','staff-company','staff-inactive','staff-active-missing','date-missing']){
       const test=setup(ownLock,{cancelled:true,status:'cancelled'});
       if(mode==='missing-lock')test.records.delete(lockPath);
@@ -89,7 +109,15 @@ for (const moduleName of ['jobs', 'analytics']) {
       if(mode==='staff-inactive')test.records.get('staffProfiles/'+staffId).active=false;
       if(mode==='staff-active-missing')delete test.records.get('staffProfiles/'+staffId).active;
       if(mode==='date-missing')test.records.get('jobs/old-job').dateKey='';
-      if(['valid','missing-lock','inactive-lock','unassigned'].includes(mode)){await test.restore();assert.equal(test.records.get('jobs/old-job').status,mode==='unassigned'?'open':'assigned');if(mode!=='unassigned')assert.equal(test.records.get(lockPath).active,true);}
+      if(['valid','missing-lock','inactive-lock','unassigned'].includes(mode)){
+        const beforeLock=test.records.has(lockPath)?JSON.stringify(test.records.get(lockPath)):null;
+        await test.restore();const restored=test.records.get('jobs/old-job');
+        assert.equal(restored.status,mode==='unassigned'?'stopped':'assigned');
+        assert.equal(restored.publishable,false,'Restoring cancellation does not approve recruitment');
+        assert.equal(restored.recruitmentStopped,true,'Explicit publication is required before reopening');
+        if(mode!=='unassigned')assert.equal(test.records.get(lockPath).active,true);
+        else assert.equal(JSON.stringify(test.records.get(lockPath)),beforeLock,'Unassigned restore cannot reoccupy or release the historical staff day');
+      }
       else{await assert.rejects(test.restore(),{code:'failed-precondition'},mode);assert.equal(test.committed.length,0,mode);}
       passed++;
     }
@@ -107,6 +135,11 @@ for (const moduleName of ['jobs', 'analytics']) {
     const test = setup(lock);
     await test.cancel();
     assert.equal(test.records.get('jobs/old-job').cancelled, true, label);
+    assert.equal(test.records.get('jobs/old-job').status, 'cancelled', 'Cancellation status/flag must be atomic');
+    const notice=test.committed.find(item=>item.path.startsWith('notificationQueue/')).data;
+    assert.equal(notice.title,'シフトの予定が変更されました');
+    assert.equal(notice.body,'詳細は管理者へ直接ご連絡ください。');
+    assert.ok(!notice.body.includes('合成取消'),'Private reason must stay in Admin history, never the staff notice');
     assert.equal(test.committed.filter(item => item.path === lockPath).length, release ? 1 : 0, label);
     if (release) assert.equal(test.records.get(lockPath).active, false, label);
     else assert.deepEqual(test.records.get(lockPath), lock ?? undefined, label);

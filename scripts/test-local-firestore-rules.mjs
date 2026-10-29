@@ -41,6 +41,13 @@ try {
     'jobs/open-a':{companyId:'company-a',status:'open',assignedStaffId:null},
     'jobs/open-b':{companyId:'company-b',status:'open',assignedStaffId:null},
     'jobs/assigned-other':{companyId:'company-a',status:'assigned',assignedStaffId:'staff-other'},
+    'jobs/confirmed-own':{companyId:'company-a',status:'assigned',assignedStaffId:'staff-a',dateKey:'2026-11-02',caseId:'synthetic-confirmed',applicationUnconfirmed:false},
+    'jobs/pending-own':{companyId:'company-a',status:'assigned',assignedStaffId:'staff-a',dateKey:'2026-11-03',caseId:'synthetic-pending',applicationUnconfirmed:true},
+    'jobs/past-own':{companyId:'company-a',status:'assigned',assignedStaffId:'staff-a',dateKey:'2025-11-03',caseId:'synthetic-past'},
+    'jobs/cancelled-own':{companyId:'company-a',status:'cancelled',cancelled:true,assignedStaffId:'staff-a',dateKey:'2026-11-04',caseId:'synthetic-cancelled',cancellationReason:'SYNTHETIC_PRIVATE_REASON',recruitmentStopped:true,publishable:false},
+    'jobs/cancelled-foreign':{companyId:'company-b',status:'cancelled',cancelled:true,assignedStaffId:'staff-a',dateKey:'2026-11-05',caseId:'synthetic-foreign'},
+    'jobs/stopped-own':{companyId:'company-a',status:'stopped',assignedStaffId:'staff-a'},
+    'jobs/draft-own':{companyId:'company-a',status:'draft',assignedStaffId:'staff-a'},
     'tasks/own':{companyId:'company-a',staffId:'staff-a'},
     'tasks/other':{companyId:'company-a',staffId:'staff-other'},
     'submissions/own':{companyId:'company-a',staffId:'staff-a'},
@@ -63,6 +70,38 @@ try {
   await test('自社の公開案件をスタッフが読める',async()=>assert.ok((await read(staff,'jobs/open-a')).exists()));
   await test('他社の公開案件を拒否',()=>denied(read(staff,'jobs/open-b')));
   await test('他人の担当案件を拒否',()=>denied(read(staff,'jobs/assigned-other')));
+  for(const [name,db] of [['本人',staff],['同社の他人',otherStaff],['別会社',managerB],['未認証',anonymous]]){
+    await test(name+'の取消履歴直接読取を拒否',()=>denied(read(db,'jobs/cancelled-own')));
+  }
+  await test('本人の確定シフトは取得できる',async()=>assert.equal((await read(staff,'jobs/confirmed-own')).data().applicationUnconfirmed,false));
+  await test('本人の確認待ちも取得でき、確定へ変更しない',async()=>assert.equal((await read(staff,'jobs/pending-own')).data().applicationUnconfirmed,true));
+  await test('旧文書のcancelledフィールド欠落でも通常担当読取を維持',async()=>assert.equal((await read(staff,'jobs/past-own')).data().caseId,'synthetic-past'));
+  for(const path of ['jobs/stopped-own','jobs/draft-own','jobs/cancelled-foreign'])await test('担当IDが一致しても非担当状態/他社は拒否 '+path,()=>denied(read(staff,path)));
+  await test('管理者は同社の取消理由と固定IDを保持して読める',async()=>{
+    const row=(await read(manager,'jobs/cancelled-own')).data();assert.equal(row.cancellationReason,'SYNTHETIC_PRIVATE_REASON');assert.equal(row.caseId,'synthetic-cancelled');assert.equal(row.assignedStaffId,'staff-a');
+  });
+  await test('管理者の会社範囲一覧は取消履歴を含み年間照合の原行を保持',async()=>{
+    const rows=await list(manager,'jobs',['companyId','company-a']);assert.ok(rows.docs.some(row=>row.id==='cancelled-own'));assert.ok(rows.docs.some(row=>row.id==='confirmed-own'));
+  });
+  await test('旧本人クエリはRulesのフィルター代わりにならず全体を拒否',()=>denied(list(staff,'jobs',['companyId','company-a'],['assignedStaffId','staff-a'])));
+  const ownShifts=(...filters)=>clientApi.getDocsFromServer(clientApi.query(clientApi.collection(staff,'jobs'),clientApi.where('companyId','==','company-a'),clientApi.where('assignedStaffId','==','staff-a'),clientApi.where('status','==','assigned'),...filters));
+  await test('新本人クエリは確認待ち/確定を保持して取消を取得前に除外',async()=>{
+    const rows=await ownShifts(clientApi.where('dateKey','>=','2026-01-01'),clientApi.orderBy('dateKey','asc'),clientApi.limit(301));assert.deepEqual(rows.docs.map(row=>row.id),['confirmed-own','pending-own']);
+  });
+  await test('本人過去クエリも取消を除いて取得できる',async()=>{
+    const rows=await ownShifts(clientApi.where('dateKey','<','2026-01-01'),clientApi.orderBy('dateKey','asc'),clientApi.limit(51));assert.deepEqual(rows.docs.map(row=>row.id),['past-own']);
+  });
+  await test('新本人クエリのカーソルは同日/次ページを飛ばさない',async()=>{
+    const first=await ownShifts(clientApi.where('dateKey','>=','2026-01-01'),clientApi.orderBy('dateKey','asc'),clientApi.limit(1));
+    const next=await ownShifts(clientApi.where('dateKey','>=','2026-01-01'),clientApi.orderBy('dateKey','asc'),clientApi.startAfter(first.docs[0]),clientApi.limit(1));assert.deepEqual(next.docs.map(row=>row.id),['pending-own']);
+  });
+  await test('募集中クエリを維持し本人手配/取消の履歴は混ぜない',async()=>assert.deepEqual((await list(staff,'jobs',['companyId','company-a'],['status','open'])).docs.map(row=>row.id),['open-a']));
+  await test('取消後は同じ本人のサーバー再取得を拒否し管理者履歴を残す',async()=>{
+    await seed.doc('jobs/confirmed-own').update({status:'cancelled',cancelled:true,cancellationReason:'SYNTHETIC_NEW_PRIVATE_REASON',publishable:false,recruitmentStopped:true});
+    await denied(read(staff,'jobs/confirmed-own'));assert.equal((await read(manager,'jobs/confirmed-own')).data().caseId,'synthetic-confirmed');
+    assert.deepEqual((await ownShifts(clientApi.where('dateKey','>=','2026-01-01'))).docs.map(row=>row.id),['pending-own']);
+  });
+  for(const [name,db] of [['本人',staff],['管理者',manager]])await test(name+'の直接取消更新を拒否し管理者APIを経由させる',()=>denied(clientApi.updateDoc(clientApi.doc(db,'jobs/pending-own'),{status:'cancelled',cancelled:true})));
   await test('本人の対応事項を読める',async()=>assert.ok((await read(staff,'tasks/own')).exists()));
   await test('他人の対応事項を拒否',()=>denied(read(staff,'tasks/other')));
   await test('本人の提出ファイルを読める',async()=>assert.ok((await read(staff,'submissions/own/files/file')).exists()));

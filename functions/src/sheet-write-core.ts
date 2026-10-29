@@ -29,7 +29,22 @@ export function cancellationSheetWriteIdentity(job: Record<string, unknown>): st
 /** Source-linked cancellation keeps its owned day lock until a later source read. */
 export function cancellationSourceLinked(job: Record<string, unknown>): boolean {
   const source = job.source && typeof job.source === "object" ? job.source as Record<string, unknown> : {};
-  return job.sheetRef != null || source.type === "google_sheets_readonly" || job.mailIntake != null || job.adminCreated === true;
+  let caseListLinked = false;
+  if (job.caseListSource != null) {
+    const linked = job.caseListSource && typeof job.caseListSource === "object" && !Array.isArray(job.caseListSource)
+      ? job.caseListSource as Record<string, unknown> : {};
+    const hash = (value: unknown) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+    // Pending Source C already contains a name before a monthly sheetRef exists.
+    // Never release its lock by mistaking that absence for an unlinked job.
+    caseListLinked = linked.version === 1 && linked.sheetId === 2026101601 &&
+      typeof job.caseId === "string" && /^LKCASE_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(job.caseId) &&
+      linked.caseId === job.caseId && [linked.sourceRevision, linked.rowRevision, linked.ledgerRevision, linked.bindingHash].every(hash) &&
+      !Object.hasOwn(linked, "spreadsheetId");
+    if (!caseListLinked || source.type != null && (source.type !== "case_list" || source.sheetId !== linked.sheetId || source.bindingHash !== linked.bindingHash)) {
+      throw new Error("案件リストの取消元を確認できません。勤務枠と履歴を保持して停止しました。");
+    }
+  }
+  return caseListLinked || job.sheetRef != null || source.type === "google_sheets_readonly" || job.mailIntake != null || job.adminCreated === true;
 }
 
 export function cancellationSourceAckFields(job: Record<string, unknown>, ownsLock: boolean,
@@ -69,6 +84,60 @@ export function importedCancellationSourceAck(old: Record<string, any> | undefin
     sheet.spreadsheetId !== incoming.sheetRef.spreadsheetId || sheet.sheetId !== incoming.sheetRef.sheetId ||
     sheet.sheetName !== incoming.sheetRef.sheetName || sheet.caseIdColumn !== incoming.sheetRef.caseIdColumn ||
     (sheet.caseIdColumn === undefined && (!Number.isSafeInteger(sheet.currentRow) || sheet.currentRow < 1 || sheet.currentRow !== incoming.sheetRef.currentRow))) refuse();
+  return true;
+}
+
+/** Fresh Source readback for an imported manual name cancelled before owner
+ * selection. This does not authorize or perform a Source/monthly write.
+ * Selected/unknown monthly execution must keep its lock for a separate review. */
+export function importedCaseListCancellationSourceAck(old: Record<string, any> | undefined,
+  incoming: { schema: "LK_CASE_LIST_CANCEL_SOURCE_READ_V1"; companyId: string; jobId: string; caseId: string;
+    dateKey: string; workDate: string; source: Record<string, any>; rowCells: Record<string, any>[];
+    queue: Record<string, any>; dayLock: Record<string, any> | null | undefined },
+  readStartedAtMs: number, hash: (value: unknown) => string): boolean {
+  if (!old) return false;
+  const saved = old.cancellationSheetWrite;
+  if (saved?.sourceAckPending !== true || !old?.caseListManualPending || old.sheetRef != null ||
+    old.caseListManualSelection != null || old.assignmentSheetWrite != null) return false;
+  const refuse = (): never => { throw new Error("取消後の案件リストで氏名空欄・取消・同じ案件と勤務枠を確認できません。勤務枠を保持しました。"); };
+  const source = old.caseListSource, pending = old.caseListManualPending, next = incoming.source;
+  const queue = incoming.queue, day = incoming.dayLock, row = incoming.rowCells;
+  const digest = (value: unknown) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  if (!cancellationSourceLinked(old) || !source || incoming.schema !== "LK_CASE_LIST_CANCEL_SOURCE_READ_V1" ||
+    old.cancelled !== true || old.status !== "cancelled" || old.sourceCancellationClosed !== true ||
+    typeof old.assignedStaffId !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(old.assignedStaffId) || typeof old.assignedStaffName !== "string" || !old.assignedStaffName.trim() || old.assignedUid != null ||
+    saved.sourceAckVersion !== 1 || typeof saved.queueId !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(saved.queueId) ||
+    !/^[A-Za-z0-9_-]{1,200}$/.test(incoming.jobId) || typeof old.cancelledBy !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(old.cancelledBy) ||
+    !["job.cancel", "job.cancel.v2"].includes(saved.operation) ||
+    !Number.isSafeInteger(saved.sourceAckRequestedAtMs) || saved.sourceAckRequestedAtMs < 0 ||
+    !Number.isSafeInteger(readStartedAtMs) || readStartedAtMs <= saved.sourceAckRequestedAtMs ||
+    saved.sourceAckJobRevision !== old.revision || !Number.isSafeInteger(old.revision) ||
+    saved.identity !== cancellationSheetWriteIdentity(old) ||
+    old.companyId !== incoming.companyId || old.caseId !== incoming.caseId || old.dateKey !== incoming.dateKey || old.workDate !== incoming.workDate ||
+    pending.staffId !== old.assignedStaffId || pending.dateKey !== old.dateKey || pending.sourceRevision !== source.sourceRevision || !digest(pending.observationHash) ||
+    next?.version !== 1 || next.sheetId !== 2026101601 || next.caseId !== old.caseId || next.bindingHash !== source.bindingHash || next.ledgerRevision !== source.ledgerRevision ||
+    ![next.sourceRevision, next.rowRevision, next.ledgerRevision, next.bindingHash].every(digest) || Object.hasOwn(next, "spreadsheetId") ||
+    next.sourceRevision === source.sourceRevision || next.rowRevision === source.rowRevision ||
+    queue?.id !== saved.queueId || queue.companyId !== old.companyId || queue.jobId !== incoming.jobId || queue.operation !== saved.operation ||
+    queue.idempotencyKey !== `${saved.operation}:${incoming.jobId}:${saved.queueId}` || queue.actorUid !== old.cancelledBy ||
+    queue.updates?.cancelled !== true || queue.updates?.cancellationReason !== old.cancellationReason ||
+    !day || day.active !== true || day.companyId !== old.companyId || day.staffId !== old.assignedStaffId || day.dateKey !== old.dateKey || day.jobId !== incoming.jobId ||
+    !Array.isArray(row) || row.length !== 65 || row.some(cell => !cell || typeof cell !== "object" || Array.isArray(cell) || cell.$unknown === true) ||
+    row[60]?.userEnteredValue?.stringValue !== old.caseId || row[60]?.effectiveValue?.stringValue !== old.caseId) refuse();
+  const nativeBoolean = (cell: Record<string, any>) => Object.keys(cell.userEnteredValue ?? {}).length === 1 &&
+    typeof cell.userEnteredValue.boolValue === "boolean" && Object.keys(cell.effectiveValue ?? {}).length === 1 && cell.effectiveValue.boolValue === cell.userEnteredValue.boolValue;
+  const blank = (value: Record<string, unknown>) => Object.keys(value).every(key => key === "stringValue") &&
+    (value.stringValue === undefined || typeof value.stringValue === "string" && !value.stringValue.trim());
+  // BL is the canonical Source cancellation flag. Legacy A is unrelated to
+  // cancellation and cannot acknowledge it or prevent a valid BL readback.
+  if (!nativeBoolean(row[63]!) || row[63]!.userEnteredValue.boolValue !== true ||
+    !blank(row[2]!.userEnteredValue ?? {}) || !blank(row[2]!.effectiveValue ?? {})) refuse();
+  const dateValue = Object.hasOwn(row[1]!.userEnteredValue ?? {}, "formulaValue") ? row[1]!.effectiveValue : row[1]!.userEnteredValue;
+  const nativeDate = typeof dateValue?.numberValue === "number" && Number.isInteger(dateValue.numberValue) && dateValue.numberValue >= 0 && dateValue.numberValue < 2958466
+    ? new Date(Date.UTC(1899, 11, 30) + dateValue.numberValue * 86400000).toISOString().slice(0, 10) : dateValue?.stringValue;
+  if (nativeDate !== old.dateKey || next.rowRevision !== hash({ schema: "LK_CASE_CONTENT_REVISION_V1", jobId: old.caseId,
+    cells: row.map(cell => ({ userEnteredValue: cell.userEnteredValue ?? {}, effectiveValue: cell.effectiveValue ?? {} })) }) ||
+    next.sourceRevision !== hash({ schema: "LK_CASE_LIST_AUTHORITY_REVISION_V1", caseId: old.caseId, rowRevision: next.rowRevision, ledgerRevision: next.ledgerRevision })) refuse();
   return true;
 }
 

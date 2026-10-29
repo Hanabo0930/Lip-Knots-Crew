@@ -225,11 +225,13 @@ export const listMyMailApplications = onCall(async request => {
       if (!value) { value = tx.get(ref); cache.set(ref.path,value); }
       return value;
     }};
-    const items = await Promise.all(records.map(async doc => {
+    const candidateItems = await Promise.all(records.map(async doc => {
       const candidate = CandidateSchema.parse(doc.data());
       if (candidate.companyId !== companyId || candidate.staffId !== staffId) throw new HttpsError("permission-denied","応募候補の所属が一致しません。");
       const jobData = (await reader.get(db.collection("jobs").doc(candidate.jobId))).data();
       if (jobData && jobData.companyId !== companyId) throw new HttpsError("permission-denied","案件の所属が一致しません。");
+      // Keep the raw page cursor, but never expose a cancelled candidate or its details.
+      if (jobData?.cancelled === true || jobData?.status === "cancelled") return null;
       const text = (key:string) => typeof jobData?.[key] === "string" ? jobData[key] : "";
       const job = {id:candidate.jobId,workDate:candidate.workDate,dateKey:candidate.workDate,
         ...(Number.isSafeInteger(jobData?.revision) ? {revision:jobData!.revision} : {}),
@@ -252,6 +254,7 @@ export const listMyMailApplications = onCall(async request => {
       }
       return {id:doc.id,revision:candidate.revision,job,state};
     }));
+    const items = candidateItems.filter(item => item !== null);
     return {ok:true,mode:"app",items,nextCursor:page.docs.length>25?records.at(-1)!.id:null};
   });
 });

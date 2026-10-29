@@ -1,3 +1,5 @@
+import {readyManualSourceTransferIssue,validManualSourceTransferConfirmation,type ManualSourceTransferConfirmation} from "./manual-source-transfer";
+import {currentStaffPerformanceYearRange,validStaffPerformanceRange} from "./staff-performance-range";
 import AdminAtmosphere, { LiquidOrb } from "./AdminAtmosphere";
 import AdminNavigation, { adminWorkspaces, workspaceViews, viewKey, type AdminWorkspace } from "./AdminNavigation";
 import { parseShiftImportPreview, previewSheetNames, type ShiftImportPreview } from "./shift-import-preview";
@@ -200,6 +202,7 @@ export type DashboardData = {
 export type StaffPerformanceData = {
   profile:{id:string;displayName:string;rank:string;areaLabels:string[];nearestStation:string};
   performance:{from?:string;through?:string;
+    requestHistory?:{basis:"caseId+staffId";complete:boolean;totalRequests:number|null;knownUniqueRequests:number;duplicateRows:number;issues:string[]};
     totals:{assignedJobs:number;implementedJobs:number;scheduledJobs:number;cancelledJobs:number;preContactLate:number;reportLate:number;salesFloorLate:number;invoice:number;payment:number;grossProfit:number};
     clients:NamedCount[]; makers:NamedCount[]; menus:NamedCount[]; stores:NamedCount[]; months:NamedCount[];
     recentJobs:Array<{id:string;dateKey:string;clientName:string;storeName:string;makerName:string;menuName:string;cancelled:boolean}>;
@@ -978,6 +981,7 @@ export default function App() {
   const timelinePendingRef=useRef<string|null>(null);
   const timelineReady=timelineStatus==="ready"&&timelineLoadedKey===timelineKey;
   const [sheetIssues, setSheetIssues] = useState<SheetWriteIssue[]>([]);
+  const [manualIssuesNextCursor,setManualIssuesNextCursor]=useState<string|null>(null);
   const [issuesBusy, setIssuesBusy] = useState(false);
   const issuesVersionRef=useRef(0),operationEpochRef=useRef(0),resubmissionListVersionRef=useRef(0);
   const operationLocksRef=useRef(new Map<string,symbol>());
@@ -1081,7 +1085,7 @@ const [monthBusy, setMonthBusy] = useState(false);
       shiftPreviewVersionRef.current++;setShiftPreview(null);setSyncBusy(false);setSyncSummary("未実行");
       resubmissionNeedsReviewRef.current=false;setResubmissionNeedsReview(false);
       closeComparison();expenseVersionRef.current++;
-      setStaffDirectoryMessage("");closeStaffPerformance();closeStaffDevices();resubmissionListVersionRef.current++;issuesVersionRef.current++;operationEpochRef.current++;operationLocksRef.current.clear();setOperationKeys([]);setIssuesBusy(false);dashboardVersionRef.current++;setDashboardBusy(false);setDashboardError("");
+      setStaffDirectoryMessage("");closeStaffPerformance();closeStaffDevices();resubmissionListVersionRef.current++;issuesVersionRef.current++;operationEpochRef.current++;operationLocksRef.current.clear();setOperationKeys([]);setIssuesBusy(false);setManualIssuesNextCursor(null);dashboardVersionRef.current++;setDashboardBusy(false);setDashboardError("");
       expenseReadyRef.current=null;expenseLoadRef.current=null;expenseWriteRef.current=null;
       setExpenseReady(false);setExpenseBusy(false);setExpenseValues(blankExpense);setExpenseNote("");setExpenseStatus("未読込");
       exportRunRef.current=null;setExportBusy(false);
@@ -2774,21 +2778,24 @@ async function previewRowCreation() {
     await runAdminOperation("resubmission:"+requestId,"completeResubmissionRequest",{requestId},"再提出の確認を完了しました。","resubmission");
   }
 
-  async function loadSheetIssues(guard?:AuthRunGuard, propagateError=false) {
+  async function loadSheetIssues(guard?:AuthRunGuard, propagateError=false, manualCursor?:string) {
     const version=++issuesVersionRef.current,user=auth?.currentUser;
     const isCurrent=()=>version===issuesVersionRef.current&&auth?.currentUser===user&&canApplyAuthResult(guard);
     if (!firebaseConfigured) {
       const {getDemoSheetIssues}=await import("./AdminSheetIssuePanel");
-      if(isCurrent())setSheetIssues(getDemoSheetIssues());
+      if(isCurrent()){setSheetIssues(getDemoSheetIssues());setManualIssuesNextCursor(null);}
       return;
     }
     if (!functions) return;
     if(!guard)setIssuesBusy(true);
     try {
       const callable = httpsCallable(functions, "getSheetWriteIssues");
-      const response = await callable({ limit:100 });
+      const response = await callable({ limit:100,...(manualCursor?{manualCursor}:{}) });
       if(!isCurrent())return;
-      setSheetIssues((response.data as { issues?:SheetWriteIssue[] }).issues ?? []);
+      const result=response.data as {issues?:SheetWriteIssue[];manualNextCursor?:string|null};
+      if(!Array.isArray(result.issues)||result.manualNextCursor!=null&&(!/^[A-Za-z0-9_-]{1,200}$/.test(result.manualNextCursor)||result.manualNextCursor===manualCursor))throw Error("手入力案件の続きの位置を確認できません。再読込してください。");
+      setSheetIssues(current=>manualCursor?[...new Map([...current,...result.issues!].map(issue=>[issue.operation+":"+issue.id,issue])).values()]:result.issues!);
+      setManualIssuesNextCursor(result.manualNextCursor??null);
     } catch (error) {
       if(!isCurrent())return;
       if(propagateError)throw error;
@@ -2799,16 +2806,18 @@ async function previewRowCreation() {
   }
 
   async function retrySheetIssue(issue:SheetWriteIssue) {
-    if (!issue.canRetry||issue.writeVerificationRequired) {setMessage("原本と依頼の確認が必要です。再試行できません。");return;}
+    if (issue.operation==="case_list.manual"||issue.operation==="case_list.assign"||!issue.canRetry||issue.writeVerificationRequired) {setMessage("原本と依頼の確認が必要です。再試行できません。");return;}
     await runSheetIssueAction(issue,"retrySheetWriteIssue","管理画面から手動再試行");
   }
 
   async function acknowledgeSheetIssue(issue:SheetWriteIssue) {
+    if(issue.operation==="case_list.manual"){setMessage("手入力案件は条件と日給を確認し、ネームアップ後に個別に選択してください。");return;}
     if(issue.operation==="case_list.assign") {
       await runAdminOperation("issue:"+issue.id,"acknowledgeSheetWriteIssue",{queueId:issue.id,action:"reconcile-case-list"},data=>{
         const status=(data as {status?:string})?.status;
         if(status==="MONTHLY_READBACK_VERIFIED"||status==="NO_OP_ALREADY_ACCEPTED")return "保存済みの原本を照合し、応募の反映を確認しました。";
         if(status==="OWNER_RESUME_REQUIRED")return "案件リストの担当者反映まで確認できました。月別への保存は未完了のため保留しています。";
+        if(status==="OWNER_TRANSFER_SELECTION_REQUIRED")return "ネームアップ後の移行選択待ちです。担当名だけでシフト表には移行しません。";
         return "保存結果を確定できませんでした。現在のデータを保持して保留しています。";
       },false);
       return;
@@ -2819,6 +2828,20 @@ async function previewRowCreation() {
 
   async function runSheetIssueAction(issue:SheetWriteIssue,action:string,note:string) {
     await runAdminOperation("issue:"+issue.id,action,{queueId:issue.id,note},action==="retrySheetWriteIssue"?"再試行を受け付けました。":"確認メモを記録しました。",false);
+  }
+
+  async function selectMonthlyTransfer(issue:SheetWriteIssue,manualConfirmation?:ManualSourceTransferConfirmation) {
+    if(issue.operation==="case_list.manual"){
+      if(!readyManualSourceTransferIssue(issue)||!validManualSourceTransferConfirmation(manualConfirmation)){setMessage("手入力案件の条件・日給・担当者を確認してください。照合できるまで保留します。");return;}
+      const label=issue.job?[issue.job.workDate,issue.job.clientName,issue.job.storeName,issue.job.assignedStaffName].filter(Boolean).join(" "):"案件 "+issue.jobId;
+      if(!window.confirm(label+"\n日給 "+manualConfirmation.payOffer.dailyWageJPY+"円・交通費／通信費全額支給\n\nクライアントへのネームアップは済みましたか？\n表示したこの1件を移行対象に選択して、シフト表への移行を指示します。"))return;
+      await runAdminOperation("issue:"+issue.id,"acknowledgeSheetWriteIssue",{action:"select-case-list-manual-monthly",jobId:issue.jobId,observationHash:issue.manualObservationHash,expectedJobRevision:issue.manualExpectedJobRevision,expectedSourceRevision:issue.manualExpectedSourceRevision,clientNameUpConfirmed:true,manualConfirmation},"選択した手入力案件の移行指示を受け付けました。月別への転記・照合が終わるまで確認待ちです。",false);
+      return;
+    }
+    if(!issue.manualTransferPending||!issue.canSelectMonthlyTransfer||!/^([a-f0-9]{64})$/.test(issue.manualTransferReviewKey??""))return;
+    const label=issue.job?[issue.job.workDate,issue.job.clientName,issue.job.storeName,issue.job.assignedStaffName].filter(Boolean).join(" "):"案件 "+issue.jobId;
+    if(!window.confirm(label+"\n\nクライアントへのネームアップは済みましたか？\n表示したこの1件を移行対象に選択して、シフト表への移行を指示します。"))return;
+    await runAdminOperation("issue:"+issue.id,"acknowledgeSheetWriteIssue",{queueId:issue.id,action:"select-case-list-monthly",reviewKey:issue.manualTransferReviewKey,clientNameUpConfirmed:true},"選択した案件の移行指示を受け付けました。完了は案件一覧の反映状態で確認してください。",false);
   }
 
   async function confirmJobApplication(job:Job) {
@@ -2851,7 +2874,7 @@ async function previewRowCreation() {
         if(profile&&profile.id===payload.staffId){if(firebaseConfigured)await openStaffDevices(profile,true);else setStaffDevices(current=>current.map(device=>({...device,active:false})));}
       }
       else if(firebaseConfigured&&application==="cancellation")await Promise.all([loadJobs(isCurrent),loadDashboard(undefined,isCurrent,true)]);
-      else if(firebaseConfigured&&payload.action==="reconcile-case-list")await Promise.all([loadJobs(isCurrent),loadSheetIssues(isCurrent,true)]);
+      else if(firebaseConfigured&&["reconcile-case-list","select-case-list-monthly","select-case-list-manual-monthly"].includes(String(payload.action)))await Promise.all([loadJobs(isCurrent),loadSheetIssues(isCurrent,true)]);
       else if(firebaseConfigured){if(application)await loadJobs(isCurrent);else await loadSheetIssues(isCurrent,true);}
       else if(application==="netprint")setJobs(current=>current.map(job=>job.id===payload.jobId?{...job,netPrint:{items:(payload.numbers as string[]).filter(Boolean).map((number,index)=>({id:`demo_np_${index}`,number,printed:false}))}}:job));
       else if(application)setJobs(current=>current.map(job=>job.id===payload.jobId?{...job,applicationAdminConfirmed:true}:job));
@@ -3031,7 +3054,8 @@ async function previewRowCreation() {
     await runAdminOperation("cancellation","adminRestoreCancelledJob",{jobId:job.id,note,...(job.mailIntake?{expectedRevision:job.revision}:{})},"キャンセルを解除しました。","cancellation");
   }
 
-  async function loadStaffPerformance(profile: StaffProfile,range={from:"2025-10-01",through:"2099-12-31"}) {
+  async function loadStaffPerformance(profile: StaffProfile,range=currentStaffPerformanceYearRange()) {
+    if(!validStaffPerformanceRange(range)){setMessage("集計期間の開始日・終了日を確認してください。");return;}
     if(firebaseConfigured&&(!functions||!auth?.currentUser||!adminSessionReady))return;
     openWorkspace("staff","performance");
     const version=++performanceVersionRef.current,user=auth?.currentUser;
@@ -3888,7 +3912,7 @@ function downloadCsv(filename:string,content:string) {
         <article><small>書込エラー</small><strong>{sheetIssues.length}件</strong></article>
       </section></WorkspacePanel>
 
-      <WorkspacePanel view="issues" activeView={workspaceView} visitedViews={visitedViews} group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">書込エラーを読込中…</p>}><AdminSheetIssuePanel sheetIssues={sheetIssues} issuesBusy={issuesBusy} operationKeys={operationKeys} loadSheetIssues={loadSheetIssues} retrySheetIssue={retrySheetIssue} acknowledgeSheetIssue={acknowledgeSheetIssue}/></Suspense></WorkspacePanel>
+      <WorkspacePanel view="issues" activeView={workspaceView} visitedViews={visitedViews} group="overview" active={workspace} visited={visitedWorkspaces} ready={true}><Suspense fallback={<p role="status">書込エラーを読込中…</p>}><AdminSheetIssuePanel sheetIssues={sheetIssues} issuesBusy={issuesBusy} operationKeys={operationKeys} loadSheetIssues={loadSheetIssues} manualNextCursor={manualIssuesNextCursor} loadMoreManualIssues={()=>loadSheetIssues(undefined,false,manualIssuesNextCursor??undefined)} retrySheetIssue={retrySheetIssue} acknowledgeSheetIssue={acknowledgeSheetIssue} selectMonthlyTransfer={selectMonthlyTransfer}/></Suspense></WorkspacePanel>
 
 
 
@@ -4304,7 +4328,7 @@ function downloadCsv(filename:string,content:string) {
 
 
       <WorkspacePanel view="performance" activeView={workspaceView} visitedViews={visitedViews} group="staff" active={workspace} visited={visitedWorkspaces} ready={true}>{!performance&&<section className="panel empty-workspace"><h2>{performanceBusy?"稼働実績を読み込んでいます…":"スタッフを選んでください"}</h2><p>スタッフ一覧の「実績」から対象者を選ぶと、ここに表示します。</p><button onClick={()=>openWorkspace("staff")}>スタッフ一覧へ</button></section>}{performance && (
-        <Suspense fallback={<p role="status">稼働実績を準備中…</p>}><AdminStaffPerformancePanel performance={performance} onClose={closeStaffPerformance}/></Suspense>
+        <Suspense fallback={<p role="status">稼働実績を準備中…</p>}><AdminStaffPerformancePanel performance={performance} busy={performanceBusy} onRangeChange={range=>{const profile=staff.find(item=>item.id===performance?.profile.id);if(!profile){setMessage("スタッフ一覧を更新してから、もう一度実績を開いてください。");return;}void loadStaffPerformance(profile,range);}} onClose={closeStaffPerformance}/></Suspense>
       )}</WorkspacePanel>
 
       <WorkspacePanel view="devices" activeView={workspaceView} visitedViews={visitedViews} group="staff" active={workspace} visited={visitedWorkspaces} ready={true}>{!deviceStaffName&&<section className="panel empty-workspace"><h2>スタッフを選んでください</h2><p>スタッフ一覧から端末を確認する対象者を選びます。</p><button onClick={()=>openWorkspace("staff")}>スタッフ一覧へ</button></section>}{!!deviceStaffName && <Suspense fallback={<p role="status">端末画面を準備中…</p>}><AdminStaffDevicePanel name={deviceStaffName} devices={staffDevices} status={staffDeviceStatus} onClose={closeStaffDevices} onReload={reloadStaffDevices}/></Suspense>}</WorkspacePanel>

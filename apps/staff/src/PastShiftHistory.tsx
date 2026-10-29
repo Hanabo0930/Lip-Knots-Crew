@@ -7,6 +7,7 @@ import {
 
 type Props<T extends PastShiftRecord & ShiftCardJob, C> = {
   scope: PastShiftScope; scopeVersion: number; selectionRequest: number; reader: PastShiftReader<T, C>; isCurrent: () => boolean;
+  onAccessDenied?: () => void;
   selectedId?: string; selectedDateKey?: string; onSelect: (job: T) => void; accent: (menu: string) => string;
   kind: (menu: string) => string; summary: (job: T) => string; submissionSummary: (job: T) => string;
 };
@@ -60,7 +61,7 @@ export default function PastShiftHistory<T extends PastShiftRecord & ShiftCardJo
   const controller = useRef<ReturnType<typeof createPastShiftHistory<T, C>> | null>(null);
   useEffect(() => {
     setPage(0);
-    const current = createPastShiftHistory(scope, reader, setState, () => guard.current());
+    const current = createPastShiftHistory(scope, reader, setState, () => guard.current(), props.onAccessDenied);
     controller.current = current; void current.initialize(() => preferredYear.current);
     return () => { current.dispose(); if (controller.current === current) controller.current = null; };
   }, [scope.uid, scope.companyId, scope.staffId, scope.today, scopeVersion, reader]);

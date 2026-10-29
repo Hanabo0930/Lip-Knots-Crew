@@ -23,7 +23,7 @@ for(const name of Object.keys(modules)){
  else reject(name,'await assertProductionOperational(companyId);','');
 }
 const mutations={
- getSheetWriteIssues:[['.where("companyId", "==", companyId)',''],['job?.companyId === companyId','true'],['sourceWriteVerified: false','sourceWriteVerified: true']],
+ getSheetWriteIssues:[['.where("companyId", "==", companyId)','']],
  getOperationsDashboard:[['.where("companyId", "==", companyId)',''],['.limit(15001)','.limit(15000)'],['snapshot.size > 15000','false']],
  getStaffPerformance:[['profile.data()?.companyId !== companyId','false'],['.where("assignedStaffId", "==", input.staffId)',''],['snapshot.size > 10000','false']],
  createAdminJobGroup:[['normalizeJobInput(parsed)','unchecked(parsed)'],['await nativeJobSourceEnabled(companyId)','true'],['stageAdminJobGroup(batch, {','unchecked(batch, {'],['createCaseMailJobGroup(request.data, companyId, session.uid','createCaseMailJobGroup(request.data, request.data.companyId, session.uid']],
@@ -35,6 +35,33 @@ const mutations={
  adminRestoreCancelledJob:[['jobSnap.data()?.companyId !== companyId','false'],['staffSnap.data()?.companyId !== companyId','false'],['currentLock.staffId !== assignedStaffId','false'],['lockSnap.data()?.jobId !== input.jobId','false'],['job.cancelled !== true && job.status !== "cancelled"','false'],['assertCancelledAssignmentCanRestore(job);','']],
 };
 for(const [name,pairs]of Object.entries(mutations))for(const [before,after]of pairs)reject(name,before,after);
+// Mutate each queue/manual company gate inside its own projection. A broad
+// first replacement cannot prove that the other repeated gates are checked.
+function rejectIssueRegion(label, begin, end, before, after) {
+ const p='functions/src/admin-operations.ts',source=sources[p],start=source.indexOf(begin),stop=end?source.indexOf(end,start):source.indexOf('\n});',start);
+ assert.ok(start>=0&&stop>start,label+': scoped region');
+ const region=source.slice(start,stop);assert.ok(region.includes(before),label+': mutation target');
+ assert.deepEqual(run('getSheetWriteIssues',files=>{files[p]=source.slice(0,start)+region.replace(before,after)+source.slice(stop);}),{passed:false,exitCode:1},label);cases++;
+}
+rejectIssueRegion('original queue job company','issues: [...snap.docs.map((doc) => {',null,'job?.companyId === companyId','true');
+rejectIssueRegion('manual ready company','const manualIssues =','const offer =','job?.companyId === companyId','true');
+rejectIssueRegion('manual public job company','const manualIssues =','  return {\n    count:','job: job?.companyId === companyId','job: true');
+rejectIssueRegion('original queue verification remains false','issues: [...snap.docs.map((doc) => {',null,'sourceWriteVerified: false','sourceWriteVerified: true');
+rejectIssueRegion('manual verification remains false','const manualIssues =','  return {\n    count:','sourceWriteVerified: false','sourceWriteVerified: true');
+rejectIssueRegion('manual observation query company','let manualQuery =','const jobIds =','.where("companyId", "==", companyId)','');
+// Legacy sources have only the original queue projection. They retain that
+// exact scoped check; adding an incomplete manual region cannot fall through.
+{
+ const p='functions/src/admin-operations.ts',source=sources[p];
+ const start=source.indexOf('  let manualQuery ='),jobIdsEnd=source.indexOf('  const jobs =',start);
+ const manualStart=source.indexOf('  const manualIssues ='),returnStart=source.indexOf('  return {\n    count:',manualStart);
+ assert.ok(start>0&&jobIdsEnd>start&&manualStart>jobIdsEnd&&returnStart>manualStart);
+ let legacy=source.slice(0,start)+'  const jobIds = [...new Set(snap.docs.map((doc) => String(doc.data().jobId ?? "")).filter(Boolean))];\n'+source.slice(jobIdsEnd,manualStart)+source.slice(returnStart);
+ legacy=legacy.replace('count: snap.size + manualIssues.length,','count: snap.size,').replace(/    manualNextCursor: [^\n]+\n/,'').replace('issues: [...snap.docs.map((doc) => {','issues: snap.docs.map((doc) => {').replace('}), ...manualIssues],','}),');
+ assert.deepEqual(run('getSheetWriteIssues',files=>{files[p]=legacy;}),{passed:true,exitCode:0},'legacy original queue-only projection');cases++;
+ assert.deepEqual(run('getSheetWriteIssues',files=>{files[p]=legacy.replace('job: job?.companyId === companyId','job: true');}),{passed:false,exitCode:1},'legacy queue projection guard remains required');cases++;
+ assert.deepEqual(run('getSheetWriteIssues',files=>{files[p]=legacy.replace('  const jobs =','  const manualIssues = [];\n  const jobs =');}),{passed:false,exitCode:1},'incomplete manual shape cannot use legacy exception');cases++;
+}
 reject('generateJobExport','from: z.iso.date(),','from: z.string(),',true);
 reject('createAdminJobGroup','feature.data()?.adminJobCreationSourceReady === true','true',true);
 for(const [file,before,after]of [

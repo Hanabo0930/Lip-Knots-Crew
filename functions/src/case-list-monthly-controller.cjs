@@ -24,6 +24,20 @@ var LK_MONTHLY_V5 = (() => {
   function knownCell(c){return !!c&&typeof c==='object'&&!Array.isArray(c)&&c.$unknown!==true;}
   function writable(c){need(knownCell(c),'UNKNOWN_CELL_NOT_WRITABLE');return Object.fromEntries(WRITABLE.filter(k=>Object.hasOwn(c,k)).map(k=>[k,copy(c[k])]))}
   function normalizedEffective(c){const v=c?.effectiveValue;if(!v||!Object.keys(v).length||v.stringValue==='')return null;return copy(v)}
+  // A physically cleared cancelled monthly row is history, not occupancy.
+  // Recognize only the literal cancellation suffix written by the existing
+  // cancellation path. Formula/unknown/malformed staff cells remain a hold.
+  function cancelledMonthlyVacancy(row){
+    const staff=row.cells?.[1],client=row.cells?.[9];
+    if(!knownCell(staff)||!knownCell(client))return false;
+    const blank=value=>value===undefined||value&&typeof value==='object'&&!Array.isArray(value)&&
+      (Object.keys(value).length===0||Object.keys(value).length===1&&value.stringValue==='');
+    if(!blank(staff.userEnteredValue)||!blank(staff.effectiveValue))return false;
+    const entered=client.userEnteredValue,effective=client.effectiveValue;
+    return entered&&typeof entered==='object'&&!Array.isArray(entered)&&Object.keys(entered).length===1&&typeof entered.stringValue==='string'&&
+      /(?:（キャンセル）|\(キャンセル\))$/.test(entered.stringValue.trim())&&effective&&typeof effective==='object'&&!Array.isArray(effective)&&
+      Object.keys(effective).length===1&&effective.stringValue===entered.stringValue;
+  }
   function serialDate(n){need(Number.isInteger(n)&&n>0&&n<2958466,'INVALID_DATE');return new Date(Date.UTC(1899,11,30)+n*86400000).toISOString().slice(0,10)}
   function column(n){let s='';for(;n>0;n=Math.floor((n-1)/26))s=String.fromCharCode(65+(n-1)%26)+s;return s;}
   function columnNumber(s){return [...s].reduce((n,c)=>n*26+c.charCodeAt(0)-64,0)}
@@ -82,6 +96,7 @@ var LK_MONTHLY_V5 = (() => {
   }
   function assertMonthlyWritePreflight(snapshot,intent,services){
     assertSnapshotCoverage(snapshot,intent.caseId,services);const row=sourceRow(snapshot,intent.caseId);
+    assertOwnerTransfer(snapshot,row,intent.assignment,intent.ownerTransfer,services,intent.operationId);
     need(contentHash(services,row.cells)===intent.sourceContentHash&&snapshot.dependencyHash===intent.dependencyHash,'MONTHLY_PREIMAGE_CHANGED');
     need(sha(services,intent.assignment)===intent.assignmentHash,'ASSIGNMENT_CHANGED');checkPromisedPay(row,intent.assignment);
     const valid=validate(snapshot,row,intent.assignment,services);choosePosition(valid.month,valid.date,row,intent.position.kind==='ISOLATED_TAIL'?'ISOLATED_TAIL':undefined);
@@ -139,7 +154,7 @@ var LK_MONTHLY_V5 = (() => {
   function sourceRow(snapshot,id){const rows=snapshot.source.rows.filter(r=>r.caseId);unique(rows,'caseId','DUPLICATE_SOURCE_ID');need(new Set(rows.map(r=>r.caseId.toLowerCase())).size===rows.length,'CANONICAL_SOURCE_ID_COLLISION');const r=rows.find(r=>r.caseId===id);need(r,'SOURCE_NOT_FOUND');need(r.cells.length===65&&text(r.cells[60])===id,'SOURCE_ID_MISMATCH');need(/^LKCASE_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)||snapshot.isolated===true&&/^LK_SYNTHETIC_[A-Za-z0-9_]+$/.test(id),'SOURCE_CASE_ID_INVALID');return r;}
   async function approvedAssignment(services,request,snapshot,row){
     const a=await services.resolveAssignment(request,snapshot,row); // native/trusted server adapter, not request booleans
-    need(a&&['OWNER_SELECTED','CREW_QUEUE'].includes(a.authority),'ASSIGNMENT_AUTHORITY_MISSING');
+    need(a&&['OWNER_SELECTED','CREW_QUEUE','SOURCE_MANUAL'].includes(a.authority),'ASSIGNMENT_AUTHORITY_MISSING');
     need(a.caseId===row.caseId&&typeof a.staffId==='string'&&a.staffId&&typeof a.staffName==='string'&&a.staffName,'ASSIGNMENT_INVALID');
     need(a.dateKey===serialDate(num(row.cells[1])),'ASSIGNMENT_DATE_MISMATCH');
     if(a.authority==='CREW_QUEUE'){
@@ -147,14 +162,22 @@ var LK_MONTHLY_V5 = (() => {
       need(a.preCatalog&&['rowRevision','ledgerRevision','sourceRevision'].every(k=>typeof a.preCatalog[k]==='string'&&/^[a-f0-9]{64}$/.test(a.preCatalog[k]))&&/^[a-f0-9]{64}$/.test(a.preMonthlyContentHash||''),'CREW_PREIMAGE_HASHES_MISSING');
       need(a.publicPayOffer&&Number.isSafeInteger(a.publicPayOffer.dailyWageJPY)&&a.publicPayOffer.dailyWageJPY>0&&a.publicPayOffer.dailyWageJPY<=1000000&&a.publicPayOffer.travelExpenses==='全額支給'&&a.publicPayOffer.communicationExpenses==='全額支給','TRUSTED_PUBLIC_PAY_OFFER_REQUIRED');
     }
+    if(a.authority==='SOURCE_MANUAL'){
+      need(a.schema==='LK_CASE_LIST_MANUAL_ASSIGN_V1'&&a.operationId===request.operationId&&a.queueId===request.operationId&&a.companyId&&a.jobId&&Number.isInteger(a.assignedJobRevision)&&a.assignedJobRevision>0,'MANUAL_QUEUE_BINDING_INVALID');
+      need(a.preCatalog&&['rowRevision','ledgerRevision','sourceRevision'].every(k=>typeof a.preCatalog[k]==='string'&&/^[a-f0-9]{64}$/.test(a.preCatalog[k]))&&/^[a-f0-9]{64}$/.test(a.preMonthlyContentHash||''),'MANUAL_PREIMAGE_HASHES_MISSING');
+      need(['observationHash','ownerConditionsHash'].every(k=>typeof a[k]==='string'&&/^[a-f0-9]{64}$/.test(a[k]))&&typeof a.canonicalStaffName==='string'&&a.canonicalStaffName.trim(),'MANUAL_OWNER_CONDITIONS_REQUIRED');
+      need(a.publicPayOffer&&Number.isSafeInteger(a.publicPayOffer.dailyWageJPY)&&a.publicPayOffer.dailyWageJPY>0&&a.publicPayOffer.dailyWageJPY<=1000000&&a.publicPayOffer.travelExpenses==='全額支給'&&a.publicPayOffer.communicationExpenses==='全額支給','TRUSTED_PUBLIC_PAY_OFFER_REQUIRED');
+    }
     return copy(a);
   }
   function validate(snapshot,row,assignment,services){
     sourceSchema(snapshot.source.headers);
     need(typeof row.cells[0].userEnteredValue?.boolValue==='boolean','TRANSFER_CONTROL_INVALID');
-    if(assignment.authority==='OWNER_SELECTED')need(row.cells[0].userEnteredValue.boolValue===true,'TRANSFER_SELECTION_REQUIRED');
+    if(snapshot.source.headers[0]==='キャンセル')need(row.cells[0].userEnteredValue.boolValue===false,'SOURCE_CANCELLED_OR_INVALID');
+    else if(assignment.authority==='OWNER_SELECTED')need(row.cells[0].userEnteredValue.boolValue===true,'TRANSFER_SELECTION_REQUIRED');
     need(row.cells[2]?.userEnteredValue?.stringValue===assignment.staffName,'SOURCE_STAFF_NOT_PROJECTED');
     need(row.cells[63].userEnteredValue?.boolValue===false&&!cancellation(text(row.cells[10])),'SOURCE_CANCELLED_OR_INVALID');
+    if(assignment.authority==='SOURCE_MANUAL')need(row.staffIdentityVerified===true&&row.staffId===assignment.staffId,'MANUAL_SOURCE_STAFF_IDENTITY_CHANGED');
     if(assignment.authority==='OWNER_SELECTED')need(['ASSIGNED','担当確定・転記待ち'].includes(text(row.cells[55])),'SOURCE_ASSIGNMENT_NOT_READY');
     need(['単日','SINGLE'].includes(text(row.cells[58]))&&!text(row.cells[59]),'GROUP_REQUIRES_SEPARATE_POLICY');
     const date=serialDate(num(row.cells[1]));need(date>='2026-11-01','OCTOBER_OR_PAST_SCOPE');
@@ -166,6 +189,7 @@ var LK_MONTHLY_V5 = (() => {
     for(const m of snapshot.months){monthSchema(m);const nonempty=m.rows.filter(r=>r.fixedId);unique(nonempty,'fixedId','DUPLICATE_MONTHLY_ID');for(const r of m.rows)if(text(r.cells[9]))need(serialSafe(r.cells[0]),'MONTHLY_ASSIGNMENT_DATE_UNVERIFIED');}
     const allIds=snapshot.months.flatMap(m=>m.rows.filter(r=>r.fixedId).map(r=>r.fixedId.toLowerCase()));need(allIds.length===new Set(allIds).size,'CROSS_MONTH_CANONICAL_DUPLICATE_ID');
     for(const m of snapshot.months)for(const r of m.rows)if(serialSafe(r.cells[0])===date&&text(r.cells[9])){
+      if(cancelledMonthlyVacancy(r))continue;
       need(r.staffIdentityVerified===true&&typeof r.staffId==='string'&&r.staffId,'MONTHLY_STAFF_IDENTITY_UNVERIFIED',{month:m.title,row:r.row});
       if(r.staffId===assignment.staffId)fail('STAFF_ALREADY_ASSIGNED_SAME_DAY',{month:m.title,row:r.row});
     }
@@ -223,7 +247,16 @@ var LK_MONTHLY_V5 = (() => {
     return {verified:true,scope:'NORMAL_EXISTING_DAY_CLIENT_TIME_AND_DAILY_COUNT',chronologicalPlacementAccepted:true};
   }
   function sameCatalog(a,b){return a&&b&&['rowRevision','ledgerRevision','sourceRevision'].every(k=>a[k]===b[k]);}
-  function checkPromisedPay(row,assignment){if(assignment.authority==='CREW_QUEUE')need(typeof row.cells[36]?.effectiveValue?.numberValue==='number'&&row.cells[36].effectiveValue.numberValue===assignment.publicPayOffer.dailyWageJPY,'PUBLIC_PAY_OFFER_SOURCE_BASIC_MISMATCH');}
+  function checkPromisedPay(row,assignment){if(['CREW_QUEUE','SOURCE_MANUAL'].includes(assignment.authority))need(typeof row.cells[36]?.effectiveValue?.numberValue==='number'&&row.cells[36].effectiveValue.numberValue===assignment.publicPayOffer.dailyWageJPY,'PUBLIC_PAY_OFFER_SOURCE_BASIC_MISMATCH');}
+  function assertOwnerTransfer(snapshot,row,assignment,selection,services,operationId){
+    need(typeof row.cells[0]?.userEnteredValue?.boolValue==='boolean','TRANSFER_CONTROL_INVALID');
+    if(snapshot.source.headers[0]==='キャンセル')need(row.cells[0].userEnteredValue.boolValue===false,'SOURCE_CANCELLED_OR_INVALID');
+    need(selection?.schema==='LK_OWNER_MONTHLY_TRANSFER_V1'&&selection.selected===true&&selection.clientNameUpConfirmed===true&&
+      selection.sourceControlHeader===snapshot.source.headers[0]&&selection.operationId===operationId&&selection.caseId===row.caseId&&selection.assignmentHash===sha(services,assignment)&&
+      selection.sourceContentHash===contentHash(services,row.cells)&&selection.sourceRevision===(snapshot.catalog?.sourceRevision||null)&&
+      typeof selection.selectedBy==='string'&&selection.selectedBy.trim()&&Number.isFinite(selection.selectedAt)&&selection.selectedAt>0,
+      'OWNER_TRANSFER_SELECTION_REQUIRED');
+  }
   function transferCapability(snapshot,row,options={}){
     try{
       assertSnapshotCoverage(snapshot,row?.caseId,null);
@@ -257,6 +290,13 @@ var LK_MONTHLY_V5 = (() => {
       need(events.every(e=>e.caseId===row.caseId&&e.spreadsheetId===services.spreadsheetId),'OPERATION_ID_REUSED');
       return {snapshot,row,assignment,events};
     }
+    async function monthlyContext(request,c){
+      c=c||await context(request);
+      need(typeof services.authorizeMonthlyTransfer==='function','OWNER_TRANSFER_SELECTION_REQUIRED');
+      c.ownerTransfer=await services.authorizeMonthlyTransfer(request,c.snapshot,c.row,c.assignment);
+      assertOwnerTransfer(c.snapshot,c.row,c.assignment,c.ownerTransfer,services,request.operationId);
+      return c;
+    }
     async function save(event){
       event={...event,spreadsheetId:services.spreadsheetId};
       await services.appendEvent(event);
@@ -281,11 +321,12 @@ var LK_MONTHLY_V5 = (() => {
     }
     async function prepareSourceInside(request){
       const c=await context(request),prior=one(c.events,'SOURCE_INTENT');
+      need(c.assignment.authority!=='SOURCE_MANUAL','MANUAL_SOURCE_WRITE_PHASE_FORBIDDEN');
       if(prior){need(prior.assignmentHash===sha(services,c.assignment),'ASSIGNMENT_CHANGED');return {status:'SOURCE_INTENT_EXISTS',intent:prior};}
       const intent=sourceIntent(c,request);await save(intent);return {status:'SOURCE_INTENT_PREPARED',intent};
     }
     async function applySourceInside(request){
-      const c=await context(request),intent=one(c.events,'SOURCE_INTENT');need(intent,'SOURCE_INTENT_REQUIRED');
+      const c=await context(request),intent=one(c.events,'SOURCE_INTENT');need(c.assignment.authority!=='SOURCE_MANUAL','MANUAL_SOURCE_WRITE_PHASE_FORBIDDEN');need(intent,'SOURCE_INTENT_REQUIRED');
       need(intent.assignmentHash===sha(services,c.assignment),'ASSIGNMENT_CHANGED');
       if(one(c.events,'SOURCE_PROJECTED'))return reconcileSourceInside(request);
       if(one(c.events,'SOURCE_WRITE_STARTED')||one(c.events,'SOURCE_DISPATCHED')||one(c.events,'SOURCE_UNKNOWN')||one(c.events,'SOURCE_DEFERRED'))return {status:'SOURCE_RECONCILIATION_REQUIRED',automaticRetry:false};
@@ -303,7 +344,7 @@ var LK_MONTHLY_V5 = (() => {
       return {status:'SOURCE_WRITE_DISPATCHED',sourceCellWrites:1,monthlyWrites:0,mailWrites:0};
     }
     async function reconcileSourceInside(request){
-      const c=await context(request),intent=one(c.events,'SOURCE_INTENT');need(intent,'SOURCE_INTENT_REQUIRED');
+      const c=await context(request),intent=one(c.events,'SOURCE_INTENT');need(c.assignment.authority!=='SOURCE_MANUAL','MANUAL_SOURCE_WRITE_PHASE_FORBIDDEN');need(intent,'SOURCE_INTENT_REQUIRED');
       need(intent.assignmentHash===sha(services,c.assignment),'ASSIGNMENT_CHANGED');
       need(contentHash(services,c.row.cells)===intent.expectedPostMonthlyContentHash,'SOURCE_AFTERIMAGE_NOT_VERIFIED');
       need(c.snapshot.dependencyHash===intent.dependencyHash,'DEPENDENCIES_CHANGED_AFTER_ASSIGNMENT');
@@ -314,7 +355,25 @@ var LK_MONTHLY_V5 = (() => {
       const event={schema:'LK_SOURCE_ASSIGNMENT_PROJECTED_V1',stage:'SOURCE_PROJECTED',operationId:request.operationId,caseId:intent.caseId,intentHash:intent.intentHash,assignmentHash:intent.assignmentHash,preCatalog:intent.preCatalog,postCatalog:copy(c.snapshot.catalog),preMonthlyContentHash:intent.preMonthlyContentHash,postMonthlyContentHash:contentHash(services,c.row.cells),at:services.now()};
       await save(event);return {status:'SOURCE_ASSIGNMENT_PROJECTED',event,finalApplicationConfirmed:false};
     }
+    function manualObservation(c){
+      const a=c.assignment,observed=one(c.events,'SOURCE_MANUAL_OBSERVED');
+      need(observed,'MANUAL_SOURCE_OBSERVATION_REQUIRED');
+      need(!['SOURCE_INTENT','SOURCE_PROJECTED','SOURCE_WRITE_STARTED','SOURCE_DISPATCHED','SOURCE_UNKNOWN','SOURCE_DEFERRED'].some(stage=>one(c.events,stage)),'MANUAL_SOURCE_WRITE_PROOF_FORBIDDEN');
+      const normalized={...observed,createdAt:0};delete normalized.observationProofHash;
+      need(observed.schema==='LK_SOURCE_MANUAL_OBSERVED_V1'&&observed.stage==='SOURCE_MANUAL_OBSERVED'&&observed.operationId===a.operationId&&observed.caseId===a.caseId&&observed.spreadsheetId===services.spreadsheetId&&
+        observed.observationProofHash===sha(services,normalized)&&observed.assignmentHash===sha(services,a)&&canonical(observed.assignment)===canonical(a)&&
+        observed.observationHash===a.observationHash&&observed.ownerConditionsHash===a.ownerConditionsHash,'MANUAL_SOURCE_OBSERVATION_BINDING_INVALID');
+      const pre=observed.preCatalog;
+      need(pre?.version===1&&pre.spreadsheetId===services.spreadsheetId&&pre.sheetId===2026101601&&pre.caseId===a.caseId&&sameCatalog(pre,a.preCatalog)&&
+        canonical(pre)===canonical(observed.postCatalog)&&canonical(observed.postCatalog)===canonical(c.snapshot.catalog)&&
+        observed.preMonthlyContentHash===a.preMonthlyContentHash&&observed.postMonthlyContentHash===observed.preMonthlyContentHash&&
+        Array.isArray(observed.sourceSnapshot)&&observed.sourceSnapshot.length===65&&sha(services,observed.sourceSnapshot)===observed.preMonthlyContentHash&&
+        canonical(observed.sourceSnapshot)===canonical(c.row.cells.map(writable))&&contentHash(services,c.row.cells)===observed.postMonthlyContentHash&&
+        observed.dependencyHash===c.snapshot.dependencyHash,'MANUAL_SOURCE_OBSERVATION_CHANGED');
+      return observed;
+    }
     function checkPostAuthority(c){
+      if(c.assignment.authority==='SOURCE_MANUAL')manualObservation(c);
       if(c.assignment.authority==='CREW_QUEUE'){
         const projected=one(c.events,'SOURCE_PROJECTED');need(projected,'SOURCE_PROJECTION_RECEIPT_REQUIRED');
         need(projected.assignmentHash===sha(services,c.assignment)&&sameCatalog(projected.postCatalog,c.snapshot.catalog)&&projected.postMonthlyContentHash===contentHash(services,c.row.cells),'POST_ASSIGNMENT_SOURCE_CHANGED');
@@ -328,9 +387,9 @@ var LK_MONTHLY_V5 = (() => {
       need(!snapshot.months.some(m=>m.rows.some(r=>r.fixedId&&r.fixedId.toLowerCase()===fixedId.toLowerCase())),'EXISTING_DESTINATION_WITHOUT_RECEIPT');
       const position=choosePosition(month,date,row,request.layoutMode),mapped=mapSource(row.cells,fixedId,schema.width);
       const fees=FEE.map(column=>({column,value:normalizedEffective(row.cells[column])}));
-      const projected=one(c.events,'SOURCE_PROJECTED');
+      const projected=c.assignment.authority==='SOURCE_MANUAL'?manualObservation(c):one(c.events,'SOURCE_PROJECTED');
       const snapshotProfile=snapshot.coverage?.schema===COMPACT_COVERAGE?STRUCTURAL_LAYOUT:LEGACY_LAYOUT;
-      const intent={schema:'LK_MONTHLY_INTENT_V5',stage:'INTENT',spreadsheetId:services.spreadsheetId,operationId:request.operationId,caseId:row.caseId,fixedId,sourceContentHash:contentHash(services,row.cells),sourceSnapshot:row.cells.map(writable),sourceEffectiveFees:fees,assignment,assignmentHash:sha(services,assignment),preCatalog:projected?.preCatalog||snapshot.catalog||null,postCatalog:snapshot.catalog||null,preMonthlyContentHash:projected?.preMonthlyContentHash||contentHash(services,row.cells),postMonthlyContentHash:contentHash(services,row.cells),month:{title:month.title,sheetId:month.sheetId,width:schema.width,rowCount:month.rowCount,snapshotProfile,contentHash:monthLayoutHash(services,month,snapshotProfile)},position,mapped,dependencyHash:snapshot.dependencyHash,createdAt:services.now(),retention:'AT_LEAST_THROUGH_'+(Number(date.slice(0,4))+(Number(date.slice(5,7))>=10?1:0))+'-09-30',concurrencyGuarantee:'TRUSTED_QUEUE_LEASE_AND_SAME_PROJECT_CONTROLLER_LOCK_ONLY'};
+      const intent={schema:'LK_MONTHLY_INTENT_V5',stage:'INTENT',spreadsheetId:services.spreadsheetId,operationId:request.operationId,caseId:row.caseId,fixedId,sourceContentHash:contentHash(services,row.cells),sourceSnapshot:row.cells.map(writable),sourceEffectiveFees:fees,assignment,assignmentHash:sha(services,assignment),ownerTransfer:copy(c.ownerTransfer),preCatalog:projected?.preCatalog||snapshot.catalog||null,postCatalog:snapshot.catalog||null,preMonthlyContentHash:projected?.preMonthlyContentHash||contentHash(services,row.cells),postMonthlyContentHash:contentHash(services,row.cells),month:{title:month.title,sheetId:month.sheetId,width:schema.width,rowCount:month.rowCount,snapshotProfile,contentHash:monthLayoutHash(services,month,snapshotProfile)},position,mapped,dependencyHash:snapshot.dependencyHash,createdAt:services.now(),retention:'AT_LEAST_THROUGH_'+(Number(date.slice(0,4))+(Number(date.slice(5,7))>=10?1:0))+'-09-30',concurrencyGuarantee:'TRUSTED_QUEUE_LEASE_AND_SAME_PROJECT_CONTROLLER_LOCK_ONLY'};
       intent.planHash=sha(services,{...intent,createdAt:0});return intent;
     }
     async function previewInside(request){
@@ -339,14 +398,14 @@ var LK_MONTHLY_V5 = (() => {
       if(c.assignment.authority==='CREW_QUEUE'&&!one(c.events,'SOURCE_PROJECTED')){
         const si=one(c.events,'SOURCE_INTENT')||sourceIntent(c,request);return {status:'SOURCE_ASSIGNMENT_PREVIEW_READY',reviewToken:si.intentHash,assignment:c.assignment,sourceWritesPlanned:1,monthlyWrites:0};
       }
-      const intent=monthlyPlan(c,request);return {status:'MONTHLY_PREVIEW_READY',reviewToken:intent.planHash,intent,sourceWritesPlanned:0};
+      await monthlyContext(request,c);const intent=monthlyPlan(c,request);return {status:'MONTHLY_PREVIEW_READY',reviewToken:intent.planHash,intent,sourceWritesPlanned:0};
     }
     async function prepareMonthlyInside(request){
-      const c=await context(request),prior=one(c.events,'INTENT');if(prior){need(prior.assignmentHash===sha(services,c.assignment),'ASSIGNMENT_CHANGED');return {status:'MONTHLY_INTENT_EXISTS',intent:prior};}
+      const c=await monthlyContext(request),prior=one(c.events,'INTENT');if(prior){need(prior.assignmentHash===sha(services,c.assignment),'ASSIGNMENT_CHANGED');return {status:'MONTHLY_INTENT_EXISTS',intent:prior};}
       need(!one(c.events,'ACCEPTED'),'ALREADY_ACCEPTED');const intent=monthlyPlan(c,request);await save(intent);return {status:'MONTHLY_INTENT_PREPARED',intent};
     }
     async function applyMonthlyInside(request){
-      const c=await context(request),intent=one(c.events,'INTENT');need(intent,'MONTHLY_INTENT_REQUIRED');checkPostAuthority(c);
+      const c=await monthlyContext(request),intent=one(c.events,'INTENT');need(intent,'MONTHLY_INTENT_REQUIRED');checkPostAuthority(c);
       checkPromisedPay(c.row,c.assignment);
       need(contentHash(services,c.row.cells)===intent.sourceContentHash&&sha(services,c.assignment)===intent.assignmentHash&&c.snapshot.dependencyHash===intent.dependencyHash,'MONTHLY_PREIMAGE_CHANGED');
       if(one(c.events,'ACCEPTED'))return reconcileInside(request);
@@ -358,7 +417,7 @@ var LK_MONTHLY_V5 = (() => {
       await save({stage:'MONTHLY_DISPATCHED',operationId:request.operationId,caseId:intent.caseId,planHash:intent.planHash,at:services.now()});return {status:'MONTHLY_WRITE_DISPATCHED',monthlyBatches:1,sourceWrites:0,mailWrites:0};
     }
     async function reconcileInside(request){
-      const c=await context(request),intent=one(c.events,'INTENT');need(intent,'MONTHLY_INTENT_REQUIRED');checkPostAuthority(c);
+      const c=await monthlyContext(request),intent=one(c.events,'INTENT');need(intent,'MONTHLY_INTENT_REQUIRED');checkPostAuthority(c);
       checkPromisedPay(c.row,c.assignment);
       need(contentHash(services,c.row.cells)===intent.sourceContentHash&&sha(services,c.assignment)===intent.assignmentHash,'SOURCE_OR_ASSIGNMENT_CHANGED_AFTER_INTENT');need(c.snapshot.dependencyHash===intent.dependencyHash,'DEPENDENCIES_CHANGED_AFTER_INTENT');
       const matches=c.snapshot.months.flatMap(m=>m.rows.filter(r=>r.fixedId===intent.fixedId).map(r=>({m,r})));need(matches.length===1,'UNKNOWN_DESTINATION_NOT_UNIQUE');

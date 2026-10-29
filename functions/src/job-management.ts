@@ -63,6 +63,7 @@ const PublicationSchema = z.object({
   expectedSourceRevisions: z.record(z.string(), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
   caseListConfirmations: z.record(z.string(), z.object({
     expectedSourceRevision: z.string().regex(/^[a-f0-9]{64}$/),
+    confirmedRegion: z.string().min(1).max(100).refine(value => value === value.trim()),
     confirmedFields: z.object({ arrival: z.literal(true), execution: z.literal(true), headcount: z.literal(true), dateMode: z.literal(true), payOffer: z.literal(true), vacancy: z.literal(true) }),
     payOffer: z.object({ dailyWageJPY: z.number().int().min(1).max(1000000), travelExpenses: z.literal("全額支給"), communicationExpenses: z.literal("全額支給") }),
     sourceReview: z.object({ headcountPerSlot: z.literal(1), reviewedIssues: z.array(z.string().max(1000)).max(100), resolutionNote: z.string().min(3).max(2000) }).optional(),
@@ -712,6 +713,11 @@ export const generateJobExport = onCall(
     const session = requireAdmin(request);
     const companyId = companyFromClaims(session.token);
     await assertProductionOperational(companyId);
+    if (request.data && Object.hasOwn(request.data, "purpose")) {
+      if (request.data.purpose !== "recruitment-draft") throw new HttpsError("invalid-argument", "出力の目的を確認してください。");
+      const recruitment = require("./case-list-recruitment") as typeof import("./case-list-recruitment");
+      return recruitment.generateCaseListRecruitmentDraft(request.data, companyId, session.token as Record<string, unknown>);
+    }
     const input = ExportSchema.parse(request.data ?? {});
 
     if (input.through < input.from) {

@@ -17,6 +17,7 @@ SHA = "a" * 40
 CASE_LIST_ASSETS = (
     "case-list-projection.cjs", "case-list-monthly-compact.cjs",
     "case-list-monthly-controller.cjs", "case-list-monthly-adapter.cjs",
+    "recruitment-mail-core.cjs",
 )
 
 def metadata(function):

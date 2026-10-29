@@ -55,7 +55,12 @@ export function assertCancelledAssignmentCanRestore(job:Data){
 /** Exact replay is handled before this guard. Keep the original proof intact until correction has an immutable history path. */
 export function assertAcknowledgedCancellationCanChange(job:Data){
   if(job.sourceCancellationClosed===true&&job.cancelled===true&&job.status==="cancelled"&&
-    typeof job.rawStaffName==="string"&&!job.rawStaffName.trim()&&present(job.assignedStaffId)){
+    present(job.assignedStaffId)&&(
+      typeof job.rawStaffName==="string"&&!job.rawStaffName.trim()||
+      // Earlier Source-import ACKs did not add legacy rawStaffName. Their
+      // original proof and historical assignee must remain immutable too.
+      job.caseListSource!=null&&job.caseListManualPending!=null&&job.sheetRef==null&&
+        job.cancellationSheetWrite?.sourceAckVersion===1&&job.cancellationSheetWrite?.sourceAckPending===false)){
     throw new Error("氏名消去確認済みの取消履歴は上書きできません。元の確認記録を保持して変更を停止しました。");
   }
 }

@@ -417,6 +417,106 @@ class MigrationTests(unittest.TestCase):
 
 
 class InspectionDiagnosticsTests(unittest.TestCase):
+    def scheduler_failure(self, payload, *, method="GET", url=None):
+        url = url or m.SCHED + m.PREFIX + "/jobs?pageSize=500"
+        raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        response = m.urllib.error.HTTPError(url, 403, "private-message", {"private": "private-header"}, io.BytesIO(raw))
+        api = m.Api()
+        with patch.object(api, "headers", return_value={"Authorization": "Bearer private-token"}), \
+             patch.object(m.urllib.request, "urlopen", side_effect=response) as transport:
+            with self.assertRaises(m.ApiHttpError) as raised:
+                api.json(method, url)
+        self.assertEqual(transport.call_count, 1)
+        self.assertEqual(str(raised.exception), "API_HTTP_403")
+        return raised.exception
+
+    def error_envelope(self, reason="IAM_PERMISSION_DENIED", domain="iam.googleapis.com", metadata=None):
+        return {"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "private-message",
+                          "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": reason,
+                                       "domain": domain, "metadata": metadata if metadata is not None else {
+                                           "permission": "cloudscheduler.jobs.list", "resource": "private-resource",
+                                           "service": "cloudscheduler.googleapis.com", "consumer": "private-consumer",
+                                           "activationUrl": "https://private.invalid?signature=private-token"}},
+                                      {"@type": "private-type", "private": "private-policy"}]}}
+
+    def test_scheduler_forbidden_classification_drops_all_free_text(self):
+        for reason, domain in (("IAM_PERMISSION_DENIED", "iam.googleapis.com"),
+                               ("IAM_PERMISSION_DENIED", "googleapis.com"),
+                               ("SERVICE_DISABLED", "googleapis.com"),
+                               ("ACCESS_TOKEN_SCOPE_INSUFFICIENT", "googleapis.com")):
+            with self.subTest(reason=reason, domain=domain):
+                error = self.scheduler_failure(self.error_envelope(reason, domain))
+                expected = {"reason": reason, "domain": domain, "permission": "cloudscheduler.jobs.list",
+                            "service": "cloudscheduler.googleapis.com"}
+                self.assertEqual(error.scheduler_error_info, expected)
+                self.assertNotIn("private", json.dumps(error.scheduler_error_info))
+                self.assertNotIn("Bearer", str(error))
+
+    def test_unrecognized_or_ambiguous_scheduler_response_remains_unclassified(self):
+        payloads = [b"not-json private-token", b"x" * 16385, [], {"error": []},
+                    self.error_envelope("private-reason"), self.error_envelope(domain="private.invalid"),
+                    self.error_envelope(metadata={"permission": "private-permission"}),
+                    self.error_envelope(metadata={"service": "private.googleapis.com"}),
+                    self.error_envelope(metadata=[])]
+        for key, value in (("code", 401), ("status", "private-status"), ("details", {})):
+            payload = self.error_envelope()
+            payload["error"][key] = value
+            payloads.append(payload)
+        for field in ("reason", "domain"):
+            payload = self.error_envelope()
+            payload["error"]["details"][0][field] = {"private": "value"}
+            payloads.append(payload)
+        duplicate = self.error_envelope()
+        duplicate["error"]["details"].append(copy.deepcopy(duplicate["error"]["details"][0]))
+        payloads.append(duplicate)
+        for i, payload in enumerate(payloads):
+            with self.subTest(case=i):
+                self.assertEqual(self.scheduler_failure(payload).scheduler_error_info, {})
+
+    def test_classification_does_not_expand_api_scope_or_read_a_write_error(self):
+        for method, url in (("GET", m.CF + m.PREFIX + "/functions/" + TARGET),
+                            ("GET", m.SCHED + m.PREFIX + "/jobs?pageSize=500&pageToken=private-token"),
+                            ("PATCH", m.CF + m.PREFIX + "/functions/" + TARGET + "?updateMask=" + m.MASK)):
+            with self.subTest(method=method, url=url):
+                error = self.scheduler_failure(self.error_envelope(), method=method, url=url)
+                self.assertEqual(error.scheduler_error_info, {})
+
+    def test_truncated_error_body_preserves_original_forbidden_code(self):
+        url = m.SCHED + m.PREFIX + "/jobs?pageSize=500"
+        response = m.urllib.error.HTTPError(url, 403, "private-message", {}, None)
+        api = m.Api()
+        with patch.object(api, "headers", return_value={}), \
+             patch.object(response, "read", side_effect=m.http.client.IncompleteRead(b"private-token")), \
+             patch.object(m.urllib.request, "urlopen", side_effect=response):
+            with self.assertRaises(m.ApiHttpError) as raised:
+                api.json("GET", url)
+        self.assertEqual(str(raised.exception), "API_HTTP_403")
+        self.assertEqual(raised.exception.scheduler_error_info, {})
+
+    def test_scheduler_error_info_reaches_only_incomplete_readonly_summary(self):
+        error = self.scheduler_failure(self.error_envelope())
+        url = m.SCHED + m.PREFIX + "/jobs?pageSize=500"
+        api = ReadFixtureApi()
+        read = api.json
+        def fail_scheduler(method, requested, body=None):
+            if requested == url:
+                api.calls.append((method, requested, body))
+                raise error
+            return read(method, requested, body)
+        with tempfile.TemporaryDirectory() as folder, patch.object(api, "json", side_effect=fail_scheduler):
+            evidence = Path(folder) / "evidence"
+            with self.assertRaisesRegex(m.MetadataReadError, "API_HTTP_403"):
+                self.run_main(str(evidence), api, True)
+            report = json.loads((evidence / "summary.json").read_text())
+            self.assertEqual(report["failedRead"]["errorInfo"], error.scheduler_error_info)
+            self.assertEqual(report["status"], "INSPECTION_INCOMPLETE")
+            self.assertFalse(report["configurationComplete"])
+            self.assertFalse(report["cloudMutation"])
+            self.assertNotIn("private", json.dumps(report))
+            self.assertEqual(set(p.name for p in evidence.iterdir()), {"summary.json"})
+            self.assertTrue(all(method == "GET" for method, _, _ in api.calls))
+            self.assertEqual(sum(requested == url for _, requested, _ in api.calls), 1)
+
     def test_collection_retains_exact_read_scope_and_results(self):
         api = ReadFixtureApi()
         self.assertEqual(m.collect(api), fixture())

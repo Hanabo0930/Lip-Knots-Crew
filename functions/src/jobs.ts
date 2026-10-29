@@ -12,7 +12,7 @@ import {
 } from "./utils";
 import { queueDocumentData } from "./notification-core";
 import { tokyoParts } from "./notification-time";
-import { cancellationSheetWriteIdentity, cancellationSourceAckFields, cancellationSourceAckPending, cancellationSourceLinked } from "./sheet-write-core";
+import { cancellationSheetWriteIdentity, cancellationSourceAckFields, cancellationSourceAckPending, cancellationSourceLinked, captureCaseListSourceCancellation } from "./sheet-write-core";
 import { mailPreparationContext, applicationConfirmationIdentity, assignmentPreparationPatch, nextAssignmentRevision, resetApplicationConfirmation } from "./assignment-preparation-core";
 import { assertProductionOperational } from "./system-safety";
 import { readMailApplicationForAssignment } from "./automation-intake";
@@ -245,6 +245,7 @@ export const applyToJob = onCall(async (request) => {
 
 const CancelSchema = z.object({
   jobId: z.string().min(1),
+  expectedRevision: z.number().int().min(0).optional(),
   reason: z.string().min(1).max(500),
 });
 
@@ -266,6 +267,10 @@ export const adminCancelJob = onCall(async (request) => {
       throw new HttpsError("permission-denied", "会社情報が一致しません。");
     }
 
+    if (job.caseListSource && (!Number.isSafeInteger(job.revision) || Number(job.revision) < 1 || input.expectedRevision !== job.revision)) {
+      throw new HttpsError("failed-precondition", "案件リストの確認後に担当・内容が変更されています。再読込して取消対象を確認してください。");
+    }
+
     // 取消対象の枠だけを解除する。別案件への再応募後の再取消でも、その勤務枠を保持する。
     const lockRef = typeof job.assignedStaffId === "string" && job.assignedStaffId
       ? db.collection("staffDayLocks").doc(`${companyId}_${job.assignedStaffId}_${job.dateKey}`)
@@ -280,7 +285,11 @@ export const adminCancelJob = onCall(async (request) => {
 
     if (job.cancelled === true && job.status === "cancelled" && job.cancellationReason === input.reason && (!ownsActiveLock || cancellationSourceAckPending(job))) return;
     const now = Timestamp.now();
-    try { assertAcknowledgedCancellationCanChange(job); }
+    let caseListCancellation: Record<string, unknown> | null;
+    try {
+      assertAcknowledgedCancellationCanChange(job);
+      caseListCancellation = captureCaseListSourceCancellation(job, input.jobId, queueRef.id, session.uid, nextAssignmentRevision(job));
+    }
     catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "取消履歴の変更確認が必要です。"); }
     const sourceAck = cancellationSourceAckFields(job, ownsActiveLock, now.toMillis(), nextAssignmentRevision(job));
     tx.update(jobRef, {
@@ -293,7 +302,7 @@ export const adminCancelJob = onCall(async (request) => {
       cancellationReason: input.reason,
       ...cancelledRecruitmentState(),
       appOverride: { type: "cancel", active: true, createdAt: now },
-      cancellationSheetWrite: { queueId: queueRef.id, operation: "job.cancel", identity: cancellationSheetWriteIdentity(job), ...sourceAck },
+      cancellationSheetWrite: { queueId: queueRef.id, operation: "job.cancel", identity: cancellationSheetWriteIdentity(job), ...sourceAck, ...(caseListCancellation ? { caseListCancellation } : {}) },
       cancelledAt: now,
       cancelledBy: session.uid,
       updatedAt: now,
@@ -311,6 +320,7 @@ export const adminCancelJob = onCall(async (request) => {
       companyId,
       jobId: input.jobId,
       operation: "job.cancel",
+      ...(caseListCancellation ? { caseListCancellation } : {}),
       updates: {
         cancelled: true,
         cancellationReason: input.reason,

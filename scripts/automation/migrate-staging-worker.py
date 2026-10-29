@@ -3,6 +3,7 @@ import argparse
 import copy
 import datetime as dt
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -266,6 +267,54 @@ def verify_after(before, after, target):
                     "UNRELATED_RUN_SERVICE_CHANGED")
 
 
+class ApiHttpError(ValueError):
+    def __init__(self, status, scheduler_error_info=None):
+        self.scheduler_error_info = scheduler_error_info or {}
+        super().__init__("API_HTTP_" + str(status))
+
+
+def scheduler_error_info(error, method, url):
+    """現在停止している読取だけ、固定のErrorInfo分類を残す。本文は保存しない。"""
+    if error.code != 403 or method != "GET" or url != SCHED + PREFIX + "/jobs?pageSize=500":
+        return {}
+    try:
+        raw = error.read(16385)
+        if len(raw) > 16384:
+            return {}
+        envelope = json.loads(raw)
+        failure = envelope.get("error") if isinstance(envelope, dict) else None
+        if not isinstance(failure, dict) or failure.get("code") != 403 or failure.get("status") != "PERMISSION_DENIED":
+            return {}
+        details = failure.get("details")
+        if not isinstance(details, list) or len(details) > 8:
+            return {}
+        infos = [item for item in details if isinstance(item, dict)
+                 and item.get("@type") == "type.googleapis.com/google.rpc.ErrorInfo"]
+        if len(infos) != 1:
+            return {}
+        info = infos[0]
+        reason, domain = info.get("reason"), info.get("domain")
+        allowed = (("IAM_PERMISSION_DENIED", "googleapis.com"),
+                   ("IAM_PERMISSION_DENIED", "iam.googleapis.com"),
+                   ("SERVICE_DISABLED", "googleapis.com"),
+                   ("ACCESS_TOKEN_SCOPE_INSUFFICIENT", "googleapis.com"))
+        if (reason, domain) not in allowed:
+            return {}
+        metadata = info.get("metadata", {})
+        if not isinstance(metadata, dict):
+            return {}
+        result = {"reason": reason, "domain": domain}
+        for key, expected in (("permission", "cloudscheduler.jobs.list"),
+                              ("service", "cloudscheduler.googleapis.com")):
+            if key in metadata:
+                if metadata[key] != expected:
+                    return {}
+                result[key] = expected
+        return result
+    except (ValueError, TypeError, AttributeError, OSError, http.client.HTTPException):
+        return {}
+
+
 class Api:
     def __init__(self):
         self.credential = None
@@ -296,7 +345,7 @@ class Api:
             with urllib.request.urlopen(request, timeout=35) as response:
                 return json.load(response)
         except urllib.error.HTTPError as error:
-            raise ValueError("API_HTTP_" + str(error.code)) from None
+            raise ApiHttpError(error.code, scheduler_error_info(error, method, url)) from None
         except (OSError, TimeoutError):
             raise ValueError("API_RESULT_UNKNOWN_READ_BEFORE_RETRY") from None
 
@@ -336,7 +385,7 @@ READ_WORKERS = {
 
 
 class MetadataReadError(ValueError):
-    def __init__(self, kind, worker, method, code):
+    def __init__(self, kind, worker, method, code, error_info=None):
         require(kind in READ_WORKERS and worker in READ_WORKERS[kind], "READ_LABEL_REJECTED")
         require(method == ("POST" if kind == "projectIam" else "GET"), "READ_METHOD_REJECTED")
         # 応答本文・URL・環境変数・IAMを例外から公開しない。
@@ -344,6 +393,8 @@ class MetadataReadError(ValueError):
             r"API_HTTP_[1-5][0-9]{2}|API_RESULT_UNKNOWN_READ_BEFORE_RETRY|AUTH_FAILED|API_SCOPE_REJECTED",
             code) else "METADATA_READ_FAILED"
         self.diagnostic = {"resourceType": kind, "worker": worker, "method": method, "code": safe_code}
+        if kind == "schedulerJobs" and safe_code == "API_HTTP_403" and error_info:
+            self.diagnostic["errorInfo"] = error_info
         super().__init__(safe_code)
 
 
@@ -353,7 +404,8 @@ def read_metadata(api, kind, worker, method, url, body=None):
     try:
         return api.json(method, url, body)
     except ValueError as error:
-        raise MetadataReadError(kind, worker, method, str(error)) from None
+        info = error.scheduler_error_info if isinstance(error, ApiHttpError) else None
+        raise MetadataReadError(kind, worker, method, str(error), info) from None
 
 
 def collect(api):

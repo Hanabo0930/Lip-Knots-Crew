@@ -53,6 +53,7 @@ const JobSafeEditPanel = lazy(() => import("./JobSafeEditPanel"));
 const NativeCreationRecovery = lazy(() => import("./NativeCreationRecovery"));
 const CaseMailIntakeEntry = lazy(() => import("./CaseMailIntakeEntry"));
 const CaseListImportPanel = lazy(() => import("./CaseListImportPanel"));
+const RecruitmentDraftPanel = lazy(() => import("./RecruitmentDraftPanel"));
 
 export type Job = {
   id: string;
@@ -67,6 +68,11 @@ export type Job = {
   menuConditions?: string[];
   mailIntake?: { receiptId: string; candidateId: string; sourceKey: string };
   caseListSource?: { sourceRevision: string };
+  sourceReady?: boolean;
+  caseListManualPending?: unknown;
+  assignmentSheetWrite?: { pending?: boolean };
+  cancellationSheetWrite?: { sourceAckPending?: boolean };
+  region?: string;
   mailIntakeReviewRequired?: boolean;
   entryTime?: string;
   workTime?: string;
@@ -2812,9 +2818,10 @@ async function previewRowCreation() {
 
   async function acknowledgeSheetIssue(issue:SheetWriteIssue) {
     if(issue.operation==="case_list.manual"){setMessage("手入力案件は条件と日給を確認し、ネームアップ後に個別に選択してください。");return;}
-    if(issue.operation==="case_list.assign") {
+    if(issue.operation==="case_list.assign"||issue.sourceCancellation===true&&issue.canReconcile===true) {
       await runAdminOperation("issue:"+issue.id,"acknowledgeSheetWriteIssue",{queueId:issue.id,action:"reconcile-case-list"},data=>{
         const status=(data as {status?:string})?.status;
+        if(status==="SOURCE_CANCELLATION_READBACK_VERIFIED")return "案件リストの氏名消去と取消状態を照合し、取消の反映を確認しました。募集は停止したままです。";
         if(status==="MONTHLY_READBACK_VERIFIED"||status==="NO_OP_ALREADY_ACCEPTED")return "保存済みの原本を照合し、応募の反映を確認しました。";
         if(status==="OWNER_RESUME_REQUIRED")return "案件リストの担当者反映まで確認できました。月別への保存は未完了のため保留しています。";
         if(status==="OWNER_TRANSFER_SELECTION_REQUIRED")return "ネームアップ後の移行選択待ちです。担当名だけでシフト表には移行しません。";
@@ -2822,6 +2829,7 @@ async function previewRowCreation() {
       },false);
       return;
     }
+    if(issue.sourceCancellation===true){setMessage("取消の反映は確認メモで完了にできません。依頼の状態を確認してください。");return;}
     const note=window.prompt("確認メモ", "");
     if(note!==null)await runSheetIssueAction(issue,"acknowledgeSheetWriteIssue",note);
   }
@@ -3017,7 +3025,7 @@ async function previewRowCreation() {
     if (!cancellationJobId||cancellationLocked()) return;
     const job = jobs.find((item) => item.id === cancellationJobId);
     if (!job) return;
-    if (!window.confirm(`${job.workDate} ${job.storeName}をキャンセルとして記録しますか？`)) return;
+    if (!window.confirm(`${job.workDate} ${job.storeName} ${job.assignedStaffName||"担当未設定"}をキャンセルとして記録しますか？`)) return;
     if (!firebaseConfigured) {
       setJobs((current) => current.map((item) => item.id === cancellationJobId ? {
         ...item,
@@ -3031,7 +3039,7 @@ async function previewRowCreation() {
 
       return;
     }
-    await runAdminOperation("cancellation","adminSetJobCancellation",{jobId:cancellationJobId,...(job.mailIntake?{expectedRevision:job.revision}:{}),reasonCategory:cancellationReasonCategory,reasonNote:cancellationNote,financialTreatment:cancellationTreatment},"キャンセルを記録しました。募集・事前連絡・提出タスクを停止します。","cancellation");
+    await runAdminOperation("cancellation","adminSetJobCancellation",{jobId:cancellationJobId,...(job.mailIntake||job.caseListSource?{expectedRevision:job.revision}:{}),reasonCategory:cancellationReasonCategory,reasonNote:cancellationNote,financialTreatment:cancellationTreatment},"キャンセルを記録しました。募集・事前連絡・提出タスクを停止します。","cancellation");
   }
 
   async function restoreCancellation(job: Job) {
@@ -3221,14 +3229,14 @@ async function duplicateJobAction(job:Job,isCurrent:()=>boolean) {
 
 async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"schedule",isCurrent:()=>boolean) {
   const confirmedRevision=job.revision;
-  let caseListConfirmation: { expectedSourceRevision: string; confirmedFields: { arrival: true; execution: true; headcount: true; dateMode: true; payOffer: true; vacancy: true }; payOffer: { dailyWageJPY: number; travelExpenses: "全額支給"; communicationExpenses: "全額支給" }; sourceReview?: { headcountPerSlot: 1; reviewedIssues: string[]; resolutionNote: string } } | undefined;
+  let caseListConfirmation: { expectedSourceRevision: string; confirmedRegion: string; confirmedFields: { arrival: true; execution: true; headcount: true; dateMode: true; payOffer: true; vacancy: true }; payOffer: { dailyWageJPY: number; travelExpenses: "全額支給"; communicationExpenses: "全額支給" }; sourceReview?: { headcountPerSlot: 1; reviewedIssues: string[]; resolutionNote: string } } | undefined;
   if(job.caseListSource && action==="publish") {
     if(!Number.isSafeInteger(confirmedRevision)||!/^[a-f0-9]{64}$/.test(job.caseListSource.sourceRevision)){setMessage("案件リストを取り込み直してください。");return;}
     const wage=window.prompt("この案件の公開日給（円）を確認して入力してください。交通費・通信費は全額支給です。",typeof job.basePay==="number"&&job.basePay>0?String(job.basePay):"");
     if(wage===null||!isCurrent())return;
     if(!/^\d+$/.test(wage)||!Number.isSafeInteger(Number(wage))||Number(wage)<1||Number(wage)>1000000){setMessage("公開日給を正しい金額で入力してください。");return;}
     if(!functions)return;
-    type SourceReviewRow = { jobId: string; sourceRevision: string; workDate?: string; storeName?: string; makerName?: string; menuName?: string; entryTime?: string; workTime?: string; ownerReviewRequired?: boolean; reviewIssues?: string[] };
+    type SourceReviewRow = { jobId: string; sourceRevision: string; workDate?: string; storeName?: string; makerName?: string; menuName?: string; entryTime?: string; workTime?: string; region?: string; ownerReviewRequired?: boolean; reviewIssues?: string[] };
     let currentSource: SourceReviewRow | undefined;
     try {
       const response=await httpsCallable(functions,"previewShiftImport")({source:"case-list"});
@@ -3237,6 +3245,11 @@ async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"
       currentSource=result.rows?.find(row=>row.jobId===job.id);
       if(!currentSource||currentSource.sourceRevision!==job.caseListSource.sourceRevision)throw new Error("案件リストが更新されています。下書きを取り込み直してください。");
     } catch(error) { if(isCurrent())setMessage(error instanceof Error?error.message:"案件リストを確認できません。");return; }
+    const sourceRegion=currentSource.region;
+    if(typeof sourceRegion!=="string"||!sourceRegion||sourceRegion!==sourceRegion.trim()||sourceRegion.length>100){setMessage("案件リストの地域（BE列）が未確認です。対象案件の地域を確認し、取り込み直してください。");return;}
+    const confirmedRegion=window.prompt("募集する地域を確認して入力してください。案件リストの地域（BE列）："+sourceRegion,sourceRegion);
+    if(confirmedRegion===null||!isCurrent())return;
+    if(confirmedRegion!==sourceRegion){setMessage("募集地域が案件リストと一致しません。対象案件の地域を確認してください。");return;}
     const issues=currentSource.reviewIssues??[];
     let sourceReview: {headcountPerSlot:1;reviewedIssues:string[];resolutionNote:string}|undefined;
     if(currentSource.ownerReviewRequired||issues.length){
@@ -3245,10 +3258,10 @@ async function changePublicationAction(job:Job,action:"publish"|"stop"|"draft"|"
       if(note.trim().length<3||note.length>2000){setMessage("確認の根拠・解消内容を3〜2000文字で入力してください。");return;}
       sourceReview={headcountPerSlot:1,reviewedIssues:issues,resolutionNote:note.trim()};
     }
-    const details=[["実施日",currentSource.workDate],["店舗",currentSource.storeName],["メーカー",currentSource.makerName],["内容",currentSource.menuName],["入店",currentSource.entryTime],["勤務時間",currentSource.workTime]].map(([label,value])=>label+"："+(value||"未確認")).join("\n");
+    const details=[["実施日",currentSource.workDate],["地域",sourceRegion],["店舗",currentSource.storeName],["メーカー",currentSource.makerName],["内容",currentSource.menuName],["入店",currentSource.entryTime],["勤務時間",currentSource.workTime]].map(([label,value])=>label+"："+(value||"未確認")).join("\n");
     if(!window.confirm(details+`\n日給：${Number(wage).toLocaleString()}円＋交通費・通信費全額支給\n\n未手配の単日1名枠で、入店・勤務時間・人数・日程・給与条件を確認済みとして募集します。既存シフト・実績台帳との照合が未完了なら開始できません。`))return;
     if(!isCurrent())return;
-    caseListConfirmation={expectedSourceRevision:job.caseListSource.sourceRevision,confirmedFields:{arrival:true,execution:true,headcount:true,dateMode:true,payOffer:true,vacancy:true},payOffer:{dailyWageJPY:Number(wage),travelExpenses:"全額支給",communicationExpenses:"全額支給"},...(sourceReview?{sourceReview}:{})};
+    caseListConfirmation={expectedSourceRevision:job.caseListSource.sourceRevision,confirmedRegion,confirmedFields:{arrival:true,execution:true,headcount:true,dateMode:true,payOffer:true,vacancy:true},payOffer:{dailyWageJPY:Number(wage),travelExpenses:"全額支給",communicationExpenses:"全額支給"},...(sourceReview?{sourceReview}:{})};
   }
   if(job.mailIntake&&action==="publish"){
     if(!Number.isSafeInteger(confirmedRevision)||Number(confirmedRevision)<0){setMessage("案件の確認版がありません。一覧を読み直してください。");return;}
@@ -3986,6 +3999,7 @@ function downloadCsv(filename:string,content:string) {
 
       <WorkspacePanel view="list" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel job-directory">
         <h2>案件一覧</h2>
+        <Suspense fallback={<p role="status">募集文の作成を準備中…</p>}><RecruitmentDraftPanel jobs={jobs} functions={functions} demo={!firebaseConfigured}/></Suspense>
         <Suspense fallback={<p>検索を準備中…</p>}><AdminJobSearchControls queryText={queryText} jobListFilter={jobListFilter} total={jobs.length} count={filtered.length} page={jobPageView.page} onQuery={value=>{setQueryText(value);setJobPage(0);}} onFilter={value=>{setJobListFilter(value);setJobPage(0);}} onClear={()=>{setQueryText("");setJobListFilter("all");setJobPage(0);}}/></Suspense>
         <div className="table-wrap">
           <table className="job-directory-table">
@@ -4006,7 +4020,7 @@ function downloadCsv(filename:string,content:string) {
                     <button className="ghost compact" onClick={()=>duplicateJob(job)}>複製</button>
                     {!isCancelledJob(job) && !job.assignedStaffId && (
                       job.publishable
-                        ? <button className="ghost compact" onClick={()=>changePublication(job,"stop")}>募集停止</button>
+                        ? <><button className="ghost compact" onClick={()=>changePublication(job,"stop")}>募集停止</button>{job.caseListSource && <button className="ghost compact" onClick={()=>changePublication(job,"publish")}>募集条件を再確認</button>}</>
                         : <button className="ghost compact" onClick={()=>changePublication(job,"publish")}>{job.mailIntake?"募集内容を確認":"募集開始"}</button>
                     )}
                     {job.status==="assigned" && !job.applicationAdminConfirmed && <button className="ghost compact" disabled={operationKeys.includes("job:"+job.id)||job.cancelled||job.sourceMissing||job.assignmentUnresolved||job.mailIntakeReviewRequired||(Boolean(job.mailIntake)&&job.pendingSourceWrite)||!job.assignedStaffId} onClick={()=>confirmJobApplication(job)}>応募確認</button>}

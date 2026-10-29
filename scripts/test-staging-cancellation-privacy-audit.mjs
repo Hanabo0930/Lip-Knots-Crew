@@ -18,8 +18,26 @@ await test('All staging jobs, exactly two nonprivate fields, readonly transactio
 await test('Empty successful snapshot is distinct from missing or failed query',async()=>{
  const r=await auditStagingCancellationPrivacy(fixture([{readTime:time}]));assert.equal(r.scannedJobs,0);assert.equal(r.status,'PASS');
 });
-for(const [status,flag]of [['assigned',true],['open',true],['draft',true],['scheduled',true],['stopped',true],['cancelled',false],['cancelled',undefined]])await test('Contradictory '+status+'/'+flag+' is HOLD, never deployment clearance',async()=>{
+for(const [status,flag]of [['assigned',true],['open',true],['draft',true],['scheduled',true],['stopped',true],['archived',true],['cancelled',false],['cancelled',undefined]])await test('Contradictory '+status+'/'+flag+' is HOLD, never deployment clearance',async()=>{
  const r=await auditStagingCancellationPrivacy(fixture([row('private-id',status,flag)]));assert.equal(r.status,'HOLD');assert.equal(r.zeroConflicts,false);assert.equal(r.conflicts,1);assert(!JSON.stringify(r).includes('private-id'));
+});
+await test('Declared archived state is audited without treating it as cancelled',async()=>{
+ const r=await auditStagingCancellationPrivacy(fixture([row('private-archive','archived',false)]));
+ assert.equal(r.status,'PASS');assert.equal(r.scannedJobs,1);assert.equal(r.cancelledJobs,0);assert.equal(r.deploymentReady,false);
+});
+await test('Unsupported states scan the full snapshot, report only fixed buckets, and still fail closed',async()=>{
+ const missing=row('private-missing');delete missing.document.fields.status;
+ const invalid=row('private-invalid');invalid.document.fields.status={integerValue:'12345'};
+ const h=fixture([row('private-normal'),row('private-unknown','PRIVATE_UNKNOWN_STATUS'),missing,invalid,row('private-archive','archived'),row('private-final','cancelled',true)]);
+ await assert.rejects(auditStagingCancellationPrivacy(h),error=>{
+  assert.equal(error.message,'UNKNOWN_JOB_STATUS');assert.deepEqual(error.statusAudit,{scannedJobs:6,statusCounts:{draft:0,scheduled:0,open:0,assigned:1,stopped:0,cancelled:1,archived:1},missingStatusJobs:1,invalidStatusJobs:1,unknownStatusJobs:1});
+  assert(!JSON.stringify(error).includes('private-'));assert(!JSON.stringify(error).includes('PRIVATE_UNKNOWN_STATUS'));assert(!('zeroConflicts' in error.statusAudit));return true;
+ });
+ assert.equal(h.calls.at(-1).operation,'rollback');
+});
+await test('Later snapshot errors override aggregate status diagnostics',async()=>{
+ const h=fixture([row('private-unknown','PRIVATE_UNKNOWN_STATUS'),{...row('private-final'),readTime:'2026-10-29T00:00:01Z'}]);
+ await assert.rejects(auditStagingCancellationPrivacy(h),/INCONSISTENT_SNAPSHOT/);assert.equal(h.calls.at(-1).operation,'rollback');
 });
 for(const [name,mutate]of [
  ['truncated',()=>[]],['unfinished',r=>[{...r[0],done:false}]],['server error',()=>[{error:{message:'PRIVATE'}}]],['skipped',r=>[{...r[0],skippedResults:1}]],['missing read time',r=>[{document:r[0].document}]],

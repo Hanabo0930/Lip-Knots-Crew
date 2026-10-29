@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Deploy Functions or run the single-mail Gmail smoke only
+        description: Deploy Functions, run the single-mail smoke, or audit cancellation privacy read-only
         required: true
         type: choice
         options:
           - deploy
           - gmail-smoke
+          - cancellation-privacy-audit
         default: deploy
       source_ref:
         description: CI-passing source branch
@@ -378,3 +379,102 @@ jobs:
             echo "- Production touched: \`false\`"
             echo "- Direct Firestore write: \`false\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  cancellation-audit-guard:
+    if: inputs.operation == 'cancellation-privacy-audit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require current main and explicit read-only audit scope
+        env:
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          FUNCTIONS: ${{ inputs.functions }}
+          TRANSFER_MODE: ${{ inputs.transfer_mode }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Hanabo0930/Lip-Knots-Crew" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]]
+          [[ "$WORKFLOW_REF" == "Hanabo0930/Lip-Knots-Crew/.github/workflows/staging-functions-deploy.yml@refs/heads/main" ]]
+          [[ "$OPERATION" == "cancellation-privacy-audit" ]]
+          [[ "$SOURCE_REF" == "main" ]]
+          [[ "$FUNCTIONS" == "none" ]]
+          [[ "$TRANSFER_MODE" == "preserve" ]]
+          [[ "$CONFIRMATION" == "AUDIT_LKC_STAGING_CANCELLATION_PRIVACY" ]]
+          current_main=$(gh api repos/Hanabo0930/Lip-Knots-Crew/git/ref/heads/main --jq '.object.sha')
+          [[ "$current_main" == "$GITHUB_SHA" ]]
+          gh api "repos/Hanabo0930/Lip-Knots-Crew/actions/runs?head_sha=$GITHUB_SHA&event=push&per_page=100" > "$RUNNER_TEMP/privacy-main-runs.json"
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ["RUNNER_TEMP"]+"/privacy-main-runs.json") as f: runs=json.load(f)["workflow_runs"]
+          current=[r for r in runs if r["head_sha"]==os.environ["GITHUB_SHA"] and r["path"]==".github/workflows/release-candidate.yml" and r["event"]=="push"]
+          if not current or max(current,key=lambda r:r["id"])["conclusion"]!="success": raise SystemExit("CURRENT_MAIN_CANONICAL_CI_REQUIRED")
+          PY
+
+  cancellation-audit:
+    if: inputs.operation == 'cancellation-privacy-audit'
+    needs: cancellation-audit-guard
+    environment: lkc-staging-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Recheck current main before observer auth
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(gh api repos/Hanabo0930/Lip-Knots-Crew/git/ref/heads/main --jq '.object.sha')" == "$GITHUB_SHA" ]]
+      - name: Checkout verified main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node for read-only audit
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Authenticate existing staging observer for cancellation audit
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_OBSERVER_SERVICE_ACCOUNT }}
+      - name: Set up Google Cloud CLI for read-only audit
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+      - name: Read only status and cancellation flag
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          gcloud auth print-access-token | node scripts/audit-staging-cancellation-privacy.mjs --token-stdin --evidence "$RUNNER_TEMP/cancellation-privacy-audit"
+      - name: Summarize aggregate cancellation audit only
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/cancellation-privacy-audit/privacy-audit.json" ]]; then
+            cat "$RUNNER_TEMP/cancellation-privacy-audit/privacy-audit.json" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'CANCELLATION_PRIVACY_AUDIT=INCOMPLETE' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve aggregate cancellation audit
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: staging-cancellation-privacy-audit
+          path: ${{ runner.temp }}/cancellation-privacy-audit/privacy-audit.json
+          if-no-files-found: warn
+          retention-days: 7

@@ -46,7 +46,9 @@ Source **B:BCの54業務列 → 月別A:BB**へ対応付ける。手入力金額
 
 月別参照がまだないCaseList案件もSourceに氏名が存在するため、取消だけで所有勤務枠を解放しない。選択前の手入力案件についてだけ、現行の取消キュー・版・会社・担当・勤務日・所有lockと、新しい65列Source読戻し（取消true・C空欄・固定ID・日付・ハッシュ・同じ台帳版）が一致すれば共有ACKヘルパーで解放する。選択済み、月別書込不明、古いSource、別キュー／別lockは保留を維持する。**Source取消の実書込ライターは追加していない**。読戻しACKの合成試験を、実際のSource取消書込完了と混同しない。
 
-非公開履歴は`cancellation-private-history-review.md`に変更案と影響を記載した。`firestore.rules`自体は未編集・未配備。新しいRules／IAM／本番／GAS操作の承認は受けておらず、履歴担当IDを消して既存Source ACKを壊す方法も取っていない。
+非公開履歴は`cancellation-private-history-review.md`に承認済みの変更範囲と影響を記載した。2026-10-29に本人がSTAGING限定の狭い案を承認し、Rules本人assigned条件・5query・索引1定義・cache v2・拒否時除去・今後の通知一般文言をソース実装した。実Rules82/実App24等の隔離試験に合格し、head1259917の正式CI40793434066全3系統も成功。実環境の監査・索引READY→App→Rules反映は別で、まだ未配備である。IAM／本番／GAS／原本業務write／実送信／停止解除の許可は追加しておらず、履歴担当IDを消して既存Source ACKを壊す方法も取っていない。
+
+独立した監査入口の実行40793656805は、既存GCP federation attribute conditionの認証拒否でデータを読む前に停止した。本人の停止解決指示を受け、監査を同じスクリプトのまま既存の信頼済みFunctions workflowの読取専用モードへ通常CI/mergeで統合した（PR241）。旧独立入口は削除し、権限設定やworkflow_refの偽装で通す方法は取らない。現在の配備済み認証条件は未取得なので、具体的role不足を断定しない。
 
 ## CI失敗の調査と共有
 

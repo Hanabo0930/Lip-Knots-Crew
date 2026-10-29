@@ -49,7 +49,9 @@ AGENTS.md に今回の狭い承認範囲を記録した。状態は **AUTHORIZED
 
 scripts/audit-staging-cancellation-privacy.mjs は既存のSTAGING固定read transportを使い、全 jobs の status/cancelled の2項目だけを読取専用トランザクションで取得する。会社で絞ると他社文書の矛盾を見落とすため、同じ検証プロジェクトの全件を対象にする。上限+1、不完全応答、重複、別project、不明状態/型、読取時刻不一致、rollback失敗では証明しない。status=cancelled と cancelled=true の不一致が1件でもあれば HOLD。記録は集計数・日時・完了フラグのみで、文書ID・スタッフ情報・理由・トークンは保存しない。PASSでも deploymentReady=false とし、配備物の来歴や退避の別要件を省略しない。
 
-監査は .github/workflows/staging-cancellation-privacy-audit.yml に分離した読取専用工程で行う。通常の対象選択/月別writerは増設しない。現在mainの正式CI成功、既存の保護環境とobserver identity、固定確認語を要求し、Rules/索引/業務文書の変更機能を持たせない。PR239を先に完成扱いで統合して監査する循環を避け、監査5ファイルだけの独立PRとして通常CI/統合を行う。
+監査は既存 .github/workflows/staging-functions-deploy.yml の `cancellation-privacy-audit` モードで行う。source_ref=main / functions=none / transfer_mode=preserve / 確認語 AUDIT_LKC_STAGING_CANCELLATION_PRIVACY を必須にし、deploy/Gmail smokeのjobは実行しない。同じ監査スクリプト1本を呼び、通常の対象選択/月別writerは増設しない。現在mainの正式CI成功、既存の保護環境とobserver identityを要求し、保護レビュー後にmainを再照合する。Rules/索引/業務文書の変更機能を持たせない。
+
+独立した旧監査入口はPR240で通常統合し、main dd053e1の正式CI全3成功後に実行40793656805を1回だけ起動した。guardと保護レビューは通ったが、Google Cloud federation attribute conditionで認証拒否となり、データ読取はSKIPPED・INCOMPLETE・成果物0。2026-10-29の本人の停止解決指示に基づき、PR241で実行入口を既存の信頼済みworkflowへ通常CI/mergeで統合し、独立入口を削除した。WIF/IAM/資格情報/保護設定を変更せず、元の失敗runの再試行やworkflow_ref偽装はしない。PR239を未完成のまま先に統合して監査する循環も避ける。統合後のmain正式CI・保護付き実監査は別に確認し、成功を先取りしない。
 
 ## 配備物の退避と復元
 

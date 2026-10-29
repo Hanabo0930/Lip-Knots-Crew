@@ -17,3 +17,11 @@
 独立した監査workflowの実行40793656805は、既存federation attribute conditionで認証が拒否され、データを読む前に停止した。その実行を再試行したりworkflow_refを偽装したりせず、監査の実行入口を通常のCI・merge・保護レビューで既存の信頼済みworkflowへ統合する。独立入口は削除し、過去の実行履歴は保持する。WIF条件、IAM role/binding、保護設定、資格情報は変更しない。
 
 2026-10-29、本人の「止まってる部分を解決して進めてくれ」を受けた修正。承認済みの狭い取消非公開化の読取前提を回復する範囲に限定し、原本業務write、本番、GAS、実送信、停止解除の許可を追加しない。配備済みfederationの現在値は未取得であり、repo内bootstrapだけから現在条件や必要roleを断定しない。この入口でも認証/読取が拒否される場合は、権限を拡張せず実結果を記録する。
+
+## 実読取と状態診断
+
+実行40802270788（main 60ecd7f、PR241統合後）では、既存observer認証とCLI設定が成功し、読取監査が `UNKNOWN_JOB_STATUS` / `INCOMPLETE` で停止した。業務書込・原本requestは0。これにより認証回復は確認できたが、取消矛盾ゼロや配備可能とは扱わない。
+
+監査の既知状態へ、既存 `functions/src/automation-bridge-core.ts` が宣言する `archived` を含める。これを取消扱いへ変換せず、archivedかつcancelled=trueも矛盾としてHOLDにする。実行40802270788の原因がarchivedだったとは推測しない。
+
+未宣言状態・状態欠落・型不正は引き続きINCOMPLETEとして拒否する。完全な読取スナップショットを走査できた場合だけ、既知の固定状態別件数とunknown/missing/invalid件数を補足する。未知の実値、案件ID、氏名、理由、トークンは出さない。診断件数をzeroConflictsや配備許可として利用しない。途中の応答不備・上限超過・rollback失敗では診断集計も出さない。

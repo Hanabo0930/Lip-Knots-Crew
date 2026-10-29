@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
+import ts from 'typescript';
+const access={exports:{}};
+runInNewContext(ts.transpileModule(readFileSync('apps/staff/src/shift-access.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,access);
 const app=readFileSync('apps/staff/src/App.tsx','utf8');
 const from=app.indexOf('  async function refreshBusinessData('),to=app.indexOf('  async function refreshPushStatus(',from);
 assert.ok(from>=0&&to>from);
 function harness(options={}){
  const state={messages:[],calls:[],refreshing:false,status:'ready',source:'cached'};
- const scope={businessRefreshInFlightRef:{current:false},submissionEditPending:false,isPending:()=>false,businessDataStatus:'ready',firebaseConfigured:true,user:{uid:'user'},staffId:'staff',companyId:'company',lastBusinessDataRefreshAt:100000,BUSINESS_DATA_REFRESH_INTERVAL_MS:30000,authLoadVersionRef:{current:1},
+ const scope={...access.exports,businessRefreshInFlightRef:{current:false},submissionEditPending:false,isPending:()=>false,businessDataStatus:'ready',firebaseConfigured:true,user:{uid:'user'},staffId:'staff',companyId:'company',lastBusinessDataRefreshAt:100000,BUSINESS_DATA_REFRESH_INTERVAL_MS:30000,authLoadVersionRef:{current:1},
  Date:{now:()=>100001},performance:{now:()=>100},openJobsStatus:'idle',refreshOpenJobs:()=>{throw Error('Unexpected open jobs call');},
  setMessage:value=>state.messages.push(value),setBusinessRefreshing:value=>state.refreshing=value,
  setBusinessDataStatus:value=>state.status=value,setBusinessDataSource:value=>state.source=value,setBusinessRefreshMs:()=>{},

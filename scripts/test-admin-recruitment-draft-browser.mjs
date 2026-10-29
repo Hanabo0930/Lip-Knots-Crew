@@ -52,6 +52,9 @@ try {
     await page.waitForFunction(()=>window.recruitFixture.calls.length===4);
     await page.evaluate(()=>window.recruitFixture.setUser(null));
     await page.evaluate(()=>{const call=window.recruitFixture.calls.at(-1);window.recruitFixture.pending.shift().resolve({data:{purpose:"recruitment-draft",subject:call.input.subject,body:"前の利用者の募集文",caseCount:1,region:call.input.region,validatedAt:"2026-10-29T00:00:00.000Z",dispatch:"disabled"}});});
+    // Auth invalidation is synchronous, while React commits the cleared input
+    // on the next render. Observe that commit before asserting its DOM value.
+    await page.waitForFunction(()=>document.querySelector('[aria-label="募集地域"]').value==="");
     assert.equal(await page.getByLabel("作成した本文",{exact:true}).count(),0);assert.equal(await page.getByLabel("募集地域",{exact:true}).inputValue(),"");checks++;
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),"No viewport overflow at "+width);checks++;
     assert.deepEqual(errors,[]);assert.deepEqual(external,[]);checks++;

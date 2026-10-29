@@ -43,7 +43,7 @@ function loadCandidate(name){
   const code=ts.transpileModule(fs.readFileSync(file,"utf8"),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
   vm.runInThisContext("(function(exports,require){"+code+"\n})",{filename:file})(exports,dep=>{
     if(dep==="node:crypto")return crypto;
-    assert.ok(["./sheet-write-core","./analytics-core"].includes(dep));return loadCandidate(dep);
+    assert.ok(["./case-list-publication-state","./sheet-write-core","./analytics-core"].includes(dep));return loadCandidate(dep);
   });
   return exports;
 }

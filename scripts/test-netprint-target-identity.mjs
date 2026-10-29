@@ -1,6 +1,14 @@
 import { z } from "zod";
 import assert from 'node:assert/strict';import fs from 'node:fs';import ts from 'typescript';import {runInNewContext} from 'node:vm';
-const sheetCore={};runInNewContext(ts.transpileModule(fs.readFileSync('functions/src/sheet-write-core.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports:sheetCore});
+const pureModules=new Map();
+function loadPure(name){
+ assert.ok(['./sheet-write-core','./case-list-publication-state'].includes(name),'Unexpected pure dependency '+name);
+ if(pureModules.has(name))return pureModules.get(name);
+ const exports={};pureModules.set(name,exports);
+ const code=ts.transpileModule(fs.readFileSync('functions/src/'+name.slice(2)+'.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
+ runInNewContext(code,{exports,require:loadPure});return exports;
+}
+const sheetCore=loadPure('./sheet-write-core');
 const source=fs.readFileSync('functions/src/netprint.ts','utf8'),start=source.indexOf('export const markNetPrintPrinted =');assert.ok(start>=0);const code=ts.transpileModule(source.slice(start),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
 for(const mode of ['unique','duplicate','duplicate-empty','missing','printed']){
  const item={id:'one',number:'12345678',position:1,printed:mode==='printed'};const items=mode==='missing'?[]:mode==='duplicate'?[item,{...item,number:'99999999'}]:mode==='duplicate-empty'?[item,{...item,number:''}]:[null,item];const writes=[];const ctx={exports:{},z,netPrintWriteIdentity:sheetCore.cancellationSheetWriteIdentity,assertCaseMailSubmissionRevision:job=>assert.equal(job.mailIntake,undefined),onCall:f=>f,HttpsError:class extends Error{constructor(code,message){super(message);this.code=code;}},requireAuth:()=>({uid:'user',token:{}}),companyFromClaims:()=> 'company',staffFromClaims:()=> 'staff',assertProductionOperational:async()=>{},PrintSchema:{parse:v=>v},Timestamp:{now:()=>({toMillis:()=>1})},db:{collection:name=>({doc:id=>({path:name+'/'+(id??'queue')})}),runTransaction:async fn=>fn({get:async()=>({exists:true,data:()=>({companyId:'company',assignedStaffId:'staff',dateKey:'2099-09-20',status:'assigned',netPrint:{items}})}),update:(...v)=>writes.push(v),create:(...v)=>writes.push(v)})}};runInNewContext(code,ctx);

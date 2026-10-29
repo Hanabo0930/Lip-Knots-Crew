@@ -21,7 +21,7 @@ function loadPure(file){
   const code=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
   const localRequire=name=>{
     if(name==="node:crypto")return require(name);
-    if(!["./sheet-write-core","./analytics-core"].includes(name))throw new Error("Unexpected dependency: "+name);
+    if(!["./case-list-publication-state","./sheet-write-core","./analytics-core"].includes(name))throw new Error("Unexpected dependency: "+name);
     return loadPure(path.join(path.dirname(file),name+".ts"));
   };
   vm.runInThisContext("(function(exports,require,module){"+code+"\n})",{filename:file})(mod.exports,localRequire,mod);

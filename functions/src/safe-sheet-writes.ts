@@ -23,7 +23,7 @@ type Queue = {
   companyId: string; jobId: string; operation: string; dateKey?: string;
   updates?: Record<string, unknown>; styles?: Record<string, { background?: string }>;
   expected?: Record<string, ExpectedValue>; idempotencyKey?: string; attempts?: number;
-  status?: string; actorUid?: string; actorStaffId?: string; claimToken?: string; caseListCancellation?: Record<string, unknown>;
+  status?: string; actorUid?: string; actorStaffId?: string; claimToken?: string; caseListCancellation?: Record<string, unknown>; caseListPublication?: Record<string, unknown>;
 };
 type Mapping = {
   enabled?: boolean; spreadsheetId: string; idColumn?: string; allowVerifiedFallbackRow?: boolean;
@@ -41,6 +41,7 @@ export const processSafeSheetWrite = onDocumentWritten("sheetSyncQueue/{queueId}
   }
   // claim・計測より前に停止し、依頼の状態や試行回数を保持する。
   if (sheetWriteExecutionPaused()) return;
+  if (after?.exists && after.data()?.operation === "case_list.publish" && process.env.LKC_CASE_LIST_PUBLICATION_MODE !== "active") return;
   if (!after?.exists || after.data()?.status !== "pending") return;
   // 遅延イベントの本文ではなく、transactionで獲得した最新の依頼を使う。
   const queue = await claim(after.ref);
@@ -74,6 +75,7 @@ export const retrySafeSheetWrites = onSchedule({ schedule: "every 5 minutes", ti
   const expired = await db.collection("sheetSyncQueue").where("status", "==", "processing").where("retryAt", "<=", now).limit(100).get();
   for (const doc of expired.docs) await db.runTransaction(async tx => {
     const current = await tx.get(doc.ref), data = current.data();
+    if (data?.operation === "case_list.publish" && process.env.LKC_CASE_LIST_PUBLICATION_MODE !== "active") return;
     if (data?.status !== "processing" || !(data.retryAt instanceof Timestamp) || data.retryAt.toMillis() > now.toMillis()) return;
     tx.set(doc.ref, {
       status: "blocked", errorType: "verification_required", writeVerificationRequired: true,
@@ -84,6 +86,7 @@ export const retrySafeSheetWrites = onSchedule({ schedule: "every 5 minutes", ti
   // 読込後に状態が変わった依頼をpendingへ戻さない。確認待ちは自動再試行しない。
   for (const doc of snap.docs) await db.runTransaction(async tx => {
     const current = await tx.get(doc.ref), data = current.data();
+    if (data?.operation === "case_list.publish" && process.env.LKC_CASE_LIST_PUBLICATION_MODE !== "active") return;
     if (data?.status !== "retry_wait" || !(data.retryAt instanceof Timestamp) || data.retryAt.toMillis() > now.toMillis()) return;
     tx.set(doc.ref, requiresWriteVerification(data) ? verificationHold(data, now) : { status: "pending", updatedAt: now }, { merge: true });
   });
@@ -127,7 +130,7 @@ function queueFingerprint(queue: Queue): string {
   return JSON.stringify(sort({
     companyId: queue.companyId, jobId: queue.jobId, operation: queue.operation, dateKey: queue.dateKey,
     updates: queue.updates, styles: queue.styles, expected: queue.expected, idempotencyKey: queue.idempotencyKey,
-    actorUid: queue.actorUid, actorStaffId: queue.actorStaffId, caseListCancellation: queue.caseListCancellation,
+    actorUid: queue.actorUid, actorStaffId: queue.actorStaffId, caseListCancellation: queue.caseListCancellation, caseListPublication: queue.caseListPublication,
   }));
 }
 async function finishOwned(ref: FirebaseFirestore.DocumentReference, queue: Queue, data: FirebaseFirestore.DocumentData) {
@@ -333,6 +336,11 @@ function matchesValue(queue: Queue, key: string, actual: unknown, expected: unkn
 }
 
 async function execute(ref: FirebaseFirestore.DocumentReference, queue: Queue) {
+  if (queue.operation === "case_list.publish") {
+    const publication: typeof import("./case-list-publication-worker") = require("./case-list-publication-worker");
+    await publication.processCaseListPublication(ref, queue);
+    return;
+  }
   if (queue.operation === "case_list.assign") throw new BlockedError("案件リストの月別連携は検証中です。既存行の書込経路へは進めません。");
   let mutationAttempted = false;
   try {

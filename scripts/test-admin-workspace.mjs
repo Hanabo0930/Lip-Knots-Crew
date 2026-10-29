@@ -471,3 +471,5 @@ if(process.argv.includes("--browser")){const {verifyStaffOfflineNavigation}=awai
 
 // Recruitment draft is a real UI flow; keep it in the existing Chromium job.
 if(process.argv.includes("--browser")) await import("./test-admin-recruitment-draft-browser.mjs");
+
+if(process.argv.includes("--browser")) await import("./test-admin-owner-publication-browser.mjs");

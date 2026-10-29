@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { caseListPublicationPending } from "./case-list-publication-state";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import { db } from "./firebase";
@@ -96,9 +97,10 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
   const sourceReadStartedAtMs = Date.now();
   const snapshot = await readLiveCaseList(companyId, undefined, mode === "preview" || enable);
   const verifiedColumns = enable || enableAssignments ? await readVerifiedMonthIdColumns(snapshot.spreadsheetId) : null;
-  const preview = { source: "case-list", mode, observedAt: snapshot.observedAt, digest: snapshot.inspected.digest,
+  const makePreview = (snapshot: LiveSnapshot) => ({ source: "case-list", mode, observedAt: snapshot.observedAt, digest: snapshot.inspected.digest,
     counts: { total: snapshot.inspected.jobs.length, held: snapshot.inspected.jobs.filter(job => job.holdReasons.length).length, existingMonthlyLinks: snapshot.inspected.jobs.filter(job => job.ledgerLinked).length },
-    rows: snapshot.inspected.jobs.map(job => ({ caseId: job.caseId, jobId: createJobIdFromPersistedCaseId(companyId, job.caseId), ...job.fields, sourceRevision: job.source.sourceRevision, holdReasons: job.holdReasons, reviewIssues: job.reviewIssues, ownerReviewRequired: job.ownerReviewRequired })) };
+    rows: snapshot.inspected.jobs.map(job => ({ caseId: job.caseId, jobId: createJobIdFromPersistedCaseId(companyId, job.caseId), ...job.fields, sourceState: snapshot.rows.find(row => row[60]?.userEnteredValue?.stringValue === job.caseId)?.[55]?.userEnteredValue?.stringValue ?? "", sourceRevision: job.source.sourceRevision, holdReasons: job.holdReasons, reviewIssues: job.reviewIssues, ownerReviewRequired: job.ownerReviewRequired })) });
+  const preview = makePreview(snapshot);
   if (mode === "preview") return { ...preview, writes: 0, publications: 0 };
   // An occupied Source C is observed privately, never converted into an
   // application or a native-write queue. Reuse the worker's stable-ID resolver.
@@ -136,14 +138,19 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
   });
   let writes = 0, heldLinked = 0;
   try {
+    // Commit snapshots must start after acquiring the same company lease as
+    // native writers; a pre-lease read may precede a publication ACK.
+    const sourceReadStartedAtMs = Date.now();
+    const snapshot = await readLiveCaseList(companyId, undefined, enable);
     const catalogRef = db.collection("caseListCatalogs").doc(companyId);
     const previousIds = ((await catalogRef.get()).data()?.caseIds ?? []) as string[];
     for (const entry of snapshot.inspected.jobs) {
       const jobId = createJobIdFromPersistedCaseId(companyId, entry.caseId), jobRef = db.collection("jobs").doc(jobId);
       await db.runTransaction(async tx => {
         const [lease, current, config] = await Promise.all([tx.get(leaseRef), tx.get(jobRef), tx.get(db.collection("sheetImportConfigs").doc(companyId))]);
-        if (lease.data()?.tokenId !== tokenId || config.data()?.caseListEnabled !== true) throw new HttpsError("aborted", "案件リスト取込の設定または処理権限が変わりました。");
+        if (lease.data()?.tokenId !== tokenId || config.data()?.caseListEnabled !== true || config.data()?.spreadsheetId !== snapshot.spreadsheetId) throw new HttpsError("aborted", "案件リスト取込の設定または処理権限が変わりました。");
         const old = current.data();
+        if (old && caseListPublicationPending(old)) { heldLinked++; return; }
         if (old && (old.companyId !== companyId || old.caseId !== entry.caseId || !old.caseListSource)) { heldLinked++; return; }
         if (!old && entry.ledgerLinked) { heldLinked++; return; }
         const manualRef = db.collection("caseListManualObservations").doc(jobId), priorManual = (await tx.get(manualRef)).data();
@@ -278,12 +285,13 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
       if (lease.data()?.tokenId !== tokenId || config.data()?.caseListEnabled !== true) throw new HttpsError("aborted", "案件リスト取込の設定または処理権限が変わりました。");
       tx.set(catalogRef, { companyId, caseIds: [...currentIds], digest: snapshot.inspected.digest, observedAt: snapshot.observedAt, completedAt: Timestamp.now(), actorUid });
     });
-    return { ...preview, writes, heldLinked, publications: 0 };
+    return { ...makePreview(snapshot), writes, heldLinked, publications: 0 };
   } finally {
     await db.runTransaction(async tx => { if ((await tx.get(leaseRef)).data()?.tokenId === tokenId) tx.delete(leaseRef); });
   }
 }
 export async function readCaseListPublication(tx: Tx, companyId: string, jobId: string, job: Record<string, unknown>, expectedJobRevision: number | undefined, expectedSourceRevision: string | undefined, confirmation?: CaseListConfirmation, actorUid?: string) {
+  if (caseListPublicationPending(job)) throw new HttpsError("failed-precondition", "原本への募集条件の反映を確認中です。完了まで応募・募集文・転記を保留します。");
   if (!Number.isSafeInteger(expectedJobRevision) || expectedJobRevision !== job.revision || typeof expectedSourceRevision !== "string") throw new HttpsError("failed-precondition", "案件の確認版が変わりました。一覧を更新してください。");
   const config = (await tx.get(db.collection("sheetImportConfigs").doc(companyId))).data();
   if (config?.companyId !== companyId || config.caseListEnabled !== true || config.caseListAssignmentsEnabled !== true) throw new HttpsError("failed-precondition", "案件リストの応募・月別連携はまだ有効化されていません。");
@@ -313,6 +321,9 @@ export async function readCaseListPublication(tx: Tx, companyId: string, jobId: 
   if (!confirmation && (Object.entries(jobFields).some(([key, value]) => job[key] !== value) || job.basePay !== (candidate.payOffer as { dailyWageJPY: number }).dailyWageJPY || !job.publicPayOffer || hashCaseList(job.publicPayOffer) !== hashCaseList(candidate.payOffer))) throw new HttpsError("failed-precondition", "アプリと案件リストの募集条件が一致しません。取り込み直して確認してください。");
   const row = snapshot.rows.find(row => row[60]?.userEnteredValue?.stringValue === entry.caseId);
   if (!row) throw new HttpsError("failed-precondition", "元の募集枠を確認できません。");
+  const promisedPay = require("../src/case-list-monthly-controller.cjs") as { checkPromisedPay(row: unknown, assignment: unknown): void };
+  try { promisedPay.checkPromisedPay({ cells: row }, { authority: "CREW_QUEUE", publicPayOffer: candidate.payOffer }); }
+  catch { throw new HttpsError("failed-precondition", "公開日給と原本の基本給が一致しません。原本の支給条件を確認してから募集してください。"); }
   // This mail bridge has no owner-reviewed public-note/extra-allowance
   // contract yet. A populated or formula-based BM must not silently vanish.
   const recruitmentNotice = row[64];

@@ -8,6 +8,8 @@ const functionsSource = JSON.parse(fs.readFileSync(path.join(root, "firebase.jso
 assert.equal(functionsSource.source, "functions");
 assert.equal(functionsSource.ignore, undefined, "A new upload exclusion needs explicit asset closure review");
 const assets = [
+  ["case-list-publication-core", "case-list-monthly-controller.cjs", ["checkPromisedPay", "transferCapability", "assertSnapshotCoverage"]],
+  ["case-list-publication-worker", "case-list-monthly-adapter.cjs", ["createGoogleSheetsMutationAdapter"]],
   ["case-list-recruitment", "recruitment-mail-core.cjs", ["compose", "subjects", "normalizeNotice"]],
   ["case-list-source-core", "case-list-projection.cjs", ["create"]],
   ["case-list-monthly-reader", "case-list-monthly-compact.cjs", ["createCompactSnapshot"]],

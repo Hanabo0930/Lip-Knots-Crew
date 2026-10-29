@@ -8,4 +8,6 @@
 
 ローカル検証：`PYTHONDONTWRITEBYTECODE=1 python3 scripts/automation/test-staging-worker-migration.py`。実HTTP transportを模した403分類、秘密の除去、未対応応答、書込エラーへの非適用、読取summaryへの接続と副作用停止を検証する。ローカル成功は実環境の拒否理由確認や配備完了とは別。
 
+2026-10-29の実点検：main `efb1000b3badc4bd857c1b9ee8555e0d68028ed5` の正式push CI `40825146079` 全3項目成功後、既存保護環境を通したinspect `40828168301` attempt 1を実行した。guard `123295920865` は成功、点検job `123295982337` はScheduler一覧GETの `API_HTTP_403` で停止した。summaryに `errorInfo` はなく、許可した構造化詳細から拒否理由・permissionを確定できなかった。本文を広く公開して補完せず、具体的な不足ロールも断定しない。後段のEventarc・Pub/Sub・project IAMは未観測。構成完了・旧実行終了・配送保持は未立証で、配備・IAM変更・別identity利用・停止解除は行っていない。同じ条件での反復検査は行わない。
+
 応答仕様の参照：[Google API ErrorReason](https://github.com/googleapis/googleapis/blob/master/google/api/error_reason.proto)、[IAM permission errors](https://docs.cloud.google.com/iam/docs/permission-error-messages)。

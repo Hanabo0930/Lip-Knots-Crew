@@ -6,6 +6,9 @@ const compile = value => ts.transpileModule(value, { compilerOptions: { target: 
 const exported = {};
 Function("exports", compile(fs.readFileSync("apps/admin/src/recruitment-draft.ts", "utf8")))(exported);
 const { recruitmentDraftCandidate, recruitmentDraftRequest, parseRecruitmentDraft, recruitmentSubjects } = exported;
+const ownerHelpers = {}, searchHelpers = {};
+Function("exports", compile(fs.readFileSync("apps/admin/src/owner-source-publication.ts", "utf8")))(ownerHelpers);
+Function("exports", compile(fs.readFileSync("apps/admin/src/job-search.ts", "utf8")))(searchHelpers);
 const base = { id: "synthetic-job", workDate: "2026-11-20", clientName: "合成依頼元", storeName: "合成店舗", makerName: "合成メーカー", menuName: "合成試食", region: "通常", revision: 2, status: "open", publishable: true, sourceReady: true, caseListSource: { sourceRevision: "a".repeat(64) } };
 const request = () => recruitmentDraftRequest([base], [base.id], "通常", recruitmentSubjects[0], "案内");
 let tests = 0;
@@ -59,11 +62,11 @@ await asyncTest("unverified result never reaches clipboard",async()=>{const t=se
 const app = fs.readFileSync("apps/admin/src/App.tsx", "utf8");
 const publicationCode=compile(app.slice(app.indexOf("async function changePublicationAction("),app.indexOf("function loadJobEdit(")));
 async function publish(sourceRegion,enteredRegion=sourceRegion){
-  const state={payloads:[],messages:[],prompts:[]},preview={jobId:base.id,sourceRevision:base.caseListSource.sourceRevision,region:sourceRegion,ownerReviewRequired:false,reviewIssues:[]};
-  const deps={setMessage:m=>state.messages.push(m),functions:{},firebaseConfigured:true,window:{prompt:(message,initial)=>{state.prompts.push(message);return state.prompts.length===1?"10000":enteredRegion;},confirm:()=>true},httpsCallable:(fn,name)=>async payload=>{state.payloads.push({name,payload});return {data:name==="previewShiftImport"?{rows:[preview]}:{updated:[base.id],blocked:[]}};},refreshJobsAfterAction:async()=>{},parsePublicationDateInput:()=>null};
+  const state={payloads:[],messages:[],prompts:[]},preview={jobId:base.id,sourceRevision:base.caseListSource.sourceRevision,sourceState:"募集中",region:sourceRegion,ownerReviewRequired:false,reviewIssues:[]};
+  const deps={...ownerHelpers,isCancelledJob:searchHelpers.isCancelledJob,setMessage:m=>state.messages.push(m),functions:{},firebaseConfigured:true,window:{prompt:(message,initial)=>{state.prompts.push(message);return state.prompts.length===1?"10000":enteredRegion;},confirm:()=>true},httpsCallable:(fn,name)=>async payload=>{state.payloads.push({name,payload});return {data:name==="previewShiftImport"?{rows:[preview]}:{updated:[base.id],blocked:[]}};},refreshJobsAfterAction:async()=>{},parsePublicationDateInput:()=>null};
   const handler=Function(...Object.keys(deps),publicationCode+";return changePublicationAction;")(...Object.values(deps));await handler(base,"publish",()=>true);return state;
 }
-for(const region of ["",undefined," 通常","通常 "])await asyncTest("unconfirmed Source BE stops publication " + region,async()=>{const state=await publish(region);assert.equal(state.payloads.filter(x=>x.name==="updateJobPublication").length,0);assert.match(state.messages.at(-1),/地域.*未確認/);});
+for(const region of ["",undefined," 通常","通常 "])await asyncTest("unconfirmed Source BE stops publication " + region,async()=>{const state=await publish(region);assert.equal(state.payloads.filter(x=>x.name==="updateJobPublication").length,0);assert.match(state.messages.at(-1),/状態・地域|地域.*未確認/);});
 await asyncTest("owner cannot replace BE with a different region",async()=>{const state=await publish("通常","東北");assert.equal(state.payloads.filter(x=>x.name==="updateJobPublication").length,0);assert.match(state.messages.at(-1),/一致しません/);});
 await asyncTest("same BE is explicitly included in publisher confirmation",async()=>{const state=await publish("東北"),sent=state.payloads.find(x=>x.name==="updateJobPublication");assert.equal(sent.payload.caseListConfirmations[base.id].confirmedRegion,"東北");assert.ok(!("region" in sent.payload));});
 assert.match(component,/onAuthStateChanged\(auth/);assert.match(component,/generation.current\+\+; runRef.current = null/);assert.match(component,/募集文に掲載/);assert.match(component,/送信はご自身で/);

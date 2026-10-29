@@ -357,7 +357,8 @@ function checkCaseListSourceGuards(publication = false) {
   return freshCompact || freshLegacy;
 }
 function checkCaseListPublicationRoute(block) {
-  const approvalWrite = 'if(caseListCheck)tx.set(db.collection("caseListApprovals").doc(snap.id),{companyId,jobId:snap.id,...caseListCheck.approval,confirmedAt:now});';
+  const compact = text => text.replace(/\s+/g, "");
+  const approvalWrite = 'finalizer.stageVerifiedCaseListPublication(tx,snap.ref,caseListCheck,session.uid,now,companyId);';
   if (![
     'if(input.action==="publish")for(constsnapofsnapshots){',
     'if(snap.exists&&snap.data()?.companyId===companyId&&snap.data()?.caseListSource){',
@@ -372,6 +373,45 @@ function checkCaseListPublicationRoute(block) {
   ].every(part => block.includes(part)) || block.split(approvalWrite).length !== 2) return false;
   // Permit exactly this company/job-bound private approval sink. All other
   // publication writes retain the original exact three transaction-set limit.
+  const finalizer = compact(sourceFile('functions/src/case-list-publication-finalizer.ts'));
+  const transition = compact(sourceFile('functions/src/case-list-publication.ts'));
+  const planner = compact(sourceFile('functions/src/case-list-publication-core.ts'));
+  if (![
+    'if(caseListCheck){constfinalizer:',
+    'input.expectedRevisions?.[snap.id]!==pendingJob.revision',
+    'caseListSourceModule().requireCaseListExecutive({...session.token});',
+
+    'if(request.data&&Object.hasOwn(request.data,"sourceTransition")){',
+    'returnsourcePublication.updateCaseListSourcePublication(request.data,companyId,session.uid,session.tokenasRecord<string,unknown>);',
+  ].every(part=>block.includes(part))) return false;
+  if (!['tx.set(jobRef,','status:"open",publishable:true,recruitmentStopped:false',
+    'tx.set(db.collection("caseListApprovals").doc(jobRef.id),{companyId,jobId:jobRef.id,...check.approval,actorUid,confirmedAt:now});'
+  ].every(part=>finalizer.includes(part)) || (finalizer.match(/tx\.set\(/g)??[]).length!==2) return false;
+  if (!['requireCaseListExecutive(token);','token.companyId===companyId&&(token.uid??token.sub)===actorUid',
+    'jobIds:z.array(z.string().regex(/^[A-Za-z0-9_-]{1,200}$/)).length(1)',
+    'prepareCaseListPublicationPlan({snapshot,companyId,jobId,job:current,confirmation:review,expectedJobRevision:revision!,expectedSourceRevision:expectedSourceRevision!,',
+    'latest.reviewPlanHash===plan.reviewPlanHash',
+    'current.revision===expectedGenerationRevision',
+    'current.caseListPublicationWrite?.intentHash===expectedIntentHash',
+    'job.revision===expectedGenerationRevision&&job.caseListPublicationWrite?.queueId===queueRef.id',
+    'after.caseListPublicationWrite?.intentHash===expectedIntentHash',
+    'latest.revision===expectedGenerationRevision&&latest.caseListPublicationWrite?.intentHash===expectedIntentHash',
+
+
+    'caseListPublicationWrite:{queueId:queueRef.id,intentHash:captureHash,pending:true,state:"AWAITING_SOURCE_ACK"}',
+    'status:"draft",publishable:false,sourceReady:false,recruitmentStopped:true',
+    'tx.create(actualOperationRef.collection("events").doc("REQUESTED")',
+  ].every(part=>transition.includes(part))) return false;
+  if (!['assertCaseListJobBinding(companyId,jobId,job,source,createJobIdFromPersistedCaseId)',
+    'nativeString(cells[55]!,"確認待ち")&&nativeBlank(cells[56]!)&&nativeBlank(cells[2]!)',
+    'controller.transferCapability(snapshot,row).supported',
+    'confirmedCaseListCandidate(snapshot.rawRows,snapshot.rawLedgerRows,snapshot.catalog.caseId,',
+    'canonical(snapshot.catalog)===canonical(plan.postCatalog)',
+    'canonical(values(cells))===canonical(plan.postSourceValues)',
+  ].every(part=>planner.includes(part))) return false;
+  const preparation = planner.slice(planner.indexOf('exportfunctionprepareCaseListPublicationPlan('), planner.indexOf('exportfunctionassertCaseListPublicationReadback('));
+  const readback = planner.slice(planner.indexOf('exportfunctionassertCaseListPublicationReadback('));
+  if (!preparation.includes('controller.transferCapability(snapshot,row).supported') || !readback.includes('controller.transferCapability(snapshot,row).supported')) return false;
   return (block.replace(approvalWrite, '').match(/tx\.set\(/g) ?? []).length === 3 && checkCaseListSourceGuards(true);
 }
 function checkCaseListApplyRoute(block) {

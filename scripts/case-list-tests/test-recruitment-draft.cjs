@@ -65,8 +65,10 @@ function refreshAuthority(e) {
  });
  await test('public offer is the confirmed 12,000, not financial or source supplier amount',async()=>{
   const e=setup();e.first().basePay=12000;e.first().publicPayOffer.dailyWageJPY=12000;e.approval().payOffer.dailyWageJPY=12000;
+  e.f.rows[1][36]={userEnteredValue:{numberValue:12000},effectiveValue:{numberValue:12000}};refreshAuthority(e);
   const out=await e.run();assert.match(out.body,/★日給12,000円/);assert.equal(e.dbState.writes.length,0);
  });
+ await test('confirmed public wage must match native Source AK basic before recruiting',async()=>{const e=setup();e.first().basePay=12000;e.first().publicPayOffer.dailyWageJPY=12000;e.approval().payOffer.dailyWageJPY=12000;await rejected(()=>e.run(),'failed-precondition');assert.equal(e.dbState.writes.length,0);});
  await test('private Q/finance/BK provenance/receipt is absent in public return',async()=>{
   const e=setup();e.f.rows[1][16]=str('PRIVATE_Q_NOTE_MARKER');e.f.rows[1][19]=str('PRIVATE_AMOUNT_MARKER');
   e.f.rows[1][62]=str(JSON.stringify({schema:'LKCM1_CASE_META_V1',publicEligible:true,headcountConfirmed:true,privateData:'PRIVATE_PROVENANCE_MARKER'}));

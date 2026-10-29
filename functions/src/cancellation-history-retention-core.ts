@@ -42,6 +42,7 @@ export function retainedCancellationAssignment(old:Data|undefined,incoming:Data,
 
 /** The current restore queue does not write a cleared name back. Stop until explicit re-assignment is implemented. */
 export function assertCancelledAssignmentCanRestore(job:Data){
+  if(job.caseListPublicationWrite!=null&&(job.caseListPublicationWrite.pending!==false||!["PUBLISHED","REVOKED"].includes(job.caseListPublicationWrite.state))) throw new Error("原本の募集反映が未確認です。取消履歴を保持し、照合が完了するまで復帰を停止しました。");
   if(job.sourceCancellationClosed===true&&job.cancelled===true&&
     present(job.assignedStaffId)&&(
       typeof job.rawStaffName==="string"&&!job.rawStaffName.trim()||

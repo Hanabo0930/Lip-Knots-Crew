@@ -56,9 +56,9 @@ export default function RecruitmentDraftPanel({ jobs, functions, demo }: { jobs:
     <section aria-label="募集メールの作成" aria-busy={busy}>
       <p>募集開始を確認した案件から、地域ごとに掲載対象を選びます。この選択は募集文の作成だけに使います。送信はご自身で行ってください。</p>
       <div className="export-controls">
-        <label>募集地域<select value={region} disabled={busy} onChange={event => { invalidate(); setRegion(event.target.value); setIds([]); }}><option value="">選択してください</option>{regions.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
-        <label>件名<select value={subject} disabled={busy} onChange={event => { invalidate(); setSubject(event.target.value); }}>{recruitmentSubjects.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
-        <label>お知らせ<textarea value={notice} maxLength={4000} disabled={busy} onChange={event => { invalidate(); setNotice(event.target.value); }} /></label>
+        <label>募集地域<select aria-label="募集地域" value={region} disabled={busy} onChange={event => { invalidate(); setRegion(event.target.value); setIds([]); }}><option value="">選択してください</option>{regions.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+        <label>件名<select aria-label="件名" value={subject} disabled={busy} onChange={event => { invalidate(); setSubject(event.target.value); }}>{recruitmentSubjects.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+        <label>お知らせ<textarea aria-label="お知らせ" value={notice} maxLength={4000} disabled={busy} onChange={event => { invalidate(); setNotice(event.target.value); }} /></label>
       </div>
       {!candidates.length && <p>掲載候補はありません。案件リストの状態・地域を確認し、案件の「募集開始」を完了してください。</p>}
       {region && <div className="table-wrap"><table><thead><tr><th>募集文に掲載</th><th>日付</th><th>店舗</th><th>メーカー・内容</th></tr></thead><tbody>{candidates.filter(job => job.region === region).map(job => <tr key={job.id}>
@@ -69,8 +69,8 @@ export default function RecruitmentDraftPanel({ jobs, functions, demo }: { jobs:
       {message && <p role="status">{message}</p>}
       {draft && <div>
         <p>{draft.region}・{draft.caseCount}件／確認日時 {new Date(draft.validatedAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}</p>
-        <label>作成した件名<input readOnly value={draft.subject} /></label><button className="ghost" disabled={busy} onClick={() => void runDraft("subject")}>再照合して件名をコピー</button>
-        <label>作成した本文<textarea readOnly rows={16} value={draft.body} /></label><button className="ghost" disabled={busy} onClick={() => void runDraft("body")}>再照合して本文をコピー</button>
+        <label>作成した件名<input aria-label="作成した件名" readOnly value={draft.subject} /></label><button className="ghost" disabled={busy} onClick={() => void runDraft("subject")}>再照合して件名をコピー</button>
+        <label>作成した本文<textarea aria-label="作成した本文" readOnly rows={16} value={draft.body} /></label><button className="ghost" disabled={busy} onClick={() => void runDraft("body")}>再照合して本文をコピー</button>
       </div>}
     </section>
   </details>;

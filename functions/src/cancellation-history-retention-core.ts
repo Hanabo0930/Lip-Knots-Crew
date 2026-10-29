@@ -43,7 +43,11 @@ export function retainedCancellationAssignment(old:Data|undefined,incoming:Data,
 /** The current restore queue does not write a cleared name back. Stop until explicit re-assignment is implemented. */
 export function assertCancelledAssignmentCanRestore(job:Data){
   if(job.sourceCancellationClosed===true&&job.cancelled===true&&
-    typeof job.rawStaffName==="string"&&!job.rawStaffName.trim()&&present(job.assignedStaffId)){
+    present(job.assignedStaffId)&&(
+      typeof job.rawStaffName==="string"&&!job.rawStaffName.trim()||
+      // Manual Source ACK has no legacy rawStaffName or monthly sheetRef.
+      // Its historical assignee is not proof that a physical name was restored.
+      job.caseListSource!=null&&job.caseListManualPending!=null&&job.sheetRef==null)){
     throw new Error("取消後に氏名消去を確認済みです。履歴担当を再手配せず、明示的な再手配と氏名反映を確認してください。");
   }
 }

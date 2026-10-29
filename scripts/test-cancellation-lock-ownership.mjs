@@ -75,6 +75,26 @@ for (const moduleName of ['jobs', 'analytics']) {
     return { records, committed, reads, cancel, restore:()=>exports.adminRestoreCancelledJob({auth:{uid:"synthetic-admin",token:{companyId,role:"admin"}},data:{jobId:"old-job",note:"合成復帰"}}) };
   }
   if(moduleName==='analytics'){
+    for(const rawName of [undefined,null]){
+      const caseId='LKCASE_00000000-0000-5000-8000-000000000001',revision='a'.repeat(64);
+      const test=setup(ownLock,{caseId,workDate:dateKey,assignedStaffName:'合成手入力担当',assignedUid:null,
+        applicationUnconfirmed:true,revision:1,...(rawName===undefined?{}:{rawStaffName:rawName}),
+        caseListSource:{version:1,sheetId:2026101601,caseId,sourceRevision:revision,rowRevision:revision,ledgerRevision:revision,bindingHash:revision},
+        source:{type:'case_list',sheetId:2026101601,bindingHash:revision},
+        caseListManualPending:{observationHash:revision,sourceRevision:revision,staffId,dateKey,canonicalStaffName:'合成手入力担当'}});
+      await test.cancel();
+      const cancelled=test.records.get('jobs/old-job'),intent=cancelled.cancellationSheetWrite;
+      assert.equal(intent.sourceAckPending,true);assert.equal(cancelled.rawStaffName,rawName);
+      // Match the real Source importer ACK: it records fresh C-empty/BL-true
+      // proof and releases the lock, but does not add legacy rawStaffName.
+      cancelled.cancellationSheetWrite={...intent,sourceAckPending:false,sourceAckProof:{readStartedAtMs:1300,confirmedAtMs:1400,runId:'synthetic-import',originalRevision:cancelled.revision,originalIdentity:intent.identity,staffId,dateKey}};
+      test.records.get(lockPath).active=false;
+      const before=JSON.stringify([...test.records]),writes=test.committed.length;
+      await assert.rejects(test.restore(),{code:'failed-precondition'},'Verified manual Source cancellation cannot restore an unwritten historical name');
+      assert.equal(JSON.stringify([...test.records]),before);assert.equal(test.committed.length,writes);
+      assert.equal(test.records.get(lockPath).active,false);assert.equal(cancelled.publishable,false);assert.equal(cancelled.recruitmentStopped,true);
+      passed++;
+    }
     for(const mode of ['valid','missing-lock','inactive-lock','unassigned','other-job','lock-company','lock-staff','lock-date','staff-missing','staff-company','staff-inactive','staff-active-missing','date-missing']){
       const test=setup(ownLock,{cancelled:true,status:'cancelled'});
       if(mode==='missing-lock')test.records.delete(lockPath);

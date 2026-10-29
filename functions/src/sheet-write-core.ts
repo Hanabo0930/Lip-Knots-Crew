@@ -128,7 +128,9 @@ export function importedCaseListCancellationSourceAck(old: Record<string, any> |
     typeof cell.userEnteredValue.boolValue === "boolean" && Object.keys(cell.effectiveValue ?? {}).length === 1 && cell.effectiveValue.boolValue === cell.userEnteredValue.boolValue;
   const blank = (value: Record<string, unknown>) => Object.keys(value).every(key => key === "stringValue") &&
     (value.stringValue === undefined || typeof value.stringValue === "string" && !value.stringValue.trim());
-  if (!nativeBoolean(row[0]!) || !nativeBoolean(row[63]!) || !(row[0]!.userEnteredValue.boolValue || row[63]!.userEnteredValue.boolValue) ||
+  // BL is the canonical Source cancellation flag. Legacy A is unrelated to
+  // cancellation and cannot acknowledge it or prevent a valid BL readback.
+  if (!nativeBoolean(row[63]!) || row[63]!.userEnteredValue.boolValue !== true ||
     !blank(row[2]!.userEnteredValue ?? {}) || !blank(row[2]!.effectiveValue ?? {})) refuse();
   const dateValue = Object.hasOwn(row[1]!.userEnteredValue ?? {}, "formulaValue") ? row[1]!.effectiveValue : row[1]!.userEnteredValue;
   const nativeDate = typeof dateValue?.numberValue === "number" && Number.isInteger(dateValue.numberValue) && dateValue.numberValue >= 0 && dateValue.numberValue < 2958466

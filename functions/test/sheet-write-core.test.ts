@@ -44,7 +44,7 @@ cancelledPending.cancellationSheetWrite = { queueId: "cancel-queue", operation: 
   sourceAckVersion: 1, sourceAckPending: true, sourceAckRequestedAtMs: 123, sourceAckJobRevision: 4 };
 const sourceRow: Record<string, any>[] = Array.from({ length: 65 }, () => ({}));
 sourceRow[0] = literalCell(true); sourceRow[1] = literalCell("2026-11-20");
-sourceRow[60] = literalCell(pendingCase.caseId); sourceRow[63] = literalCell(false);
+sourceRow[60] = literalCell(pendingCase.caseId); sourceRow[63] = literalCell(true);
 const readObservation = { schema: "LK_CASE_LIST_CANCEL_SOURCE_READ_V1" as const, companyId: "company", jobId: "job-one", caseId: pendingCase.caseId,
   dateKey: "2026-11-20", workDate: "2026-11-20", source: { ...pendingCase.caseListSource }, rowCells: sourceRow,
   queue: { id: "cancel-queue", companyId: "company", jobId: "job-one", operation: "job.cancel", idempotencyKey: "job.cancel:job-one:cancel-queue", actorUid: "owner", updates: { cancelled: true, cancellationReason: "owner cancellation" } },
@@ -61,7 +61,11 @@ assert.equal(importedCaseListCancellationSourceAck(cancelledPending, readObserva
 assert.equal(importedCaseListCancellationSourceAck({ ...cancelledPending, caseListManualSelection: { queueId: "selected" } }, readObservation, 124, hashRead), false);
 assert.equal(importedCaseListCancellationSourceAck({ ...cancelledPending, sheetRef: { currentRow: 2 } }, readObservation, 124, hashRead), false);
 for (const change of [
-  (r: typeof readObservation) => { r.rowCells[0] = literalCell(false); },
+  // A remains checked: it must never substitute for canonical BL cancellation.
+  (r: typeof readObservation) => { r.rowCells[63] = literalCell(false); },
+  (r: typeof readObservation) => { r.rowCells[63] = {}; },
+  (r: typeof readObservation) => { r.rowCells[63] = { userEnteredValue: { formulaValue: '=TRUE()' }, effectiveValue: { boolValue: true } }; },
+  (r: typeof readObservation) => { r.rowCells[63] = { userEnteredValue: { boolValue: true }, effectiveValue: { boolValue: false } }; },
   (r: typeof readObservation) => { r.rowCells[2] = literalCell("remaining raw-alias"); },
   (r: typeof readObservation) => { r.rowCells[2] = { userEnteredValue: { formulaValue: '=IF(TRUE,"", "alias")' }, effectiveValue: { stringValue: "" } }; },
   (r: typeof readObservation) => { r.rowCells[60] = literalCell("other-case"); },
@@ -79,4 +83,6 @@ assert.throws(() => importedCaseListCancellationSourceAck(cancelledPending, read
 assert.throws(() => importedCaseListCancellationSourceAck({ ...cancelledPending, revision: 5 }, readObservation, 124, hashRead));
 const blOnly = JSON.parse(JSON.stringify(readObservation)); blOnly.rowCells[0] = literalCell(false); blOnly.rowCells[63] = literalCell(true); hashObservation(blOnly);
 assert.equal(importedCaseListCancellationSourceAck(cancelledPending, blOnly, 124, hashRead), true);
+const unrelatedA = JSON.parse(JSON.stringify(readObservation)); unrelatedA.rowCells[0] = literalCell("legacy control"); hashObservation(unrelatedA);
+assert.equal(importedCaseListCancellationSourceAck(cancelledPending, unrelatedA, 124, hashRead), true);
 console.log("Fresh preselection manual Source cancellation ACK validates literal cancellation/blank name, raw alias history, case/day/queue/lock identity and hashes; selected monthly work stays held.");

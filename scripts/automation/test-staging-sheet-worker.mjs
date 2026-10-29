@@ -58,6 +58,8 @@ try {
     ['functions/src/case-list-monthly-worker.ts', 'current.writeVerificationRequired !== false', 'false'],
     ['functions/src/case-list-monthly-worker.ts', 'const sheets = owner ? null : google.sheets', 'const sheets = google.sheets'],
     ['functions/src/case-list-monthly-reader.ts', 'metadata.spreadsheetId !== spreadsheetId', 'false'],
+    ['functions/src/sheet-write-core.ts', 'if (!nativeBoolean(row[63]!) || row[63]!.userEnteredValue.boolValue !== true ||', 'if (!nativeBoolean(row[63]!) || !(row[0]?.userEnteredValue?.boolValue || row[63]!.userEnteredValue.boolValue) ||'],
+    ['functions/src/sheet-write-core.ts', 'if (!nativeBoolean(row[63]!) || row[63]!.userEnteredValue.boolValue !== true ||', 'if (false ||'],
   ]) {
     assert.ok(sources[file].includes(before));
     check(() => assert.throws(() => assertRetryWorkerSource(name => name === file ? sources[name].replace(before, after) : sources[name]), /SOURCE_NOT_REVIEWED/));

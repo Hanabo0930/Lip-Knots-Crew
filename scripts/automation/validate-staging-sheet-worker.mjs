@@ -23,7 +23,8 @@ export const retryWorkerSourcePins = Object.freeze({
   "functions/src/case-list-monthly-compact.cjs": "6d40516a62f7d0d7938b060d229f7e6a142ba174b37e494bcec0a051c8144d87",
   "functions/src/case-list-projection.cjs": "059f39d152981e9e9566c276332f9db7da6442dd99fe3ec12e28c587ff9a3326",
   "functions/src/case-id.ts": "7c03676a32947d8c7a81a8a5b7600c1870ccd2c41b036362bf3e8dd475422d87",
-  "functions/src/sheet-write-core.ts": "67e2e88a80171a6e20e076594b117c4e7fc3257b04ec41afacae6a671d84e764",
+  // Reviewed canonical-BL-only cancellation ACK; pure validation, no new I/O.
+  "functions/src/sheet-write-core.ts": "3a974b677e83721c4f69f8afeea4016d6fa28e98750266b7486c6e29757cf598",
   "functions/src/system-safety.ts": "25debd6fa931ce85b72f82d4f7e499db99b0054576af0f07a91ffb8917e61ce3",
   "functions/src/sheet-reader.ts": "9362b67e922d89661a26999c4cb44c5394a199635627b69e0de5057a9202dce0"
 });

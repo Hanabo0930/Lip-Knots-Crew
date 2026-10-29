@@ -5,7 +5,7 @@ import { HttpsError } from "firebase-functions/v2/https";
 import { db } from "./firebase";
 import { createReadOnlySheetsClient } from "./sheet-reader";
 import { createJobIdFromPersistedCaseId } from "./case-id";
-import { importedCaseListCancellationSourceAck } from "./sheet-write-core";
+import { importedCaseListCancellationSourceAck, isUnassignedSourceCancellation, sourceCancellationUnassigned } from "./sheet-write-core";
 import { assertProductionOperational } from "./system-safety";
 import { verifyCaseListTransferCapability } from "./case-list-transfer-capability";
 import { readCaseListMonthlySnapshot } from "./case-list-monthly-reader";
@@ -223,7 +223,13 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
             entry.source.ledgerRevision === old.caseListSource.ledgerRevision && Array.isArray(intent.expectedSourceAfter) && intent.expectedSourceAfter.length === 65 &&
             intent.expectedSourceAfter[2]?.userEnteredValue?.stringValue === old.assignedStaffName && hashCaseList(actualRow.map(cell => cell.userEnteredValue ?? {})) === hashCaseList(intent.expectedSourceAfter.map((cell: Cell) => cell.userEnteredValue ?? {})));
         }
-        const assignedSourceChanged = preserveAssignment && old?.caseListSource?.rowRevision !== entry.source.rowRevision && !ownPendingProjection;
+        // Cancellation keeps the history row, but an explicitly unassigned
+        // capture must not acquire fictitious assignment-review flags. Keep its
+        // preimage/revision below and leave all ACK authority to the native
+        // full-CellData journal; importing BL=true is never an acknowledgement.
+        const unassignedCancellation = old?.sourceCancellationClosed === true && old.status === "cancelled" && old.cancelled === true &&
+          isUnassignedSourceCancellation(old.cancellationSheetWrite?.caseListCancellation) && sourceCancellationUnassigned(old);
+        const assignedSourceChanged = preserveAssignment && !unassignedCancellation && old?.caseListSource?.rowRevision !== entry.source.rowRevision && !ownPendingProjection;
         const pendingLedgerChanged = Boolean(pendingQueueId && old?.caseListSource?.ledgerRevision !== entry.source.ledgerRevision);
         const keepNativeConfirmation = preserveAssignment && !assignedSourceChanged && old?.applicationUnconfirmed === false && old.assignmentUnresolved !== true && old.assignmentSheetWrite?.nativeAck?.status === "MONTHLY_READBACK_VERIFIED";
         const keepCancellationPreimage = old?.cancellationSheetWrite?.sourceAckPending === true && !sourceCancellationConfirmed;

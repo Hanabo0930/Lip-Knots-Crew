@@ -131,8 +131,8 @@ export const getSheetWriteIssues = onCall(async (request) => {
         sourceWriteVerified: false,
         acknowledgedAt: serializeTimestamp(data.acknowledgedAt),
         acknowledgedNote: typeof data.acknowledgedNote === "string" ? data.acknowledgedNote : "",
-        sourceCancellation: ["job.cancel", "job.cancel.v2"].includes(data.operation) && data.caseListCancellation?.schema === "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1",
-        canReconcile: data.operation === "case_list.assign" && !manualTransferPending || ["job.cancel", "job.cancel.v2"].includes(data.operation) && data.caseListCancellation?.schema === "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1" && data.writeVerificationRequired === true,
+        sourceCancellation: ["job.cancel", "job.cancel.v2"].includes(data.operation) && ["LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1", "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V2"].includes(data.caseListCancellation?.schema),
+        canReconcile: data.operation === "case_list.assign" && !manualTransferPending || ["job.cancel", "job.cancel.v2"].includes(data.operation) && ["LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1", "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V2"].includes(data.caseListCancellation?.schema) && data.writeVerificationRequired === true,
         manualTransferPending,
         canSelectMonthlyTransfer: executive && manualTransferPending,
         manualTransferReviewKey: manualTransferPending && /^[a-f0-9]{64}$/.test(data.caseListPhase?.continuationHash ?? "") ? data.caseListPhase.continuationHash : null,
@@ -221,7 +221,7 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
     const snapshot = await ref.get();
     if (!snapshot.exists || snapshot.data()?.companyId !== companyId) throw new HttpsError("not-found", "書込エラーが見つかりません。");
     const data = snapshot.data()!;
-    if (["job.cancel", "job.cancel.v2"].includes(data.operation) && data.caseListCancellation?.schema === "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1") {
+    if (["job.cancel", "job.cancel.v2"].includes(data.operation) && ["LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1", "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V2"].includes(data.caseListCancellation?.schema)) {
       const cancellation: typeof import("./case-list-source-cancellation") = require("./case-list-source-cancellation");
       return cancellation.processCaseListSourceCancellation(ref, undefined, { actorUid: session.uid, token: session.token });
     }
@@ -238,7 +238,7 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
       throw new HttpsError("not-found", "書込エラーが見つかりません。");
     }
     const data = snap.data()!;
-    if (data.caseListCancellation?.schema === "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1") throw new HttpsError("failed-precondition", "案件リストの取消は確認メモで完了にできません。保存結果を再照合してください。");
+    if (["LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1", "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V2"].includes(data.caseListCancellation?.schema)) throw new HttpsError("failed-precondition", "案件リストの取消は確認メモで完了にできません。保存結果を再照合してください。");
     if (data.operation === "case_list.assign") throw new HttpsError("failed-precondition", "案件リストの移行待ちは確認メモで完了にできません。対象を選択して移行してください。");
     if (data.status === "acknowledged") {
       if (data.acknowledgedBy === session.uid && data.acknowledgedNote === input.note) return;

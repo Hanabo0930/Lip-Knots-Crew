@@ -3,7 +3,8 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { google } from "googleapis";
 import { db } from "./firebase";
 import { createJobIdFromPersistedCaseId } from "./case-id";
-import { cancellationSheetWriteIdentity } from "./sheet-write-core";
+import { cancellationSheetWriteIdentity, isUnassignedSourceCancellation, sourceCancellationUnassigned, sourceCancellationPublicationPointer } from "./sheet-write-core";
+import { caseListPublicationPending } from "./case-list-publication-state";
 import { assertExecutive, canonical, configuredCaseListSource, hashCaseList, publicCaseListSource, caseListBindingHash } from "./case-list-source-core";
 import { readCaseListMonthlySnapshot } from "./case-list-monthly-reader";
 import { assertKnownCaseListContinuation } from "./case-list-monthly-worker";
@@ -42,9 +43,10 @@ function dateValue(cell: Data): string {
  * never permission to ignore a selected or uncertain monthly operation. */
 export function assertCaseListSourceCancellationAuthority(queueId: string, queue: Data, job: Data, config: Data, mapping: Data, day: Data, staff: Data, ownerReadOnly = false): { capture: Data; spreadsheetId: string } {
   const capture = object(queue.caseListCancellation), saved = object(job.cancellationSheetWrite), source = object(job.caseListSource);
+  const unassigned = isUnassignedSourceCancellation(capture);
   need(ID.test(queueId) && ["job.cancel", "job.cancel.v2"].includes(queue.operation) && ID.test(queue.companyId ?? "") && ID.test(queue.jobId ?? "") && ID.test(queue.actorUid ?? ""), "SOURCE_CANCEL_QUEUE_INVALID");
-  need(capture.schema === "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1" && capture.queueId === queueId && capture.jobId === queue.jobId && capture.companyId === queue.companyId && capture.actorUid === queue.actorUid &&
-    CASE.test(capture.caseId ?? "") && ID.test(capture.staffId ?? "") && typeof capture.staffName === "string" && capture.staffName.trim() &&
+  need((unassigned ? capture.staffId === null && capture.staffName === null && capture.assignedUid === null && capture.priorAssignment === null && capture.manualPending === null && ["draft", "open", "stopped"].includes(capture.beforeStatus) : capture.schema === "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1" && ID.test(capture.staffId ?? "") && typeof capture.staffName === "string" && capture.staffName.trim()) && capture.queueId === queueId && capture.jobId === queue.jobId && capture.companyId === queue.companyId && capture.actorUid === queue.actorUid &&
+    CASE.test(capture.caseId ?? "") &&
     /^2026-(?:11|12)-\d{2}$/.test(capture.dateKey ?? "") && new Date(capture.dateKey + "T00:00:00Z").toISOString().slice(0, 10) === capture.dateKey && capture.workDate === capture.dateKey &&
     Number.isSafeInteger(capture.beforeJobRevision) && capture.beforeJobRevision >= 0 && capture.cancelledJobRevision === capture.beforeJobRevision + 1 &&
     capture.ownerSelected === false && canonical(saved.caseListCancellation ?? null) === canonical(capture), "SOURCE_CANCEL_CAPTURE_INVALID");
@@ -55,7 +57,7 @@ export function assertCaseListSourceCancellationAuthority(queueId: string, queue
     [source.sourceRevision, source.rowRevision, source.ledgerRevision, source.bindingHash].every(value => typeof value === "string" && HASH.test(value)) && source.bindingHash === caseListBindingHash(spreadsheetId) &&
     canonical(source) === canonical(capture.source) && job.sheetRef == null && job.caseListManualSelection == null && job.assignmentSheetWrite == null, "SOURCE_CANCEL_JOB_BINDING_CHANGED");
   need(job.status === "cancelled" && job.cancelled === true && job.sourceCancellationClosed === true && job.sourceMissing !== true && job.revision === capture.cancelledJobRevision &&
-    job.assignedStaffId === capture.staffId && job.assignedStaffName === capture.staffName && (job.assignedUid ?? null) === capture.assignedUid && job.dateKey === capture.dateKey && job.workDate === capture.workDate &&
+    (unassigned ? sourceCancellationUnassigned(job) && !caseListPublicationPending(job) && canonical(sourceCancellationPublicationPointer(job)) === canonical(capture.publicationPointer) : job.assignedStaffId === capture.staffId && job.assignedStaffName === capture.staffName && (job.assignedUid ?? null) === capture.assignedUid) && job.dateKey === capture.dateKey && job.workDate === capture.workDate &&
     job.cancelledBy === capture.actorUid && job.publishable === false && job.recruitmentStopped === true && saved.queueId === queueId && saved.operation === queue.operation &&
     saved.identity === capture.identity && saved.identity === cancellationSheetWriteIdentity(job) && saved.sourceAckVersion === 1 && saved.sourceAckPending === true && saved.sourceAckJobRevision === job.revision &&
     Number.isSafeInteger(saved.sourceAckRequestedAtMs) && saved.sourceAckRequestedAtMs >= 0 && queue.idempotencyKey === `${queue.operation}:${queue.jobId}:${queueId}` &&
@@ -68,13 +70,26 @@ export function assertCaseListSourceCancellationAuthority(queueId: string, queue
     expected.cancellationReasonCategory = cancellationReasonLabels[reason]; expected.cancellationFinancialTreatment = cancellationTreatmentLabels[treatment];
   }
   need(canonical(queue.updates ?? {}) === canonical(expected) && canonical(queue.expected ?? {}) === "{}", "SOURCE_CANCEL_REQUEST_CHANGED");
-  need(day?.active === true && day.companyId === queue.companyId && day.jobId === queue.jobId && day.staffId === capture.staffId && day.dateKey === capture.dateKey &&
+  if (!unassigned) need(day?.active === true && day.companyId === queue.companyId && day.jobId === queue.jobId && day.staffId === capture.staffId && day.dateKey === capture.dateKey &&
     staff?.companyId === queue.companyId && staff.active === true && typeof staff.displayName === "string" && staff.displayName.trim(), "SOURCE_CANCEL_STAFF_OR_DAY_LOCK_CHANGED");
   return { capture, spreadsheetId };
 }
 
+/** Nullable authority is deliberately limited to one ordinary single-day slot.
+ * Headcount proof must be present in the current native metadata, even when a
+ * historical publication was approved; unsupported shapes remain held. */
+function assertUnassignedShape(cells: Data[], capture: Data): void {
+  const text = (cell: Data) => cell.effectiveValue?.stringValue ?? cell.userEnteredValue?.stringValue ?? "";
+  let metadata: Data = {}; try { metadata = JSON.parse(text(cells[62]!)); } catch { /* held below */ }
+  need(blank(cells[2]!) && !(cells[2]!.chipRuns?.length) && ["単日", "SINGLE"].includes(text(cells[58]!)) && blank(cells[59]!) &&
+    metadata.schema === "LKCM1_CASE_META_V1" && metadata.headcountConfirmed === true &&
+    !/研修|OJT|ラウンダー|出口調査|グレイス|グレース/i.test([text(cells[10]!), text(cells[11]!), text(cells[13]!), text(cells[16]!)].join(" ")) &&
+    text(cells[55]!) === (capture.publicationPointer?.state === "PUBLISHED" ? "募集中" : "確認待ち"), "SOURCE_CANCEL_UNASSIGNED_SHAPE_UNSUPPORTED");
+}
+
 /** Only C and BL are writable. Everything else is compared as full writable
- * CellData, so formulas, manually entered fees, notes and formatting survive. */
+ * CellData, so formulas, manually entered fees, notes and formatting survive.
+ * UNASSIGNED_SOURCE only writes BL; its blank C CellData is preserved exactly. */
 export function assertCaseListSourceCancellationImage(snapshot: Snapshot, capture: Data, expectedCatalog: Data, before?: Data[]): { row: number; cells: Data[] } {
   need(snapshot.spreadsheetId === expectedCatalog.spreadsheetId && snapshot.isolated === false, "SOURCE_CANCEL_SNAPSHOT_BOOK_CHANGED");
   core.assertSnapshotCoverage(snapshot, capture.caseId, { sha256: sha });
@@ -89,13 +104,15 @@ export function assertCaseListSourceCancellationImage(snapshot: Snapshot, captur
   let metadata: Data = {}; try { metadata = JSON.parse(String(text(ledger[0]![19]))); } catch { /* held below */ }
   need(metadata.schema === "LK_HISTORY_CORE_SNAPSHOT_V1" && metadata.caseId === capture.caseId && metadata.monthly == null &&
     ["未手配", "未手配・募集継続"].includes(String(text(ledger[0]![8]))) && !text(ledger[0]![9]) && !text(ledger[0]![10]), "SOURCE_CANCEL_LEDGER_ASSIGNED_OR_ENDED");
+  const unassigned = isUnassignedSourceCancellation(capture);
+  if (unassigned) assertUnassignedShape(cells, capture);
   if (!before) {
-    need(canonical(snapshot.catalog) === canonical(expectedCatalog) && nativeString(cells[2]!, capture.staffName) && nativeBool(cells[63]!, false), "SOURCE_CANCEL_PREIMAGE_CHANGED");
+    need(canonical(snapshot.catalog) === canonical(expectedCatalog) && (unassigned ? blank(cells[2]!) : nativeString(cells[2]!, capture.staffName)) && nativeBool(cells[63]!, false), "SOURCE_CANCEL_PREIMAGE_CHANGED");
   } else {
     need(before.length === 65 && blank(cells[2]!) && nativeBool(cells[63]!, true), "SOURCE_CANCEL_AFTERIMAGE_NOT_VERIFIED");
     const actual = writable(cells), expected = copy(before);
     // Clearing C may be returned by Google as an omitted value or empty text.
-    delete actual[2]!.userEnteredValue; delete expected[2]!.userEnteredValue;
+    if (!unassigned) { delete actual[2]!.userEnteredValue; delete expected[2]!.userEnteredValue; }
     expected[63] = { ...expected[63], userEnteredValue: { boolValue: true } };
     need(canonical(actual) === canonical(expected), "SOURCE_CANCEL_UNRELATED_CELLDATA_CHANGED");
   }
@@ -109,8 +126,52 @@ export function assertCaseListSourceCancellationIntent(intent: Data, capture: Da
     intent.sourceBefore.every((cell: Data, index: number) => cell && typeof cell === "object" && !Array.isArray(cell) && Object.keys(cell).every(key => WRITABLE.includes(key)) && canonical(cell.userEnteredValue ?? {}) === canonical(intent.sourceBeforeValues[index]?.userEnteredValue ?? {})) &&
     intent.sourceBeforeValues.every((cell: Data) => cell && typeof cell === "object" && !Array.isArray(cell) && Object.keys(cell).every(key => ["userEnteredValue", "effectiveValue"].includes(key))) &&
     hashCaseList({ schema: "LK_CASE_CONTENT_REVISION_V1", jobId: capture.caseId, cells: intent.sourceBeforeValues }) === expectedCatalog.rowRevision &&
-    nativeString(intent.sourceBeforeValues[2], capture.staffName) && nativeBool(intent.sourceBeforeValues[63], false) && nativeString(intent.sourceBeforeValues[60], capture.caseId) && dateValue(intent.sourceBeforeValues[1]) === capture.dateKey,
+    (isUnassignedSourceCancellation(capture) ? blank(intent.sourceBeforeValues[2]) : nativeString(intent.sourceBeforeValues[2], capture.staffName)) && nativeBool(intent.sourceBeforeValues[63], false) && nativeString(intent.sourceBeforeValues[60], capture.caseId) && dateValue(intent.sourceBeforeValues[1]) === capture.dateKey,
   "SOURCE_CANCEL_INTENT_PREIMAGE_INVALID");
+}
+
+/** A terminal public pointer alone never authorizes cancellation. Re-read its
+ * immutable private generation on every authorization and before the ACK. */
+async function assertUnassignedPublication(tx: Tx, queue: Data, capture: Data): Promise<void> {
+  const pointer = capture.publicationPointer;
+  if (pointer == null) { need(capture.beforeStatus === "draft", "SOURCE_CANCEL_PUBLICATION_REQUIRED"); return; }
+  need(ID.test(pointer.queueId ?? "") && HASH.test(pointer.intentHash ?? "") && pointer.pending === false && ["PUBLISHED", "REVOKED"].includes(pointer.state), "SOURCE_CANCEL_PUBLICATION_POINTER_INVALID");
+  const ref = db.collection("caseListMonthlyOperations").doc(sha(queue.companyId + "|" + pointer.queueId));
+  const [qSnap, opSnap, ...records] = await Promise.all([tx.get(db.collection("sheetSyncQueue").doc(pointer.queueId)), tx.get(ref),
+    ...["REQUESTED", "INTENT", "WRITE_STARTED", "ACK", "REVOKED"].map(stage => tx.get(ref.collection("events").doc(stage)))]);
+  const q = qSnap.data(), op = opSnap.data(), events: Data = {};
+  for (const [index, stage] of ["REQUESTED", "INTENT", "WRITE_STARTED", "ACK", "REVOKED"].entries()) {
+    const record = records[index]!.data();
+    if (!record) continue;
+    need(record.companyId === queue.companyId && record.queueId === pointer.queueId && record.payloadHash === hashCaseList(record.payload), "SOURCE_CANCEL_PUBLICATION_EVENT_INVALID");
+    events[stage] = record.payload;
+  }
+  const pub = object(q?.caseListPublication), pubHash = hashCaseList(pub);
+  need(q && op && q.operation === "case_list.publish" && q.companyId === queue.companyId && q.jobId === queue.jobId &&
+    pub.schema === "LK_CASE_LIST_PUBLICATION_CAPTURE_V1" && pub.companyId === queue.companyId && pub.jobId === queue.jobId && pub.queueId === pointer.queueId && pub.caseId === capture.caseId &&
+    pub.actorUid === q.actorUid && ID.test(pub.actorUid ?? "") && pubHash === pointer.intentHash && canonical(events.REQUESTED) === canonical(pub) &&
+    HASH.test(pub.reviewPlanHash ?? "") && pub.requestKey === pub.reviewPlanHash && pub.conditionsHash === hashCaseList(pub.confirmation) &&
+    Number.isSafeInteger(pub.beforeJobRevision) && pub.beforeJobRevision >= 0 && pub.queuedJobRevision === pub.beforeJobRevision + 1 &&
+    capture.beforeJobRevision >= pub.queuedJobRevision && q.idempotencyKey === `case_list.publish:${queue.jobId}:${pub.requestKey}` &&
+    canonical(q.updates ?? {}) === "{}" && canonical(q.expected ?? {}) === "{}" && canonical(q.styles ?? {}) === "{}" &&
+    op.schema === "LK_CASE_LIST_PUBLICATION_OPERATION_V1" && op.companyId === queue.companyId && op.jobId === queue.jobId && op.queueId === pointer.queueId && op.captureHash === pubHash,
+  "SOURCE_CANCEL_PUBLICATION_GENERATION_INVALID");
+  for (const stage of ["INTENT", "WRITE_STARTED", "ACK", "REVOKED"]) if (events[stage]) need(events[stage].stage === stage && events[stage].operationId === pointer.queueId && events[stage].caseId === capture.caseId && events[stage].captureHash === pubHash, "SOURCE_CANCEL_PUBLICATION_EVENT_SCOPE");
+  if (pointer.state === "PUBLISHED") {
+    const intent = events.INTENT, ack = events.ACK, plan = object(intent?.plan), withoutHash = { ...plan }; delete withoutHash.reviewPlanHash;
+    need(capture.beforeStatus === "open" && q.status === "completed" && op.status === "completed" && !events.REVOKED &&
+      intent?.schema === "LK_CASE_LIST_PUBLICATION_INTENT_V1" && intent.companyId === queue.companyId && intent.jobId === queue.jobId && intent.queueId === pointer.queueId &&
+      plan.schema === "LK_CASE_LIST_PUBLICATION_PLAN_V1" && plan.companyId === queue.companyId && plan.jobId === queue.jobId && plan.caseId === capture.caseId &&
+      plan.reviewPlanHash === pub.reviewPlanHash && hashCaseList(withoutHash) === pub.reviewPlanHash &&
+      events.WRITE_STARTED?.intentHash === hashCaseList(intent) && ack?.schema === "LK_CASE_LIST_PUBLICATION_ACK_V1" && ack.intentHash === hashCaseList(intent) &&
+      pointer.ackHash === hashCaseList(ack) && op.acceptedAckHash === pointer.ackHash && canonical(ack.postSource) === canonical(capture.source) &&
+      canonical(publicCaseListSource(plan.postCatalog)) === canonical(capture.source) && canonical(publicCaseListSource(plan.preCatalog)) === canonical(pub.source), "SOURCE_CANCEL_PUBLICATION_ACK_INVALID");
+  } else {
+    const revoked = events.REVOKED;
+    need(["draft", "stopped"].includes(capture.beforeStatus) && q.status === "cancelled" && op.status === "revoked" && !events.WRITE_STARTED && !events.ACK &&
+      revoked?.schema === "LK_CASE_LIST_PUBLICATION_REVOCATION_V1" && revoked.companyId === queue.companyId && revoked.jobId === queue.jobId && revoked.queueId === pointer.queueId &&
+      revoked.afterWriteStarted === false && canonical(pub.source) === canonical(capture.source), "SOURCE_CANCEL_PUBLICATION_REVOCATION_UNCERTAIN");
+  }
 }
 
 /** Invoked by the existing queue worker after its pause/claim boundary. The
@@ -134,19 +195,24 @@ export async function processCaseListSourceCancellation(queueRef: Ref, claimedQu
     const queue = queueSnap.data(), job = jobSnap.data(), config = configSnap.data(), mapping = mapSnap.data(), lease = leaseSnap.data(), operation = operationSnap.data();
     need(queue && job && config && mapping && fingerprint(queue) === beforeFingerprint && !privateRef.exists, "SOURCE_CANCEL_TRUSTED_DOCUMENT_CHANGED");
     const c = object(queue.caseListCancellation);
-    need(ID.test(c.staffId ?? "") && typeof c.dateKey === "string" && /^2026-(?:11|12)-\d{2}$/.test(c.dateKey), "SOURCE_CANCEL_STAFF_ID_INVALID");
-    const dayRef = db.collection("staffDayLocks").doc(`${queue.companyId}_${c.staffId}_${c.dateKey}`);
-    const [daySnap, staffSnap, actorSnap] = await Promise.all([tx.get(dayRef), tx.get(db.collection("staffProfiles").doc(c.staffId)), tx.get(db.collection("authIdentities").doc(queue.actorUid))]);
+    const unassigned = isUnassignedSourceCancellation(c);
+    need((unassigned || ID.test(c.staffId ?? "")) && typeof c.dateKey === "string" && /^2026-(?:11|12)-\d{2}$/.test(c.dateKey), "SOURCE_CANCEL_STAFF_ID_INVALID");
+    const dayRef = unassigned ? null : db.collection("staffDayLocks").doc(`${queue.companyId}_${c.staffId}_${c.dateKey}`);
+    const actorSnap = await tx.get(db.collection("authIdentities").doc(queue.actorUid));
     const actor = actorSnap.data();
     need(!actorSnap.exists || actor?.active === true && actor.companyId === queue.companyId, "SOURCE_CANCEL_ACTOR_REVOKED");
-    const checked = assertCaseListSourceCancellationAuthority(queueRef.id, queue, job, config, mapping, object(daySnap.data()), object(staffSnap.data()), !!owner);
+    const [daySnap, staffSnap] = unassigned ? [null, null] : await Promise.all([tx.get(dayRef!), tx.get(db.collection("staffProfiles").doc(c.staffId))]);
+    const checked = assertCaseListSourceCancellationAuthority(queueRef.id, queue, job, config, mapping, object(daySnap?.data()), object(staffSnap?.data()), !!owner);
     let expectedCatalog: Data;
-    if (c.manualPending) {
+    if (unassigned) {
+      await assertUnassignedPublication(tx, queue, c);
+      expectedCatalog = { ...c.source, spreadsheetId: checked.spreadsheetId }; delete expectedCatalog.bindingHash;
+    } else if (c.manualPending) {
       need(c.priorAssignment == null && c.assignedUid == null && canonical(c.manualPending) === canonical(job.caseListManualPending ?? null), "SOURCE_CANCEL_MANUAL_CAPTURE_CHANGED");
       const observed = (await tx.get(db.collection("caseListManualObservations").doc(queue.jobId))).data(), pending = c.manualPending;
       need(observed?.schema === "LK_CASE_LIST_MANUAL_OBSERVATION_V1" && observed.origin === "SOURCE_MANUAL" && observed.companyId === queue.companyId && observed.jobId === queue.jobId && observed.caseId === c.caseId &&
         observed.selected === false && observed.clientNameUpConfirmed === false && observed.observationHash === pending.observationHash && HASH.test(pending.observationHash ?? "") &&
-        observed.staffId === c.staffId && observed.sourceStaffName === c.staffName && observed.dateKey === c.dateKey && observed.canonicalStaffName === staffSnap.data()?.displayName &&
+        observed.staffId === c.staffId && observed.sourceStaffName === c.staffName && observed.dateKey === c.dateKey && observed.canonicalStaffName === staffSnap?.data()?.displayName &&
         pending.staffId === c.staffId && pending.dateKey === c.dateKey && pending.sourceRevision === c.source.sourceRevision && canonical(observed.source) === canonical(c.source), "SOURCE_CANCEL_MANUAL_OBSERVATION_CHANGED");
       expectedCatalog = { ...c.source, spreadsheetId: checked.spreadsheetId }; delete expectedCatalog.bindingHash;
     } else {
@@ -229,7 +295,7 @@ export async function processCaseListSourceCancellation(queueRef: Ref, claimedQu
       const sheets = google.sheets({ version: "v4", auth: new google.auth.GoogleAuth({ scopes: ["https://www.googleapis.com/auth/spreadsheets"] }) });
       need(++nativeBatches === 1, "SOURCE_CANCEL_NATIVE_BUDGET");
       await sheets.spreadsheets.batchUpdate({ spreadsheetId: trusted.spreadsheetId, requestBody: { requests: [
-        { updateCells: { range: { sheetId: 2026101601, startRowIndex: latest.row - 1, endRowIndex: latest.row, startColumnIndex: 2, endColumnIndex: 3 }, rows: [{ values: [{}] }], fields: "userEnteredValue" } },
+        ...(isUnassignedSourceCancellation(trusted.capture) ? [] : [{ updateCells: { range: { sheetId: 2026101601, startRowIndex: latest.row - 1, endRowIndex: latest.row, startColumnIndex: 2, endColumnIndex: 3 }, rows: [{ values: [{}] }], fields: "userEnteredValue" } }]),
         { updateCells: { range: { sheetId: 2026101601, startRowIndex: latest.row - 1, endRowIndex: latest.row, startColumnIndex: 63, endColumnIndex: 64 }, rows: [{ values: [{ userEnteredValue: { boolValue: true } }] }], fields: "userEnteredValue" } },
       ] } }, { retry: false, retryConfig: { retry: 0, noResponseRetries: 0, httpMethodsToRetry: [] }, timeout });
     }
@@ -243,11 +309,11 @@ export async function processCaseListSourceCancellation(queueRef: Ref, claimedQu
       const current = await readTrusted(tx, true), savedIntent = await event(tx, "INTENT"), savedDispatch = await event(tx, "WRITE_STARTED"), savedAck = await event(tx, "ACK");
       need(!savedAck && savedIntent && savedDispatch && savedDispatch.intentHash === hashCaseList(savedIntent) && hashCaseList(savedIntent) === hashCaseList(intent), "SOURCE_CANCEL_READBACK_PROOF_CHANGED");
       const now = Timestamp.now(), proof = { readStartedAtMs, confirmedAtMs: now.toMillis(), runId: queueRef.id, originalRevision: current.job.revision, originalIdentity: current.job.cancellationSheetWrite.identity,
-        staffId: current.capture.staffId, dateKey: current.capture.dateKey, origin: current.capture.manualPending ? "SOURCE_MANUAL" : "CREW_QUEUE", sourceRevision: postSource.sourceRevision, nativeIntentHash: hashCaseList(savedIntent) };
+        staffId: current.capture.staffId, dateKey: current.capture.dateKey, origin: isUnassignedSourceCancellation(current.capture) ? "UNASSIGNED_SOURCE" : current.capture.manualPending ? "SOURCE_MANUAL" : "CREW_QUEUE", sourceRevision: postSource.sourceRevision, nativeIntentHash: hashCaseList(savedIntent) };
       const ack = { schema: "LK_CASE_LIST_SOURCE_CANCEL_ACK_V1", stage: "ACK", captureHash: hashCaseList(current.capture), intentHash: hashCaseList(savedIntent), postSource, proof };
       tx.create(operationRef.collection("events").doc("ACK"), { companyId: initial.companyId, queueId: queueRef.id, payload: ack, payloadHash: hashCaseList(ack), createdAt: now });
       tx.update(jobRef, { rawStaffName: "", caseListSource: postSource, cancellationSheetWrite: { ...current.job.cancellationSheetWrite, sourceAckPending: false, sourceAckProof: proof }, publishable: false, recruitmentStopped: true, updatedAt: now });
-      tx.set(current.dayRef, { active: false, releasedAt: now, releaseReason: "cancelled-source-confirmed", updatedAt: now }, { merge: true });
+      if (current.dayRef) tx.set(current.dayRef, { active: false, releasedAt: now, releaseReason: "cancelled-source-confirmed", updatedAt: now }, { merge: true });
       tx.set(queueRef, { status: "completed", retryAt: null, writeVerificationRequired: false, sourceCancellationAckHash: hashCaseList(ack), completedAt: now, updatedAt: now }, { merge: true });
       tx.set(operationRef, { status: "completed", acceptedAckHash: hashCaseList(ack), completedAt: now, updatedAt: now }, { merge: true });
       tx.set(db.collection("sheetWriteIdempotency").doc(sha(initial.companyId + "|" + initial.idempotencyKey)), { companyId: initial.companyId, queueId: queueRef.id, status: "completed", completedAt: now }, { merge: true });

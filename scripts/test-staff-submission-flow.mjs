@@ -1,3 +1,4 @@
+import * as diagnosticFormatModule from "../apps/staff/src/diagnostic-report-format.ts";
 import "./test-submission-attempt-store.mjs";
 import "./test-staff-preview-context.mjs";
 import "./test-staff-selected-image-recovery.mjs";
@@ -606,7 +607,7 @@ try {
   }
   const changedDiagnosticReports=[];
   for(const change of ['disconnect','reconnect','denied','default']){
-    let permission='granted';const diagnosticScope={exports:{},navigator:{onLine:change!=='reconnect',serviceWorker:{ready:Promise.resolve({})}},window:{setTimeout,clearTimeout},require:()=>({currentPushPermission:()=>permission,loadServerPushStatusWithRetry:async()=>{if(change==='disconnect')diagnosticScope.navigator.onLine=false;else if(change==='reconnect')diagnosticScope.navigator.onLine=true;else permission=change;return true;}})};
+    let permission='granted';const diagnosticScope={exports:{},navigator:{onLine:change!=='reconnect',serviceWorker:{ready:Promise.resolve({})}},window:{setTimeout,clearTimeout},require:name=>name==="./diagnostic-report-format"?diagnosticFormatModule:({currentPushPermission:()=>permission,loadServerPushStatusWithRetry:async()=>{if(change==='disconnect')diagnosticScope.navigator.onLine=false;else if(change==='reconnect')diagnosticScope.navigator.onLine=true;else permission=change;return true;}})};
     runInNewContext(ts.transpileModule(readFileSync('apps/staff/src/diagnostics.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,diagnosticScope);
     const report=await diagnosticScope.exports.runStaffDiagnostics({signedIn:true,companyScoped:true,businessDataStatus:'ready',businessDataSource:'live',businessRefreshing:false,homeDisplayMs:100,businessRefreshMs:100,homeLoadedFromCache:false,deviceSessionRegistered:true,functions:{}});changedDiagnosticReports.push({report,text:diagnosticScope.exports.formatDiagnosticReport(report)});
   }

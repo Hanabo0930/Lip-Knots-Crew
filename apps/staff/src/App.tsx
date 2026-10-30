@@ -35,11 +35,9 @@ import {
   listenForForegroundPush, loadServerPushStatusWithRetry, loadTestPushStatus, refreshPushNotifications,
   requestTestPush, type PushTestStatus,
 } from "./push";
-import {
-  formatDiagnosticReport,
-  runStaffDiagnostics,
-  type DiagnosticReport,
-} from "./diagnostics";
+import type { DiagnosticReport } from "./diagnostics";
+import { formatDiagnosticReport } from "./diagnostic-report-format";
+const loadStaffDiagnostics=()=>import("./diagnostics");
 import SubmissionPreviewImage, { type PreviewFile } from "./SubmissionPreviewImage";
 import SubmissionHistoryFiles from "./SubmissionHistoryFiles";
 import SubmissionProcessingRecovery from "./SubmissionProcessingRecovery";
@@ -948,6 +946,8 @@ export default function App(){
     setShowDiagnostics(true);
     setDiagnosticReport(null);
     try{await run("diagnostics:"+version,async()=>{
+      const {runStaffDiagnostics}=await loadStaffDiagnostics();
+      if(!isCurrent())return;
       let report=await runStaffDiagnostics({
         signedIn:Boolean(user),
         companyScoped:Boolean(companyId&&staffId),

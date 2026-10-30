@@ -1,3 +1,4 @@
+import { isRecruitmentMailEntry } from "./recruitment-mail-entry";
 import {readyManualSourceTransferIssue,validManualSourceTransferConfirmation,type ManualSourceTransferConfirmation} from "./manual-source-transfer";
 import {ownerPublicationGeneration,ownerPublicationPending,ownerPublicationRegion,ownerPublicationResultMessage,ownerPublicationRevokeMessage,ownerPublicationReview,ownerPublicationSourceMode,ownerPublicationStatus,type OwnerPublicationWrite} from "./owner-source-publication";
 import {currentStaffPerformanceYearRange,validStaffPerformanceRange} from "./staff-performance-range";
@@ -823,6 +824,7 @@ export default function App() {
   const [workspace,setWorkspace]=useState<AdminWorkspace>("overview");
   const [visitedWorkspaces,setVisitedWorkspaces]=useState<AdminWorkspace[]>(["overview"]);
   const [adminSessionReady,setAdminSessionReady]=useState(!firebaseConfigured);
+  const [recruitmentMailEntry]=useState(()=>isRecruitmentMailEntry(window.location.href));
   const [operationsLoadState,setOperationsLoadState]=useState<"idle"|"loading"|"ready"|"error">("idle");
   const [operationsRetry,setOperationsRetry]=useState(0);
   const operationsRequested=visitedWorkspaces.includes("operations");
@@ -835,6 +837,9 @@ export default function App() {
     setVisitedWorkspaces(current=>current.includes(next)?current:[...current,next]);
     setWorkspace(next);
   }
+  useEffect(()=>{
+    if(adminSessionReady&&recruitmentMailEntry)openWorkspace("jobs","list");
+  },[adminSessionReady,recruitmentMailEntry]);
   useEffect(()=>{
     const frame=requestAnimationFrame(()=>{
       if(document.activeElement?.closest(".workspace-panel:not([hidden])"))return;
@@ -4065,7 +4070,7 @@ function downloadCsv(filename:string,content:string) {
 
       <WorkspacePanel view="list" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel job-directory">
         <h2>案件一覧</h2>
-        <Suspense fallback={<p role="status">募集文の作成を準備中…</p>}><RecruitmentDraftPanel jobs={jobs.filter(job=>!ownerPublicationPending(job))} functions={functions} demo={!firebaseConfigured}/></Suspense>
+        <Suspense fallback={<p role="status">募集文の作成を準備中…</p>}><RecruitmentDraftPanel jobs={jobs.filter(job=>!ownerPublicationPending(job))} functions={functions} demo={!firebaseConfigured} entryOpen={recruitmentMailEntry}/></Suspense>
         <Suspense fallback={<p>検索を準備中…</p>}><AdminJobSearchControls queryText={queryText} jobListFilter={jobListFilter} total={jobs.length} count={filtered.length} page={jobPageView.page} onQuery={value=>{setQueryText(value);setJobPage(0);}} onFilter={value=>{setJobListFilter(value);setJobPage(0);}} onClear={()=>{setQueryText("");setJobListFilter("all");setJobPage(0);}}/></Suspense>
         <div className="table-wrap">
           <table className="job-directory-table">

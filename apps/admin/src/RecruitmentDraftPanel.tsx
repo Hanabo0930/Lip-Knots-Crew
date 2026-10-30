@@ -5,7 +5,7 @@ import { auth } from "./firebase";
 import type { Job } from "./App";
 import { parseRecruitmentDraft, recruitmentDraftCandidate, recruitmentDraftRequest, recruitmentSubjects, type RecruitmentDraft } from "./recruitment-draft";
 
-export default function RecruitmentDraftPanel({ jobs, functions, demo }: { jobs: Job[]; functions: Functions | null; demo: boolean }) {
+export default function RecruitmentDraftPanel({ jobs, functions, demo, entryOpen = false }: { jobs: Job[]; functions: Functions | null; demo: boolean; entryOpen?: boolean }) {
   const [ids, setIds] = useState<string[]>([]), [region, setRegion] = useState(""), [subject, setSubject] = useState<string>(recruitmentSubjects[0]), [notice, setNotice] = useState("");
   const [draft, setDraft] = useState<RecruitmentDraft | null>(null), [busy, setBusy] = useState(false), [message, setMessage] = useState("");
   const runRef = useRef<object | null>(null), inputRef = useRef(""), generation = useRef(0);
@@ -51,7 +51,7 @@ export default function RecruitmentDraftPanel({ jobs, functions, demo }: { jobs:
     } catch (error) { if (current()) { setDraft(null); setMessage(error instanceof Error ? error.message : String(error)); } }
     finally { if (runRef.current === run) { runRef.current = null; setBusy(false); } }
   }
-  return <details className="recruitment-draft-panel">
+  return <details className="recruitment-draft-panel" open={entryOpen || undefined}>
     <summary>募集メールを作成</summary>
     <section aria-label="募集メールの作成" aria-busy={busy}>
       <p>募集開始を確認した案件から、地域ごとに掲載対象を選びます。この選択は募集文の作成だけに使います。送信はご自身で行ってください。</p>

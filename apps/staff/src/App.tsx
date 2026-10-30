@@ -35,9 +35,8 @@ import {
   listenForForegroundPush, loadServerPushStatusWithRetry, loadTestPushStatus, refreshPushNotifications,
   requestTestPush, type PushTestStatus,
 } from "./push";
+import { formatDiagnosticReport } from "./diagnostic-report";
 import type { DiagnosticReport } from "./diagnostics";
-import { formatDiagnosticReport } from "./diagnostic-report-format";
-const loadStaffDiagnostics=()=>import("./diagnostics");
 import SubmissionPreviewImage, { type PreviewFile } from "./SubmissionPreviewImage";
 import SubmissionHistoryFiles from "./SubmissionHistoryFiles";
 import SubmissionProcessingRecovery from "./SubmissionProcessingRecovery";
@@ -51,6 +50,8 @@ import {
   splitAssignedJobs,
 } from "./job-list";
 import { sleep, useAsyncAction } from "./useAsyncAction";
+
+const loadStaffDiagnostics = () => import("./diagnostics");
 
 type View = "home" | "jobs" | "shifts" | "submit" | "contact";
 type BusinessDataStatus = "idle" | "loading" | "ready" | "error";
@@ -946,8 +947,8 @@ export default function App(){
     setShowDiagnostics(true);
     setDiagnosticReport(null);
     try{await run("diagnostics:"+version,async()=>{
-      const {runStaffDiagnostics}=await loadStaffDiagnostics();
-      if(!isCurrent())return;
+      const { runStaffDiagnostics } = await loadStaffDiagnostics();
+      if (!isCurrent()) return;
       let report=await runStaffDiagnostics({
         signedIn:Boolean(user),
         companyScoped:Boolean(companyId&&staffId),

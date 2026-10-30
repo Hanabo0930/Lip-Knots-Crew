@@ -184,4 +184,4 @@ export async function runStaffDiagnostics(input: DiagnosticInput): Promise<Diagn
   };
 }
 
-export { formatDiagnosticReport } from "./diagnostic-report-format";
+export { formatDiagnosticReport } from "./diagnostic-report";

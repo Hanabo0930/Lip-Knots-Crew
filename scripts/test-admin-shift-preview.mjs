@@ -31,7 +31,13 @@ for(const mode of ["success","failure","auth-change","newer","logged-out","inval
  results.push({mode,passed:true});
 }
 const callback=app.slice(app.indexOf("      const currentRun=++authRun;"),app.indexOf("      resubmissionNeedsReviewRef.current=false;",app.indexOf("      const currentRun=++authRun;")));
-const reset={authRun:0,shiftPreviewVersionRef:{current:4},setShiftPreview:v=>assert.equal(v,null),setSyncBusy:v=>assert.equal(v,false),setSyncSummary:v=>assert.equal(v,"未実行")};runInNewContext(callback,reset);assert.equal(reset.shiftPreviewVersionRef.current,5);
+const reset={authRun:0,tokenCheckRun:2,authorizedIdentity:{uid:"synthetic-admin"},tokenCheckPending:true,tokenChecking:true,authorizationRejected:false,
+ resumeAdminReads:()=>assert.fail("An auth reset must not resume reads"),retryAdminTokenRef:{current:()=>{}},adminAuthorizationReadyRef:{current:true},adminAuthEpochRef:{current:7},
+ setAdminShellRetained:v=>assert.equal(v,false),setAdminTokenChecking:v=>assert.equal(v,false),setAdminAuthorizationMessage:v=>assert.equal(v,""),
+ shiftPreviewVersionRef:{current:4},setShiftPreview:v=>assert.equal(v,null),setSyncBusy:v=>assert.equal(v,false),setSyncSummary:v=>assert.equal(v,"未実行")};
+runInNewContext(callback,reset);assert.equal(reset.shiftPreviewVersionRef.current,5);assert.equal(reset.tokenCheckRun,3);
+assert.equal(reset.authorizedIdentity,null);assert.equal(reset.tokenCheckPending,false);assert.equal(reset.tokenChecking,false);
+assert.equal(reset.resumeAdminReads,null);assert.equal(reset.retryAdminTokenRef.current,null);assert.equal(reset.adminAuthorizationReadyRef.current,false);assert.equal(reset.adminAuthEpochRef.current,8);
 console.log(JSON.stringify({adminShiftPreview:results,malformedPayloadsRejected:5,escapingAndTruncation:true,authReset:true,realData:false}));
 
 const syncStart=app.indexOf("  async function runSheetSync() {"),syncEnd=app.indexOf("  function selectAdminJob(",syncStart),syncHandler=compile(app.slice(syncStart,syncEnd));

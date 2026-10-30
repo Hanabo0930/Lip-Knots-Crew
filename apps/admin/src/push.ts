@@ -15,6 +15,7 @@ export type PushResult = {
   token?: string;
   message: string;
 };
+export type PushRequestProgress = { started:boolean; completed:boolean };
 
 export function currentPushPermission(): NotificationPermission | "unsupported" {
   return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
@@ -25,7 +26,8 @@ function assertCurrentPushAction(isCurrent:()=>boolean){if(!isCurrent())throw ne
 export async function enablePushNotifications(
   functions: Functions,
   deviceSessionId = "",
-  isCurrent:()=>boolean=()=>true
+  isCurrent:()=>boolean=()=>true,
+  progress?:PushRequestProgress
 ): Promise<PushResult> {
   assertCurrentPushAction(isCurrent);
   if (!("serviceWorker" in navigator) || typeof Notification === "undefined") {
@@ -49,6 +51,7 @@ export async function enablePushNotifications(
   assertCurrentPushAction(isCurrent);
   if (!token) throw new Error("通知端末の登録に失敗しました。");
   const register = httpsCallable(functions, "registerPushToken");
+  if(progress)progress.started=true;
   await register({
     token,
     deviceSessionId,
@@ -56,13 +59,15 @@ export async function enablePushNotifications(
     userAgent: navigator.userAgent,
     platform: navigator.platform || "",
   });
+  if(progress)progress.completed=true;
   assertCurrentPushAction(isCurrent);
   return { enabled:true, permission, token, message:"プッシュ通知を有効にしました。" };
 }
 
 export async function disablePushNotifications(
   functions: Functions,
-  isCurrent:()=>boolean=()=>true
+  isCurrent:()=>boolean=()=>true,
+  progress?:PushRequestProgress
 ): Promise<PushResult> {
   assertCurrentPushAction(isCurrent);
   const messaging = await getClientMessaging();
@@ -77,9 +82,11 @@ export async function disablePushNotifications(
   assertCurrentPushAction(isCurrent);
   if (token) {
     const unregister = httpsCallable(functions, "unregisterPushToken");
+    if(progress)progress.started=true;
     await unregister({ token });
   assertCurrentPushAction(isCurrent);
     await deleteToken(messaging);
+    if(progress)progress.completed=true;
   assertCurrentPushAction(isCurrent);
   }
   return { enabled:false, permission:currentPushPermission(), message:"この端末の通知を無効にしました。" };
@@ -91,10 +98,12 @@ export async function loadServerPushStatus(functions: Functions): Promise<boolea
   return (response.data as { enabled?: boolean }).enabled === true;
 }
 
-export async function requestTestPush(functions: Functions,isCurrent:()=>boolean=()=>true): Promise<void> {
+export async function requestTestPush(functions: Functions,isCurrent:()=>boolean=()=>true,progress?:PushRequestProgress): Promise<void> {
   assertCurrentPushAction(isCurrent);
   const callable = httpsCallable(functions, "sendTestPush");
+  if(progress)progress.started=true;
   await callable({});
+  if(progress)progress.completed=true;
   assertCurrentPushAction(isCurrent);
 }
 

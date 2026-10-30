@@ -1,3 +1,9 @@
+await import('./test-admin-auth-guard.mjs');
+await import('./test-admin-session-transitions.mjs');
+await import('./test-admin-push-auth-transition.mjs');
+await import('./test-admin-push-pending-boundary.mjs');
+await import('./test-admin-pending-read-boundary.mjs');
+await import('./test-admin-boundary-and-resume.mjs');
 await import("./test-admin-manual-source-transfer.mjs");
 await import("./test-admin-case-list-archive.mjs");
 await import('./test-admin-edit-panel.mjs');
@@ -19,12 +25,13 @@ const effectSource=source.slice(start,end);
 const calls=[...effectSource.matchAll(/\b(load\w+)\([^;\n]*isCurrentRun\)/g)].map(match=>match[1]);
 assert.equal(calls.length,11);
 const startup=source.slice(source.indexOf('  useEffect(() => {\n    const activeAuth=auth;'),start);
-assert.match(startup,/loadProductionControlStatus\(isCurrentRun\)/);
+assert.match(startup,/loadProductionControlStatus\(canRead\)/);
 for(const name of calls)assert.ok(!startup.includes(name+'('),'Operations call leaked into startup: '+name);
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};}
 for(const scenario of ['closed','not-ready','success','failure','cancelled','account-changed']){
  const states=[],gates=[];let cleanup;
- const scope={operationsRequested:scenario!=='closed',adminSessionReady:scenario!=='not-ready',firebaseConfigured:true,user:{uid:'first'},functions:{},auth:{currentUser:{uid:'first'}},operationsRetry:0,setOperationsLoadState:value=>states.push(value),useEffect:fn=>{cleanup=fn();}};
+ const scope={operationsRequested:scenario!=='closed',adminSessionReady:scenario!=='not-ready',firebaseConfigured:true,user:{uid:'first'},functions:{},auth:{currentUser:{uid:'first'}},operationsRetry:0,adminAuthorized:true,adminAuthorizationReadyRef:{current:true},operationsReadsRef:{current:{retry:0,completed:new Set(),failed:new Set()}},setOperationsLoadState:value=>states.push(value),useEffect:fn=>{cleanup=fn();}};
+ scope.auth.currentUser=scope.user;
  for(const name of calls)scope[name]=()=>{const gate=deferred();gates.push(gate);return gate.promise;};
  runInNewContext(ts.transpileModule(effectSource,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,scope);
  if(['closed','not-ready'].includes(scenario)){assert.equal(gates.length,0);assert.deepEqual(states,[]);continue;}
@@ -92,7 +99,7 @@ for(const missing of ['user','selectedAdminJobId','functions']){
 for(const scenario of ['success','empty','failure','malformed','context','auth','newer']){
  const gates=[],state={status:'idle',busy:false,files:['old'],selected:'old'};
  const authUser={uid:'one'};
- const scope={require:name=>{assert.equal(name,'./submission-timeline');return timelineModule;},submissionTimeline:[],selectedAdminJobId:'job',resubmitType:'report',firebaseConfigured:true,user:authUser,auth:{currentUser:authUser},functions:{},timelineKey:'first',timelineKeyRef:{current:'first'},timelineVersionRef:{current:0},timelinePendingRef:{current:null},
+ const scope={require:name=>{assert.equal(name,'./submission-timeline');return timelineModule;},submissionTimeline:[],selectedAdminJobId:'job',resubmitType:'report',firebaseConfigured:true,adminAuthorizationReadyRef:{current:true},user:authUser,auth:{currentUser:authUser},functions:{},timelineKey:'first',timelineKeyRef:{current:'first'},timelineVersionRef:{current:0},timelinePendingRef:{current:null},
   setTimelineBusy:v=>state.busy=v,setTimelineStatus:v=>state.status=v,setSubmissionTimeline:v=>state.files=v,setSelectedSourceFile:v=>state.selected=v,setTimelineLoadedKey:v=>state.key=v,
   httpsCallable:()=>()=>{const gate=deferred();gates.push(gate);return gate.promise;}};
  runInNewContext(timelineCode,scope);

@@ -13,7 +13,7 @@ const checks = [
   },
   {
     label: "submission timeline waits for an authenticated user",
-    ok: source.includes("if (selectedAdminJobId&&(!firebaseConfigured||user))void loadSubmissionTimeline();") && source.includes("if (!selectedAdminJobId||(firebaseConfigured&&(!user||!functions)))return;"),
+    ok: source.includes("if (selectedAdminJobId&&(!firebaseConfigured||user&&adminAuthorizationReadyRef.current))void loadSubmissionTimeline();") && source.includes("if (!selectedAdminJobId||(firebaseConfigured&&(!user||!functions||auth?.currentUser!==user||!adminAuthorizationReadyRef.current)))return;"),
   },
   {
     label: "primary startup work is isolated with allSettled",
@@ -66,7 +66,8 @@ const checks = [
   {
     label: "startup results are pinned to the current Firebase user",
     ok:
-      source.includes("activeAuth.currentUser?.uid===current?.uid") &&
+      source.includes("activeAuth.currentUser===current") &&
+      source.includes("if(current!==sessionUser){rejectAuthorization();return;}") &&
       source.includes("if(!isCurrentRun())return;"),
   },
   {
@@ -89,10 +90,12 @@ const checks = [
   {
     label: "deferred startup loaders and push status stay in the active auth run",
     ok:
-      source.includes(".then((enabled)=>{if(isCurrentRun()&&pushVersion===pushActionVersionRef.current)setPushEnabled(enabled);})") &&
+      source.includes("const canRead=()=>isCurrentRun()&&adminAuthorizationReadyRef.current;") &&
+      source.includes("if(!canRead())return;") &&
+      source.includes(".then(enabled=>{if(canRead()&&pushVersion===pushActionVersionRef.current)setPushEnabled(enabled);else if(isCurrentRun()&&!canRead())pushReadPending=true;})") &&
       [
         "loadPilotReadiness(isCurrentRun)",
-        "loadProductionControlStatus(isCurrentRun)",
+        "loadProductionControlStatus(canRead)",
         "loadProductionSloDashboard(isCurrentRun)",
         "loadProductionTelemetryStatus(isCurrentRun)",
         "loadProductionDeploymentReadiness(isCurrentRun)",

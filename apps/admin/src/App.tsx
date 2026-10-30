@@ -12,6 +12,7 @@ import { Component, lazy, Suspense, useEffect, useMemo, useRef, useState, type R
 import {
   GoogleAuthProvider,
   onAuthStateChanged,
+  onIdTokenChanged,
   signInWithPopup,
   signOut,
   User,
@@ -818,15 +819,41 @@ function WorkspacePanel({group,view,activeView,visitedViews,active,visited,ready
 }
 
 export default function App() {
+  const [identity,setIdentity]=useState<{user:User|null;generation:number}|null>(()=>auth?null:{user:null,generation:0});
+  const [rejectedIdentity,setRejectedIdentity]=useState<User|null>(null);
+  const observedIdentityRef=useRef<User|null|undefined>(undefined);
+  useEffect(()=>{
+    const activeAuth=auth;
+    if(!activeAuth)return;
+    return onAuthStateChanged(activeAuth,current=>{
+      if(observedIdentityRef.current!==current){observedIdentityRef.current=current;setRejectedIdentity(null);}
+      setIdentity(previous=>previous?.user===current?previous:{user:current,generation:(previous?.generation??0)+1});
+    });
+  },[]);
+  if(!identity)return <main className="login"><section><p role="status">認証状態を確認中です…</p></section></main>;
+  if(identity.user&&rejectedIdentity===identity.user)return <main className="login"><section><p role="alert">管理者の権限を確認できません。ログアウトして再度お試しください。</p><button onClick={()=>auth&&signOut(auth)}>ログアウト</button></section></main>;
+  return <AdminSession key={identity.generation} sessionUser={identity.user} onAuthorizationRejected={()=>setRejectedIdentity(identity.user)}/>;
+}
+
+function AdminSession({sessionUser,onAuthorizationRejected}:{sessionUser:User|null;onAuthorizationRejected:()=>void}) {
   const [user, setUser] = useState<User | null>(null);
   const [motionPaused,setMotionPaused]=useState(()=>{try{return localStorage.getItem("lkc.admin.motionPaused")==="true";}catch{return false;}});
   function toggleMotion(){setMotionPaused(current=>{const next=!current;try{localStorage.setItem("lkc.admin.motionPaused",String(next));}catch{/* 設定を保存できなくても画面内の切替は利用できる。 */}return next;});}
   const [workspace,setWorkspace]=useState<AdminWorkspace>("overview");
   const [visitedWorkspaces,setVisitedWorkspaces]=useState<AdminWorkspace[]>(["overview"]);
   const [adminSessionReady,setAdminSessionReady]=useState(!firebaseConfigured);
+  const [adminAuthorized,setAdminAuthorized]=useState(!firebaseConfigured);
+  const [adminShellRetained,setAdminShellRetained]=useState(!firebaseConfigured);
+  const [adminAuthorizationMessage,setAdminAuthorizationMessage]=useState("");
+  const [adminTokenChecking,setAdminTokenChecking]=useState(false);
+  const [adminTokenRevision,setAdminTokenRevision]=useState(0);
+  const adminAuthEpochRef=useRef(0);
+  const adminAuthorizationReadyRef=useRef(!firebaseConfigured);
+  const retryAdminTokenRef=useRef<(()=>void)|null>(null);
   const [recruitmentMailEntry]=useState(()=>isRecruitmentMailEntry(window.location.href));
   const [operationsLoadState,setOperationsLoadState]=useState<"idle"|"loading"|"ready"|"error">("idle");
   const [operationsRetry,setOperationsRetry]=useState(0);
+  const operationsReadsRef=useRef({retry:0,completed:new Set<number>(),failed:new Set<number>()});
   const operationsRequested=visitedWorkspaces.includes("operations");
   const [workspaceView,setWorkspaceView]=useState("home");
   const [visitedViews,setVisitedViews]=useState<string[]>(["overview:home"]);
@@ -992,6 +1019,7 @@ export default function App() {
   timelineKeyRef.current=timelineKey;
   const timelineVersionRef=useRef(0);
   const timelinePendingRef=useRef<string|null>(null);
+  const timelineReadDeferredRef=useRef(false);
   const timelineReady=timelineStatus==="ready"&&timelineLoadedKey===timelineKey;
   const [sheetIssues, setSheetIssues] = useState<SheetWriteIssue[]>([]);
   const [manualIssuesNextCursor,setManualIssuesNextCursor]=useState<string|null>(null);
@@ -1092,9 +1120,70 @@ const [monthBusy, setMonthBusy] = useState(false);
     let cancelled=false;
     let authRun=0;
     let activeUid:string|null=null;
+    let observedAuthUser:User|null=null;
     let cancelDeferredLoads:(()=>void)|null=null;
+    let authorizedIdentity:{user:User;companyId:string}|null=null;
+    let tokenCheckRun=0;
+    let tokenCheckPending=false;
+    let tokenChecking=false;
+    let authorizationRejected=false;
+    let resumeAdminReads:(()=>void)|null=null;
+    const rejectAuthorization=()=>{
+      authorizationRejected=true;
+      authorizedIdentity=null;
+      resumeAdminReads=null;retryAdminTokenRef.current=null;
+      adminAuthorizationReadyRef.current=false;
+      tokenCheckRun++;tokenCheckPending=false;tokenChecking=false;
+      adminAuthEpochRef.current++;
+      cancelDeferredLoads?.();cancelDeferredLoads=null;
+      setAdminTokenChecking(false);setAdminAuthorized(false);setAdminShellRetained(false);setAdminSessionReady(false);
+      setAdminAuthorizationMessage("管理者の権限を確認できません。ログアウトして再度お試しください。");
+      onAuthorizationRejected();
+    };
+    const checkCurrentToken=(current:User)=>{
+      const identity=authorizedIdentity;
+      if(!identity||activeAuth.currentUser!==current||authorizationRejected)return;
+      if(identity.user!==current){rejectAuthorization();return;}
+      tokenCheckPending=true;
+      if(tokenChecking)return;
+      tokenChecking=true;
+      const checkRun=++tokenCheckRun;
+      adminAuthEpochRef.current++;
+      adminAuthorizationReadyRef.current=false;
+      setAdminTokenRevision(value=>value+1);
+      setAdminTokenChecking(true);setAdminAuthorized(false);setAdminAuthorizationMessage("");
+      const isCurrentCheck=()=>!cancelled&&checkRun===tokenCheckRun&&authorizedIdentity===identity&&activeAuth.currentUser===current;
+      void (async()=>{
+        try{
+          for(let attempt=0;attempt<4;attempt++){
+            tokenCheckPending=false;
+            const token=await current.getIdTokenResult(false);
+            if(!isCurrentCheck())return;
+            if(token.claims.role!=="admin"||token.claims.companyId!==identity.companyId){rejectAuthorization();return;}
+            if(!tokenCheckPending){
+              tokenChecking=false;adminAuthorizationReadyRef.current=true;
+              setAdminTokenChecking(false);setAdminAuthorized(true);setAdminShellRetained(true);setAdminAuthorizationMessage("");
+              resumeAdminReads?.();return;
+            }
+          }
+          throw new Error("管理者の権限を確認できません。ログアウトして再度お試しください。");
+        }catch{
+          if(!isCurrentCheck())return;
+          tokenChecking=false;adminAuthorizationReadyRef.current=false;
+          setAdminTokenChecking(false);setAdminAuthorized(false);
+          setAdminAuthorizationMessage("権限の確認に失敗しました。入力を保持したまま、確認を再試行できます。");
+        }
+      })();
+    };
     const unsubscribe=onAuthStateChanged(activeAuth, (current) => {
+      if(authorizationRejected)return;
+      if(current!==sessionUser){rejectAuthorization();return;}
       const currentRun=++authRun;
+      tokenCheckRun++;authorizedIdentity=null;tokenCheckPending=false;tokenChecking=false;authorizationRejected=false;
+      resumeAdminReads=null;retryAdminTokenRef.current=null;adminAuthorizationReadyRef.current=false;
+      setAdminShellRetained(false);
+      setAdminTokenChecking(false);
+      adminAuthEpochRef.current++;setAdminAuthorizationMessage("");
       shiftPreviewVersionRef.current++;setShiftPreview(null);setSyncBusy(false);setSyncSummary("未実行");
       resubmissionNeedsReviewRef.current=false;setResubmissionNeedsReview(false);
       closeComparison();expenseVersionRef.current++;
@@ -1107,11 +1196,13 @@ const [monthBusy, setMonthBusy] = useState(false);
       jobEditContextRef.current++;jobEditBaselineRef.current=blankJobEdit;
       setJobEditId("");setJobEditRevision(0);setJobEdit(blankJobEdit);
       setAdminSessionReady(false);
+      setAdminAuthorized(false);
       const nextUid=current?.uid??null;
+      observedAuthUser=current;
       const isCurrentRun=()=>(
-        !cancelled &&
+        !cancelled && !authorizationRejected &&
         currentRun===authRun &&
-        activeAuth.currentUser?.uid===current?.uid
+        activeAuth.currentUser===current
       );
       if(activeUid!==nextUid){
         activeUid=nextUid;
@@ -1165,10 +1256,40 @@ const [monthBusy, setMonthBusy] = useState(false);
           const bootstrap=httpsCallable(activeFunctions,"bootstrapSession");
           const bootstrapResponse=await bootstrap();
           const bootstrapData=bootstrapResponse.data as AdminDirectoryPayload & {
+            role?:unknown;
+            companyId?:unknown;
             refreshToken?:boolean;
           };
-          await current.getIdToken(true);
           if(!isCurrentRun())return;
+          if(bootstrapData?.role!=="admin"||typeof bootstrapData.companyId!=="string"||!bootstrapData.companyId.trim())throw new Error("管理者アカウントでログインしてください。");
+          const token=await current.getIdTokenResult(true);
+          if(!isCurrentRun())return;
+          if(token.claims.role!=="admin"||token.claims.companyId!==bootstrapData.companyId)throw new Error("管理者の権限を確認できません。ログアウトして再度お試しください。");
+          authorizedIdentity={user:current,companyId:bootstrapData.companyId};
+          let primaryStarted=false;
+          let primaryFinished=false;
+          let deferredActive=false;
+          let pushReadPending=true,controlReadPending=true;
+          const canRead=()=>isCurrentRun()&&adminAuthorizationReadyRef.current;
+          const scheduleRemainingReads=()=>{
+            if(!primaryFinished||deferredActive||!canRead()||!pushReadPending&&!controlReadPending)return;
+            deferredActive=true;
+            cancelDeferredLoads=scheduleWhenIdle(()=>{
+              if(!canRead()){deferredActive=false;return;}
+              const reads:Promise<unknown>[]=[];
+              if(pushReadPending){
+                const pushVersion=pushActionVersionRef.current;
+                reads.push(import("./push").then(({loadServerPushStatus})=>{
+                  if(!canRead())return;
+                  pushReadPending=false;
+                  return loadServerPushStatus(activeFunctions).then(enabled=>{if(canRead()&&pushVersion===pushActionVersionRef.current)setPushEnabled(enabled);else if(isCurrentRun()&&!canRead())pushReadPending=true;});
+                }).catch(error=>{pushReadPending=isCurrentRun()&&!canRead();if(isCurrentRun()&&canRead())setMessage(error instanceof Error?error.message:String(error));}));
+              }
+              if(controlReadPending){controlReadPending=false;reads.push(loadProductionControlStatus(canRead).then(()=>{if(isCurrentRun()&&!canRead())controlReadPending=true;}).catch(error=>{controlReadPending=isCurrentRun()&&!canRead();if(isCurrentRun()&&canRead())setMessage(error instanceof Error?error.message:String(error));}));}
+              void Promise.allSettled(reads).then(()=>{deferredActive=false;scheduleRemainingReads();});
+            });
+          };
+          const initializeAdmin=async()=>{
           if(Array.isArray(bootstrapData.jobs)){
             if(!canApplyAuthResult(isCurrentRun))return;
             resetJobPaging(bootstrapData.jobs);
@@ -1189,26 +1310,39 @@ const [monthBusy, setMonthBusy] = useState(false);
           if(primaryFailure?.status==="rejected"){
             setMessage(primaryFailure.reason instanceof Error?primaryFailure.reason.message:String(primaryFailure.reason));
           }
+          primaryFinished=true;
           setAdminSessionReady(true);
-          const pushVersion=pushActionVersionRef.current;
-          cancelDeferredLoads=scheduleWhenIdle(()=>{
-            if(!isCurrentRun())return;
-            void Promise.allSettled([
-              import("./push")
-                .then(({loadServerPushStatus})=>loadServerPushStatus(activeFunctions))
-                .then((enabled)=>{if(isCurrentRun()&&pushVersion===pushActionVersionRef.current)setPushEnabled(enabled);}),
-              loadProductionControlStatus(isCurrentRun),
-            ]);
-          });
+          scheduleRemainingReads();
+          };
+          resumeAdminReads=()=>{
+            if(!canRead())return;
+            if(primaryStarted){scheduleRemainingReads();return;}
+            primaryStarted=true;
+            void initializeAdmin().catch(error=>{if(isCurrentRun())setMessage(error instanceof Error?error.message:String(error));});
+          };
+          retryAdminTokenRef.current=()=>checkCurrentToken(current);
+          checkCurrentToken(current);
         }catch(error){
-          if(isCurrentRun())setMessage(error instanceof Error?error.message:String(error));
+          if(isCurrentRun()){
+            const description=error instanceof Error?error.message:String(error);
+            setAdminAuthorizationMessage(description);setMessage(description);
+          }
         }
       })();
+    });
+    const unsubscribeToken=onIdTokenChanged(activeAuth,current=>{
+      if(!current||activeAuth.currentUser!==current)return;
+      if(observedAuthUser&&activeUid===current.uid&&observedAuthUser!==current){rejectAuthorization();return;}
+      checkCurrentToken(current);
     });
     return()=>{
       cancelled=true;
       authRun+=1;
+      tokenCheckRun+=1;
+      adminAuthEpochRef.current++;operationEpochRef.current++;
+      retryAdminTokenRef.current=null;adminAuthorizationReadyRef.current=false;
       cancelDeferredLoads?.();
+      unsubscribeToken();
       unsubscribe();
     };
   }, []);
@@ -1216,31 +1350,38 @@ const [monthBusy, setMonthBusy] = useState(false);
 
   // 運用情報は画面を開いたときだけ取得し、認証が変わった応答を破棄する。
   useEffect(()=>{
-    if(!operationsRequested||!adminSessionReady)return;
+    if(!operationsRequested||!adminSessionReady||!adminAuthorized||!adminAuthorizationReadyRef.current)return;
     if(!firebaseConfigured){setOperationsLoadState("ready");return;}
-    if(!user||!functions)return;
+    if(!user||!functions||auth?.currentUser!==user)return;
     let cancelled=false;
-    const currentUid=user.uid;
-    const isCurrentRun=()=>!cancelled&&auth?.currentUser?.uid===currentUid;
+    const currentUser=user;
+    const isCurrentRun=()=>!cancelled&&auth?.currentUser===currentUser;
+    if(operationsReadsRef.current.retry!==operationsRetry)operationsReadsRef.current={retry:operationsRetry,completed:new Set<number>(),failed:new Set<number>()};
+    const readState=operationsReadsRef.current;
+    const reads=[
+      ()=>loadPilotReadiness(isCurrentRun),
+      ()=>loadPilotRolloutStatus(isCurrentRun),
+      ()=>loadPilotExpansionReview(undefined,isCurrentRun),
+      ()=>loadStagedRolloutStatus(undefined,isCurrentRun),
+      ()=>loadProductionRehearsalStatus(undefined,isCurrentRun),
+      ()=>loadProductionCutoverStatus(undefined,isCurrentRun),
+      ()=>loadProductionSloDashboard(isCurrentRun),
+      ()=>loadProductionTelemetryStatus(isCurrentRun),
+      ()=>loadProductionDeploymentReadiness(isCurrentRun),
+      ()=>loadProductionReleaseEvidenceStatus(true,isCurrentRun),
+      ()=>loadMonthHistory(isCurrentRun),
+    ].map((read,index)=>({read,index})).filter(({index})=>!readState.completed.has(index));
+    if(!reads.length)return;
     setOperationsLoadState("loading");
-    void Promise.allSettled([
-      loadPilotReadiness(isCurrentRun),
-      loadPilotRolloutStatus(isCurrentRun),
-      loadPilotExpansionReview(undefined,isCurrentRun),
-      loadStagedRolloutStatus(undefined,isCurrentRun),
-      loadProductionRehearsalStatus(undefined,isCurrentRun),
-      loadProductionCutoverStatus(undefined,isCurrentRun),
-      loadProductionSloDashboard(isCurrentRun),
-      loadProductionTelemetryStatus(isCurrentRun),
-      loadProductionDeploymentReadiness(isCurrentRun),
-      loadProductionReleaseEvidenceStatus(true,isCurrentRun),
-      loadMonthHistory(isCurrentRun),
-    ]).then(results=>{
+    void Promise.allSettled(reads.map(async({read,index})=>{
+      try{await read();if(isCurrentRun())readState.completed.add(index);}
+      catch(error){if(isCurrentRun()){readState.completed.add(index);readState.failed.add(index);}throw error;}
+    })).then(()=>{
       if(!isCurrentRun())return;
-      setOperationsLoadState(results.some(result=>result.status==="rejected")?"error":"ready");
+      setOperationsLoadState(readState.failed.size?"error":"ready");
     });
     return()=>{cancelled=true;};
-  },[user,adminSessionReady,operationsRequested,operationsRetry]);
+  },[user,adminSessionReady,adminAuthorized,operationsRequested,operationsRetry]);
 
   // 提出履歴は案件・種類・認証ごとに応答を分離する。
   useEffect(() => {
@@ -1248,29 +1389,40 @@ const [monthBusy, setMonthBusy] = useState(false);
     setSelectedSourceFile(null);
     setTimelineStatus("idle");
     setTimelineBusy(false);
-    if (selectedAdminJobId&&(!firebaseConfigured||user))void loadSubmissionTimeline();
+    timelineReadDeferredRef.current=Boolean(selectedAdminJobId&&firebaseConfigured&&user&&!adminAuthorizationReadyRef.current);
+    if (selectedAdminJobId&&(!firebaseConfigured||user&&adminAuthorizationReadyRef.current))void loadSubmissionTimeline();
     return()=>{timelineVersionRef.current++;timelinePendingRef.current=null;};
   }, [user, selectedAdminJobId, resubmitType]);
 
+  useEffect(()=>{
+    if(!adminAuthorized||!adminAuthorizationReadyRef.current||!timelineReadDeferredRef.current||!selectedAdminJobId||auth?.currentUser!==user)return;
+    timelineReadDeferredRef.current=false;
+    void loadSubmissionTimeline();
+  },[adminAuthorized,user,selectedAdminJobId,resubmitType]);
+
   useEffect(() => {
-    if (!user) return;
+    const activeAuth=auth;
+    if (!user || !adminAuthorized || adminTokenChecking || !activeAuth) return;
     let unsubscribe: (() => void) | null = null;
     let cancelled = false;
+    const epoch=adminAuthEpochRef.current;
+    const isCurrent=()=>!cancelled && activeAuth.currentUser===user && adminAuthEpochRef.current===epoch;
     void import("./push")
-      .then(({ listenForForegroundPush }) => listenForForegroundPush((payload) => {
+      .then(({ listenForForegroundPush }) => isCurrent() ? listenForForegroundPush((payload) => {
+        if(!isCurrent())return;
         const title = payload.data?.title ?? "Lip Knots Crew";
         const body = payload.data?.body ?? "新しい管理通知があります。";
         setMessage(`${title}：${body}`);
-      }))
+      }) : null)
       .then((value) => {
-        if (cancelled) value?.();
+        if (!isCurrent()) value?.();
         else unsubscribe = value;
       });
     return () => {
       cancelled = true;
       unsubscribe?.();
     };
-  }, [user]);
+  }, [user,adminAuthorized,adminTokenChecking,adminTokenRevision]);
 
 
 
@@ -1682,18 +1834,37 @@ async function previewRowCreation() {
 
 
   async function runPushAction(action:"enable"|"disable"|"test"){
-    const current=auth?.currentUser,epoch=operationEpochRef.current;
-    if(operationLocksRef.current.has("push")||firebaseConfigured&&(!functions||!current||!adminSessionReady))return;
-    const token=Symbol(),isCurrent=()=>auth?.currentUser===current&&operationEpochRef.current===epoch;
+    const current=auth?.currentUser,epoch=operationEpochRef.current,authorizationEpoch=adminAuthEpochRef.current;
+    if(operationLocksRef.current.has("push")||firebaseConfigured&&(!functions||!current||current!==user||!adminSessionReady||!adminAuthorizationReadyRef.current))return;
+    const token=Symbol(),isSameAccount=()=>auth?.currentUser===current&&operationEpochRef.current===epoch;
+    const isCurrent=()=>isSameAccount()&&(!firebaseConfigured||adminAuthorizationReadyRef.current&&adminAuthEpochRef.current===authorizationEpoch);
+    const progress={started:false,completed:false};
+    let keepLock=false;
+    const recordCompleted=()=>{
+      if(action!=="test")setPushEnabled(action==="enable");
+      setMessage(action==="test"?"管理者通知テストの送信完了を確認しました。":"通知設定の変更完了を確認しました。");
+    };
+    const recordUncertain=()=>{
+      keepLock=true;
+      setMessage("通知操作の結果を確認できません。重複を避けるため、このログイン中の再操作を停止しました。");
+    };
     operationLocksRef.current.set("push",token);setOperationKeys([...operationLocksRef.current.keys()]);pushActionVersionRef.current++;
     try{
       if(!functions){if(action!=="test")setPushEnabled(action==="enable");setMessage(action==="test"?"デモ：管理者通知テストを送信しました。":action==="enable"?"デモ：管理者通知を有効にしました。":"デモ：管理者通知を無効にしました。");return;}
       const push=await import("./push");if(!isCurrent())return;
-      const result=action==="enable"?await push.enablePushNotifications(functions,current?.uid??"",isCurrent):action==="disable"?await push.disablePushNotifications(functions,isCurrent):await push.requestTestPush(functions,isCurrent);
-      if(!isCurrent())return;
+      const result=action==="enable"?await push.enablePushNotifications(functions,current?.uid??"",isCurrent,progress):action==="disable"?await push.disablePushNotifications(functions,isCurrent,progress):await push.requestTestPush(functions,isCurrent,progress);
+      if(!isSameAccount())return;
+      if(!isCurrent()){if(progress.completed)recordCompleted();else if(progress.started)recordUncertain();return;}
       if(result){setPushEnabled(result.enabled);setMessage(result.message);}else setMessage("管理者通知テストを送信しました。");
-    }catch(error){if(isCurrent())setMessage(error instanceof Error?error.message:String(error));}
-    finally{if(operationLocksRef.current.get("push")===token){operationLocksRef.current.delete("push");setOperationKeys([...operationLocksRef.current.keys()]);}}
+    }catch(error){
+      if(!isSameAccount())return;
+      if(progress.started&&!progress.completed){
+        recordUncertain();
+      }else if(progress.completed){
+        recordCompleted();
+      }else if(isCurrent())setMessage(error instanceof Error?error.message:String(error));
+    }
+    finally{if(!keepLock&&operationLocksRef.current.get("push")===token){operationLocksRef.current.delete("push");setOperationKeys([...operationLocksRef.current.keys()]);}}
   }
   async function enablePush(){await runPushAction("enable");}
   async function disablePush(){await runPushAction("disable");}
@@ -2673,7 +2844,7 @@ async function previewRowCreation() {
   }
 
   async function loadSubmissionTimeline(previewFile?:{submissionId:string;fileId:string}) {
-    if (!selectedAdminJobId||(firebaseConfigured&&(!user||!functions)))return;
+    if (!selectedAdminJobId||(firebaseConfigured&&(!user||!functions||auth?.currentUser!==user||!adminAuthorizationReadyRef.current)))return;
     const key=timelineKey;
     if(timelinePendingRef.current===key)return;
     const version=++timelineVersionRef.current;
@@ -3526,14 +3697,20 @@ function downloadCsv(filename:string,content:string) {
 
   const cancellationBusy=operationKeys.includes("cancellation");
   const netPrintBusy=operationKeys.includes("netprint:"+selectedAdminJobId);
-  if (firebaseConfigured && !user) {
+  if (firebaseConfigured && (!user || !adminAuthorized&&!adminShellRetained)) {
     return (
       <main className="login">
         <section>
           <img src="/logo.png" alt="Lip Knots" />
           <h1>Lip Knots Crew Admin</h1>
-          <p>管理者Googleアカウントでログインしてください。</p>
-          <button onClick={login}>Googleでログイン</button>
+          {user ? <>
+            <p role={adminAuthorizationMessage ? "alert" : "status"}>{adminAuthorizationMessage || "管理者アカウントを確認中です…"}</p>
+            {!!adminAuthorizationMessage&&retryAdminTokenRef.current&&<button onClick={()=>retryAdminTokenRef.current?.()}>権限確認を再試行</button>}
+            <button onClick={() => auth && signOut(auth)}>ログアウト</button>
+          </> : <>
+            <p>管理者Googleアカウントでログインしてください。</p>
+            <button onClick={login}>Googleでログイン</button>
+          </>}
         </section>
       </main>
     );
@@ -3549,8 +3726,9 @@ function downloadCsv(filename:string,content:string) {
     (productionControl?.environment === "production" && !productionControl.control.productionEnabled)
   );
 
-  return (
-    <main data-motion={motionPaused?"paused":"active"} className={`shell admin-shell ${productionBlocked ? "production-blocked" : ""}`}>
+  return (<>
+    {!adminAuthorized && <main className="login"><section><p role={adminAuthorizationMessage?"alert":"status"}>{adminAuthorizationMessage||"管理者の権限を確認中です…"}</p>{!adminTokenChecking&&retryAdminTokenRef.current&&<button onClick={()=>retryAdminTokenRef.current?.()}>権限確認を再試行</button>}<button onClick={()=>auth&&signOut(auth)}>ログアウト</button></section></main>}
+    <main data-motion={motionPaused?"paused":"active"} className={`shell admin-shell ${productionBlocked ? "production-blocked" : ""}`} style={!adminAuthorized?{display:"none"}:undefined} aria-hidden={!adminAuthorized||undefined}>
       <AdminAtmosphere/>
       <header>
         <img src="/logo.png" alt="Lip Knots" />
@@ -4424,5 +4602,6 @@ function downloadCsv(filename:string,content:string) {
 
       </div>
     </main>
+    </>
   );
 }

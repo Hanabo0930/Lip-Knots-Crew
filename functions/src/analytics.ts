@@ -169,7 +169,7 @@ export const adminSetJobCancellation = onCall(async (request) => {
       caseListCancellation = captureCaseListSourceCancellation(job, input.jobId, queueRef.id, session.uid, nextAssignmentRevision(job));
     }
     catch (error) { throw new HttpsError("failed-precondition", error instanceof Error ? error.message : "取消履歴の変更確認が必要です。"); }
-    const sourceAck = cancellationSourceAckFields(job, ownsActiveLock, now.toMillis(), nextAssignmentRevision(job));
+    const sourceAck = cancellationSourceAckFields(job, ownsActiveLock, now.toMillis(), nextAssignmentRevision(job), caseListCancellation);
     tx.set(jobRef, {
       ...resetApplicationConfirmation(),
       revision: nextAssignmentRevision(job),

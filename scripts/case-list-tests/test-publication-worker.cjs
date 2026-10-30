@@ -19,7 +19,7 @@ async function setup(options={}){
  const snapshot=buildWorkerCompactSnapshot({book:f.book,caseId:f.a.sourceCaseId,sourceHeader:Controller.SOURCE_HEADERS,sourceCells:cells,ledger,month:h.month});
  const confirmation={expectedSourceRevision:source.sourceRevision,confirmedRegion:'通常',confirmedFields:{arrival:true,execution:true,headcount:true,dateMode:true,payOffer:true,vacancy:true},payOffer:{dailyWageJPY:10000,travelExpenses:'全額支給',communicationExpenses:'全額支給'}};
  const plan=core.prepareCaseListPublicationPlan({snapshot,companyId:f.companyId,jobId:f.jobId,job,confirmation,expectedJobRevision:4,expectedSourceRevision:source.sourceRevision,nowISO:new Date().toISOString()});
- const queueId='publication_fixture',now=Date.now(),capture={schema:'LK_CASE_LIST_PUBLICATION_CAPTURE_V1',companyId:f.companyId,jobId:f.jobId,queueId,actorUid:'owner_fixture',caseId:f.a.sourceCaseId,source:helper.publicCaseListSource(source),beforeJobRevision:4,queuedJobRevision:5,confirmedRegion:'通常',confirmation,conditionsHash:helper.hashCaseList(confirmation),ownerPolicyHash:core.ownerPublicationPolicyHash(process.env.EXECUTIVE_APPROVER_EMAILS||''),createdAtMs:now,expiresAtMs:now+600000,reviewPlanHash:plan.reviewPlanHash,requestKey:plan.reviewPlanHash};
+ const queueId=options.queueId??'publication_fixture',now=Date.now(),capture={schema:'LK_CASE_LIST_PUBLICATION_CAPTURE_V1',companyId:f.companyId,jobId:f.jobId,queueId,actorUid:'owner_fixture',caseId:f.a.sourceCaseId,source:helper.publicCaseListSource(source),beforeJobRevision:4,queuedJobRevision:5,confirmedRegion:'通常',confirmation,conditionsHash:helper.hashCaseList(confirmation),ownerPolicyHash:core.ownerPublicationPolicyHash(process.env.EXECUTIVE_APPROVER_EMAILS||''),createdAtMs:now,expiresAtMs:now+600000,reviewPlanHash:plan.reviewPlanHash,requestKey:plan.reviewPlanHash};
  Object.assign(job,{revision:5,caseListPublicationWrite:{queueId,intentHash:helper.hashCaseList(capture),pending:true,state:'AWAITING_SOURCE_ACK'}});
  const queue={companyId:f.companyId,jobId:f.jobId,operation:'case_list.publish',actorUid:'owner_fixture',caseListPublication:H.copy(capture),updates:{},expected:{},styles:{},idempotencyKey:`case_list.publish:${f.jobId}:${plan.reviewPlanHash}`,status:'processing',claimToken:'publication_claim',retryAt:H.Stamp.fromMillis(Date.now()+600000)};
  const queueRef=new H.Doc('sheetSyncQueue/'+queueId),opPath='caseListMonthlyOperations/'+sha(f.companyId+'|'+queueId);
@@ -70,7 +70,7 @@ function installFreshGenerationB(c,{ownLease=false}={}) {
  return {queueId,capture,opPath,bytes:()=>JSON.stringify([...protectedPaths.map(path=>[path,c.records.get(path)]),...[...c.records].filter(([path])=>path.startsWith(opPath+'/events/')).sort(([a],[b])=>a.localeCompare(b))]),sourceBytes:()=>JSON.stringify(c.h.cells)};
 }
 const results=[];async function test(name,fn){process.env.LKC_SHEET_WRITE_MODE='active';process.env.LKC_CASE_LIST_PUBLICATION_MODE='active';await fn();results.push({name,passed:true});}
-(async()=>{
+async function main(){
  await test('same publisher continuation changes only BD/BE once, then atomically opens job and postSource approval',async()=>{
   const c=await setup();H.setAfterCommit(()=>{const job=c.records.get('jobs/'+c.f.jobId);if(job.publishable){assert.equal(job.status,'open');assert.equal(c.records.get(c.queueRef.path).status,'completed');assert.ok(c.records.has(c.opPath+'/events/ACK'));assert.equal(c.records.get('caseListApprovals/'+c.f.jobId).expectedSourceRevision,job.caseListSource.sourceRevision);}});
   const result=await c.run();assert.equal(result.state,'PUBLISHED',JSON.stringify(result));assert.equal(c.batches(),1);assert.equal(result.snapshotReads,3);assert.equal(result.nativeBatches,1);
@@ -128,4 +128,6 @@ const results=[];async function test(name,fn){process.env.LKC_SHEET_WRITE_MODE='
  });
  await test('nonexecutive or other-company owner cannot reconcile',async()=>{const c=await setup({ackLoss:true});await c.run();for(const token of [{uid:'owner_fixture',companyId:c.f.companyId,role:'admin',email:'other@example.invalid',email_verified:true},{uid:'owner_fixture',companyId:'other',role:'admin',email:'owner@example.invalid',email_verified:true}])await assert.rejects(()=>worker.processCaseListPublication(c.queueRef,undefined,{actorUid:'owner_fixture',token}));assert.equal(c.batches(),1);});
  console.log(JSON.stringify({status:'PASS',tests:results.length,scope:'ACTUAL_PUBLICATION_QUEUE_WORKER_ADAPTER_FINALIZER_SYNTHETIC_ONLY',nativeRequests:0,externalWrites:0,results},null,2));
-})().catch(error=>{console.error(error);process.exitCode=1;});
+}
+module.exports={setup,addPhysicalMonthlyTarget};
+if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});

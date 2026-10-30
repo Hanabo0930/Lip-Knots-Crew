@@ -1,3 +1,4 @@
+import { caseListPublicationPending } from "./case-list-publication-state";
 export type ExpectedValue = { mode:"any"|"blank"|"exact"; value?:unknown };
 export type OperationConfig = { values:string[]; styles?:string[] };
 export type MappingConfig = { columns:Record<string,string>; operations:Record<string,OperationConfig> };
@@ -48,9 +49,28 @@ export function cancellationSourceLinked(job: Record<string, unknown>): boolean 
 }
 
 export function cancellationSourceAckFields(job: Record<string, unknown>, ownsLock: boolean,
-  requestedAtMs: number, expectedJobRevision: number): Record<string, unknown> {
-  return ownsLock && cancellationSourceLinked(job) ? { sourceAckVersion: 1, sourceAckPending: true,
+  requestedAtMs: number, expectedJobRevision: number, capture?: Record<string, unknown> | null): Record<string, unknown> {
+  const unassigned = isUnassignedSourceCancellation(capture) && sourceCancellationUnassigned(job) &&
+    capture!.companyId === job.companyId && capture!.caseId === job.caseId && capture!.identity === cancellationSheetWriteIdentity(job) &&
+    capture!.beforeJobRevision === job.revision && capture!.cancelledJobRevision === expectedJobRevision;
+  return (ownsLock || unassigned) && cancellationSourceLinked(job) ? { sourceAckVersion: 1, sourceAckPending: true,
     sourceAckRequestedAtMs: requestedAtMs, sourceAckJobRevision: expectedJobRevision } : {};
+}
+
+/** A distinct server-owned mode; a malformed assigned V1 is never unassigned. */
+export function isUnassignedSourceCancellation(value: unknown): boolean {
+  const capture = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return capture.schema === "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V2" && capture.assignmentMode === "UNASSIGNED_SOURCE";
+}
+export function sourceCancellationUnassigned(job: Record<string, any>): boolean {
+  return job.assignedStaffId == null && job.assignedUid == null && (job.assignedStaffName == null || job.assignedStaffName === "") &&
+    (job.rawStaffName == null || job.rawStaffName === "") && job.assignmentSheetWrite == null && job.caseListManualPending == null &&
+    job.caseListManualSelection == null && job.sheetRef == null && job.caseListMonthlyAck == null && job.applicationUnconfirmed !== true && job.assignmentUnresolved !== true;
+}
+export function sourceCancellationPublicationPointer(job: Record<string, any>): Record<string, unknown> | null {
+  const pointer = job.caseListPublicationWrite;
+  return pointer && typeof pointer === "object" && !Array.isArray(pointer)
+    ? Object.fromEntries(["queueId", "intentHash", "pending", "state", "ackHash"].filter(key => Object.hasOwn(pointer, key)).map(key => [key, pointer[key]])) : null;
 }
 
 /** Server-captured before cancellation clears the current assignment pointer.
@@ -61,6 +81,21 @@ export function captureCaseListSourceCancellation(job: Record<string, any>, jobI
   if (job.cancelled === true && job.cancellationSheetWrite?.caseListCancellation) {
     throw new Error("案件リストの取消結果を確認中です。結果の照合が終わるまで取消内容を変更できません。");
   }
+  if (sourceCancellationUnassigned(job)) {
+    const publicationPointer = sourceCancellationPublicationPointer(job);
+    if (caseListPublicationPending(job) || job.sourceMissing === true || job.pendingSourceWrite === true || job.adminEditSheetWrite?.pending === true || job.sourceCancellationClosed === true || job.cancellationSheetWrite != null ||
+      !(job.status === "draft" && publicationPointer == null && job.publishable !== true ||
+        job.status === "open" && publicationPointer?.state === "PUBLISHED" ||
+        ["draft", "stopped"].includes(job.status) && publicationPointer?.state === "REVOKED")) {
+      throw new Error("未割当案件の公開反映・取下げ・担当の状態を先に照合してください。取消指示は保存していません。");
+    }
+    return { schema: "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V2", assignmentMode: "UNASSIGNED_SOURCE", companyId: job.companyId ?? null, jobId, queueId, actorUid,
+      caseId: job.caseId ?? null, staffId: null, staffName: null, assignedUid: null, dateKey: job.dateKey ?? null, workDate: job.workDate ?? null,
+      beforeJobRevision: job.revision ?? null, cancelledJobRevision, beforeStatus: job.status, identity: cancellationSheetWriteIdentity(job),
+      source: Object.fromEntries(["version", "sheetId", "caseId", "sourceRevision", "rowRevision", "ledgerRevision", "bindingHash"].filter(key => Object.hasOwn(job.caseListSource, key)).map(key => [key, job.caseListSource[key]])),
+      priorAssignment: null, manualPending: null, ownerSelected: false, publicationPointer };
+  }
+  if (job.assignedStaffId == null) throw new Error("未割当案件の担当・手配状態を確認できません。取消指示は保存していません。");
   const pick = (value: any, keys: string[]) => value && typeof value === "object" && !Array.isArray(value)
     ? Object.fromEntries(keys.filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]])) : null;
   return {

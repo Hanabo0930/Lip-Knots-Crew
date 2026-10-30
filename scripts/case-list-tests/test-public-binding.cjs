@@ -1,9 +1,7 @@
-const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
-const {stripTypeScriptTypes}=require('node:module');
-const file=path.join(__dirname,'../../functions/src/sheet-write-core.ts');
-const code=stripTypeScriptTypes(fs.readFileSync(file,'utf8'),{mode:'transform'}).replace(/^export /gm,'');
-const box={module:{exports:{}}};vm.runInNewContext(code+'\nmodule.exports={cancellationSheetWriteIdentity,submissionSheetWriteIdentity};',box,{filename:file});
-const core=box.module.exports,book='synthetic_private_source_book';
+const assert=require('node:assert/strict');
+// Reuse the actual pure-module loader so its shared publication barrier is
+// loaded too; these identity assertions still use the production helpers.
+const core=require('./test-worker-binding.cjs').load('sheet-write-core'),book='synthetic_private_source_book';
 const job={companyId:'company-synthetic',caseId:'LKCASE_00000000-0000-5000-8000-000000000001',assignedStaffId:'staff-1',assignedStaffName:'合成担当',dateKey:'2026-11-20',workDate:'2026-11-20',revision:4,caseListSource:{bindingHash:'a'.repeat(64)},sheetRef:{sheetId:1773116117,sheetName:'2026.11',caseIdColumn:'BC',bindingHash:'b'.repeat(64)}};
 const hydrated={...job,sheetRef:{...job.sheetRef,spreadsheetId:book}};
 assert.equal(core.cancellationSheetWriteIdentity(job),core.cancellationSheetWriteIdentity(hydrated));

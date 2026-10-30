@@ -15,10 +15,12 @@ export const retryWorkerSourcePins = Object.freeze({
   "functions/src/case-list-publication-core.ts": "14cd481606974d29c65af44d804eb2199cc3ac220d230be5d9ea4f3f585287ac",
   "functions/src/case-list-publication-finalizer.ts": "fe2773482dc6a79ffe0e416ca4dbf4f3a4ae0821e67ae4c78b88831a0c43f0ac",
   "functions/src/case-list-publication-worker.ts": "a16375e7056ce176cfb54751c2d35cc240458c7413be92d353823fd529798b14",
+  // Reviewed durable publication barrier shared by unassigned cancellation capture/native authorization.
+  "functions/src/case-list-publication-state.ts": "c2c5a154fb8528acf97667a4c172ca4d9de8c2e34d129497ba172156b2841a83",
   "functions/src/case-list-manual-origin-core.ts": "c4747e7ab535185e3aa10a089385a2240f314eaaeded6247e59277df67a3c3cd",
   "functions/src/safe-sheet-writes.ts": "a99dc707a8fe04f03be70b6579cc22dd3ebbb0e3a35b7b65cbb614e2f1411370",
   // Reviewed native Source cancellation is reachable only after the existing pause/claim boundary.
-  "functions/src/case-list-source-cancellation.ts": "c492d93fe8e4ca7bafd699d6293b3f413c03f76da571f4522c69b3a85b8c97ad",
+  "functions/src/case-list-source-cancellation.ts": "85064fe29871716b69eba3e43b2e705c79d5f32d58d95f7659738b80f8497097",
   "functions/src/sheet-write-control.ts": "a57db6a895c42ed58655a42ae67d84754fb679c2f0751d11b5b65edff0387f08",
   "functions/src/index.ts": "b5258e6842732565b671c33c89e43da117baec7e629bf7654d0dccffebbe1dc9",
   "functions/src/case-list-monthly-worker.ts": "baf7fcd668fd8befb8c986752e32fbab3e9d94fb915d5ed2f8b768908be054fa",
@@ -30,7 +32,7 @@ export const retryWorkerSourcePins = Object.freeze({
   "functions/src/case-list-projection.cjs": "059f39d152981e9e9566c276332f9db7da6442dd99fe3ec12e28c587ff9a3326",
   "functions/src/case-id.ts": "7c03676a32947d8c7a81a8a5b7600c1870ccd2c41b036362bf3e8dd475422d87",
   // Reviewed capture-before-clear and BL-only legacy ACK guard; pure validation, no new I/O.
-  "functions/src/sheet-write-core.ts": "3b0786fbca89aca90e6c73b5704357cb049cb89515084f5038df3c543b74fe16",
+  "functions/src/sheet-write-core.ts": "fe677879d21187855c208c7ccdc22ffd9968b6f8fb658dd65f9d6dd7d54850af",
   "functions/src/system-safety.ts": "25debd6fa931ce85b72f82d4f7e499db99b0054576af0f07a91ffb8917e61ce3",
   "functions/src/sheet-reader.ts": "9362b67e922d89661a26999c4cb44c5394a199635627b69e0de5057a9202dce0"
 });

@@ -1,4 +1,4 @@
-import {cancellationSheetWriteIdentity} from "./sheet-write-core";
+import {cancellationSheetWriteIdentity,isUnassignedSourceCancellation} from "./sheet-write-core";
 import {hashText} from "./case-id";
 type Data=Record<string,any>;
 const present=(value:unknown):value is string=>typeof value==="string"&&value.trim().length>0;
@@ -40,8 +40,15 @@ export function retainedCancellationAssignment(old:Data|undefined,incoming:Data,
   return {staffId:old.assignedStaffId as string,staffName:old.assignedStaffName as string};
 }
 
+function protectedUnassignedSourceCancellation(job:Data):boolean {
+  const saved=job.cancellationSheetWrite;
+  return job.sourceCancellationClosed===true&&job.cancelled===true&&job.status==="cancelled"&&
+    isUnassignedSourceCancellation(saved?.caseListCancellation)&&saved?.sourceAckVersion===1&&[true,false].includes(saved?.sourceAckPending);
+}
+
 /** The current restore queue does not write a cleared name back. Stop until explicit re-assignment is implemented. */
 export function assertCancelledAssignmentCanRestore(job:Data){
+  if(protectedUnassignedSourceCancellation(job))refuse();
   if(job.caseListPublicationWrite!=null&&(job.caseListPublicationWrite.pending!==false||!["PUBLISHED","REVOKED"].includes(job.caseListPublicationWrite.state))) throw new Error("原本の募集反映が未確認です。取消履歴を保持し、照合が完了するまで復帰を停止しました。");
   if(job.sourceCancellationClosed===true&&job.cancelled===true&&
     present(job.assignedStaffId)&&(
@@ -55,6 +62,7 @@ export function assertCancelledAssignmentCanRestore(job:Data){
 
 /** Exact replay is handled before this guard. Keep the original proof intact until correction has an immutable history path. */
 export function assertAcknowledgedCancellationCanChange(job:Data){
+  if(protectedUnassignedSourceCancellation(job))refuse();
   if(job.sourceCancellationClosed===true&&job.cancelled===true&&job.status==="cancelled"&&
     present(job.assignedStaffId)&&(
       typeof job.rawStaffName==="string"&&!job.rawStaffName.trim()||

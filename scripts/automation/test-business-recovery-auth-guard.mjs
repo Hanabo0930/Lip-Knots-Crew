@@ -91,7 +91,7 @@ const mutations={
   ['if (lockRef && ownsActiveLock && sourceAck.sourceAckPending !== true)','if (lockRef)'],
   ['sourceAck.sourceAckPending !== true','true'],
   ['assertAcknowledgedCancellationCanChange(job);',''],
-  ['cancellationSourceAckFields(job, ownsActiveLock, now.toMillis(), nextAssignmentRevision(job))','unchecked(job)'],
+  ['cancellationSourceAckFields(job, ownsActiveLock, now.toMillis(), nextAssignmentRevision(job), caseListCancellation)','unchecked(job)'],
   ['...sourceAck',''],
   ['tx.set(queueRef,','await queueRef.set('],
   ['targetStaffId: job.assignedStaffId','targetStaffId: input.staffId'],

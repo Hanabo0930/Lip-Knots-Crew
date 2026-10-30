@@ -465,7 +465,7 @@ try{
   for(const width of [390,1280]){
     await page.setViewportSize({width,height:900});
     await page.goto(base+'/?entry=recruitment-mail');
-    await page.getByRole('heading',{name:'案件一覧',exact:true}).waitFor();
+    await page.getByRole('heading',{name:'案件一覧',exact:true,level:2}).waitFor();
     const entry=page.locator('details.recruitment-draft-panel[open]');
     await entry.getByLabel('募集地域',{exact:true}).waitFor();
     assert.equal(await entry.getByRole('checkbox').count(),0,'An entry link never selects recruitment jobs');

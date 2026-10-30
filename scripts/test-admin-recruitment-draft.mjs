@@ -71,3 +71,5 @@ await asyncTest("owner cannot replace BE with a different region",async()=>{cons
 await asyncTest("same BE is explicitly included in publisher confirmation",async()=>{const state=await publish("東北"),sent=state.payloads.find(x=>x.name==="updateJobPublication");assert.equal(sent.payload.caseListConfirmations[base.id].confirmedRegion,"東北");assert.ok(!("region" in sent.payload));});
 assert.match(component,/onAuthStateChanged\(auth/);assert.match(component,/generation.current\+\+; runRef.current = null/);assert.match(component,/募集文に掲載/);assert.match(component,/送信はご自身で/);
 console.log(JSON.stringify({adminRecruitmentDraftTests:tests,status:"PASS",nativeRequests:0,cloudWrites:0,realCopies:0}));
+
+await import("./test-recruitment-sheet-entry.mjs");

@@ -462,6 +462,17 @@ try{
   assert.equal(content.subarray(0,3).toString('hex'),'efbbbf');assert.ok(content.toString('utf8').includes('\r\n'));assert.ok(content.toString('utf8').includes('"粗利概算"'));assert.match(download.suggestedFilename(),/^デモ_2026-01-01_2026-12-31_/);
   await page.goto(base+'/admin/jobs/missing');await page.getByRole('button',{name:'通知の案件を再読込',exact:true}).waitFor();await page.getByRole('button',{name:'閉じる',exact:true}).click();assert.equal(new URL(page.url()).pathname,'/');
   console.log('Admin job notification browser passed: target at list start and edit selection, unavailable link and close.');
+  for(const width of [390,1280]){
+    await page.setViewportSize({width,height:900});
+    await page.goto(base+'/?entry=recruitment-mail');
+    await page.getByRole('heading',{name:'案件一覧',exact:true,level:2}).waitFor();
+    const entry=page.locator('details.recruitment-draft-panel[open]');
+    await entry.getByLabel('募集地域',{exact:true}).waitFor();
+    assert.equal(await entry.getByRole('checkbox').count(),0,'An entry link never selects recruitment jobs');
+    assert.equal(await entry.getByRole('button',{name:'0件の募集文を作成',exact:true}).isDisabled(),true);
+    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Entry must fit '+width);
+  }
+  console.log('Sheet recruitment entry browser passed: actual App navigation, open panel, no selected jobs/automatic draft, 390/1280; synthetic demo only.');
   assert.deepEqual(errors,[]);
   console.log(`Admin browser passed: five views at 390/1280px, input persistence, expense navigation, keyboard access; initial DOM ${initial.domNodes}, ${initial.scripts.length} JS requests.`);
  }

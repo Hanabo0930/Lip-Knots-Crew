@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <base target="_top"><title>案件メール作成</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;padding:28px;font:15px/1.75 "Yu Gothic UI",Meiryo,sans-serif;color:#203039;background:#f5f7f8}h1{font-size:23px;margin:0 0 14px}p{margin:0 0 16px}a{display:block;background:#23646b;color:white;text-align:center;text-decoration:none;padding:12px 18px;border-radius:9px;font-weight:700}a:focus-visible{outline:3px solid #799fad;outline-offset:3px}[hidden]{display:none!important}.note{font-size:12px;color:#526570;margin-top:15px}
+  </style>
+</head>
+<body>
+  <h1>募集メールを作成</h1>
+  <p>管理画面で募集地域と掲載する案件を選び、件名・本文を作成します。</p>
+  <p id="status" role="status">作成画面を確認しています…</p>
+  <a id="entry" hidden target="_blank" rel="noopener noreferrer">管理画面で募集メールを作成</a>
+  <p class="note">ログイン後も、掲載する案件はご自身で選択してください。作成・コピーの際に募集状態を再照合します。メール送信と月別シフトへの移行は、それぞれ別の操作です。</p>
+  <script>
+    function showEntry(result) {
+      var link = document.getElementById('entry'), status = document.getElementById('status');
+      if (!result || result.purpose !== 'recruitment-admin-entry' || result.url !== 'https://lip-knots-crew-staging-admin.web.app/?entry=recruitment-mail') {
+        status.textContent = '作成画面を確認できません。画面を開き直してください。'; return;
+      }
+      link.href = result.url; link.hidden = false; status.textContent = '作成画面を開けます。';
+    }
+    google.script.run.withSuccessHandler(showEntry).withFailureHandler(function () {
+      document.getElementById('status').textContent = '作成画面を確認できません。管理者に設定を確認してください。';
+    }).lkRmV1Bootstrap();
+  </script>
+</body>
+</html>

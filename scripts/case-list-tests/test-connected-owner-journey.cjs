@@ -179,10 +179,25 @@ async function journey(origin, december, cancelBeforeSelection=false) {
   results.push({origin,month,passed:true,publicationPost:c.batches(),...h.counts()});
 }
 (async()=>{
+  // The shared Timestamp double must support the actual notification module's
+  // Date conversion. Cover both quiet-hour boundaries regardless of CI time.
+  const timing=H.load('notification-time');
+  const clockCases=[
+    ['2026-10-29T21:59:00+09:00','2026-10-29T21:59:00+09:00',false],
+    ['2026-10-29T22:00:00+09:00','2026-10-30T07:00:00+09:00',true],
+    ['2026-10-30T00:00:00+09:00','2026-10-30T07:00:00+09:00',true],
+    ['2026-10-30T06:59:00+09:00','2026-10-30T07:00:00+09:00',true],
+    ['2026-10-30T07:00:00+09:00','2026-10-30T07:00:00+09:00',false],
+    ['2026-10-31T23:59:00+09:00','2026-11-01T07:00:00+09:00',true],
+  ];
+  for(const [input,expected,deferred]of clockCases){
+    const value=timing.applyQuietHours(H.Stamp.fromDate(new Date(input)));
+    assert.equal(value.deliverAt.toMillis(),Date.parse(expected));assert.equal(value.quietDeferred,deferred);
+  }
   for(const december of [false,true])for(const origin of ['application','manual']){
     await journey(origin,december);await journey(origin,december,true);
   }
-  console.log(JSON.stringify({status:'PASS',connectedJourneys:results.length,actualProductionValidators:true,sameBusinessDocumentsBetweenStages:true,
+  console.log(JSON.stringify({status:'PASS',connectedJourneys:results.length,notificationClockCases:clockCases.length,actualProductionValidators:true,sameBusinessDocumentsBetweenStages:true,
     scope:'PUBLICATION_ACK_DRAFT_ACTUAL_APPLY_OR_MANUAL_IMPORT_OWNER_SELECTION_MONTHLY_ACK_UI_AND_PRESELECTION_CANCELLATION_HISTORY',
     firestoreAndGoogleAreMocks:true,realMailSent:0,cloudWrites:0,results},null,2));
 })().catch(error=>{console.error(error);process.exitCode=1;});

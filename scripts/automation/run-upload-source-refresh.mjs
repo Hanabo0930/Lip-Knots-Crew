@@ -387,7 +387,7 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
     result.cloudWritesAttempted = !dependencies.api && Boolean(api?.counters.writesAttempted);
     result.requests = api?.counters.requests ?? 0; result.mediaBytes = api?.counters.mediaBytes ?? 0;
     if (api?.counters.lastRequestKind) result.lastRequestKind = api.counters.lastRequestKind;
-    result.sourceSha = env.LKC_VERIFIED_SOURCE_SHA ?? null;
+    result.sourceSha = /^[0-9a-f]{40}$/.test(env.LKC_VERIFIED_SOURCE_SHA ?? '') ? env.LKC_VERIFIED_SOURCE_SHA : null;
     result.functions = S.functions;
     // The only artifact is this bounded result. Full settings, manifests and
     // package bytes remain private or in the reviewed private bucket.

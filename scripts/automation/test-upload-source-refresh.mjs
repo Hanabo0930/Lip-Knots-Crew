@@ -209,6 +209,15 @@ test('only the exact protected existing workflow and main pair can execute', () 
   assert.throws(() => validatePlan({mode: 'functions-upload-source-refresh', functions: S.functions.join(',') + ',bootstrapSession',
     confirmation: context().LKC_CONFIRMATION}));
 });
+test('invalid source identity cannot leak a private value into the bounded result', async () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'lkc-invalid-source-context-'));
+  try {
+    const api={counters:{requests:0,writesAttempted:0,mediaBytes:0},request:async()=>assert.fail('NETWORK_FORBIDDEN')};
+    const result=await runUploadSourceRefresh({...context(),LKC_VERIFIED_SOURCE_SHA:privateValue,GITHUB_WORKSPACE:root},{api});
+    assert.equal(result.sourceSha,null);assert.equal(result.cloudWritesAttempted,false);
+    assert.doesNotMatch(fs.readFileSync(path.join(root,'upload-source-refresh-result.json'),'utf8'),new RegExp(privateValue));
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});
 test('authenticated transport redacts private errors, refuses redirects and bounds bodies without retries', async () => {
   let calls = 0;
   const api = authenticatedUploadRefreshAPI({getRequestHeaders: async () => ({authorization: 'Bearer ' + privateValue})}, async (url, options) => {

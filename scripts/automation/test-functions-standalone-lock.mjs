@@ -16,7 +16,8 @@ function validate(lock) {
   for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'engines'])
     assert.deepEqual(lock.packages[''][field] ?? {}, manifest[field] ?? {});
   for (const [key, value] of Object.entries(lock.packages)) if (key) {
-    assert(key.startsWith('node_modules/') && !value.link && approved.has(tuple(key, value)), 'Standalone lock introduced an unreviewed dependency');
+    assert(key.startsWith('node_modules/') && !value.link && approved.has(tuple(key, value)),
+      'Standalone lock introduced an unreviewed dependency: ' + packageName(key) + '@' + value.version);
   }
 }
 validate(locked);
@@ -34,8 +35,10 @@ if (process.argv.includes('--install')) {
         {encoding: 'utf8', timeout: 180000});
       if (normalized.status === 0) {
         const candidate = JSON.parse(fs.readFileSync(path.join(temp, 'package-lock.json'), 'utf8'));
-        validate(candidate);
+        // Quarantined public dependency metadata for review only. It never
+        // replaces the committed runtime lock, and validation still fails CI.
         fs.writeFileSync(path.join(root, 'functions-standalone-lock-candidate.json'), JSON.stringify(candidate, null, 2) + '\n');
+        validate(candidate);
       }
       console.error((result.stderr ?? '').slice(-3000));
       throw Error('FUNCTIONS_STANDALONE_LOCK_INSTALL_FAILED_REVIEW_CANDIDATE');

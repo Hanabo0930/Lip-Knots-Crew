@@ -11,9 +11,10 @@ assert.equal(fs.existsSync('.github/workflows/staging-cancellation-privacy-audit
 function validate(text){
  const w=yaml.load(text);
  assert.deepEqual(Object.keys(w.on),['workflow_dispatch']);
- assert.deepEqual(w.on.workflow_dispatch.inputs.operation.options,['deploy','gmail-smoke','cancellation-privacy-audit']);
+ assert.deepEqual(w.on.workflow_dispatch.inputs.operation.options,['deploy','upload-source-refresh','gmail-smoke','cancellation-privacy-audit']);
  assert.equal(w.on.workflow_dispatch.inputs.operation.default,'deploy');
- assert.equal(w.jobs.guard.if,"inputs.operation == 'deploy'");assert.equal(w.jobs.deploy.if,"inputs.operation == 'deploy'");
+ const deployOnly="inputs.operation == 'deploy' || inputs.operation == 'upload-source-refresh'";
+ assert.equal(w.jobs.guard.if,deployOnly);assert.equal(w.jobs.deploy.if,deployOnly);
  assert.equal(w.jobs['smoke-guard'].if,"inputs.operation == 'gmail-smoke'");assert(w.jobs['gmail-smoke'].if.includes("inputs.operation == 'gmail-smoke'"));
  assert.equal(w.concurrency['cancel-in-progress'],false);
  assert.deepEqual(Object.keys(w.jobs).sort(),['cancellation-audit','cancellation-audit-guard','deploy','gmail-smoke','guard','smoke-guard']);

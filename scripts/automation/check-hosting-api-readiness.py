@@ -21,9 +21,25 @@ REQUIRED = ("createUploadSession", "finalizeStagedUpload")
 MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_FIXED_ARCHIVE = 10 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 10000
+MAX_ARCHIVE_DIAGNOSTIC_PATHS = 16
 
 class ReadinessError(Exception):
     pass
+
+class UnexpectedArchiveFilesError(ReadinessError):
+    def __init__(self, names):
+        # Untrusted names may themselves contain secrets. Retain only bounded
+        # hashes, never the names or file contents, in failure evidence.
+        super().__init__("ARCHIVE_UNEXPECTED_FILE")
+        hashes = sorted({hashlib.sha256(name.encode("utf-8")).hexdigest() for name in names})
+        self.unexpected_file_count = len(names)
+        self.path_sha256 = tuple(hashes[:MAX_ARCHIVE_DIAGNOSTIC_PATHS])
+        self.truncated = len(hashes) > MAX_ARCHIVE_DIAGNOSTIC_PATHS
+
+    @property
+    def diagnostics(self):
+        return {"unexpectedFileCount": self.unexpected_file_count,
+                "pathSha256": list(self.path_sha256), "truncated": self.truncated}
 
 def require(condition, code):
     if not condition:
@@ -220,7 +236,10 @@ def verify_archive(blob, expected, *, strict=False, optional=None):
                         require(name in directories and entry.file_size == 0,
                                 "ARCHIVE_DIRECTORY_REJECTED")
                     else:
-                        require(name in allowed, "ARCHIVE_UNEXPECTED_FILE")
+                        if name not in allowed:
+                            raise UnexpectedArchiveFilesError([
+                                item.filename for item in entries
+                                if not item.is_dir() and item.filename not in allowed])
                 require(set(expected) <= {entry.filename for entry in entries if not entry.is_dir()},
                         "DEPLOYED_PACKAGE_INCOMPLETE")
             require(len(names) == len(set(names)), "DUPLICATE_ARCHIVE_PATH")
@@ -312,6 +331,8 @@ def main():
     except (ReadinessError, evidence.EvidenceError, OSError, ValueError, TypeError, AttributeError, RecursionError) as error:
         code = str(error) if isinstance(error, (ReadinessError, evidence.EvidenceError)) else "READINESS_INPUT_INVALID"
         result = {"status": "STOPPED", "reason": code}
+        if os.environ.get("LKC_SOURCE_ACQUISITION") == "fixed-source-once" and type(error) is UnexpectedArchiveFilesError:
+            result["diagnostics"] = error.diagnostics
     if args.mutation_guard:
         # Read-only revalidation: never overwrite/renew the accepted receipt.
         # This bounded, non-secret result is checked again immediately before POST.

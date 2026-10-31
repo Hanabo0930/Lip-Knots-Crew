@@ -57,6 +57,16 @@ archiveの実バイト数とtransportの整合性を確認し、取得した実�
 
 実装前後に、別project/Function/object/generation、403、redirect、サイズ超過、非STANDARD、前後変更、ZIP不正、inventory差分、秘密混入、caller作成の偽証拠、失敗後の追加通信、照合前のHosting操作を隔離試験する。成功した合成試験と実取得の成功は分けて報告する。
 
+## 10/31の実検証と失敗診断
+
+本人の「1」で#509の未実行待機の取消と限定検証への切替を明示承認し、#509は取消完了。手動#510（run41159617938、main731fed20c34a12575ab76d412d30846d73b0a2d9、attempt1）は既存保護環境の通常承認を通過した。両Previewの実browser検査に成功し、固定ソース取得は10 GET・2,758,448 bytesで完了した。
+
+厳格照合は`ARCHIVE_UNEXPECTED_FILE`で停止。公開・退避・復旧stepは全てskipで、privateソースと鍵のcleanupは成功した。取得の成功をコード一致や公開成功とは扱わない。保存された診断はエラー種別だけなので、対象外ファイルの正体やコード不一致は未確定である。この実取得により承認された1回は消化済み。
+
+次の開発変更は、同じ停止条件を保持し、固定取得方式の未知ファイル失敗にだけ診断を添えるもの。`unexpectedFileCount`、未知パスのUTF-8文字列をSHA256にした`pathSha256`（重複を除き整列、最大16件）、省略有無`truncated`だけを保存する。原始のファイル名・本文・鍵を出力せず、未知ファイルを読み出さない。パスのハッシュは内容の一致証明ではなく、現リポジトリの候補パスと照合するための識別情報である。失敗コードと非ゼロ終了、既存allowlist、ZIP形式検査、公開前guardは維持する。
+
+診断修正の隔離試験と通常CIを終えても、自動で実取得を繰り返さない。追加が必要な場合は、現在mainの新しい通常手動`readiness`実行を、対象2API・各10 MiB/計20 MiB・最大12 GET・追加試行1回・転送費用の可能性という範囲で提示する。`readiness`はHostingを変更しない。権限追加、別identity、Functions/GAS配備、停止解除は含めない。
+
 ## 公式仕様
 
 - [Cloud Build SourceProvenance / BuildOptions](https://docs.cloud.google.com/build/docs/api/reference/rest/v1/projects.builds)

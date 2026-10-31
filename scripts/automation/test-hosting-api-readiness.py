@@ -232,6 +232,38 @@ class ReadinessTests(unittest.TestCase):
                 self.assertNotIn(name, str(caught.exception))
                 self.assertNotIn("SYNTHETIC_PRIVATE_VALUE", str(caught.exception))
 
+    def test_strict_unknown_file_failure_retains_only_path_hashes_without_reading_members(self):
+        names = [".env.SYNTHETIC_PRIVATE_NAME", "test/private-é.key"]
+        blob = archive(self.files + [(name, b"SYNTHETIC_PRIVATE_CONTENT") for name in names])
+        with patch.object(zipfile.ZipFile, "open", side_effect=AssertionError("MEMBER_READ_FORBIDDEN")), \
+             self.assertRaises(g.UnexpectedArchiveFilesError) as caught:
+            g.verify_archive(blob, g.expected_files(self.root), strict=True)
+        error = caught.exception
+        self.assertEqual(error.args, ("ARCHIVE_UNEXPECTED_FILE",))
+        self.assertEqual(error.diagnostics, {
+            "unexpectedFileCount": 2,
+            "pathSha256": sorted(g.hashlib.sha256(name.encode("utf-8")).hexdigest() for name in names),
+            "truncated": False})
+        retained = json.dumps({"error": str(error), "attributes": error.__dict__, "diagnostics": error.diagnostics})
+        for private in names + ["SYNTHETIC_PRIVATE_CONTENT"]:
+            self.assertNotIn(private, retained)
+
+    def test_strict_unknown_file_diagnostics_are_bounded_and_do_not_allow_the_files(self):
+        names = [f"unknown-{i:03d}.synthetic" for i in range(40)]
+        blob = archive(self.files + [(name, b"private") for name in names + names[:1]])
+        with self.assertRaisesRegex(g.ReadinessError, "^ARCHIVE_UNEXPECTED_FILE$") as caught:
+            g.verify_archive(blob, g.expected_files(self.root), strict=True)
+        diagnostic = caught.exception.diagnostics
+        self.assertEqual(diagnostic["unexpectedFileCount"], 41)
+        self.assertEqual(diagnostic["pathSha256"],
+                         sorted(g.hashlib.sha256(name.encode("utf-8")).hexdigest() for name in names)[:16])
+        self.assertTrue(diagnostic["truncated"])
+        self.assertEqual(len(diagnostic["pathSha256"]), 16)
+        self.assertTrue(all(len(value) == 64 for value in diagnostic["pathSha256"]))
+        # The retained route still follows its pre-existing extra-file policy.
+        self.assertIsNone(g.verify_archive(archive(self.files + [(name, b"private") for name in names]),
+                                           g.expected_files(self.root)))
+
     def test_strict_rejects_alias_paths_and_unknown_directories(self):
         for name in ("./lib/uploads.js", "lib//uploads.js", "lib/../uploads.js", "/lib/uploads.js",
                      "lib\\uploads.js", "lib:uploads.js", "lib/uploads.js\x01", "lib/./", "lib//"):

@@ -34,6 +34,14 @@ Functions retain their existing deployment path.
 - Leave upload_write_confirmation empty for read-only preflight. Only a separately reviewed execution may set it to APPLY_LKC_STAGING_UPLOAD_SOURCE_REFRESH.
 - No mutating source refresh has been performed for this code.
 
+Read-only execution #72/run41214584721 at main
+`03b4ff5d34fbe1280434964a211808cb8697fc48` made 15 metadata requests,
+zero source-body reads and zero cloud writes. Both Functions were ACTIVE with
+notification/transfer paused and the sheet-write setting absent. The bucket had
+UBLA enabled, inherited public-access prevention and an organization parent.
+It stopped at the previous no-parent guard; it did not establish whether the
+effective inherited prevention is enforced. Cleanup completed.
+
 The workflow skips the GitHub-variable dotenv writer and transfer-mode writer for
 this operation. It uses the same existing short-lived ADC/WIF identity, never
 requests a new permission, and does not call the Firebase CLI's broader deploy
@@ -45,8 +53,12 @@ Read complete official Function, Run service, Function/Run policies, Storage
 event trigger, source-generation metadata, bucket settings and project policy.
 Both Functions must be ACTIVE nodejs22, use their exact identities/revisions,
 and have all traffic on the verified ready revision. Compare Function and Run
-environment values. Notification, sheet-write and submission-transfer must all
-be explicitly paused. Missing/active/acceptance states are not inferred or changed.
+environment values. Notification and submission-transfer must be explicitly
+paused. Sheet-write must be paused or absent on both Function and Run, preserving
+the exact state. The current application helper closes on an absent value;
+the same production helper is executed in an isolated regression. A present
+active, empty, acceptance or unknown sheet mode remains rejected. No environment
+value is reconstructed, inserted or changed.
 
 Secret references must use fixed numeric versions. Build's existing
 GOOGLE_NODE_RUN_SCRIPTS must already disable automatic script execution.
@@ -56,12 +68,22 @@ comparison and are not silently discarded.
 The fixed existing bucket is
 `gcf-v2-sources-740154137290-asia-northeast1`. Its current project, region,
 uniform bucket-level access and an explicit public-access-prevention state, plus
-complete private bucket/project policies, must be observed. An inherited prevention
-state is accepted only with verified private policies and no parent-policy scope. An unverified organization/folder
-inheritance stops the operation. This code does not read outside the project,
+complete private bucket/project policies, must be observed. With an organization
+or folder parent and inherited prevention, read only the effective policy on this
+exact project using `projects.getEffectiveOrgPolicy` and the fixed constraint
+`constraints/storage.publicAccessPrevention`. Require the computed unconditional
+boolean policy to be enforced. False, missing, unknown, denied or conditional
+policy evidence stops before writes. A bucket's explicit enforced state needs no
+ancestor lookup; inherited state without any parent retains the private
+bucket/project policy checks. This code does not read parent resources,
 create a bucket, alter its policy, or add IAM to make a backup succeed.
-Actual bucket privacy, access and current paused values remain unverified until
-an approved protected execution reads them.
+The existing short-lived identity is used without extra permissions. The project
+effective-policy read requires `orgpolicy.policy.get`; a denial is retained as a
+read failure and never triggers a role grant or identity change.
+
+Primary API/semantics:
+- https://docs.cloud.google.com/resource-manager/reference/rest/v1/projects/getEffectiveOrgPolicy
+- https://docs.cloud.google.com/storage/docs/public-access-prevention
 
 ## Read-only preflight before an apply review
 
@@ -94,8 +116,10 @@ JS, maps, TypeScript, CJS, current package manifests and approved packaging file
 A standalone Functions lock and the existing root dependency overrides preserve
 the canonical workspace resolutions. The lock is checked against the existing
 root lock and installed in isolated CI without lifecycle scripts. No new dependency version
-may be introduced by lock normalization. Private dotenv is checked against official
-runtime values but never put in the new ZIP. Existing strict source provenance
+may be introduced by lock normalization. The packager accepts no runtime settings;
+the owner validates the complete official before-images and compares all settings
+before and after the source-only update. Private dotenv never enters the ZIP or
+packager input. Existing strict source provenance
 therefore needs no dotenv exception or relaxed content/inventory check.
 
 Update only `buildConfig.source` on each existing Function, sequentially.

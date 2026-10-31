@@ -6,7 +6,7 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
-import {UPLOAD_REFRESH_SCOPE as S, prepareUploadSourceRefresh, uploadBackupRequests,
+import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, prepareUploadSourceRefresh, uploadBackupRequests,
   verifyUploadBackups, uploadSourceOnlyPatch, runUploadRefreshTransaction} from './upload-source-refresh-contract.mjs';
 import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUploadRefreshObject, runUploadSourceRefresh,
   uploadRefreshCloudOwner} from './run-upload-source-refresh.mjs';
@@ -118,7 +118,7 @@ for (const [label, mutate] of [
   ['public service', f => f.before.finalizeStagedUpload.policy.bindings.push({role: 'roles/run.invoker', members: ['allUsers']})],
   ['public Function', f => f.before.createUploadSession.functionPolicy.bindings.push({role: 'roles/cloudfunctions.invoker', members: ['allAuthenticatedUsers']})],
   ['public project', f => f.bucket.projectPolicy.bindings.push({role: 'roles/viewer', members: ['allUsers']})],
-  ['unknown inherited policy', f => f.bucket.project.parent = {type: 'organization', id: '123'}],
+  ['unknown inherited policy', f => { f.bucket.project.parent = {type: 'organization', id: '123'}; f.bucket.iamConfiguration.publicAccessPrevention = 'inherited'; }],
   ['wrong project metadata', f => f.bucket.project.projectId = 'other'],
   ['unverified private bucket', f => f.bucket.iamConfiguration.publicAccessPrevention = 'UNVERIFIED'],
   ['legacy object ACLs', f => f.bucket.iamConfiguration.uniformBucketLevelAccess.enabled = false],
@@ -135,6 +135,79 @@ for (const [label, mutate] of [
   ['mutable secret alias', f => f.before.createUploadSession.fn.serviceConfig.secretEnvironmentVariables[0].version = 'latest'],
   ['unbounded private snapshot', f => f.before.createUploadSession.fn.description = 'x'.repeat(S.configBytes)],
 ]) test('reject before planning writes: ' + label, () => { const f = fixture(); mutate(f); assert.throws(() => prepareUploadSourceRefresh(f), /UPLOAD_REFRESH_/); });
+const enforcedPolicy = () => ({constraint: UPLOAD_PUBLIC_ACCESS_CONSTRAINT, booleanPolicy: {enforced: true}});
+for (const type of ['organization', 'folder']) test('inherited public access prevention requires an effective project policy: ' + type, () => {
+  const f = fixture(); f.bucket.project.parent = {type, id: '123'};
+  f.bucket.iamConfiguration.publicAccessPrevention = 'inherited';
+  f.bucket.effectivePublicAccessPrevention = enforcedPolicy();
+  assert.equal(prepareUploadSourceRefresh(f).executionReady, false);
+});
+test('explicit bucket enforcement does not require ancestor reads', () => {
+  const f = fixture(); f.bucket.project.parent = {type: 'organization', id: '123'};
+  assert.equal(prepareUploadSourceRefresh(f).executionReady, false);
+});
+for (const [label, mutate] of [
+  ['false', p => p.booleanPolicy.enforced = false], ['missing boolean', p => delete p.booleanPolicy],
+  ['empty boolean', p => p.booleanPolicy = {}], ['wrong constraint', p => p.constraint = 'constraints/other'],
+  ['conditional', p => p.booleanPolicy.condition = 'unverified'], ['unknown field', p => p.future = true],
+  ['restore default', p => p.restoreDefault = {}], ['nonzero version', p => p.version = 1],
+  ['uncomputed policy', p => p.etag = 'direct-policy-etag'],
+]) test('reject unverifiable effective policy: ' + label, () => {
+  const f = fixture(), policy = enforcedPolicy(); mutate(policy);
+  assert.equal(uploadEffectivePublicAccessPreventionEnforced(policy), false);
+  f.bucket.project.parent = {type: 'organization', id: '123'};
+  f.bucket.iamConfiguration.publicAccessPrevention = 'inherited'; f.bucket.effectivePublicAccessPrevention = policy;
+  assert.throws(() => prepareUploadSourceRefresh(f), /EFFECTIVE_PUBLIC_ACCESS_PREVENTION_NOT_VERIFIED/);
+});
+test('preserve absent sheet mode with the actual fail-closed application helper; never create a setting', () => {
+  const module = new URL('../../functions/src/sheet-write-control.ts', import.meta.url).href;
+  const script = `import {sheetWriteExecutionPaused} from ${JSON.stringify(module)};
+    const results=[];for(const mode of [null,'paused','active','','unknown','acceptance']){
+      delete process.env.LKC_SHEET_WRITE_MODE;if(mode!==null)process.env.LKC_SHEET_WRITE_MODE=mode;
+      results.push([mode,sheetWriteExecutionPaused()]);}console.log(JSON.stringify(results));`;
+  const actual = JSON.parse(execFileSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '--eval', script],
+    {env: {}, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe']}));
+  assert.deepEqual(actual, [[null,true],['paused',true],['active',false],['',true],['unknown',true],['acceptance',true]]);
+  const f = fixture();
+  for (const name of S.functions) {
+    delete f.before[name].fn.serviceConfig.environmentVariables.LKC_SHEET_WRITE_MODE;
+    f.before[name].service.spec.template.spec.containers[0].env = f.before[name].service.spec.template.spec.containers[0].env.filter(e => e.name !== 'LKC_SHEET_WRITE_MODE');
+  }
+  assert.doesNotMatch(uploadBackupRequests(prepareUploadSourceRefresh(f))[2].body, /LKC_SHEET_WRITE_MODE/);
+});
+for (const value of ['active', 'acceptance', '', 'unknown']) test('reject a present unsafe sheet mode: ' + JSON.stringify(value), () => {
+  const f = fixture(); f.before.createUploadSession.fn.serviceConfig.environmentVariables.LKC_SHEET_WRITE_MODE = value;
+  f.before.createUploadSession.service.spec.template.spec.containers[0].env.find(e => e.name === 'LKC_SHEET_WRITE_MODE').value = value;
+  assert.throws(() => prepareUploadSourceRefresh(f), /PAUSE_NOT_VERIFIED/);
+});
+test('an absent Function sheet mode cannot be inferred from a present Run value', () => {
+  const f = fixture(); delete f.before.createUploadSession.fn.serviceConfig.environmentVariables.LKC_SHEET_WRITE_MODE;
+  assert.throws(() => prepareUploadSourceRefresh(f), /FUNCTION_SERVICE_ENV_MISMATCH/);
+});
+test('effective policy transport reads only the exact project constraint and never counts a write', async () => {
+  let calls = 0;
+  const api = authenticatedUploadRefreshAPI({getRequestHeaders: async () => ({authorization:'synthetic'})}, async () => {
+    calls++; return new Response(JSON.stringify(enforcedPolicy()));
+  });
+  const url = `https://cloudresourcemanager.googleapis.com/v1/projects/${S.project}:getEffectiveOrgPolicy`;
+  assert.deepEqual(await api.request(url, {method:'POST', body:{constraint:UPLOAD_PUBLIC_ACCESS_CONSTRAINT}, readOnlyPost:true}), enforcedPolicy());
+  assert.equal(api.counters.writesAttempted, 0); assert.equal(api.counters.lastRequestKind, 'project-effective-public-access');
+  for (const [target, body, method = 'POST'] of [
+    [url.replace('projects/' + S.project, 'organizations/123'), {constraint:UPLOAD_PUBLIC_ACCESS_CONSTRAINT}],
+    [url.replace(S.project,'other-project'), {constraint:UPLOAD_PUBLIC_ACCESS_CONSTRAINT}],
+    [url,{constraint:'constraints/other'}], [url,{constraint:UPLOAD_PUBLIC_ACCESS_CONSTRAINT, update:true}],
+    [url+'?extra=1',{constraint:UPLOAD_PUBLIC_ACCESS_CONSTRAINT}], [url,{constraint:UPLOAD_PUBLIC_ACCESS_CONSTRAINT},'GET'],
+    [url.replace('getEffectiveOrgPolicy','setOrgPolicy'),{constraint:UPLOAD_PUBLIC_ACCESS_CONSTRAINT}],
+  ]) await assert.rejects(api.request(target,{method,body,readOnlyPost:true}), /HTTP_SCOPE_REJECTED/);
+  assert.equal(calls,1);
+});
+test('a caller cannot disguise a source PATCH as a read-only POST in write accounting', async () => {
+  const f=fixture(), patch=uploadSourceOnlyPatch(prepareUploadSourceRefresh(f),S.functions[0]);
+  const api=authenticatedUploadRefreshAPI({getRequestHeaders:async()=>({authorization:'synthetic'})},async()=>new Response('{}'));
+  await api.request(`https://cloudfunctions.googleapis.com/v2/${patch.name}?updateMask=buildConfig.source`,
+    {method:'PATCH',body:patch.body,readOnlyPost:true});
+  assert.equal(api.counters.writesAttempted,1);
+});
 test('source-only patches contain no environment, auth, trigger, runtime or resource changes', () => {
   const plan = prepareUploadSourceRefresh(fixture());
   for (const name of S.functions) {
@@ -276,7 +349,7 @@ test('the existing workflow owns the route and private data is never selected as
   assert.ok(shell.indexOf('functions-upload-source-refresh') < shell.indexOf('npx --yes'));
 });
 
-for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified', 'read-only-preflight', 'inherited-private-preflight'])
+for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified', 'read-only-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight'])
   test('isolated existing-runner integration: ' + scenario, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-refresh-integration-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
@@ -300,12 +373,25 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
     }
     if (scenario === 'private-bucket-unverified') f.bucket.iamConfiguration.publicAccessPrevention = 'UNVERIFIED';
     if (scenario === 'inherited-private-preflight') f.bucket.iamConfiguration.publicAccessPrevention = 'inherited';
+    if (scenario.startsWith('organization-')) {
+      f.bucket.iamConfiguration.publicAccessPrevention = 'inherited'; f.bucket.project.parent = {type:'organization',id:'123'};
+      f.bucket.effectivePublicAccessPrevention = enforcedPolicy();
+      if (scenario === 'organization-unverified-preflight') f.bucket.effectivePublicAccessPrevention.booleanPolicy.enforced = false;
+      for (const name of S.functions) {
+        delete pair[name].fn.serviceConfig.environmentVariables.LKC_SHEET_WRITE_MODE;
+        pair[name].service.spec.template.spec.containers[0].env = pair[name].service.spec.template.spec.containers[0].env.filter(e => e.name !== 'LKC_SHEET_WRITE_MODE');
+      }
+    }
     const json = value => new Response(JSON.stringify(value), {headers: {'content-type': 'application/json'}});
     const fakeFetch = async (value, options) => {
       const url = new URL(value), method = options.method, p = url.pathname;
       assert.equal(options.redirect, 'error');
       if (method === 'GET' && url.hostname === 'storage.googleapis.com' && p === `/storage/v1/b/${S.bucket}`) {
-        const {policy, project, projectPolicy, ...bucket} = f.bucket; return json(bucket);
+        const {policy, project, projectPolicy, effectivePublicAccessPrevention, ...bucket} = f.bucket; return json(bucket);
+      }
+      if (url.hostname === 'cloudresourcemanager.googleapis.com' && p.endsWith(':getEffectiveOrgPolicy')) {
+        assert.equal(method,'POST'); assert.deepEqual(JSON.parse(options.body),{constraint:UPLOAD_PUBLIC_ACCESS_CONSTRAINT});
+        return scenario === 'organization-policy-forbidden-preflight' ? new Response('',{status:403}) : json(f.bucket.effectivePublicAccessPrevention);
       }
       if (url.hostname === 'cloudresourcemanager.googleapis.com') return json(method === 'GET' ? f.bucket.project : f.bucket.projectPolicy);
       if (method === 'GET' && p === `/storage/v1/b/${S.bucket}/iam`) return json(f.bucket.policy);
@@ -372,7 +458,13 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
     assert.equal(result.cloudWritesAttempted, false);
     const artifact = fs.readFileSync(path.join(root, 'upload-source-refresh-result.json'), 'utf8');
     assert.doesNotMatch(artifact, new RegExp(privateValue)); assert.doesNotMatch(artifact, /secretEnvironmentVariables|PRIVATE_BUILD_SETTING/);
-    if (scenario.endsWith('preflight')) {
+    if (['organization-unverified-preflight','organization-policy-forbidden-preflight'].includes(scenario)) {
+      assert.equal(result.status, 'STOPPED_SAFELY');
+      assert.equal(result.reason, scenario === 'organization-unverified-preflight'
+        ? 'UPLOAD_REFRESH_EFFECTIVE_PUBLIC_ACCESS_PREVENTION_NOT_VERIFIED' : 'UPLOAD_REFRESH_HTTP_REJECTED');
+      if (scenario === 'organization-policy-forbidden-preflight') assert.equal(result.httpStatus,403);
+      assert.equal(patches,0); assert.equal(probes,0); assert.equal(mutations.length,0); assert.equal(result.mediaBytes,0);
+    } else if (scenario.endsWith('preflight')) {
       assert.equal(result.status, 'UPLOAD_SOURCE_PREFLIGHT_VERIFIED'); assert.equal(result.sourceRefreshPreflightVerified, true);
       assert.equal(patches, 0); assert.equal(probes, 0); assert.equal(mutations.length, 0); assert.equal(result.mediaBytes, 0);
     } else if (scenario.endsWith('success')) {

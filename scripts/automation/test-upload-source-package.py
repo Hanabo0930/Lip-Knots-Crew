@@ -29,14 +29,9 @@ class UploadPackageTest(unittest.TestCase):
             file = self.root / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text(body)
-        self.env = {key: "synthetic-private-" + key for key in package.readiness.DEPLOYMENT_CONFIG_KEYS}
-        self.env.update(APP_ENVIRONMENT="staging", EXPECTED_FIREBASE_PROJECT_ID=package.readiness.PROJECT,
-                        LKC_NOTIFICATION_DELIVERY_MODE="paused", LKC_SHEET_WRITE_MODE="paused", LKC_SUBMISSION_TRANSFER_MODE="paused")
-        self.environments = {name: dict(self.env) for name in package.readiness.REQUIRED}
 
     def test_strict_current_inventory_and_maps_but_no_dotenv_or_private_values(self):
-        self.environments["finalizeStagedUpload"]["ADMIN_EMAILS"] = "different@example.invalid"
-        result = package.build_packages(self.root, self.environments, self.output)
+        result = package.build_packages(self.root, self.output)
         self.assertEqual(set(result), set(package.readiness.REQUIRED))
         for info in result.values():
             file = pathlib.Path(info["path"])
@@ -47,10 +42,11 @@ class UploadPackageTest(unittest.TestCase):
                 self.assertIn("test/sample.ts", archive.namelist())
                 self.assertFalse(any(name.startswith(".env") for name in archive.namelist()))
                 self.assertNotIn(b"synthetic-private-", b"".join(archive.read(name) for name in archive.namelist()))
+                self.assertNotIn(b"must-not-be-packaged", b"".join(archive.read(name) for name in archive.namelist()))
         self.assertEqual(result["createUploadSession"]["sha256"], result["finalizeStagedUpload"]["sha256"])
 
     def test_readiness_gate_accepts_the_exact_packaged_bytes_without_a_policy_exception(self):
-        result = package.build_packages(self.root, self.environments, self.output)
+        result = package.build_packages(self.root, self.output)
         expected = package.readiness.expected_files(self.root, strict=True)
         optional = package.readiness.expected_packaging_files(self.root)
         for info in result.values():
@@ -59,7 +55,7 @@ class UploadPackageTest(unittest.TestCase):
     def test_missing_current_runtime_output_stops(self):
         (self.root / "functions/lib/uploads.js").unlink()
         with self.assertRaisesRegex(package.readiness.ReadinessError, "LOCAL_BUILD_REQUIRED"):
-            package.build_packages(self.root, self.environments, self.output)
+            package.build_packages(self.root, self.output)
         self.assertEqual(list(self.output.iterdir()), [])
 
     def test_a_source_link_is_never_followed(self):
@@ -67,27 +63,24 @@ class UploadPackageTest(unittest.TestCase):
         file.unlink()
         file.symlink_to(self.root / "functions/lib/uploads.js")
         with self.assertRaisesRegex(package.readiness.ReadinessError, "LINK_REJECTED"):
-            package.build_packages(self.root, self.environments, self.output)
+            package.build_packages(self.root, self.output)
 
-    def test_config_is_validated_privately_before_any_source_file_is_written(self):
-        self.environments["createUploadSession"]["LKC_SHEET_WRITE_MODE"] = "active"
-        with self.assertRaisesRegex(package.readiness.ReadinessError, "CONFIG_PAUSE_STATE_REJECTED"):
-            package.build_packages(self.root, self.environments, self.output)
+    def test_runtime_configuration_is_not_accepted_by_the_packager(self):
+        with self.assertRaises(TypeError):
+            package.build_packages(self.root, {"PRIVATE_SETTING": "never-transmit"}, self.output)
         self.assertEqual(list(self.output.iterdir()), [])
 
     def test_existing_output_is_not_overwritten(self):
         file = self.output / "createUploadSession.zip"
         file.write_bytes(b"preserve-existing-file")
         with self.assertRaises(FileExistsError):
-            package.build_packages(self.root, self.environments, self.output)
+            package.build_packages(self.root, self.output)
         self.assertEqual(file.read_bytes(), b"preserve-existing-file")
 
-    def test_cli_rejects_private_input_without_echoing_values(self):
-        self.environments["createUploadSession"]["ADMIN_EMAILS"] = 'synthetic-private-invalid"value'
+    def test_cli_never_reads_or_echoes_private_stdin(self):
         result = subprocess.run(["python3", str(pathlib.Path(package.__file__)), "--root", str(self.root), "--output", str(self.output)],
-                                input=json.dumps(self.environments), capture_output=True, text=True)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("CONFIG_FILE_FORMAT_REJECTED", result.stderr)
+                                input='synthetic-private-invalid"value', capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
         self.assertNotIn("synthetic-private", result.stdout + result.stderr)
 
 

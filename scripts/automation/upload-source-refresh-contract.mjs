@@ -11,6 +11,7 @@ export const UPLOAD_REFRESH_SCOPE = Object.freeze({
   sourceBytes: 10 * 1024 * 1024, totalSourceBytes: 20 * 1024 * 1024,
   configBytes: 512 * 1024,
 });
+export const UPLOAD_PUBLIC_ACCESS_CONSTRAINT = 'constraints/storage.publicAccessPrevention';
 const S = UPLOAD_REFRESH_SCOPE;
 const PREFIX = `projects/${S.project}/locations/${S.region}`;
 const privatePlans = new WeakMap(), verifiedBackups = new WeakMap(), consumed = new WeakSet();
@@ -40,9 +41,21 @@ function state(plan) {
 function paused(env) {
   requireValue(plain(env) && env.APP_ENVIRONMENT === 'staging'
     && env.EXPECTED_FIREBASE_PROJECT_ID === S.project
-    && ['LKC_NOTIFICATION_DELIVERY_MODE', 'LKC_SHEET_WRITE_MODE', 'LKC_SUBMISSION_TRANSFER_MODE']
-      .every(key => env[key] === 'paused'), 'UPLOAD_REFRESH_PAUSE_NOT_VERIFIED');
+    && ['LKC_NOTIFICATION_DELIVERY_MODE', 'LKC_SUBMISSION_TRANSFER_MODE']
+      .every(key => env[key] === 'paused')
+    // The actual sheet-write-control closes on every value except "active".
+    // Preserve an absent setting as absent; never fabricate an environment value.
+    && (!Object.hasOwn(env, 'LKC_SHEET_WRITE_MODE') || env.LKC_SHEET_WRITE_MODE === 'paused'),
+  'UPLOAD_REFRESH_PAUSE_NOT_VERIFIED');
   requireValue(Object.values(env).every(value => typeof value === 'string'), 'UPLOAD_REFRESH_ENV_INVALID');
+}
+export function uploadEffectivePublicAccessPreventionEnforced(policy) {
+  return plain(policy) && policy.constraint === UPLOAD_PUBLIC_ACCESS_CONSTRAINT
+    && Object.keys(policy).every(key => ['constraint', 'booleanPolicy', 'version', 'etag', 'updateTime'].includes(key))
+    && [undefined, 0].includes(policy.version) && [undefined, ''].includes(policy.etag)
+    && (!Object.hasOwn(policy, 'updateTime') || text(policy.updateTime))
+    && plain(policy.booleanPolicy) && Object.keys(policy.booleanPolicy).join(',') === 'enforced'
+    && policy.booleanPolicy.enforced === true;
 }
 function source(ref) {
   requireValue(plain(ref) && Object.keys(ref).sort().join(',') === 'bucket,generation,object'
@@ -101,7 +114,8 @@ function validateRecord(record, name, active = true) {
     && new Set(env.map(e => e.name)).size === env.length, 'UPLOAD_REFRESH_SERVICE_ENV_INVALID');
   paused(Object.fromEntries(env.map(e => [e.name, e.value])));
   const serviceEnv = Object.fromEntries(env.map(e => [e.name, e.value]));
-  requireValue(Object.entries(conf.environmentVariables).every(([key, value]) => serviceEnv[key] === value),
+  requireValue(Object.entries(conf.environmentVariables).every(([key, value]) => serviceEnv[key] === value)
+    && Object.hasOwn(conf.environmentVariables, 'LKC_SHEET_WRITE_MODE') === Object.hasOwn(serviceEnv, 'LKC_SHEET_WRITE_MODE'),
     'UPLOAD_REFRESH_FUNCTION_SERVICE_ENV_MISMATCH');
   privatePolicy(record.policy);
   privatePolicy(record.functionPolicy);
@@ -172,9 +186,15 @@ export function assertUploadRefreshBeforeImages(before, bucket) {
   'UPLOAD_REFRESH_PRIVATE_BUCKET_NOT_VERIFIED');
   privatePolicy(bucket.policy);
   requireValue(bucket.project?.projectId === S.project && bucket.project.projectNumber === S.projectNumber
-    && bucket.project.lifecycleState === 'ACTIVE' && !bucket.project.parent,
+    && bucket.project.lifecycleState === 'ACTIVE'
+    && (!bucket.project.parent || (plain(bucket.project.parent)
+      && ['organization', 'folder'].includes(bucket.project.parent.type) && decimal(bucket.project.parent.id))),
   'UPLOAD_REFRESH_PROJECT_OR_INHERITANCE_NOT_VERIFIED');
   privatePolicy(bucket.projectPolicy);
+  if (bucket.iamConfiguration.publicAccessPrevention === 'inherited' && bucket.project.parent) {
+    requireValue(uploadEffectivePublicAccessPreventionEnforced(bucket.effectivePublicAccessPrevention),
+      'UPLOAD_REFRESH_EFFECTIVE_PUBLIC_ACCESS_PREVENTION_NOT_VERIFIED');
+  }
   requireValue(bytes({before, bucket}).length <= S.configBytes - 8192, 'UPLOAD_REFRESH_CONFIG_TOO_LARGE');
   let total = 0;
   for (const name of S.functions) {

@@ -518,13 +518,14 @@ assert.match(previewWorkflow,/--no-authorized-domains/u);
 assert.doesNotMatch(promoteWorkflow,/hosting:clone|hosting:channel:(?:create|delete)/u);
 const steps=promoteSpec.jobs.promote.steps;
 const reviewedControlled={pilot_review:"success",pilot_readiness:"success","pilot_review.acceptance_method":"CONTROLLED_BROWSER"};
-function stepRuns(step,mode,outcomes={},priorSuccess=true,metadataOnly=false,evidencePolicy="source-provenance"){
+function stepRuns(step,mode,outcomes={},priorSuccess=true,metadataOnly=false,evidencePolicy="source-provenance",sourceAcquisition="retained"){
   outcomes={...reviewedControlled,...outcomes};
   let expression=String(step.if??"true").trim().replace(/^\$\{\{|\}\}$/gu,"").trim();
   if(!expression.includes("always()")&&!priorSuccess)return false;
   expression=expression.replace(/env\.LKC_OPERATION/gu,JSON.stringify(mode))
     .replace(/env\.LKC_METADATA_ONLY/gu,JSON.stringify(String(metadataOnly)))
     .replace(/env\.LKC_EVIDENCE_POLICY/gu,JSON.stringify(evidencePolicy))
+    .replace(/env\.LKC_SOURCE_ACQUISITION/gu,JSON.stringify(sourceAcquisition))
     .replace(/steps\.([a-z_]+)\.outcome/gu,(_,id)=>JSON.stringify(outcomes[id]??"skipped"))
     .replace(/steps\.([a-z_]+)\.outputs\.([a-z_]+)/gu,(_,id,key)=>JSON.stringify(outcomes[id+"."+key]??""))
     .replace(/always\(\)/gu,"true");
@@ -615,7 +616,14 @@ for(const mode of ["readiness","promote"]){
  assert.equal(stepRuns(steps.find(s=>s.id==="readiness"),mode),true,
   "strict source verification is still required for "+mode);
  assert.equal(stepRuns(steps.find(s=>s.id==="readiness"),mode,{},true,false,"limited-staff-pilot"),false);
+ assert.equal(stepRuns(steps[feeIndex],mode,{},true,false,"source-provenance","fixed-source-once"),false,
+  "explicit fixed acquisition must not consume or rewrite a retained-source pin");
+ assert.equal(stepRuns(steps.find(s=>s.id==="fixed_source_guard"),mode,{},true,false,"source-provenance","fixed-source-once"),true);
+ assert.equal(stepRuns(steps.find(s=>s.id==="readiness"),mode,{},true,false,"source-provenance","fixed-source-once"),true,
+  "fixed acquisition cannot skip complete source verification");
 }
+assert.equal(stepRuns(steps.find(s=>s.id==="fixed_source_guard"),"promote"),false,
+ "default retained acquisition must not reach the fixed source guard");
 const cleanup=steps.find(s=>s.name==="Remove temporary channels after a successful promotion");
 for(const mode of ["readiness","promote","restore"])
  assert.equal(stepRuns(cleanup,mode,{promotion:"success",live_check:"success",pilot_after:"success",finalize_capture:"success"},
@@ -700,6 +708,7 @@ try{
   GITHUB_RUN_ID:"777",GITHUB_RUN_ATTEMPT:"1",LKC_PROJECT_ID:projectId,LKC_REGION:"asia-northeast1",LKC_TARGETS:"staff,admin",
   GITHUB_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",
   LKC_METADATA_ONLY:"false",LKC_EVIDENCE_POLICY:"source-provenance",LKC_LIMITED_EVIDENCE:"",
+  LKC_SOURCE_ACQUISITION:"retained",LKC_SOURCE_ACQUISITION_CONFIRMATION:"",
   LKC_REQUESTED_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",LKC_PREVIEW_RUN_ID:"",
   TEST_MAIN_SHA:"ec55200aae1b7d931d60534b2bf3cb5281c9f510",TEST_CI_RESULT:"1",TEST_PREVIEW_RESULT:"1",TEST_PREVIEW_ID:"321",
   NODE_EXE:process.execPath.replaceAll("\\","/"),
@@ -714,6 +723,16 @@ try{
   ["readiness",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:""},true],
   ["restore",{LKC_OPERATION:"restore",LKC_CONFIRMATION:"RESTORE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:"123"},true],
   ["promote",{LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},true],
+  ["fixed readiness",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"CHECK_LKC_STAGING_HOSTING_READINESS",LKC_RESTORE_RUN_ID:"",
+   LKC_SOURCE_ACQUISITION:"fixed-source-once",LKC_SOURCE_ACQUISITION_CONFIRMATION:"ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB"},true],
+  ["fixed promote",{LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:"",
+   LKC_SOURCE_ACQUISITION:"fixed-source-once",LKC_SOURCE_ACQUISITION_CONFIRMATION:"ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB"},true],
+  ["fixed automatic rejected",{GITHUB_EVENT_NAME:"workflow_run",LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:"",
+   LKC_SOURCE_ACQUISITION:"fixed-source-once",LKC_SOURCE_ACQUISITION_CONFIRMATION:"ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB"},false],
+  ["fixed missing confirmation",{LKC_OPERATION:"promote",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:"",
+   LKC_SOURCE_ACQUISITION:"fixed-source-once"},false],
+  ["fixed restore rejected",{LKC_OPERATION:"restore",LKC_CONFIRMATION:"RESTORE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:"123",
+   LKC_SOURCE_ACQUISITION:"fixed-source-once",LKC_SOURCE_ACQUISITION_CONFIRMATION:"ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB"},false],
   ["bad confirmation",{LKC_OPERATION:"readiness",LKC_CONFIRMATION:"PROMOTE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],
   ["automatic restore",{GITHUB_EVENT_NAME:"workflow_run",LKC_OPERATION:"restore",LKC_CONFIRMATION:"RESTORE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:"123"},false],
   ["missing run",{LKC_OPERATION:"restore",LKC_CONFIRMATION:"RESTORE_LKC_STAGING_HOSTING",LKC_RESTORE_RUN_ID:""},false],

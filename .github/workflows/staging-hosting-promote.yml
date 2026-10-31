@@ -25,6 +25,16 @@ on:
         description: Reviewed limited pilot JSON with digest references only; no addresses, tokens or personal data
         required: false
         type: string
+      source_acquisition:
+        description: Retained evidence by default; fixed-source-once explicitly permits up to two 10 MiB source reads and possible transfer cost
+        required: false
+        default: retained
+        type: choice
+        options: [retained, fixed-source-once]
+      source_acquisition_confirmation:
+        description: Fixed-source-once only; ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB
+        required: false
+        type: string
       restore_run_id:
         description: Successful promotion run ID; required only for restore
         required: false
@@ -85,6 +95,7 @@ jobs:
       metadata_only: ${{ steps.release.outputs.metadata_only }}
       evidence_policy: ${{ steps.release.outputs.evidence_policy }}
       preview_run_id: ${{ steps.release.outputs.preview_run_id }}
+      source_acquisition: ${{ steps.release.outputs.source_acquisition }}
     steps:
       - name: Require the deliberate live-staging enable switch
         env:
@@ -113,6 +124,8 @@ jobs:
           LKC_METADATA_ONLY: ${{ inputs.metadata_only == true && 'true' || 'false' }}
           LKC_EVIDENCE_POLICY: ${{ github.event_name == 'workflow_run' && 'source-provenance' || inputs.evidence_policy || 'source-provenance' }}
           LKC_LIMITED_EVIDENCE: ${{ inputs.limited_evidence }}
+          LKC_SOURCE_ACQUISITION: ${{ github.event_name == 'workflow_run' && 'retained' || inputs.source_acquisition || 'retained' }}
+          LKC_SOURCE_ACQUISITION_CONFIRMATION: ${{ inputs.source_acquisition_confirmation }}
         run: |
           node scripts/automation/hosting-limited-pilot.mjs --guard-only
           if [[ "$LKC_METADATA_ONLY" == "true" && "$LKC_OPERATION" != "readiness" ]]; then
@@ -131,9 +144,28 @@ jobs:
             echo "HOSTING_OPERATION_ERROR=UNEXPECTED_RESTORE_RUN_ID"
             exit 1
           fi
+          case "$LKC_SOURCE_ACQUISITION" in
+            retained)
+              if [[ -n "$LKC_SOURCE_ACQUISITION_CONFIRMATION" ]]; then
+                echo "HOSTING_OPERATION_ERROR=UNEXPECTED_SOURCE_ACQUISITION_CONFIRMATION"
+                exit 1
+              fi
+              ;;
+            fixed-source-once)
+              if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" || "$GITHUB_RUN_ATTEMPT" != "1" ||
+                    "$LKC_OPERATION" == "restore" || "$LKC_METADATA_ONLY" != "false" ||
+                    "$LKC_EVIDENCE_POLICY" != "source-provenance" ||
+                    "$LKC_SOURCE_ACQUISITION_CONFIRMATION" != "ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB" ]]; then
+                echo "HOSTING_OPERATION_ERROR=FIXED_SOURCE_EXPLICIT_REVIEW_REQUIRED"
+                exit 1
+              fi
+              ;;
+            *) echo "HOSTING_OPERATION_ERROR=SOURCE_ACQUISITION_REJECTED"; exit 1 ;;
+          esac
           echo "operation=$LKC_OPERATION" >> "$GITHUB_OUTPUT"
           echo "metadata_only=$LKC_METADATA_ONLY" >> "$GITHUB_OUTPUT"
           echo "evidence_policy=$LKC_EVIDENCE_POLICY" >> "$GITHUB_OUTPUT"
+          echo "source_acquisition=$LKC_SOURCE_ACQUISITION" >> "$GITHUB_OUTPUT"
           echo "restore_run_id=$LKC_RESTORE_RUN_ID" >> "$GITHUB_OUTPUT"
           git fetch --no-tags origin main
           source_sha="$(git rev-parse origin/main)"
@@ -251,6 +283,8 @@ jobs:
       LKC_METADATA_ONLY: ${{ needs.guard.outputs.metadata_only }}
       LKC_EVIDENCE_POLICY: ${{ needs.guard.outputs.evidence_policy }}
       LKC_PREVIEW_RUN_ID: ${{ needs.guard.outputs.preview_run_id }}
+      LKC_SOURCE_ACQUISITION: ${{ needs.guard.outputs.source_acquisition }}
+      LKC_SOURCE_ACQUISITION_CONFIRMATION: ${{ inputs.source_acquisition_confirmation }}
       LKC_CONFIRMATION: ${{ github.event_name == 'workflow_run' && 'PROMOTE_LKC_STAGING_HOSTING' || inputs.confirmation }}
       LKC_GCP_WORKLOAD_IDENTITY_PROVIDER: projects/740154137290/locations/global/workloadIdentityPools/lkc-github-staging/providers/lkc-main-workflows
       LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT: lkc-gh-staging-deploy@lip-knots-crew-staging.iam.gserviceaccount.com
@@ -282,7 +316,7 @@ jobs:
           fi
       - name: Stop source verification unless a no-fee path is established
         id: no_fee_source
-        if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance'
+        if: env.LKC_OPERATION != 'restore' && env.LKC_METADATA_ONLY != 'true' && env.LKC_EVIDENCE_POLICY == 'source-provenance' && env.LKC_SOURCE_ACQUISITION != 'fixed-source-once'
         working-directory: source
         # Resolve the independently reviewed pin after the protected environment is available.
         env:
@@ -291,6 +325,11 @@ jobs:
           node scripts/automation/restore-staging-hosting.mjs \
             --no-fee-source-guard --project "$LKC_PROJECT_ID" --region "$LKC_REGION" \
             --source-sha "$LKC_SOURCE_SHA" --evidence-dir "$LKC_EVIDENCE_DIR"
+      - name: Prepare the approved fixed-source one-shot guard before authentication
+        id: fixed_source_guard
+        if: env.LKC_SOURCE_ACQUISITION == 'fixed-source-once'
+        working-directory: source
+        run: node scripts/automation/collect-upload-metadata.mjs --fixed-source-guard
       - name: Set up Node
         if: env.LKC_METADATA_ONLY != 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -418,8 +457,15 @@ jobs:
         # Resolve the independently reviewed pin after the protected environment is available.
         env:
           LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ${{ vars.LKC_STAGING_SOURCE_EVIDENCE_SHA256 }}
+          LKC_FIXED_SOURCE_ACCESS_TOKEN: ${{ steps.hosting_auth.outputs.access_token }}
         run: |
+          fixed_source_access_token="$LKC_FIXED_SOURCE_ACCESS_TOKEN"
+          unset LKC_FIXED_SOURCE_ACCESS_TOKEN
           npm run build -w @lkc/functions
+          if [[ "$LKC_SOURCE_ACQUISITION" == "fixed-source-once" ]]; then
+            LKC_FIXED_SOURCE_ACCESS_TOKEN="$fixed_source_access_token" node scripts/automation/collect-upload-metadata.mjs --collect-fixed-source
+          fi
+          unset fixed_source_access_token
           python3 scripts/automation/check-hosting-api-readiness.py \
             --root . \
             --source-sha "$LKC_SOURCE_SHA" \
@@ -693,6 +739,7 @@ jobs:
             echo
             echo "- Operation: \`$LKC_OPERATION\`"
             echo "- Evidence policy: \`$LKC_EVIDENCE_POLICY\`"
+            echo "- Source acquisition: \`$LKC_SOURCE_ACQUISITION\`"
             echo "- Metadata only: \`$LKC_METADATA_ONLY\`"
             echo "- Metadata collection step: \`${{ steps.metadata_collection.outcome }}\`"
             echo "- Source: \`$LKC_SOURCE_SHA\`"
@@ -721,6 +768,10 @@ jobs:
               echo "- Trial backups and previews are retained; no acceptance cleanup performed."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove private fixed-source bytes and key after all verification and recovery
+        if: always() && env.LKC_SOURCE_ACQUISITION == 'fixed-source-once'
+        working-directory: source
+        run: node scripts/automation/collect-upload-metadata.mjs --cleanup-fixed-source
       - name: Enforce the final result
         if: always()
         run: |

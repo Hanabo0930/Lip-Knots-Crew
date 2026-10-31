@@ -37,6 +37,11 @@ on:
         description: Type the confirmation required by the selected operation
         required: true
         type: string
+      upload_write_confirmation:
+        description: Leave empty for read-only upload preflight; write requires APPLY_LKC_STAGING_UPLOAD_SOURCE_REFRESH
+        required: false
+        type: string
+        default: ""
 
 permissions:
   actions: read
@@ -78,6 +83,7 @@ jobs:
           LKC_CONFIRMATION: ${{ inputs.confirmation }}
           LKC_OPERATION: ${{ inputs.operation }}
           LKC_TRANSFER_MODE_REQUESTED: ${{ inputs.transfer_mode }}
+          LKC_UPLOAD_WRITE_CONFIRMATION: ${{ inputs.upload_write_confirmation }}
         run: |
           lkc_mode=functions-deploy
           if [[ "$LKC_OPERATION" == "upload-source-refresh" ]]; then
@@ -86,6 +92,10 @@ jobs:
               exit 1
             fi
             lkc_mode=functions-upload-source-refresh
+            if [[ -n "$LKC_UPLOAD_WRITE_CONFIRMATION" && "$LKC_UPLOAD_WRITE_CONFIRMATION" != "APPLY_LKC_STAGING_UPLOAD_SOURCE_REFRESH" ]]; then
+              echo UPLOAD_REFRESH_WRITE_CONFIRMATION_REJECTED >&2
+              exit 1
+            fi
           fi
           node guardrails/scripts/automation/validate-staging-scope.mjs \
             --mode "$lkc_mode" \
@@ -262,6 +272,7 @@ jobs:
           LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
           LKC_OPERATION: ${{ inputs.operation }}
           LKC_TRANSFER_MODE_REQUESTED: ${{ inputs.transfer_mode }}
+          LKC_UPLOAD_WRITE_CONFIRMATION: ${{ inputs.upload_write_confirmation }}
         run: bash scripts/automation/deploy-staging-functions.sh
       - name: Retain bounded upload source-refresh result
         if: always() && inputs.operation == 'upload-source-refresh'

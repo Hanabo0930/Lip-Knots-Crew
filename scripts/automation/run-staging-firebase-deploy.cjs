@@ -68,7 +68,7 @@ async function main() {
     const {runUploadSourceRefresh} = await import(pathToFileURL(path.join(__dirname, "run-upload-source-refresh.mjs")).href);
     const result = await runUploadSourceRefresh();
     console.log(JSON.stringify(result));
-    if (!result.deployedFunctionsVerified || result.cleanup !== "DONE") process.exitCode = 1;
+    if ((!result.deployedFunctionsVerified && !result.sourceRefreshPreflightVerified) || result.cleanup !== "DONE") process.exitCode = 1;
     return;
   }
   const {validatePlan} = await import(pathToFileURL(path.join(__dirname, "validate-staging-scope.mjs")).href);

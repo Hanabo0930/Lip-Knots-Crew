@@ -120,7 +120,7 @@ for (const [label, mutate] of [
   ['public project', f => f.bucket.projectPolicy.bindings.push({role: 'roles/viewer', members: ['allUsers']})],
   ['unknown inherited policy', f => f.bucket.project.parent = {type: 'organization', id: '123'}],
   ['wrong project metadata', f => f.bucket.project.projectId = 'other'],
-  ['unverified private bucket', f => f.bucket.iamConfiguration.publicAccessPrevention = 'inherited'],
+  ['unverified private bucket', f => f.bucket.iamConfiguration.publicAccessPrevention = 'UNVERIFIED'],
   ['legacy object ACLs', f => f.bucket.iamConfiguration.uniformBucketLevelAccess.enabled = false],
   ['wrong source generation', f => f.before.createUploadSession.object.generation = '18'],
   ['oversize source', f => f.before.createUploadSession.object.size = String(S.sourceBytes + 1)],
@@ -196,6 +196,7 @@ for (const [label, mutate] of [
 const context = () => ({LKC_PROJECT_ID: S.project, LKC_REGION: S.region, LKC_SOURCE_REF: 'main',
   LKC_FUNCTIONS: S.functions.join(','), LKC_CONFIRMATION: 'REFRESH_LKC_STAGING_UPLOAD_SOURCE_PRESERVE',
   LKC_TRANSFER_MODE_REQUESTED: 'preserve', LKC_OPERATION: 'upload-source-refresh',
+  LKC_UPLOAD_WRITE_CONFIRMATION: 'APPLY_LKC_STAGING_UPLOAD_SOURCE_REFRESH',
   GITHUB_REPOSITORY: 'Hanabo0930/Lip-Knots-Crew', GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'workflow_dispatch',
   GITHUB_JOB: 'deploy', GITHUB_WORKFLOW_REF: 'Hanabo0930/Lip-Knots-Crew/.github/workflows/staging-functions-deploy.yml@refs/heads/main',
   GITHUB_RUN_ID: '123456', GITHUB_RUN_ATTEMPT: '1', GITHUB_SHA: 'a'.repeat(40), LKC_VERIFIED_SOURCE_SHA: 'a'.repeat(40)});
@@ -266,7 +267,7 @@ test('the existing workflow owns the route and private data is never selected as
   assert.ok(shell.indexOf('functions-upload-source-refresh') < shell.indexOf('npx --yes'));
 });
 
-for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified'])
+for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified', 'read-only-preflight', 'inherited-private-preflight'])
   test('isolated existing-runner integration: ' + scenario, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-refresh-integration-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
@@ -288,7 +289,8 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       pair[name].service.spec.template.spec.containers[0].env = Object.entries(pair[name].fn.serviceConfig.environmentVariables).map(([name, value]) => ({name, value}));
       objects.set(pair[name].object.name + '#' + pair[name].object.generation, copy(pair[name].object));
     }
-    if (scenario === 'private-bucket-unverified') f.bucket.iamConfiguration.publicAccessPrevention = 'inherited';
+    if (scenario === 'private-bucket-unverified') f.bucket.iamConfiguration.publicAccessPrevention = 'UNVERIFIED';
+    if (scenario === 'inherited-private-preflight') f.bucket.iamConfiguration.publicAccessPrevention = 'inherited';
     const json = value => new Response(JSON.stringify(value), {headers: {'content-type': 'application/json'}});
     const fakeFetch = async (value, options) => {
       const url = new URL(value), method = options.method, p = url.pathname;
@@ -351,6 +353,7 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
     };
     const api = authenticatedUploadRefreshAPI({getRequestHeaders: async () => ({authorization: 'Bearer synthetic-only'})}, fakeFetch);
     const env = {...context(), GITHUB_SHA: git(['rev-parse', 'HEAD']), LKC_VERIFIED_SOURCE_SHA: git(['rev-parse', 'HEAD']), LKC_SOURCE_DIRECTORY: root, GITHUB_WORKSPACE: root};
+    if (scenario.endsWith('preflight')) env.LKC_UPLOAD_WRITE_CONFIRMATION = '';
     const result = await runUploadSourceRefresh(env, {api, fetch: async (url, options) => {
       probes++; assert.equal(url.hostname, 'createuploadsession-synthetic-an.a.run.app');
       assert.deepEqual(JSON.parse(options.body), {data: {}});
@@ -360,7 +363,10 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
     assert.equal(result.cloudWritesAttempted, false);
     const artifact = fs.readFileSync(path.join(root, 'upload-source-refresh-result.json'), 'utf8');
     assert.doesNotMatch(artifact, new RegExp(privateValue)); assert.doesNotMatch(artifact, /secretEnvironmentVariables|PRIVATE_BUILD_SETTING/);
-    if (scenario.endsWith('success')) {
+    if (scenario.endsWith('preflight')) {
+      assert.equal(result.status, 'UPLOAD_SOURCE_PREFLIGHT_VERIFIED'); assert.equal(result.sourceRefreshPreflightVerified, true);
+      assert.equal(patches, 0); assert.equal(probes, 0); assert.equal(mutations.length, 0); assert.equal(result.mediaBytes, 0);
+    } else if (scenario.endsWith('success')) {
       assert.equal(result.status, 'SOURCE_ONLY_CONTRACT_VERIFIED'); assert.equal(patches, 2); assert.equal(probes, 1);
       assert.equal(result.deployedPackageBytesVerified, true); assert.equal(result.unauthenticatedRejectionVerified, true);
       assert.equal(mutations.filter(m => m.method === 'POST').length, 5);

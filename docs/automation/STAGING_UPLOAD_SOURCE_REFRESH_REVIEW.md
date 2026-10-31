@@ -31,7 +31,8 @@ Functions retain their existing deployment path.
   `asia-northeast1`; exact CI-passing source SHA, first run attempt only.
 - Existing enable switch, canonical CI, authorization/source checks, deployment
   concurrency group and `lkc-staging-deploy` protected review remain mandatory.
-- No source-refresh dispatch or cloud execution has been performed for this code.
+- Leave upload_write_confirmation empty for read-only preflight. Only a separately reviewed execution may set it to APPLY_LKC_STAGING_UPLOAD_SOURCE_REFRESH.
+- No mutating source refresh has been performed for this code.
 
 The workflow skips the GitHub-variable dotenv writer and transfer-mode writer for
 this operation. It uses the same existing short-lived ADC/WIF identity, never
@@ -54,12 +55,22 @@ comparison and are not silently discarded.
 
 The fixed existing bucket is
 `gcf-v2-sources-740154137290-asia-northeast1`. Its current project, region,
-uniform bucket-level access and enforced public-access prevention, plus private
-bucket/project policies, must be observed. An unverified organization/folder
+uniform bucket-level access and an explicit public-access-prevention state, plus
+complete private bucket/project policies, must be observed. An inherited prevention
+state is accepted only with verified private policies and no parent-policy scope. An unverified organization/folder
 inheritance stops the operation. This code does not read outside the project,
 create a bucket, alter its policy, or add IAM to make a backup succeed.
 Actual bucket privacy, access and current paused values remain unverified until
 an approved protected execution reads them.
+
+## Read-only preflight before an apply review
+
+The same operation defaults to read-only. It captures and validates only metadata,
+returns bounded mode/privacy/Invoker states, and cleans the private observations.
+It performs no package build/upload, backup, source media GET, Function PATCH or
+unauthenticated probe. The owner runner treats a verified preflight as a separate
+success, never a deployed-Functions receipt. A preflight failure retains only safe
+status/reason/HTTP-kind metadata, not policy or environment values.
 
 ## Bounded writes and preservation
 
@@ -80,8 +91,9 @@ pins; it is not a GitHub artifact. Objects are retained; no deletion is included
 
 The source packages use the current strict readiness inventory, including runtime
 JS, maps, TypeScript, CJS, current package manifests and approved packaging files.
-A standalone Functions lock is checked against the existing canonical root lock
-and installed in isolated CI without lifecycle scripts. No new dependency version
+A standalone Functions lock and the existing root dependency overrides preserve
+the canonical workspace resolutions. The lock is checked against the existing
+root lock and installed in isolated CI without lifecycle scripts. No new dependency version
 may be introduced by lock normalization. Private dotenv is checked against official
 runtime values but never put in the new ZIP. Existing strict source provenance
 therefore needs no dotenv exception or relaxed content/inventory check.

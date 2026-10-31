@@ -5,6 +5,8 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 const root = path.resolve(new URL('../..', import.meta.url).pathname);
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'functions/package.json'), 'utf8'));
+const rootManifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+assert.deepEqual(manifest.overrides ?? {}, rootManifest.overrides ?? {}, 'Standalone Functions must preserve canonical dependency overrides');
 const canonical = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
 const file = path.join(root, 'functions/package-lock.json');
 const locked = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -29,19 +31,8 @@ if (process.argv.includes('--install')) {
     const args = ['ci', '--ignore-scripts', '--omit=dev', '--audit=false', '--fund=false', '--prefix', temp];
     const result = spawnSync('npm', args, {encoding: 'utf8', timeout: 180000});
     if (result.status !== 0) {
-      // CI cannot silently use an uncommitted lock. Produce a public-dependency
-      // candidate only, reject new versions, and keep the required check failed.
-      const normalized = spawnSync('npm', ['install', '--package-lock-only', '--ignore-scripts', '--audit=false', '--fund=false', '--prefix', temp],
-        {encoding: 'utf8', timeout: 180000});
-      if (normalized.status === 0) {
-        const candidate = JSON.parse(fs.readFileSync(path.join(temp, 'package-lock.json'), 'utf8'));
-        // Quarantined public dependency metadata for review only. It never
-        // replaces the committed runtime lock, and validation still fails CI.
-        fs.writeFileSync(path.join(root, 'functions-standalone-lock-candidate.json'), JSON.stringify(candidate, null, 2) + '\n');
-        validate(candidate);
-      }
       console.error((result.stderr ?? '').slice(-3000));
-      throw Error('FUNCTIONS_STANDALONE_LOCK_INSTALL_FAILED_REVIEW_CANDIDATE');
+      throw Error('FUNCTIONS_STANDALONE_LOCK_INSTALL_FAILED');
     }
     assert.equal(fs.readFileSync(path.join(temp, 'package-lock.json'), 'utf8'), fs.readFileSync(file, 'utf8'));
   } finally { fs.rmSync(temp, {recursive: true, force: true}); }

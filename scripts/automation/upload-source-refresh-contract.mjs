@@ -168,7 +168,8 @@ export function assertUploadRefreshBeforeImages(before, bucket) {
     'UPLOAD_REFRESH_EXACT_PAIR_REQUIRED');
   requireValue(bucket?.name === S.bucket && bucket.projectNumber === S.projectNumber
     && bucket.location === S.region.toUpperCase() && bucket.iamConfiguration?.uniformBucketLevelAccess?.enabled === true
-    && bucket.iamConfiguration.publicAccessPrevention === 'enforced', 'UPLOAD_REFRESH_PRIVATE_BUCKET_NOT_VERIFIED');
+    && ['enforced', 'inherited'].includes(bucket.iamConfiguration.publicAccessPrevention),
+  'UPLOAD_REFRESH_PRIVATE_BUCKET_NOT_VERIFIED');
   privatePolicy(bucket.policy);
   requireValue(bucket.project?.projectId === S.project && bucket.project.projectNumber === S.projectNumber
     && bucket.project.lifecycleState === 'ACTIVE' && !bucket.project.parent,

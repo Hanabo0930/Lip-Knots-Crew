@@ -42,6 +42,25 @@ export function validateUploadRefreshContext(env) {
     && env.GITHUB_RUN_ATTEMPT === '1' && /^[1-9][0-9]{0,19}$/.test(env.GITHUB_RUN_ID ?? '')
     && /^[0-9a-f]{40}$/.test(env.LKC_VERIFIED_SOURCE_SHA ?? '') && env.GITHUB_SHA === env.LKC_VERIFIED_SOURCE_SHA,
   'UPLOAD_REFRESH_PROTECTED_CONTEXT_REQUIRED');
+  need(!env.LKC_UPLOAD_WRITE_CONFIRMATION || env.LKC_UPLOAD_WRITE_CONFIRMATION === 'APPLY_LKC_STAGING_UPLOAD_SOURCE_REFRESH',
+    'UPLOAD_REFRESH_WRITE_CONFIRMATION_REJECTED');
+}
+
+export function uploadRefreshPreflightSummary(before, bucket) {
+  const mode = value => value === undefined ? 'UNSET' : ['paused', 'active', 'acceptance'].includes(value) ? value : 'UNVERIFIED';
+  return {functions: S.functions.map(name => ({name,
+    state: ['ACTIVE', 'FAILED', 'DEPLOYING', 'DELETING'].includes(before[name]?.fn?.state) ? before[name].fn.state : 'UNVERIFIED',
+    revision: new RegExp(`^${name.toLowerCase()}-[0-9]+-[a-z0-9]+$`).test(before[name]?.fn?.serviceConfig?.revision ?? '')
+      ? before[name].fn.serviceConfig.revision : 'UNVERIFIED',
+    modes: Object.fromEntries(['LKC_NOTIFICATION_DELIVERY_MODE', 'LKC_SHEET_WRITE_MODE', 'LKC_SUBMISSION_TRANSFER_MODE']
+      .map(key => [key, mode(before[name]?.fn?.serviceConfig?.environmentVariables?.[key])])),
+    invokerIamDisabled: ['true', 'false'].includes(before[name]?.service?.metadata?.annotations?.['run.googleapis.com/invoker-iam-disabled'])
+      ? before[name].service.metadata.annotations['run.googleapis.com/invoker-iam-disabled'] : 'UNSET'})),
+    backupBucket: {publicAccessPrevention: ['enforced', 'inherited'].includes(bucket?.iamConfiguration?.publicAccessPrevention)
+      ? bucket.iamConfiguration.publicAccessPrevention : 'UNVERIFIED',
+    uniformBucketLevelAccess: bucket?.iamConfiguration?.uniformBucketLevelAccess?.enabled === true,
+    parentScope: ['folder', 'organization'].includes(bucket?.project?.parent?.type) ? bucket.project.parent.type
+      : bucket?.project?.parent ? 'UNVERIFIED' : 'none'}, sourceMediaRead: false};
 }
 
 // One request, bounded response, no redirects and no mutation retries. The
@@ -90,6 +109,11 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch) {
       && url.searchParams.get('sourceGeneration') === url.searchParams.get('ifSourceGenerationMatch')
       && destination.test(decodeURIComponent(copyParts[2])) && isDeepStrictEqual(body, {});
     need(read || policyRead || patch || upload || copyRequest, 'UPLOAD_REFRESH_HTTP_SCOPE_REJECTED');
+    counters.lastRequestKind = policyRead ? 'project-policy' : patch ? 'function-source-update' : upload ? 'private-object-create'
+      : copyRequest ? 'source-backup-copy' : url.pathname.endsWith(':getIamPolicy') ? 'invoker-policy'
+      : url.hostname === 'storage.googleapis.com' ? 'storage-metadata' : url.hostname === 'eventarc.googleapis.com' ? 'event-trigger'
+      : url.hostname === 'cloudresourcemanager.googleapis.com' ? 'project-metadata'
+      : url.hostname.includes('run.googleapis.com') ? 'run-service' : 'function-or-operation';
     need(!url.searchParams.has('alt') || (media && url.searchParams.get('alt') === 'media'),
       'UPLOAD_REFRESH_MEDIA_SCOPE_REJECTED');
     need(!media || (read && url.hostname === 'storage.googleapis.com' && url.searchParams.get('alt') === 'media'
@@ -309,7 +333,13 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
       api = authenticatedUploadRefreshAPI(await new GoogleAuth({scopes: ['https://www.googleapis.com/auth/cloud-platform']}).getClient());
     }
     const reader = uploadRefreshReader(api), before = await reader.readPair(), bucket = await reader.readBucket();
+    result.preflight = uploadRefreshPreflightSummary(before, bucket);
     assertUploadRefreshBeforeImages(before, bucket);
+    if (!env.LKC_UPLOAD_WRITE_CONFIRMATION) {
+      result = {...result, status: 'UPLOAD_SOURCE_PREFLIGHT_VERIFIED', sourceRefreshPreflightVerified: true,
+        environment: dependencies.api ? 'isolated-test' : 'staging-read-only'};
+      return result;
+    }
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-upload-source-refresh-')); fs.chmodSync(temporary, 0o700);
     const environment = Object.fromEntries(S.functions.map(name => [name, before[name].fn.serviceConfig.environmentVariables]));
     const packages = JSON.parse(execFileSync('python3', [path.join(HERE, 'package-upload-source-refresh.py'), '--root', root, '--output', temporary],
@@ -349,12 +379,14 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
     }
   } catch (error) {
     result = {...result, status: 'STOPPED_SAFELY', reason: safeError(error), deployedFunctionsVerified: false};
+    if (Number.isInteger(error.httpStatus)) result.httpStatus = error.httpStatus;
   } finally {
     for (const buffer of privateBuffers) buffer.fill(0);
     try { if (temporary) fs.rmSync(temporary, {recursive: true, force: true}); result.cleanup = 'DONE'; }
     catch { result.cleanup = 'FAILED'; }
     result.cloudWritesAttempted = !dependencies.api && Boolean(api?.counters.writesAttempted);
     result.requests = api?.counters.requests ?? 0; result.mediaBytes = api?.counters.mediaBytes ?? 0;
+    if (api?.counters.lastRequestKind) result.lastRequestKind = api.counters.lastRequestKind;
     result.sourceSha = env.LKC_VERIFIED_SOURCE_SHA ?? null;
     result.functions = S.functions;
     // The only artifact is this bounded result. Full settings, manifests and

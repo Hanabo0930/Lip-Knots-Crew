@@ -227,6 +227,9 @@ jobs:
         run: |
           npm run test:automation-safety
           node --test scripts/automation/test-upload-metadata.mjs
+          node --test scripts/automation/test-upload-source-refresh.mjs
+          python3 scripts/automation/test-upload-source-package.py
+          node scripts/automation/test-functions-standalone-lock.mjs --install
           node --test scripts/automation/test-hosting-limited-pilot.mjs scripts/automation/test-hosting-pilot-metadata.mjs scripts/automation/test-hosting-limited-workflow.mjs
           node --test scripts/automation/test-hosting-promotion-history.mjs
           python3 scripts/automation/test-hosting-api-readiness.py

@@ -8,7 +8,19 @@ import {mkdtemp, readFile, writeFile, readdir, rm, chmod, symlink, link, mkdir, 
 import {tmpdir} from "node:os";
 import path from "node:path";
 import {createHmac} from "node:crypto";
-import {collectFixedUploadSources, fixedSourceMain, FIXED_SOURCE_LIMITS, OBJECT_FIELDS, FUNCTION_FIELDS, CONFIG_FUNCTION_FIELDS, BUILD_FIELDS} from "./collect-upload-metadata.mjs";
+import {collectFixedUploadSources, fixedSourceMain, fixedUploadSourceObject, FIXED_SOURCE_LIMITS, OBJECT_FIELDS, FUNCTION_FIELDS, CONFIG_FUNCTION_FIELDS, BUILD_FIELDS} from "./collect-upload-metadata.mjs";
+
+test('source-refresh object namespace is exact and never admits backups or another Function', () => {
+  for (const name of ['createUploadSession', 'finalizeStagedUpload']) {
+    assert(fixedUploadSourceObject(name, name + '/function-source.zip'));
+    const candidate = 'lkc-upload-source-refresh/123456/' + 'a'.repeat(40) + '/' + name + '.zip';
+    assert(fixedUploadSourceObject(name, candidate));
+    for (const bad of [candidate.replace('refresh', 'backups'), candidate.replace('/123456/', '/0/'),
+      candidate.replace('/123456/', '/01/'), candidate.replace('a'.repeat(40), 'main'), candidate + '/extra',
+      candidate.replace(name + '.zip', 'other.zip'), '../' + candidate]) assert(!fixedUploadSourceObject(name, bad));
+  }
+  assert(!fixedUploadSourceObject('other', 'other/function-source.zip'));
+});
 
 const PROJECT = "lip-knots-crew-staging", PREFIX = `projects/${PROJECT}/locations/asia-northeast1`;
 const BUCKET = "gcf-v2-sources-740154137290-asia-northeast1";

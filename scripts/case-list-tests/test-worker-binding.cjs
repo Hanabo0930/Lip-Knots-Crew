@@ -7,7 +7,7 @@ const {stripTypeScriptTypes}=require('node:module');
 const src=path.resolve(__dirname,'../../functions/src');
 const {buildWorkerCompactSnapshot}=require('./worker-compact-fixture.cjs');
 const sha=s=>crypto.createHash('sha256').update(s).digest('hex');
-class Stamp{constructor(ms){this.ms=ms;}toMillis(){return this.ms;}toDate(){return new Date(this.ms);}static now(){return new Stamp(Date.now());}static fromMillis(ms){return new Stamp(ms);}}
+class Stamp{constructor(ms){this.ms=ms;}toMillis(){return this.ms;}toDate(){return new Date(this.ms);}static now(){return new Stamp(Date.now());}static fromMillis(ms){return new Stamp(ms);}static fromDate(date){return Stamp.fromMillis(date.getTime());}}
 const DELETE={delete:true},FieldValue={serverTimestamp:()=>Stamp.now(),delete:()=>DELETE,increment:n=>({__increment:n})};
 function copy(x){if(x instanceof Stamp)return new Stamp(x.ms);if(Array.isArray(x))return x.map(copy);if(x&&typeof x==='object')return Object.fromEntries(Object.entries(x).map(([k,v])=>[k,copy(v)]));return x;}
 let clockOffset=0;class Clock extends Date{static now(){return Date.now()+clockOffset;}}

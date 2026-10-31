@@ -39,6 +39,11 @@ class EvidenceError(Exception):
     pass
 
 
+def fixed_upload_source_object(name, value):
+    return name in FUNCTIONS and type(value) is str and (value == name + "/function-source.zip" or
+        bool(re.fullmatch(r"lkc-upload-source-refresh/[1-9][0-9]{0,19}/[0-9a-f]{40}/" + re.escape(name) + r"\.zip", value)))
+
+
 def need(condition, code):
     if not condition:
         raise EvidenceError(code)
@@ -581,7 +586,7 @@ def verify_fixed_capture(root, source_sha, directory, readiness, *, preflight=Fa
         need(record(last, name, after, readiness) == pins[name] and first == last,
              "SOURCE_DEPLOYMENT_CHANGED_DURING_CAPTURE")
         sources[name] = first["buildConfig"]["sourceProvenance"]["resolvedStorageSource"]
-        need(sources[name]["object"] == name + "/function-source.zip", "SOURCE_OBJECT_UNVERIFIED")
+        need(fixed_upload_source_object(name, sources[name]["object"]), "SOURCE_OBJECT_UNVERIFIED")
     builds = {pin["build"] for pin in pins.values()}
     keys(capture["builds"], builds)
     keys(capture["afterBuilds"], builds)

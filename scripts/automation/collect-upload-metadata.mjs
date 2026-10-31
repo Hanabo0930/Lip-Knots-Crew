@@ -244,6 +244,11 @@ function fixedTime(value) {
   return Date.parse(value);
 }
 
+export function fixedUploadSourceObject(name, object) {
+  return FUNCTIONS.includes(name) && typeof object === 'string'
+    && (object === `${name}/function-source.zip`
+      || new RegExp(`^lkc-upload-source-refresh/[1-9][0-9]{0,19}/[0-9a-f]{40}/${name}\\.zip$`, 'u').test(object));
+}
 function fixedFunction(document, name, observed) {
   if (configDiagnostic()) {
     const service = document.serviceConfig, values = service?.environmentVariables;
@@ -266,7 +271,7 @@ function fixedFunction(document, name, observed) {
   const build = document.buildConfig.build;
   requireValue(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(buildScope(build)), "FIXED_SOURCE_BUILD_REJECTED");
   const source = document.buildConfig.sourceProvenance?.resolvedStorageSource;
-  requireValue(source?.bucket === SOURCE_BUCKET && source.object === `${name}/function-source.zip`
+  requireValue(source?.bucket === SOURCE_BUCKET && fixedUploadSourceObject(name, source.object)
     && typeof source.generation === "string" && /^[1-9][0-9]{0,31}$/u.test(source.generation),
   "FIXED_SOURCE_OBJECT_REJECTED");
   return source;

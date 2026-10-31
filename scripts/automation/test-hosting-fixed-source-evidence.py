@@ -431,6 +431,58 @@ class FixedSourceEvidenceTests(unittest.TestCase):
                 self.assertEqual(g.main(), 1)
             self.assertEqual(json.loads(evidence_file.read_text())["reason"], "SOURCE_ACQUISITION_REJECTED")
 
+    def test_cli_fixed_unknown_files_emit_bounded_hashes_and_never_accept_or_rewrite_receipt(self):
+        names = [".env.SYNTHETIC_PRIVATE_NAME", "test/private-é.key"]
+        names += [f"unlisted-{i:03d}.synthetic" for i in range(24)]
+        self.blobs["createUploadSession"] = archive({**self.files,
+            **{name: b"SYNTHETIC_PRIVATE_CONTENT" for name in names}})
+        self.update_archives()
+        self.save()
+        evidence_file = self.root / "api-readiness.json"
+        argv = ["check", "--root", str(self.root), "--source-sha", SHA, "--evidence", str(evidence_file)]
+        class FixtureDateTime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW
+        with patch.dict(os.environ, self.env, clear=True), patch.object(sys, "argv", argv), \
+             patch.object(g, "source_evidence_module", return_value=e), \
+             patch.object(e.dt, "datetime", FixtureDateTime), \
+             patch.object(e, "bind_fixed_acceptance", side_effect=AssertionError("ACCEPTANCE_FORBIDDEN")):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(g.main(), 1)
+            report = json.loads(evidence_file.read_text())
+            self.assertEqual(set(report), {"status", "reason", "diagnostics"})
+            self.assertEqual((report["status"], report["reason"]), ("STOPPED", "ARCHIVE_UNEXPECTED_FILE"))
+            self.assertEqual(report["diagnostics"], {
+                "unexpectedFileCount": len(names),
+                "pathSha256": sorted(hashlib.sha256(name.encode("utf-8")).hexdigest() for name in names)[:16],
+                "truncated": True})
+            original = evidence_file.read_bytes()
+            with patch.object(sys, "argv", argv + ["--mutation-guard"]), \
+                 contextlib.redirect_stdout(io.StringIO()) as guard:
+                self.assertEqual(g.main(), 1)
+            self.assertEqual(json.loads(guard.getvalue()), report)
+            self.assertEqual(evidence_file.read_bytes(), original)
+            retained = original.decode() + output.getvalue() + guard.getvalue()
+            for private in names + ["SYNTHETIC_PRIVATE_CONTENT"]:
+                self.assertNotIn(private, retained)
+
+    def test_caller_supplied_diagnostics_are_rejected_before_inventory_and_not_reported(self):
+        self.capture["diagnostics"] = {"status": "PASS", "pathSha256": ["SYNTHETIC_PRIVATE_VALUE"]}
+        self.save()
+        evidence_file = self.root / "api-readiness.json"
+        argv = ["check", "--root", str(self.root), "--source-sha", SHA, "--evidence", str(evidence_file)]
+        with patch.dict(os.environ, self.env, clear=True), patch.object(sys, "argv", argv), \
+             patch.object(g, "source_evidence_module", return_value=e), \
+             patch.object(e, "bind_fixed_acceptance", side_effect=AssertionError("ACCEPTANCE_FORBIDDEN")), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(g.main(), 1)
+        report = json.loads(evidence_file.read_text())
+        self.assertEqual(set(report), {"status", "reason"})
+        self.assertEqual(report["status"], "STOPPED")
+        self.assertIn("FIELDS", report["reason"])
+        self.assertNotIn("SYNTHETIC_PRIVATE_VALUE", evidence_file.read_text() + output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

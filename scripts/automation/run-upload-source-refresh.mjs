@@ -7,7 +7,7 @@ import {createHash} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
 import {fileURLToPath} from 'node:url';
 import {validatePlan} from './validate-staging-scope.mjs';
-import {UPLOAD_REFRESH_SCOPE as S, assertUploadRefreshBeforeImages,
+import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, assertUploadRefreshBeforeImages,
   prepareUploadSourceRefresh, runUploadRefreshTransaction, bindUploadSourceVerification,
   bindUploadFailedSource, uploadVerifiedSources} from './upload-source-refresh-contract.mjs';
 
@@ -59,6 +59,8 @@ export function uploadRefreshPreflightSummary(before, bucket) {
     backupBucket: {publicAccessPrevention: ['enforced', 'inherited'].includes(bucket?.iamConfiguration?.publicAccessPrevention)
       ? bucket.iamConfiguration.publicAccessPrevention : 'UNVERIFIED',
     uniformBucketLevelAccess: bucket?.iamConfiguration?.uniformBucketLevelAccess?.enabled === true,
+    effectivePublicAccessPrevention: uploadEffectivePublicAccessPreventionEnforced(bucket?.effectivePublicAccessPrevention)
+      ? 'enforced' : bucket?.effectivePublicAccessPrevention === undefined ? 'not-read' : 'UNVERIFIED',
     parentScope: ['folder', 'organization'].includes(bucket?.project?.parent?.type) ? bucket.project.parent.type
       : bucket?.project?.parent ? 'UNVERIFIED' : 'none'}, sourceMediaRead: false};
 }
@@ -87,9 +89,12 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch) {
       || (url.hostname === 'eventarc.googleapis.com' && new RegExp(`^/v1/${PREFIX}/triggers/[a-z0-9-]+$`).test(url.pathname))
       || (url.hostname === 'storage.googleapis.com' && new RegExp(`^/storage/v1/b/${S.bucket}(?:/iam|/o/[^/]+)?$`).test(url.pathname))
       || (url.hostname === 'cloudresourcemanager.googleapis.com' && url.pathname === `/v1/projects/${S.project}`));
-    const policyRead = readOnlyPost && method === 'POST' && url.hostname === 'cloudresourcemanager.googleapis.com'
+    const policyRead = readOnlyPost && method === 'POST' && !url.search && url.hostname === 'cloudresourcemanager.googleapis.com'
       && url.pathname === `/v1/projects/${S.project}:getIamPolicy`
       && isDeepStrictEqual(body, {options: {requestedPolicyVersion: 3}});
+    const effectivePolicyRead = readOnlyPost && method === 'POST' && !url.search && url.hostname === 'cloudresourcemanager.googleapis.com'
+      && url.pathname === `/v1/projects/${S.project}:getEffectiveOrgPolicy`
+      && isDeepStrictEqual(body, {constraint: UPLOAD_PUBLIC_ACCESS_CONSTRAINT});
     const patch = method === 'PATCH' && url.hostname === 'cloudfunctions.googleapis.com' && exactFunction
       && url.search === '?updateMask=buildConfig.source' && body?.name === url.pathname.slice(4)
       && Object.keys(body).sort().join(',') === 'buildConfig,name'
@@ -108,8 +113,8 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch) {
       && /^[1-9][0-9]{0,19}$/.test(url.searchParams.get('sourceGeneration') ?? '')
       && url.searchParams.get('sourceGeneration') === url.searchParams.get('ifSourceGenerationMatch')
       && destination.test(decodeURIComponent(copyParts[2])) && isDeepStrictEqual(body, {});
-    need(read || policyRead || patch || upload || copyRequest, 'UPLOAD_REFRESH_HTTP_SCOPE_REJECTED');
-    counters.lastRequestKind = policyRead ? 'project-policy' : patch ? 'function-source-update' : upload ? 'private-object-create'
+    need(read || policyRead || effectivePolicyRead || patch || upload || copyRequest, 'UPLOAD_REFRESH_HTTP_SCOPE_REJECTED');
+    counters.lastRequestKind = effectivePolicyRead ? 'project-effective-public-access' : policyRead ? 'project-policy' : patch ? 'function-source-update' : upload ? 'private-object-create'
       : copyRequest ? 'source-backup-copy' : url.pathname.endsWith(':getIamPolicy') ? 'invoker-policy'
       : url.hostname === 'storage.googleapis.com' ? 'storage-metadata' : url.hostname === 'eventarc.googleapis.com' ? 'event-trigger'
       : url.hostname === 'cloudresourcemanager.googleapis.com' ? 'project-metadata'
@@ -139,7 +144,7 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch) {
       data = Buffer.isBuffer(body) || typeof body === 'string' ? body : JSON.stringify(body);
       headers.set('content-type', Buffer.isBuffer(body) ? 'application/octet-stream' : 'application/json');
     }
-    if (method !== 'GET' && !readOnlyPost) counters.writesAttempted++;
+    if (method !== 'GET' && !policyRead && !effectivePolicyRead) counters.writesAttempted++;
     let response;
     try { response = await fetchImpl(url, {method, headers, body: data, redirect: 'error', signal: AbortSignal.timeout(45000)}); }
     catch { fail('UPLOAD_REFRESH_HTTP_OUTCOME_UNKNOWN'); }
@@ -197,6 +202,10 @@ export function uploadRefreshReader(api) {
     bucket.project = await get(`https://cloudresourcemanager.googleapis.com/v1/projects/${S.project}`);
     bucket.projectPolicy = policy(await api.request(`https://cloudresourcemanager.googleapis.com/v1/projects/${S.project}:getIamPolicy`,
       {method: 'POST', body: {options: {requestedPolicyVersion: 3}}, readOnlyPost: true}));
+    if (bucket.iamConfiguration?.publicAccessPrevention === 'inherited' && bucket.project?.parent) {
+      bucket.effectivePublicAccessPrevention = await api.request(`https://cloudresourcemanager.googleapis.com/v1/projects/${S.project}:getEffectiveOrgPolicy`,
+        {method: 'POST', body: {constraint: UPLOAD_PUBLIC_ACCESS_CONSTRAINT}, readOnlyPost: true});
+    }
     return bucket;
   }
   return {readPair, readBucket};
@@ -341,9 +350,8 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
       return result;
     }
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-upload-source-refresh-')); fs.chmodSync(temporary, 0o700);
-    const environment = Object.fromEntries(S.functions.map(name => [name, before[name].fn.serviceConfig.environmentVariables]));
     const packages = JSON.parse(execFileSync('python3', [path.join(HERE, 'package-upload-source-refresh.py'), '--root', root, '--output', temporary],
-      {input: JSON.stringify(environment), encoding: 'utf8', maxBuffer: 65536, stdio: ['pipe', 'pipe', 'pipe']}));
+      {encoding: 'utf8', maxBuffer: 65536, stdio: ['ignore', 'pipe', 'pipe']}));
     need(isDeepStrictEqual(await reader.readPair(), before), 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
     const replacements = {}, replacementObjects = {}, localHashes = {};
     for (const name of S.functions) {

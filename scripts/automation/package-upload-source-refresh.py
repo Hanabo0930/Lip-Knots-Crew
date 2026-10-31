@@ -14,9 +14,8 @@ readiness = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(readiness)
 
 
-def build_packages(root, environments, output):
+def build_packages(root, output):
     root, output = pathlib.Path(root).resolve(), pathlib.Path(output).resolve()
-    readiness.require(set(environments) == set(readiness.REQUIRED), "REFRESH_EXACT_PAIR_REQUIRED")
     readiness.require(output.is_dir() and output.stat().st_mode & 0o077 == 0, "REFRESH_PRIVATE_DIRECTORY_REQUIRED")
     expected = readiness.expected_files(root, strict=True)
     optional = readiness.expected_packaging_files(root)
@@ -38,15 +37,11 @@ def build_packages(root, environments, output):
         payloads[name] = data
     results = {}
     for name in readiness.REQUIRED:
-        env = environments[name]
-        readiness.require(type(env) is dict, "REFRESH_ENV_REJECTED")
-        config = "".join(key + "=" + env.get(key, "") + "\n" for key in sorted(readiness.DEPLOYMENT_CONFIG_KEYS)).encode()
-        readiness.verify_deployment_config(config, env)
         destination = output / (name + ".zip")
         fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as stream, zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
-            # Source-only PATCH leaves the official runtime configuration in
-            # place. Private dotenv is compared above, never placed in the ZIP.
+            # The owner validates and preserves official settings in its private
+            # before-images. This packager receives no runtime configuration.
             for path, data in sorted(payloads.items()):
                 entry = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
                 entry.create_system = 3
@@ -66,9 +61,7 @@ def main():
     parser.add_argument("--output", required=True, type=pathlib.Path)
     args = parser.parse_args()
     try:
-        data = sys.stdin.buffer.read(65537)
-        readiness.require(len(data) <= 65536, "REFRESH_ENV_TOO_LARGE")
-        result = build_packages(args.root, json.loads(data), args.output)
+        result = build_packages(args.root, args.output)
         print(json.dumps(result))
     except Exception as error:
         code = str(error) if isinstance(error, readiness.ReadinessError) else "REFRESH_PACKAGE_BUILD_FAILED"

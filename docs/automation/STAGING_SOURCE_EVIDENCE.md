@@ -1,8 +1,34 @@
 # Retained source evidence for staging Hosting
 
-The source-provenance route accepts an already-retained local bundle only after
+The default retained source-provenance route accepts an already-retained local bundle only after
 an independent protected reviewer has pinned its exact SHA256. It never fetches
 source bytes, starts a Build, or changes a Function. Missing inputs remain STOP.
+
+## Explicit authenticated acquisition route
+
+The separately scoped [fixed-generation route](STAGING_FIXED_SOURCE_REVIEW.md)
+uses the SAME collector, readiness validator and protected Hosting workflow.
+It is selected only by manual `source_acquisition=fixed-source-once` plus
+`ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB`; default and automatic runs retain
+the existing pin route below. There is no fallback on a missing pin or error.
+
+Before authentication, the fixed guard creates a private per-run plan and key.
+An exclusive attempt latch precedes any GET. The existing short-lived identity
+may read only the two exact upload source objects at official fixed generations,
+up to 12 GETs and 20 MiB total; access denial stops without IAM changes or retry.
+The trusted collector seals its actual observations and archive hashes. Its
+HMAC supplies local same-run integrity, NOT a Google signature or independently
+reviewed retained pin. The generated digest is never assigned to
+`LKC_APPROVED_SOURCE_EVIDENCE_SHA256`.
+
+The verifier requires that signed capture, exact run/SHA/method, complete source
+inventory and generated maps, strict ZIP structure and ten-minute freshness.
+It verifies every present known packaging-only config/test file by its current
+hash; unknown files and secrets are rejected. Every existing backup/live POST
+revalidates the private bytes and inventory and the matching acceptance receipt.
+Raw ZIPs, key and observations are excluded from artifacts and deleted only
+after all checks/recovery. An empty private directory prevents resetting the
+same-run latch through cleanup. This route deploys no Functions or workers.
 
 ## Trust and activation boundary
 

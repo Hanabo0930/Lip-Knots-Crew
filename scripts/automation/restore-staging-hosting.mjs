@@ -437,7 +437,17 @@ export async function requireCurrentSourceMutationReview(options, {
     && options.promotionRunId === process.env.GITHUB_RUN_ID && options.runAttempt === 1
     && process.env.GITHUB_RUN_ATTEMPT === "1", "SOURCE_MUTATION_CONTEXT_REJECTED");
   const pin = process.env.LKC_APPROVED_SOURCE_EVIDENCE_SHA256;
-  requireValue(/^[a-f0-9]{64}$/u.test(pin ?? ""), "SOURCE_MUTATION_PIN_REQUIRED");
+  const acquisition = process.env.LKC_SOURCE_ACQUISITION || "retained";
+  requireValue(["retained", "fixed-source-once"].includes(acquisition), "SOURCE_ACQUISITION_REJECTED");
+  const fixed = acquisition === "fixed-source-once";
+  if (fixed) {
+    requireValue(process.env.GITHUB_EVENT_NAME === "workflow_dispatch"
+      && process.env.LKC_OPERATION === "promote" && process.env.LKC_METADATA_ONLY === "false"
+      && process.env.LKC_EVIDENCE_POLICY === "source-provenance"
+      && process.env.GITHUB_SHA === options.sourceSha
+      && process.env.LKC_SOURCE_ACQUISITION_CONFIRMATION === "ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB",
+    "FIXED_SOURCE_EXPLICIT_REVIEW_REQUIRED");
+  } else requireValue(/^[a-f0-9]{64}$/u.test(pin ?? ""), "SOURCE_MUTATION_PIN_REQUIRED");
   const result = run("python3", ["scripts/automation/check-hosting-api-readiness.py",
     "--root", ".", "--source-sha", options.sourceSha, "--mutation-guard",
     "--evidence", path.join(options.evidenceDir,"api-readiness.json")],
@@ -449,9 +459,12 @@ export async function requireCurrentSourceMutationReview(options, {
       "SOURCE_MUTATION_RECEIPT_REJECTED");
     accepted = JSON.parse(result.stdout);
   } catch { throw new Error("SOURCE_MUTATION_RECEIPT_REJECTED"); }
-  requireValue(accepted && Object.keys(accepted).sort().join(",")
-    === "evidenceDigest,expiresAt,runAttempt,runId,sourceSha,status"
-    && accepted.status === "PASS" && accepted.sourceSha === options.sourceSha && accepted.evidenceDigest === pin
+  const expectedFields = fixed ? "evidenceDigest,evidenceMethod,expiresAt,runAttempt,runId,sourceSha,status"
+    : "evidenceDigest,expiresAt,runAttempt,runId,sourceSha,status";
+  requireValue(accepted && Object.keys(accepted).sort().join(",") === expectedFields
+    && accepted.status === "PASS" && accepted.sourceSha === options.sourceSha
+    && (fixed ? accepted.evidenceMethod === "authenticated-fixed-generation" && /^[a-f0-9]{64}$/u.test(accepted.evidenceDigest ?? "")
+      : accepted.evidenceDigest === pin)
     && accepted.runId === options.promotionRunId && accepted.runAttempt === 1,
   "SOURCE_MUTATION_RECEIPT_MISMATCH");
   // Recheck after the synchronous verifier, directly at each existing POST hook.

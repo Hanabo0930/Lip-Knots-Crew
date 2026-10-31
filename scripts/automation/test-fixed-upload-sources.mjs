@@ -4,7 +4,11 @@ import {createHash} from "node:crypto";
 import {readFileSync} from "node:fs";
 import {spawnSync} from "node:child_process";
 import {inspect} from "node:util";
-import {collectFixedUploadSources, FIXED_SOURCE_LIMITS, OBJECT_FIELDS, FUNCTION_FIELDS, BUILD_FIELDS} from "./collect-upload-metadata.mjs";
+import {mkdtemp, readFile, writeFile, readdir, rm, chmod, symlink, link, mkdir, lstat} from "node:fs/promises";
+import {tmpdir} from "node:os";
+import path from "node:path";
+import {createHmac} from "node:crypto";
+import {collectFixedUploadSources, fixedSourceMain, FIXED_SOURCE_LIMITS, OBJECT_FIELDS, FUNCTION_FIELDS, BUILD_FIELDS} from "./collect-upload-metadata.mjs";
 
 const PROJECT = "lip-knots-crew-staging", PREFIX = `projects/${PROJECT}/locations/asia-northeast1`;
 const BUCKET = "gcf-v2-sources-740154137290-asia-northeast1";
@@ -106,12 +110,10 @@ test("fixed collector: official hosts, fixed generations, ten/twelve GETs and no
   }
 }));
 
-test("fixed collector: never selects live fetch implicitly and existing CLI/workflow stays disconnected", () => isolated(async () => {
+test("fixed collector: primitive never selects live fetch implicitly; metadata CLI remains separate", () => isolated(async () => {
   assert.equal((await collectFixedUploadSources({accessToken: TOKEN})).diagnostics.reason, "FIXED_SOURCE_TRANSPORT_NOT_WIRED");
-  const workflow = readFileSync(new URL("../../.github/workflows/staging-hosting-promote.yml", import.meta.url), "utf8");
-  assert(!/collectFixedUploadSources|fixed-source-once|ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB/u.test(workflow));
   const source = readFileSync(new URL("./collect-upload-metadata.mjs", import.meta.url), "utf8");
-  const main = source.slice(source.indexOf("export async function metadataMain"));
+  const main = source.slice(source.indexOf("export async function metadataMain"), source.indexOf("if (process.argv[1]"));
   assert(!/collectFixedUploadSources/u.test(main));
 }));
 
@@ -299,4 +301,184 @@ print("STRICT_SYNTHETIC_ARCHIVES=2")`], {encoding: "utf8", input: JSON.stringify
   assert.equal(checked.status, 0, checked.stderr); assert.match(checked.stdout, /STRICT_SYNTHETIC_ARCHIVES=2/u);
   assert.equal(result.diagnostics.hostingPromotionAuthorized, false);
   assert(!JSON.stringify(result).includes(blob));
+}));
+
+async function privateFixture(callback) {
+  return isolated(async () => {
+    const temporary = await mkdtemp(path.join(tmpdir(), "lkc-fixed-test-"));
+    const values = Object.fromEntries(["RUNNER_TEMP", "LKC_EVIDENCE_DIR", "LKC_FIXED_SOURCE_ACCESS_TOKEN"].map(name => [name, process.env[name]]));
+    process.env.RUNNER_TEMP = temporary;
+    process.env.LKC_EVIDENCE_DIR = path.join(temporary, "hosting-promote-evidence");
+    const directory = path.join(temporary, "hosting-fixed-source-evidence"), output = [];
+    const run = (flag, io = {}) => fixedSourceMain({argv: [flag], now: () => NOW, emit: text => output.push(text), ...io});
+    try {return await callback({temporary, directory, output, run});} finally {
+      for (const [name, value] of Object.entries(values)) {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      }
+      await rm(temporary, {recursive: true, force: true});
+    }
+  });
+}
+
+test("fixed CLI: protected plan, one acquisition, private signed capture and public summary", () => privateFixture(async ({directory, output, run}) => {
+  const io = transport(fixtures(true));
+  assert.equal(await run("--fixed-source-guard"), 0); assert.equal(io.calls.length, 0);
+  assert.deepEqual((await readdir(directory)).sort(), ["collector.key", "plan.hmac", "plan.json"]);
+  const planBytes = await readFile(path.join(directory, "plan.json")), plan = JSON.parse(planBytes), key = await readFile(path.join(directory, "collector.key"));
+  assert.equal(key.length, 32); assert.equal(plan.createdAt, NOW); assert.equal(plan.runId, ENV.GITHUB_RUN_ID);
+  assert.equal(await readFile(path.join(directory, "plan.hmac"), "ascii"), createHmac("sha256", key).update(planBytes).digest("hex"));
+  process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN = TOKEN;
+  assert.equal(await run("--collect-fixed-source", io), 0); assert.equal(io.calls.length, 12);
+  assert.equal(process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN, undefined);
+  const captureBytes = await readFile(path.join(directory, "capture.json")), capture = JSON.parse(captureBytes);
+  assert.equal(capture.method, "authenticated-fixed-generation"); assert.equal(capture.requestCount, 12);
+  assert.equal(capture.bytesDownloaded, 18); assert.equal(capture.expiresAt, "2026-10-30T00:15:00.000Z");
+  assert.equal(capture.archives.createUploadSession.size, 9);
+  assert.equal(capture.archives.createUploadSession.sha256, createHash("sha256").update("123456789").digest("hex"));
+  assert.equal(await readFile(path.join(directory, "capture.hmac"), "ascii"), createHmac("sha256", key).update(captureBytes).digest("hex"));
+  assert.equal(JSON.parse(await readFile(path.join(directory, "attempt.json"))).startedAt, NOW);
+  for (const file of await readdir(directory)) assert.equal((await lstat(path.join(directory, file))).mode & 0o777, 0o600);
+  assert.equal((await lstat(directory)).mode & 0o777, 0o700);
+  const summary = JSON.parse(await readFile(path.join(process.env.LKC_EVIDENCE_DIR, "fixed-source-collection.json")));
+  assert.equal(summary.status, "FIXED_SOURCE_COLLECTED"); assert.equal(summary.hostingPromotionAuthorized, false);
+  assert.equal(summary.deployedSourceVerified, false); assert(!JSON.stringify(summary).includes(TOKEN));
+  assert(!Object.hasOwn(summary, "archives")); assert(!Object.hasOwn(summary, "before"));
+  assert.deepEqual(await readdir(process.env.LKC_EVIDENCE_DIR), ["fixed-source-collection.json"]);
+  assert(output.includes("HOSTING_PUBLICATION_AUTHORIZED=false")); assert(!output.some(value => value.includes(TOKEN)));
+  key.fill(0);
+}));
+
+test("fixed CLI: matching promote confirmation is explicitly supported; automatic/default acquisition is rejected", () => privateFixture(async ({run}) => {
+  process.env.LKC_OPERATION = "promote"; process.env.LKC_CONFIRMATION = "PROMOTE_LKC_STAGING_HOSTING";
+  assert.equal(await run("--fixed-source-guard"), 0);
+  for (const [name, value] of [["GITHUB_EVENT_NAME", "workflow_run"], ["GITHUB_RUN_ATTEMPT", "2"],
+    ["LKC_SOURCE_ACQUISITION", "retained"], ["LKC_SOURCE_ACQUISITION_CONFIRMATION", ""]]) {
+    const previous = process.env[name]; process.env[name] = value;
+    let calls = 0; assert.equal(await run("--collect-fixed-source", {request: async () => {calls++; assert.fail("NETWORK_FORBIDDEN");}}), 1);
+    assert.equal(calls, 0); process.env[name] = previous;
+  }
+}));
+
+test("fixed CLI: duplicate guard/attempt and cleanup cannot reset the one-shot latch", () => privateFixture(async ({directory, run, output}) => {
+  const io = transport(); assert.equal(await run("--fixed-source-guard"), 0);
+  assert.equal(await run("--fixed-source-guard"), 1);
+  process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN = TOKEN; assert.equal(await run("--collect-fixed-source", io), 0);
+  const count = io.calls.length;
+  process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN = TOKEN; assert.equal(await run("--collect-fixed-source", io), 1);
+  assert.equal(io.calls.length, count); assert(output.includes("HOSTING_FIXED_SOURCE_ERROR=FIXED_SOURCE_ATTEMPT_ALREADY_EXISTS"));
+  assert.equal(await run("--cleanup-fixed-source"), 0); assert.deepEqual(await readdir(directory), []);
+  assert.equal(await run("--cleanup-fixed-source"), 0);
+  assert.equal(await run("--fixed-source-guard"), 1);
+  process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN = TOKEN; assert.equal(await run("--collect-fixed-source", io), 1);
+  assert.equal(io.calls.length, count);
+}));
+
+test("fixed CLI: changed key, mismatched plan or stale plan stops before any HTTP", () => privateFixture(async ({directory, run, output}) => {
+  assert.equal(await run("--fixed-source-guard"), 0);
+  const keyPath = path.join(directory, "collector.key"), planPath = path.join(directory, "plan.json");
+  const key = await readFile(keyPath), planBytes = await readFile(planPath), signature = await readFile(path.join(directory, "plan.hmac"));
+  let calls = 0; const io = {request: async () => {calls++; assert.fail("NETWORK_FORBIDDEN");}};
+  const binarySignature = Buffer.from(signature); binarySignature[0] |= 0x80;
+  await writeFile(path.join(directory, "plan.hmac"), binarySignature);
+  process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN = TOKEN;
+  assert.equal(await run("--collect-fixed-source", io), 1); assert.equal(calls, 0);
+  assert(output.includes("HOSTING_FIXED_SOURCE_ERROR=FIXED_SOURCE_PLAN_SIGNATURE_REJECTED"));
+  await writeFile(path.join(directory, "plan.hmac"), signature);
+  await writeFile(keyPath, Buffer.alloc(32)); process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN = TOKEN;
+  assert.equal(await run("--collect-fixed-source", io), 1); assert.equal(calls, 0);
+  assert(output.includes("HOSTING_FIXED_SOURCE_ERROR=FIXED_SOURCE_PLAN_SIGNATURE_REJECTED"));
+  await writeFile(keyPath, key);
+  const plan = JSON.parse(planBytes); plan.sourceSha = "b".repeat(40);
+  const changed = Buffer.from(JSON.stringify(plan));
+  await writeFile(planPath, changed); await writeFile(path.join(directory, "plan.hmac"), createHmac("sha256", key).update(changed).digest("hex"));
+  assert.equal(await run("--collect-fixed-source", io), 1); assert.equal(calls, 0);
+  assert(output.includes("HOSTING_FIXED_SOURCE_ERROR=FIXED_SOURCE_PLAN_REJECTED"));
+  await writeFile(planPath, planBytes); await writeFile(path.join(directory, "plan.hmac"), signature);
+  assert.equal(await run("--collect-fixed-source", {...io, now: () => "2026-10-30T00:35:00Z"}), 1); assert.equal(calls, 0);
+  assert(output.includes("HOSTING_FIXED_SOURCE_ERROR=FIXED_SOURCE_PLAN_EXPIRED"));
+  assert(!await readdir(directory).then(names => names.includes("attempt.json")));
+  key.fill(0);
+}));
+
+test("fixed CLI: symlinked directory/files, hardlinks, weak permissions and extra files are refused", () => privateFixture(async ({temporary, directory, run}) => {
+  const outside = path.join(temporary, "outside"); await mkdir(outside, {mode: 0o700});
+  await symlink(outside, directory, "dir"); assert.equal(await run("--fixed-source-guard"), 1);
+  await rm(directory); assert.equal(await run("--fixed-source-guard"), 0);
+  const keyPath = path.join(directory, "collector.key"), key = await readFile(keyPath);
+  await rm(keyPath); await writeFile(path.join(outside, "key"), key, {mode: 0o600}); await symlink(path.join(outside, "key"), keyPath);
+  let calls = 0; const io = {request: async () => {calls++; assert.fail("NETWORK_FORBIDDEN");}};
+  assert.equal(await run("--collect-fixed-source", io), 1); assert.equal(calls, 0);
+  await rm(keyPath); await link(path.join(outside, "key"), keyPath);
+  assert.equal(await run("--collect-fixed-source", io), 1); assert.equal(calls, 0);
+  await rm(keyPath); await writeFile(keyPath, key, {mode: 0o600}); await chmod(keyPath, 0o644);
+  assert.equal(await run("--collect-fixed-source", io), 1); assert.equal(calls, 0);
+  await chmod(keyPath, 0o600); await writeFile(path.join(directory, "unknown"), "synthetic", {mode: 0o600});
+  assert.equal(await run("--collect-fixed-source", io), 1); assert.equal(calls, 0);
+  assert.equal(await run("--cleanup-fixed-source"), 1);
+  assert.deepEqual(await readFile(path.join(outside, "key")), key); key.fill(0);
+}));
+
+test("fixed CLI: failed acquisition records its one attempt and no private capture or fallback", () => privateFixture(async ({directory, run, output}) => {
+  assert.equal(await run("--fixed-source-guard"), 0); process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN = TOKEN;
+  const io = transport(fixtures(), () => ({status: 403, body: {cancel: async () => {}}}));
+  assert.equal(await run("--collect-fixed-source", io), 1); assert.equal(io.calls.length, 1);
+  const names = await readdir(directory); assert(names.includes("attempt.json")); assert(!names.includes("capture.json"));
+  const summary = JSON.parse(await readFile(path.join(process.env.LKC_EVIDENCE_DIR, "fixed-source-collection.json")));
+  assert.equal(summary.reason, "METADATA_ACCESS_DENIED"); assert.equal(summary.requests, 1);
+  process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN = TOKEN;
+  assert.equal(await run("--collect-fixed-source", io), 1); assert.equal(io.calls.length, 1);
+  assert(!output.some(value => value.includes(TOKEN))); assert.equal(process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN, undefined);
+  assert.equal(await run("--cleanup-fixed-source"), 0); assert.deepEqual(await readdir(directory), []);
+}));
+
+test("fixed CLI: signed synthetic acquisition reaches strict Python verification and same-run mutation receipt", () => privateFixture(async ({temporary, directory, run}) => {
+  const sourceRoot = path.join(temporary, "source"), files = {
+    "package.json": '{"main":"lib/index.js"}', "lib/index.js": "exports.synthetic=1;", "lib/uploads.js": "exports.synthetic=1;",
+    "lib/uploads.js.map": '{"version":3}', "src/uploads.ts": "export const synthetic=1;", "case-mail-runtime/synthetic.cjs": "module.exports={};"};
+  for (const [name, bytes] of Object.entries(files)) {
+    const target = path.join(sourceRoot, "functions", name); await mkdir(path.dirname(target), {recursive: true}); await writeFile(target, bytes);
+  }
+  const release = path.join(sourceRoot, "apps/admin/src/case-mail-release.json");
+  await mkdir(path.dirname(release), {recursive: true}); await writeFile(release, '{"enabled":false}');
+  const packed = spawnSync("python3", ["-c", `import sys,json,io,zipfile,base64
+files=json.load(sys.stdin);out=io.BytesIO()
+with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED) as archive:
+ for name,value in files.items():archive.writestr(name,value.encode())
+print(base64.b64encode(out.getvalue()).decode())`], {encoding: "utf8", input: JSON.stringify(files)});
+  assert.equal(packed.status, 0, packed.stderr);
+  const data = fixtures(true); data.bytes = Buffer.from(packed.stdout.trim(), "base64");
+  let crc = 0xffffffff;
+  for (const byte of data.bytes) {crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0x82f63b78 : 0);}
+  const checksum = Buffer.alloc(4); checksum.writeUInt32BE((crc ^ 0xffffffff) >>> 0);
+  for (const object of Object.values(data.objects)) Object.assign(object, {size: String(data.bytes.length),
+    md5Hash: createHash("md5").update(data.bytes).digest("base64"), crc32c: checksum.toString("base64")});
+  assert.equal(await run("--fixed-source-guard"), 0); process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN = TOKEN;
+  const io = transport(data); assert.equal(await run("--collect-fixed-source", io), 0);
+  assert.equal(io.calls.length, 12); assert.equal(process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN, undefined);
+  const verified = spawnSync("python3", ["-c", `import sys,json,datetime,importlib.util,pathlib,socket,os
+from unittest.mock import patch
+socket.create_connection=lambda *args:(_ for _ in ()).throw(AssertionError("NETWORK_FORBIDDEN"))
+def load(name,file):
+ spec=importlib.util.spec_from_file_location(name,"scripts/automation/"+file);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+g=load("fixed_bridge_readiness","check-hosting-api-readiness.py");e=load("fixed_bridge_evidence","hosting_source_evidence.py")
+root=pathlib.Path(sys.argv[1]);directory=pathlib.Path(sys.argv[2]);now=datetime.datetime.fromisoformat("2026-10-30T00:05:00+00:00")
+with patch.object(g.subprocess,"check_output",return_value=os.environ["LKC_SOURCE_SHA"].encode()):
+ result=e.verify_fixed_capture(root,os.environ["LKC_SOURCE_SHA"],directory,g,now=now)
+ receipt=e.bind_fixed_acceptance(result,now=now)
+ target=pathlib.Path(os.environ["LKC_EVIDENCE_DIR"])/"api-readiness.json";target.write_text(json.dumps(receipt));target.chmod(0o600)
+ fresh=e.verify_fixed_capture(root,os.environ["LKC_SOURCE_SHA"],directory,g,now=now)
+ current=e.require_current_fixed_acceptance(target,fresh,now=now)
+assert current["evidenceMethod"]=="authenticated-fixed-generation" and current["runId"]==os.environ["GITHUB_RUN_ID"]
+assert result["hostingPromotionAuthorized"] is False
+print("SYNTHETIC_FIXED_SOURCE_TO_MUTATION_GUARD=PASS")`, sourceRoot, directory], {encoding: "utf8"});
+  assert.equal(verified.status, 0, verified.stderr); assert.match(verified.stdout, /SYNTHETIC_FIXED_SOURCE_TO_MUTATION_GUARD=PASS/u);
+  assert(!verified.stdout.includes(TOKEN));
+}));
+
+test("fixed CLI: partial source output without its attempt latch is never reacquired", () => privateFixture(async ({directory, run, output}) => {
+  assert.equal(await run("--fixed-source-guard"), 0);
+  await writeFile(path.join(directory, "createuploadsession.zip"), "synthetic partial", {mode: 0o600});
+  let calls = 0; process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN = TOKEN;
+  assert.equal(await run("--collect-fixed-source", {request: async () => {calls++; assert.fail("NETWORK_FORBIDDEN");}}), 1);
+  assert.equal(calls, 0); assert(output.includes("HOSTING_FIXED_SOURCE_ERROR=FIXED_SOURCE_ATTEMPT_STATE_REJECTED"));
 }));

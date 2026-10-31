@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import re
 import stat
@@ -50,6 +51,39 @@ def expected_files(root, *, strict=False):
     require((base / "lib/index.js").is_file() and (base / "lib/uploads.js").is_file(), "LOCAL_BUILD_REQUIRED")
     require(json.loads((base / "package.json").read_text("utf-8")).get("main") == "lib/index.js", "LOCAL_ENTRY_UNEXPECTED")
     return {p.relative_to(base).as_posix(): digest(p.read_bytes()) for p in files}
+
+def expected_packaging_files(root):
+    """Exact current non-runtime files a Firebase source ZIP may include.
+
+    These names are optional, never a prefix allowance: a present archive member
+    must match its current repository bytes. Runtime inventory remains required.
+    The current package has root TS configs and TypeScript tests only; env/key
+    files and other formats are deliberately not candidates.
+    """
+    base = pathlib.Path(root) / "functions"
+    candidates = [*base.glob("tsconfig*.json"), *(base / "test").rglob("*.ts")]
+    result = {}
+    for file in candidates:
+        name = file.relative_to(base).as_posix()
+        require(bool(re.fullmatch(r"tsconfig(?:[.][A-Za-z0-9_-]+)*[.]json|test/[A-Za-z0-9_./-]+[.]ts", name))
+                and all(part not in {"", ".", ".."} for part in name.split("/")),
+                "LOCAL_PACKAGING_PATH_REJECTED")
+        for ancestor in (file, *file.parents):
+            require(not stat.S_ISLNK(ancestor.lstat().st_mode), "LOCAL_PACKAGING_LINK_REJECTED")
+        before = file.lstat()
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 < before.st_size <= 2 * 1024 * 1024,
+                "LOCAL_PACKAGING_FILE_REJECTED")
+        fd = os.open(file, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                    == (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns), "LOCAL_PACKAGING_CHANGED")
+            data = stream.read(2 * 1024 * 1024 + 1)
+            after = os.fstat(stream.fileno())
+        require(len(data) == before.st_size and (opened.st_size, opened.st_mtime_ns) == (after.st_size, after.st_mtime_ns),
+                "LOCAL_PACKAGING_CHANGED")
+        result[name] = digest(data)
+    return result
 
 def identify(document, function):
     require(function in REQUIRED, "FUNCTION_OUT_OF_SCOPE")
@@ -149,18 +183,22 @@ def strict_zip_data(blob, entry, bounds):
     require(len(data) == entry.file_size and zlib.crc32(data) == entry.CRC, "ARCHIVE_UNREADABLE")
     return data
 
-def verify_archive(blob, expected, *, strict=False):
+def verify_archive(blob, expected, *, strict=False, optional=None):
     # The existing retained-source route keeps its historical policy. Fresh
     # authenticated acquisition additionally rejects every unapproved file,
     # even when it would not participate in the legacy code inventory.
     require(len(blob) <= (MAX_FIXED_ARCHIVE if strict else MAX_ARCHIVE), "ARCHIVE_TOO_LARGE")
+    optional = {} if optional is None or not strict else optional
+    if strict:
+        require(type(optional) is dict and not set(expected) & set(optional), "ARCHIVE_OPTIONAL_INVENTORY_REJECTED")
+    allowed = {**expected, **optional} if strict else expected
     try:
         with zipfile.ZipFile(io.BytesIO(blob)) as archive:
             entries = archive.infolist()
             names = [i.filename for i in entries]
             if strict:
                 require(0 < len(entries) <= MAX_ARCHIVE_ENTRIES, "ARCHIVE_ENTRY_LIMIT")
-                directories = {parent.as_posix() + "/" for name in expected
+                directories = {parent.as_posix() + "/" for name in allowed
                                for parent in pathlib.PurePosixPath(name).parents
                                if parent.as_posix() != "."}
                 for entry in entries:
@@ -182,8 +220,8 @@ def verify_archive(blob, expected, *, strict=False):
                         require(name in directories and entry.file_size == 0,
                                 "ARCHIVE_DIRECTORY_REJECTED")
                     else:
-                        require(name in expected, "ARCHIVE_UNEXPECTED_FILE")
-                require({entry.filename for entry in entries if not entry.is_dir()} == set(expected),
+                        require(name in allowed, "ARCHIVE_UNEXPECTED_FILE")
+                require(set(expected) <= {entry.filename for entry in entries if not entry.is_dir()},
                         "DEPLOYED_PACKAGE_INCOMPLETE")
             require(len(names) == len(set(names)), "DUPLICATE_ARCHIVE_PATH")
             require(all(not n.startswith("/") and "\\" not in n and ".." not in n.split("/") for n in names), "UNSAFE_ARCHIVE_PATH")
@@ -197,7 +235,8 @@ def verify_archive(blob, expected, *, strict=False):
             suffixes = (".js", ".cjs", ".ts", ".json", ".js.map") if strict else (".js", ".cjs", ".ts", ".json")
             relevant = {n for n in names if n.startswith(("lib/", "src/", "case-mail-runtime/")) and n.endswith(suffixes)}
             require(relevant == {n for n in expected if n.startswith(("lib/", "src/", "case-mail-runtime/"))}, "DEPLOYED_CODE_INVENTORY_MISMATCH")
-            for name, sha in expected.items():
+            checked = {**expected, **{name: value for name, value in optional.items() if name in names}} if strict else expected
+            for name, sha in checked.items():
                 require(name in names, "DEPLOYED_PACKAGE_INCOMPLETE")
                 if strict:
                     # No extraction or unbounded decompression. Reject unused
@@ -248,16 +287,28 @@ def main():
     args = parser.parse_args()
     evidence = source_evidence_module()
     try:
-        directory, approved = evidence.protected_context(args.source_sha)
         from types import SimpleNamespace
         validators = SimpleNamespace(BUCKET=BUCKET, identify=identify, verify_archive=verify_archive,
-                                     expected_files=expected_files, subprocess=subprocess)
-        result = evidence.verify_bundle(args.root.resolve(), args.source_sha, directory, approved,
-                                        validators, preflight=args.preflight)
-        if args.mutation_guard:
-            result = evidence.require_current_acceptance(args.evidence.absolute(), result)
-        elif not args.preflight:
-            result = evidence.bind_acceptance(result)
+                                     expected_files=expected_files, expected_packaging_files=expected_packaging_files,
+                                     subprocess=subprocess)
+        acquisition = os.environ.get("LKC_SOURCE_ACQUISITION", "retained")
+        if acquisition == "fixed-source-once":
+            directory = evidence.fixed_protected_context(args.source_sha)
+            result = evidence.verify_fixed_capture(args.root.resolve(), args.source_sha, directory,
+                                                   validators, preflight=args.preflight)
+            if args.mutation_guard:
+                result = evidence.require_current_fixed_acceptance(args.evidence.absolute(), result)
+            else:
+                result = evidence.bind_fixed_acceptance(result)
+        else:
+            evidence.need(acquisition in {"", "retained"}, "SOURCE_ACQUISITION_REJECTED")
+            directory, approved = evidence.protected_context(args.source_sha)
+            result = evidence.verify_bundle(args.root.resolve(), args.source_sha, directory, approved,
+                                            validators, preflight=args.preflight)
+            if args.mutation_guard:
+                result = evidence.require_current_acceptance(args.evidence.absolute(), result)
+            elif not args.preflight:
+                result = evidence.bind_acceptance(result)
     except (ReadinessError, evidence.EvidenceError, OSError, ValueError, TypeError, AttributeError, RecursionError) as error:
         code = str(error) if isinstance(error, (ReadinessError, evidence.EvidenceError)) else "READINESS_INPUT_INVALID"
         result = {"status": "STOPPED", "reason": code}

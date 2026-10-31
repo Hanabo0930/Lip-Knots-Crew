@@ -12,6 +12,18 @@ It records an unauthenticated staging trial separately from Staff acceptance and
 retains backup/preview channels until acceptance; the normal cleanup sequence
 below does not apply to that policy.
 
+For missing retained Build hashes, the separately reviewed
+[fixed-generation source route](STAGING_FIXED_SOURCE_REVIEW.md) uses
+`evidence_policy=source-provenance`, manual
+`source_acquisition=fixed-source-once` and the exact acquisition confirmation
+`ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB`. It bounds one source acquisition to
+two 10 MiB ZIPs / 12 GETs using the existing identity. It keeps the same current
+main, CI, Preview, protected environment, backup, per-POST verification and
+rollback requirements. Default/automatic runs still use retained evidence.
+This requires no new WIF, role, credential or long-lived resource. Source/code
+mismatch stops before Hosting changes; source acquisition success is separate
+from authenticated app or business acceptance.
+
 ## Fixed release path
 
 1. A pull request is approved and merged to `main`.

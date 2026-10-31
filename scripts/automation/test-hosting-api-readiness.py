@@ -2,6 +2,7 @@ import copy
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import stat
 import struct
@@ -163,6 +164,63 @@ class ReadinessTests(unittest.TestCase):
             with self.subTest(code=code):
                 with self.assertRaisesRegex(g.ReadinessError, code):
                     g.verify_archive(archive(files), expected, strict=True)
+
+    def test_strict_optional_packaging_present_or_omitted_matches_current_known_files(self):
+        values = {"tsconfig.json": b'{"compilerOptions":{"sourceMap":true}}',
+                  "tsconfig.synthetic-test.json": b'{"extends":"./tsconfig.json"}',
+                  "test/synthetic.test.ts": b"export const syntheticTest=true;\n"}
+        for name, value in values.items():
+            file = self.root / "functions" / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(value)
+        optional = g.expected_packaging_files(self.root)
+        self.assertEqual(optional, {name: g.digest(value) for name, value in values.items()})
+        expected = g.expected_files(self.root, strict=True)
+        for files in (self.files, self.files + list(values.items()),
+                      self.files + [("test/", b""), ("test/synthetic.test.ts", values["test/synthetic.test.ts"]) ]):
+            with self.subTest(count=len(files)):
+                self.assertIsNone(g.verify_archive(archive(files), expected, strict=True, optional=optional))
+        with self.assertRaisesRegex(g.ReadinessError, "DEPLOYED_PACKAGE_INCOMPLETE"):
+            g.verify_archive(archive(self.files[:-1] + list(values.items())), expected, strict=True, optional=optional)
+
+    def test_strict_optional_packaging_changed_or_unknown_names_stop(self):
+        values = {"tsconfig.json": b'{"compilerOptions":{}}', "test/synthetic.test.ts": b"export {};\n"}
+        for name, value in values.items():
+            file = self.root / "functions" / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(value)
+        optional = g.expected_packaging_files(self.root)
+        expected = g.expected_files(self.root, strict=True)
+        for name, value in values.items():
+            with self.subTest(name=name), self.assertRaisesRegex(g.ReadinessError, "DEPLOYED_SOURCE_MISMATCH"):
+                g.verify_archive(archive(self.files + [(name, value + b"changed")]), expected,
+                                 strict=True, optional=optional)
+        for name in ("tsconfig.unknown.json", "test/unknown.test.ts", "test/credentials.json", "test/.env",
+                     "test/private.key", "test/unknown.js", ".env"):
+            with self.subTest(name=name), self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_UNEXPECTED_FILE"):
+                g.verify_archive(archive(self.files + [(name, b"SYNTHETIC_PRIVATE")]), expected,
+                                 strict=True, optional=optional)
+        with self.assertRaisesRegex(g.ReadinessError, "OPTIONAL_INVENTORY"):
+            g.verify_archive(self.blob, expected, strict=True, optional={"package.json": "0" * 64})
+
+    def test_optional_packaging_scan_excludes_secret_formats_and_rejects_linked_sources(self):
+        base = self.root / "functions"
+        (base / "tsconfig.json").write_text('{"compilerOptions":{}}')
+        (base / "test").mkdir()
+        (base / "test/known.test.ts").write_text("export {};\n")
+        for name in (".env", "test/.env", "test/private.key", "test/credentials.json"):
+            (base / name).write_text("SYNTHETIC_PRIVATE")
+        self.assertEqual(set(g.expected_packaging_files(self.root)), {"tsconfig.json", "test/known.test.ts"})
+        outside = self.root / "outside.ts"
+        outside.write_text("export {};\n")
+        link = base / "test/link.test.ts"
+        link.symlink_to(outside)
+        with self.assertRaisesRegex(g.ReadinessError, "LOCAL_PACKAGING_LINK_REJECTED"):
+            g.expected_packaging_files(self.root)
+        link.unlink()
+        os.link(base / "test/known.test.ts", link)
+        with self.assertRaisesRegex(g.ReadinessError, "LOCAL_PACKAGING_FILE_REJECTED"):
+            g.expected_packaging_files(self.root)
 
     def test_strict_rejects_secret_and_unexpected_files_without_exposing_contents(self):
         for name in (".env", ".env.synthetic", "credentials.json", "private.pem", "package-extra.json",
@@ -423,10 +481,12 @@ class ReadinessTests(unittest.TestCase):
             self.assertEqual(conditions, ["if: env.LKC_OPERATION == 'promote'"])
 
 def load_tests(loader, tests, pattern):
-    spec = importlib.util.spec_from_file_location("source_evidence_tests", pathlib.Path(__file__).with_name("test-hosting-source-evidence.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    tests.addTests(loader.loadTestsFromModule(module))
+    for name, filename in (("source_evidence_tests", "test-hosting-source-evidence.py"),
+                           ("fixed_source_evidence_tests", "test-hosting-fixed-source-evidence.py")):
+        spec = importlib.util.spec_from_file_location(name, pathlib.Path(__file__).with_name(filename))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        tests.addTests(loader.loadTestsFromModule(module))
     return tests
 
 

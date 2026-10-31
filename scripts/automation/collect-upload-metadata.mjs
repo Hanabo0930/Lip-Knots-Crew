@@ -1,8 +1,9 @@
 /** Observation only. Uses the existing protected promote job; never authorizes release. */
-import {mkdir, writeFile} from "node:fs/promises";
+import {mkdir, writeFile, lstat, open, readdir, unlink} from "node:fs/promises";
+import {constants} from "node:fs";
 import path from "node:path";
 import {pathToFileURL} from "node:url";
-import {createHash} from "node:crypto";
+import {createHash, createHmac, randomBytes, timingSafeEqual} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import {requireProtectedContext, validateHostingOperation} from "./restore-staging-hosting.mjs";
 
@@ -206,9 +207,8 @@ export async function collectUploadMetadata({accessToken}, {request = globalThis
   return result;
 }
 
-// Dormant, offline-reviewed acquisition primitive. There is deliberately NO CLI
-// or workflow entry to this method. A trusted caller must supply the transport.
-// It returns private bytes, never readiness PASS or a retained-evidence pin.
+// The transport remains explicit. Only the protected, one-shot CLI below may
+// select live fetch; collection never grants Hosting readiness or a review pin.
 export function validateFixedSourceContext() {
   requireProtectedContext();
   validateHostingOperation({operation: process.env.LKC_OPERATION,
@@ -217,7 +217,7 @@ export function validateFixedSourceContext() {
     sourceRef: process.env.GITHUB_REF_NAME, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT)});
   requireValue(process.env.GITHUB_EVENT_NAME === "workflow_dispatch"
     && process.env.GITHUB_RUN_ATTEMPT === "1"
-    && process.env.LKC_OPERATION === "readiness" && process.env.LKC_METADATA_ONLY === "false"
+    && ["readiness", "promote"].includes(process.env.LKC_OPERATION) && process.env.LKC_METADATA_ONLY === "false"
     && process.env.LKC_EVIDENCE_POLICY === "source-provenance"
     && process.env.LKC_SOURCE_ACQUISITION === "fixed-source-once"
     && process.env.LKC_SOURCE_ACQUISITION_CONFIRMATION === "ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB",
@@ -451,6 +451,200 @@ export async function collectFixedUploadSources({accessToken}, {request, now = (
   }
 }
 
+const FIXED_FILES = ["collector.key", "plan.json", "plan.hmac", "attempt.json", "capture.json", "capture.hmac",
+  "createuploadsession.zip", "finalizestagedupload.zip"];
+const PLAN_FIELDS = ["schemaVersion", "repository", "workflowRef", "runId", "runAttempt", "sourceSha", "operation", "createdAt"];
+const FIXED_FLAGS = ["--fixed-source-guard", "--collect-fixed-source", "--cleanup-fixed-source"];
+
+function fixedIdentity() {
+  return {schemaVersion: 1, repository: process.env.GITHUB_REPOSITORY,
+    workflowRef: process.env.GITHUB_WORKFLOW_REF, runId: process.env.GITHUB_RUN_ID, runAttempt: 1,
+    sourceSha: process.env.LKC_SOURCE_SHA, operation: process.env.LKC_OPERATION};
+}
+
+async function noLinkedParents(target) {
+  requireValue(path.isAbsolute(target), "FIXED_SOURCE_PATH_REJECTED");
+  let current = path.parse(target).root;
+  for (const part of target.slice(current.length).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    const info = await lstat(current);
+    requireValue(info.isDirectory() && !info.isSymbolicLink(), "FIXED_SOURCE_PATH_REJECTED");
+  }
+}
+
+async function fixedDirectory({mustExist = true} = {}) {
+  const temporary = process.env.RUNNER_TEMP ?? "";
+  requireValue(path.isAbsolute(temporary) && path.resolve(temporary) === temporary, "FIXED_SOURCE_PATH_REJECTED");
+  await noLinkedParents(temporary);
+  const directory = path.join(temporary, "hosting-fixed-source-evidence");
+  if (mustExist) {
+    const info = await lstat(directory, {bigint: true});
+    requireValue(info.isDirectory() && !info.isSymbolicLink() && (info.mode & 0o777n) === 0o700n
+      && typeof process.getuid === "function" && info.uid === BigInt(process.getuid()), "FIXED_SOURCE_PRIVATE_DIRECTORY_REJECTED");
+    const names = await readdir(directory);
+    requireValue(names.every(name => FIXED_FILES.includes(name)), "FIXED_SOURCE_PRIVATE_DIRECTORY_REJECTED");
+  }
+  return directory;
+}
+
+function sameFile(first, last) {
+  return ["dev", "ino", "size", "mtimeNs", "ctimeNs"].every(key => first[key] === last[key]);
+}
+
+async function readPrivate(directory, name, maximum) {
+  requireValue(FIXED_FILES.includes(name), "FIXED_SOURCE_PATH_REJECTED");
+  await fixedDirectory();
+  const target = path.join(directory, name), initial = await lstat(target, {bigint: true});
+  requireValue(initial.isFile() && !initial.isSymbolicLink() && initial.nlink === 1n
+    && (initial.mode & 0o777n) === 0o600n && initial.uid === BigInt(process.getuid())
+    && initial.size > 0n && initial.size <= BigInt(maximum), "FIXED_SOURCE_PRIVATE_FILE_REJECTED");
+  const handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = await handle.stat({bigint: true});
+    requireValue(sameFile(initial, opened), "FIXED_SOURCE_PRIVATE_FILE_CHANGED");
+    const buffer = Buffer.alloc(maximum + 1);
+    let size = 0;
+    while (size < buffer.length) {
+      const result = await handle.read(buffer, size, buffer.length - size, size);
+      if (!result.bytesRead) break;
+      size += result.bytesRead;
+    }
+    requireValue(size === Number(initial.size) && size <= maximum && sameFile(opened, await handle.stat({bigint: true})),
+      "FIXED_SOURCE_PRIVATE_FILE_CHANGED");
+    return buffer.subarray(0, size);
+  } finally {await handle.close();}
+}
+
+async function writePrivate(directory, name, bytes) {
+  requireValue(FIXED_FILES.includes(name), "FIXED_SOURCE_PATH_REJECTED");
+  await fixedDirectory();
+  let handle;
+  try {
+    handle = await open(path.join(directory, name), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
+  } catch (error) {
+    if (error?.code === "EEXIST") throw new MetadataError(name === "attempt.json" ? "FIXED_SOURCE_ATTEMPT_ALREADY_EXISTS" : "FIXED_SOURCE_PRIVATE_FILE_ALREADY_EXISTS");
+    throw error;
+  }
+  try {await handle.writeFile(bytes); await handle.sync();} finally {await handle.close();}
+}
+
+function serialize(value) {return Buffer.from(JSON.stringify(value) + "\n", "utf8");}
+function mac(key, bytes) {return createHmac("sha256", key).update(bytes).digest("hex");}
+function equalMac(actual, expected) {
+  return /^[a-f0-9]{64}$/u.test(actual) && timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(expected, "hex"));
+}
+
+async function createFixedPlan(now) {
+  const createdAt = now(); fixedTime(createdAt);
+  const directory = await fixedDirectory({mustExist: false});
+  try {await mkdir(directory, {mode: 0o700});} catch (error) {
+    if (error?.code === "EEXIST") throw new MetadataError("FIXED_SOURCE_PRIVATE_DIRECTORY_ALREADY_EXISTS");
+    throw error;
+  }
+  await fixedDirectory();
+  const key = randomBytes(32), bytes = serialize({...fixedIdentity(), createdAt});
+  try {
+    await writePrivate(directory, "collector.key", key);
+    await writePrivate(directory, "plan.json", bytes);
+    await writePrivate(directory, "plan.hmac", Buffer.from(mac(key, bytes), "ascii"));
+  } finally {key.fill(0);}
+}
+
+async function loadFixedPlan(now) {
+  const directory = await fixedDirectory(), key = await readPrivate(directory, "collector.key", 32);
+  try {
+    requireValue(key.length === 32, "FIXED_SOURCE_KEY_REJECTED");
+    const bytes = await readPrivate(directory, "plan.json", 16 * 1024);
+    const signature = (await readPrivate(directory, "plan.hmac", 64)).toString("utf8");
+    requireValue(equalMac(signature, mac(key, bytes)), "FIXED_SOURCE_PLAN_SIGNATURE_REJECTED");
+    let plan; try {plan = JSON.parse(bytes.toString("utf8"));} catch {throw new MetadataError("FIXED_SOURCE_PLAN_REJECTED");}
+    requireValue(plain(plan) && Object.keys(plan).length === PLAN_FIELDS.length && PLAN_FIELDS.every(field => Object.hasOwn(plan, field))
+      && Object.entries(fixedIdentity()).every(([field, value]) => plan[field] === value), "FIXED_SOURCE_PLAN_REJECTED");
+    const current = fixedTime(now()), created = fixedTime(plan.createdAt);
+    requireValue(created <= current && current - created < 30 * 60 * 1000, "FIXED_SOURCE_PLAN_EXPIRED");
+    const names = await readdir(directory);
+    requireValue(!names.includes("attempt.json"), "FIXED_SOURCE_ATTEMPT_ALREADY_EXISTS");
+    requireValue(names.length === 3 && ["collector.key", "plan.json", "plan.hmac"].every(name => names.includes(name)),
+      "FIXED_SOURCE_ATTEMPT_STATE_REJECTED");
+    return {directory, key, plan};
+  } catch (error) {key.fill(0); throw error;}
+}
+
+async function saveFixedSummary(result) {
+  const temporary = process.env.RUNNER_TEMP ?? "", target = process.env.LKC_EVIDENCE_DIR ?? "";
+  requireValue(path.isAbsolute(temporary) && target === path.join(temporary, "hosting-promote-evidence"), "EVIDENCE_DIRECTORY_REJECTED");
+  await noLinkedParents(temporary);
+  await mkdir(target, {recursive: true}); await noLinkedParents(target);
+  try {await writeFile(path.join(target, "fixed-source-collection.json"), serialize(result), {flag: "wx", mode: 0o600});}
+  catch (error) {
+    // Preserve the first durable observation when a prohibited repeat fails.
+    if (error?.code === "EEXIST" && result.status === "STOPPED") return;
+    throw error;
+  }
+}
+
+async function cleanupFixedPlan() {
+  const directory = await fixedDirectory({mustExist: false});
+  try {await lstat(directory);} catch (error) {if (error?.code === "ENOENT") return; throw error;}
+  await fixedDirectory();
+  const names = await readdir(directory);
+  // Validate all entries before deleting any. Unlink never follows a target.
+  for (const name of names) {
+    const info = await lstat(path.join(directory, name), {bigint: true});
+    requireValue(info.isFile() && !info.isSymbolicLink() && info.nlink === 1n && (info.mode & 0o777n) === 0o600n
+      && info.uid === BigInt(process.getuid()), "FIXED_SOURCE_PRIVATE_FILE_REJECTED");
+  }
+  for (const name of names) await unlink(path.join(directory, name));
+  // The EMPTY owned directory is a one-shot tombstone for this runner. Removing
+  // it would let a second guard create a fresh plan after a successful cleanup.
+}
+
+export async function fixedSourceMain({argv = process.argv.slice(2), request = globalThis.fetch,
+  now = () => new Date().toISOString(), emit = text => console.log(text)} = {}) {
+  const accessToken = process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN;
+  delete process.env.LKC_FIXED_SOURCE_ACCESS_TOKEN;
+  try {
+    requireValue(argv.length === 1 && FIXED_FLAGS.includes(argv[0]), "FIXED_SOURCE_ARGUMENTS_REJECTED");
+    validateFixedSourceContext();
+    if (argv[0] === "--fixed-source-guard") {await createFixedPlan(now); emit("HOSTING_FIXED_SOURCE_GUARD=READY"); return 0;}
+    if (argv[0] === "--cleanup-fixed-source") {await cleanupFixedPlan(); emit("HOSTING_FIXED_SOURCE_CLEANUP=DONE"); return 0;}
+    let state, capture;
+    let diagnostics = {status: "STOPPED", method: "authenticated-fixed-generation", requests: 0,
+      bytesDownloaded: 0, deployedSourceVerified: false, hostingPromotionAuthorized: false};
+    try {
+      state = await loadFixedPlan(now);
+      const startedAt = now();
+      requireValue(fixedTime(state.plan.createdAt) <= fixedTime(startedAt), "FIXED_SOURCE_PLAN_EXPIRED");
+      await writePrivate(state.directory, "attempt.json", serialize({...state.plan, startedAt}));
+      const collected = await collectFixedUploadSources({accessToken}, {request, now});
+      diagnostics = collected.diagnostics; capture = collected.privateCapture;
+      if (diagnostics.status === "FIXED_SOURCE_COLLECTED") {
+        requireValue(capture && fixedTime(startedAt) <= fixedTime(capture.capturedAt), "FIXED_SOURCE_CAPTURE_TIME_REJECTED");
+        const archives = {};
+        for (const name of FUNCTIONS) {
+          const blob = capture.archives.get(name), filename = name.toLowerCase() + ".zip";
+          archives[name] = {file: filename, sha256: createHash("sha256").update(blob).digest("hex"), size: blob.length};
+          await writePrivate(state.directory, filename, blob);
+        }
+        const bytes = serialize({...fixedIdentity(), method: "authenticated-fixed-generation", createdAt: state.plan.createdAt,
+          capturedAt: capture.capturedAt, endsAt: capture.endsAt, expiresAt: new Date(fixedTime(capture.capturedAt) + 10 * 60 * 1000).toISOString(),
+          before: capture.before, builds: capture.builds, objects: capture.objects, after: capture.after, afterBuilds: capture.afterBuilds,
+          archives, requestCount: diagnostics.requests, bytesDownloaded: diagnostics.bytesDownloaded});
+        await writePrivate(state.directory, "capture.json", bytes);
+        await writePrivate(state.directory, "capture.hmac", Buffer.from(mac(state.key, bytes), "ascii"));
+      }
+    } catch (error) {diagnostics = {...diagnostics, status: "STOPPED", reason: safeError(error)};}
+    finally {state?.key.fill(0); for (const blob of capture?.archives.values() ?? []) blob.fill(0);}
+    await saveFixedSummary(diagnostics);
+    emit("HOSTING_FIXED_SOURCE_COLLECTION=" + diagnostics.status);
+    emit("HOSTING_PUBLICATION_AUTHORIZED=false");
+    if (diagnostics.status !== "FIXED_SOURCE_COLLECTED") emit("HOSTING_FIXED_SOURCE_ERROR=" + diagnostics.reason);
+    return diagnostics.status === "FIXED_SOURCE_COLLECTED" ? 0 : 1;
+  } catch (error) {
+    emit("HOSTING_FIXED_SOURCE_RESULT=STOPPED"); emit("HOSTING_FIXED_SOURCE_ERROR=" + safeError(error)); return 1;
+  }
+}
+
 export async function metadataMain({argv = process.argv.slice(2), request, save = async result => {
   const target = path.resolve(process.env.LKC_EVIDENCE_DIR ?? "");
   const expected = path.resolve(process.env.RUNNER_TEMP ?? "", "hosting-promote-evidence");
@@ -471,7 +665,8 @@ export async function metadataMain({argv = process.argv.slice(2), request, save 
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  metadataMain().then(code => {process.exitCode = code;}).catch(error => {
+  const main = FIXED_FLAGS.includes(process.argv[2]) ? fixedSourceMain : metadataMain;
+  main().then(code => {process.exitCode = code;}).catch(error => {
     console.error("HOSTING_METADATA_RESULT=STOPPED");
     console.error("HOSTING_METADATA_ERROR=" + safeError(error));
     process.exitCode = 1;

@@ -3,6 +3,8 @@ import importlib.util
 import io
 import json
 import pathlib
+import stat
+import struct
 import tempfile
 import unittest
 import warnings
@@ -134,6 +136,220 @@ class ReadinessTests(unittest.TestCase):
         # 環境ファイルの存在/内容を検査結果へ露出させない。
         blob = archive([(k, v.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")) for k, v in self.files] + [(".env.synthetic", b"DO_NOT_READ=synthetic")])
         self.assertEqual(self.run_check(blob=blob)["status"], "PASS")
+
+    def test_strict_archive_exact_inventory_and_known_directories(self):
+        expected = g.expected_files(self.root)
+        blob = archive([("lib/", b""), ("src/", b""), ("case-mail-runtime/", b"")] + self.files)
+        with patch.object(zipfile.ZipFile, "extract", side_effect=AssertionError("EXTRACTION_FORBIDDEN")), \
+             patch.object(zipfile.ZipFile, "extractall", side_effect=AssertionError("EXTRACTION_FORBIDDEN")):
+            self.assertIsNone(g.verify_archive(blob, expected, strict=True))
+
+    def test_strict_source_maps_are_in_exact_current_build_inventory(self):
+        map_file = self.root / "functions/lib/uploads.js.map"
+        map_bytes = b'{"version":3,"sources":["../src/uploads.ts"],"mappings":""}'
+        map_file.write_bytes(map_bytes)
+        legacy = g.expected_files(self.root)
+        expected = g.expected_files(self.root, strict=True)
+        self.assertNotIn("lib/uploads.js.map", legacy)
+        self.assertEqual(expected["lib/uploads.js.map"], g.digest(map_bytes))
+        self.assertIsNone(g.verify_archive(archive(self.files + [("lib/uploads.js.map", map_bytes)]),
+                                           expected, strict=True))
+        for files, code in (
+            (self.files, "DEPLOYED_PACKAGE_INCOMPLETE"),
+            (self.files + [("lib/uploads.js.map", map_bytes + b"changed")], "DEPLOYED_SOURCE_MISMATCH"),
+            (self.files + [("lib/uploads.js.map", map_bytes), ("lib/unknown.js.map", map_bytes)],
+             "ARCHIVE_UNEXPECTED_FILE"),
+        ):
+            with self.subTest(code=code):
+                with self.assertRaisesRegex(g.ReadinessError, code):
+                    g.verify_archive(archive(files), expected, strict=True)
+
+    def test_strict_rejects_secret_and_unexpected_files_without_exposing_contents(self):
+        for name in (".env", ".env.synthetic", "credentials.json", "private.pem", "package-extra.json",
+                     "README.md", "lib/extra.js", "src/extra.py", "case-mail-runtime/extra.wasm"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_UNEXPECTED_FILE") as caught:
+                    g.verify_archive(archive(self.files + [(name, b"SYNTHETIC_PRIVATE_VALUE")]),
+                                     g.expected_files(self.root), strict=True)
+                self.assertNotIn(name, str(caught.exception))
+                self.assertNotIn("SYNTHETIC_PRIVATE_VALUE", str(caught.exception))
+
+    def test_strict_rejects_alias_paths_and_unknown_directories(self):
+        for name in ("./lib/uploads.js", "lib//uploads.js", "lib/../uploads.js", "/lib/uploads.js",
+                     "lib\\uploads.js", "lib:uploads.js", "lib/uploads.js\x01", "lib/./", "lib//"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(g.ReadinessError, "UNSAFE_ARCHIVE_PATH"):
+                    g.verify_archive(archive(self.files + [(name, b"")]), g.expected_files(self.root), strict=True)
+        for name, value in (("unknown/", b""), ("lib/", b"nonempty")):
+            with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_DIRECTORY_REJECTED"):
+                g.verify_archive(archive(self.files + [(name, value)]), g.expected_files(self.root), strict=True)
+        # ZipInfo truncates filename at NUL while retaining orig_filename.
+        # Validate the original field too, rather than accepting its alias.
+        nul_alias = self.blob.replace(b"package.json", b"package\x00json")
+        with self.assertRaisesRegex(g.ReadinessError, "UNSAFE_ARCHIVE_PATH"):
+            g.verify_archive(nul_alias, g.expected_files(self.root), strict=True)
+
+    def test_strict_rejects_special_entries_even_when_the_contents_match(self):
+        name, value = self.files[0]
+        for kind in (stat.S_IFLNK, stat.S_IFIFO, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFSOCK, stat.S_IFDIR):
+            info = zipfile.ZipInfo(name)
+            info.create_system = 3
+            info.external_attr = (kind | 0o600) << 16
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_SPECIAL_ENTRY_REJECTED"):
+                    g.verify_archive(archive([(info, value)] + self.files[1:]),
+                                     g.expected_files(self.root), strict=True)
+
+    def test_strict_rejects_encryption_and_unsupported_compression(self):
+        encrypted = bytearray(self.blob)
+        # Set encryption on the first central-directory record. The validator
+        # must refuse it before attempting to open or decrypt a member.
+        central = encrypted.index(b"PK\x01\x02")
+        flags = struct.unpack_from("<H", encrypted, central + 8)[0]
+        struct.pack_into("<H", encrypted, central + 8, flags | 1)
+        with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_ENCRYPTION_REJECTED"):
+            g.verify_archive(encrypted, g.expected_files(self.root), strict=True)
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_BZIP2) as z:
+            for name, value in self.files:
+                z.writestr(name, value)
+        with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_COMPRESSION_REJECTED"):
+            g.verify_archive(stream.getvalue(), g.expected_files(self.root), strict=True)
+
+    def test_strict_limits_entry_count_and_expansion_before_opening_members(self):
+        with patch.object(g, "MAX_ARCHIVE_ENTRIES", len(self.files) - 1), \
+             patch.object(zipfile.ZipFile, "open", side_effect=AssertionError("MEMBER_OPEN_FORBIDDEN")):
+            with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_ENTRY_LIMIT"):
+                g.verify_archive(self.blob, g.expected_files(self.root), strict=True)
+        oversized = bytearray(self.blob)
+        central = oversized.index(b"PK\x01\x02")
+        struct.pack_into("<I", oversized, central + 24, g.MAX_ARCHIVE + 1)
+        with patch.object(zipfile.ZipFile, "open", side_effect=AssertionError("MEMBER_OPEN_FORBIDDEN")):
+            with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_TOO_LARGE"):
+                g.verify_archive(oversized, g.expected_files(self.root), strict=True)
+        # Each declaration fits the per-member limit, but their total exceeds
+        # the independent expanded-size bound. Refuse before decompression.
+        expanded = bytearray(self.blob)
+        central = expanded.index(b"PK\x01\x02")
+        while expanded[central:central + 4] == b"PK\x01\x02":
+            struct.pack_into("<I", expanded, central + 24, g.MAX_ARCHIVE // len(self.files) + 1)
+            name_size, extra_size, comment_size = struct.unpack_from("<HHH", expanded, central + 28)
+            central += 46 + name_size + extra_size + comment_size
+        with patch.object(zipfile.ZipFile, "open", side_effect=AssertionError("MEMBER_OPEN_FORBIDDEN")):
+            with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_TOO_LARGE"):
+                g.verify_archive(expanded, g.expected_files(self.root), strict=True)
+        with patch.object(g, "MAX_FIXED_ARCHIVE", len(self.blob) - 1):
+            with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_TOO_LARGE"):
+                g.verify_archive(self.blob, g.expected_files(self.root), strict=True)
+
+    def test_strict_rejects_corruption_duplicates_missing_or_changed_contents(self):
+        with zipfile.ZipFile(io.BytesIO(self.blob)) as z:
+            member = z.infolist()[0]
+            offset = member.header_offset + 30 + len(member.filename.encode()) + len(member.extra)
+        corrupted = bytearray(self.blob)
+        corrupted[offset] ^= 1
+        with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_UNREADABLE"):
+            g.verify_archive(corrupted, g.expected_files(self.root), strict=True)
+        for blob, code in (
+            (archive(self.files + [self.files[0]]), "DUPLICATE_ARCHIVE_PATH"),
+            (archive(self.files[:-1]), "DEPLOYED_PACKAGE_INCOMPLETE"),
+            (archive([(name, value + b"changed" if name == self.files[0][0] else value)
+                      for name, value in self.files]), "DEPLOYED_SOURCE_MISMATCH"),
+        ):
+            with self.subTest(code=code):
+                with self.assertRaisesRegex(g.ReadinessError, code):
+                    g.verify_archive(blob, g.expected_files(self.root), strict=True)
+
+    def test_strict_accepts_classic_deflate_and_both_descriptor_forms(self):
+        class Unseekable(io.BytesIO):
+            def seek(self, *args):
+                raise io.UnsupportedOperation("unseekable fixture")
+        contents = b'{"main":"lib/index.js"}'
+        expected = {"package.json": g.digest(contents)}
+        for compression in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            stream = Unseekable()
+            with zipfile.ZipFile(stream, "w", compression=compression) as z:
+                z.writestr("package.json", contents)
+            signed = stream.getvalue()
+            self.assertIsNone(g.verify_archive(signed, expected, strict=True))
+            with zipfile.ZipFile(io.BytesIO(signed)) as z:
+                entry = z.infolist()[0]
+                self.assertTrue(entry.flag_bits & 8)
+                descriptor = entry.header_offset + 30 + len(entry.filename) + entry.compress_size
+            self.assertEqual(signed[descriptor:descriptor + 4], b"PK\x07\x08")
+            unsigned = bytearray(signed[:descriptor] + signed[descriptor + 4:])
+            central = struct.unpack_from("<I", signed, len(signed) - 6)[0]
+            struct.pack_into("<I", unsigned, len(unsigned) - 6, central - 4)
+            self.assertIsNone(g.verify_archive(unsigned, expected, strict=True))
+            changed = bytearray(signed)
+            changed[descriptor + 4] ^= 1
+            with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_LAYOUT_REJECTED"):
+                g.verify_archive(changed, expected, strict=True)
+
+    def test_strict_rejects_unindexed_bytes_comments_and_special_flags(self):
+        expected = g.expected_files(self.root)
+        central = struct.unpack_from("<I", self.blob, len(self.blob) - 6)[0]
+        gap = bytearray(self.blob[:central] + b"UNINDEXED_PRIVATE_PAYLOAD" + self.blob[central:])
+        struct.pack_into("<I", gap, len(gap) - 6, central + len(b"UNINDEXED_PRIVATE_PAYLOAD"))
+        commented = io.BytesIO()
+        with zipfile.ZipFile(commented, "w") as z:
+            for name, value in self.files:
+                z.writestr(name, value)
+            z.comment = b"PRIVATE_ARCHIVE_COMMENT"
+        info = zipfile.ZipInfo(self.files[0][0])
+        info.comment = b"PRIVATE_ENTRY_COMMENT"
+        flags = bytearray(self.blob)
+        struct.pack_into("<H", flags, central + 8, 0x0010)
+        multi_disk = bytearray(self.blob)
+        struct.pack_into("<H", multi_disk, len(multi_disk) - 18, 1)
+        for blob in (b"PRIVATE_PREFIX" + self.blob, self.blob + b"PRIVATE_TRAILER", gap,
+                     commented.getvalue(), archive([(info, self.files[0][1])] + self.files[1:]),
+                     flags, multi_disk):
+            with self.subTest(length=len(blob)):
+                with self.assertRaises(g.ReadinessError) as caught:
+                    g.verify_archive(blob, expected, strict=True)
+                self.assertIn(str(caught.exception), {"ARCHIVE_LAYOUT_REJECTED", "ARCHIVE_UNREADABLE"})
+
+    def test_strict_rejects_central_and_local_only_extra_fields_and_zip64(self):
+        contents = b"synthetic package"
+        expected = {"package.json": g.digest(contents)}
+        base = archive([("package.json", contents)])
+        central = struct.unpack_from("<I", base, len(base) - 6)[0]
+        payload = 30 + len("package.json")
+        extra = b"\xfe\xca\x00\x00"
+        local_extra = bytearray(base[:payload] + extra + base[payload:])
+        struct.pack_into("<H", local_extra, 28, len(extra))
+        struct.pack_into("<I", local_extra, len(local_extra) - 6, central + len(extra))
+        info = zipfile.ZipInfo("package.json")
+        info.extra = extra
+        zip64 = io.BytesIO()
+        with zipfile.ZipFile(zip64, "w") as z:
+            with z.open("package.json", "w", force_zip64=True) as member:
+                member.write(contents)
+        for blob in (local_extra, archive([(info, contents)]), zip64.getvalue()):
+            with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_LAYOUT_REJECTED"):
+                g.verify_archive(blob, expected, strict=True)
+
+    def test_strict_rejects_junk_hidden_inside_declared_compressed_size(self):
+        contents = b"synthetic package"
+        expected = {"package.json": g.digest(contents)}
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as z:
+            z.writestr("package.json", contents)
+        base = stream.getvalue()
+        central = struct.unpack_from("<I", base, len(base) - 6)[0]
+        hidden = b"PRIVATE_UNUSED_DEFLATE_BYTES"
+        changed = bytearray(base[:central] + hidden + base[central:])
+        compressed = struct.unpack_from("<I", base, 18)[0]
+        struct.pack_into("<I", changed, 18, compressed + len(hidden))
+        struct.pack_into("<I", changed, central + len(hidden) + 20, compressed + len(hidden))
+        struct.pack_into("<I", changed, len(changed) - 6, central + len(hidden))
+        # The generic ZIP reader ignores the hidden bytes and returns matching
+        # contents. Strict acquisition must reject that unverified payload.
+        with zipfile.ZipFile(io.BytesIO(changed)) as z:
+            self.assertEqual(z.read("package.json"), contents)
+        with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_UNREADABLE"):
+            g.verify_archive(changed, expected, strict=True)
 
     def test_deployment_changes_during_read_stops(self):
         calls = 0

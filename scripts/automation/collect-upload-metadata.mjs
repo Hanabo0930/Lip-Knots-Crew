@@ -2,6 +2,8 @@
 import {mkdir, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {pathToFileURL} from "node:url";
+import {createHash} from "node:crypto";
+import {isDeepStrictEqual} from "node:util";
 import {requireProtectedContext, validateHostingOperation} from "./restore-staging-hosting.mjs";
 
 const PROJECT = "lip-knots-crew-staging";
@@ -10,6 +12,10 @@ const PROJECT_IDS = new Set([PROJECT, "740154137290"]);
 const FUNCTIONS = ["createUploadSession", "finalizeStagedUpload"];
 const PREFIX = `projects/${PROJECT}/locations/${REGION}`;
 const MAX_BYTES = 512 * 1024;
+export const FIXED_SOURCE_LIMITS = Object.freeze({archiveBytes: 10 * 1024 * 1024,
+  totalBytes: 20 * 1024 * 1024, gets: 12});
+export const OBJECT_FIELDS = "bucket,name,generation,metageneration,size,storageClass,md5Hash,crc32c,contentEncoding,customerEncryption,kmsKeyName";
+const SOURCE_BUCKET = "gcf-v2-sources-740154137290-asia-northeast1";
 export const FUNCTION_FIELDS = "name,environment,state,updateTime,buildConfig(build,runtime,entryPoint,sourceProvenance(resolvedStorageSource(bucket,object,generation))),serviceConfig(service,revision,allTrafficOnLatestRevision)";
 export const BUILD_FIELDS = "name,id,projectId,status,createTime,startTime,finishTime,sourceProvenance(resolvedStorageSource(bucket,object,generation),fileHashes),results(images(digest))";
 class MetadataError extends Error {}
@@ -198,6 +204,251 @@ export async function collectUploadMetadata({accessToken}, {request = globalThis
     result.status = "METADATA_COLLECTED";
   } catch (error) {result.reason = safeError(error);}
   return result;
+}
+
+// Dormant, offline-reviewed acquisition primitive. There is deliberately NO CLI
+// or workflow entry to this method. A trusted caller must supply the transport.
+// It returns private bytes, never readiness PASS or a retained-evidence pin.
+export function validateFixedSourceContext() {
+  requireProtectedContext();
+  validateHostingOperation({operation: process.env.LKC_OPERATION,
+    eventName: process.env.GITHUB_EVENT_NAME, confirmation: process.env.LKC_CONFIRMATION,
+    projectId: process.env.LKC_PROJECT_ID, region: process.env.LKC_REGION,
+    sourceRef: process.env.GITHUB_REF_NAME, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT)});
+  requireValue(process.env.GITHUB_EVENT_NAME === "workflow_dispatch"
+    && process.env.GITHUB_RUN_ATTEMPT === "1"
+    && process.env.LKC_OPERATION === "readiness" && process.env.LKC_METADATA_ONLY === "false"
+    && process.env.LKC_EVIDENCE_POLICY === "source-provenance"
+    && process.env.LKC_SOURCE_ACQUISITION === "fixed-source-once"
+    && process.env.LKC_SOURCE_ACQUISITION_CONFIRMATION === "ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB",
+  "FIXED_SOURCE_EXPLICIT_REVIEW_REQUIRED");
+  requireValue(/^[a-f0-9]{40}$/u.test(process.env.LKC_SOURCE_SHA ?? "")
+    && process.env.GITHUB_SHA === process.env.LKC_SOURCE_SHA
+    && /^[1-9][0-9]{0,19}$/u.test(process.env.GITHUB_RUN_ID ?? ""), "FIXED_SOURCE_CONTEXT_REJECTED");
+}
+
+function fixedTime(value) {
+  requireValue(typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(value)
+    && Number.isFinite(Date.parse(value)), "FIXED_SOURCE_TIME_REJECTED");
+  requireValue(new Date(value).toISOString().slice(0, 19) === value.slice(0, 19), "FIXED_SOURCE_TIME_REJECTED");
+  return Date.parse(value);
+}
+
+function fixedFunction(document, name, observed) {
+  validateFunction(document, name);
+  requireValue(document.environment === "GEN_2" && document.state === "ACTIVE"
+    && document.buildConfig?.runtime === "nodejs22" && document.buildConfig.entryPoint === name
+    && document.serviceConfig?.service === `${PREFIX}/services/${name.toLowerCase()}`
+    && new RegExp(`^${name.toLowerCase()}-[0-9]+-[a-z0-9]+$`, "u").test(document.serviceConfig.revision)
+    && document.serviceConfig.allTrafficOnLatestRevision === true, "FIXED_SOURCE_FUNCTION_NOT_READY");
+  requireValue(fixedTime(document.updateTime) <= observed, "FIXED_SOURCE_TIME_REJECTED");
+  const build = document.buildConfig.build;
+  requireValue(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(buildScope(build)), "FIXED_SOURCE_BUILD_REJECTED");
+  const source = document.buildConfig.sourceProvenance?.resolvedStorageSource;
+  requireValue(source?.bucket === SOURCE_BUCKET && source.object === `${name}/function-source.zip`
+    && typeof source.generation === "string" && /^[1-9][0-9]{0,31}$/u.test(source.generation),
+  "FIXED_SOURCE_OBJECT_REJECTED");
+  return source;
+}
+
+function canonicalHash(value, bytes) {
+  requireValue(typeof value === "string" && Buffer.from(value, "base64").length === bytes
+    && Buffer.from(value, "base64").toString("base64") === value, "FIXED_SOURCE_HASH_REJECTED");
+  return value;
+}
+
+function fixedBuild(document, name, sources, observed) {
+  validateBuild(document, name);
+  requireValue(document.status === "SUCCESS" && fixedTime(document.createTime) <= fixedTime(document.startTime)
+    && fixedTime(document.startTime) <= fixedTime(document.finishTime)
+    && fixedTime(document.finishTime) <= observed, "FIXED_SOURCE_BUILD_REJECTED");
+  const provenance = document.sourceProvenance;
+  // A missing Build hash is allowed ONLY in this unprivileged collection method.
+  // Present provenance must still agree; it cannot be silently discarded.
+  if (provenance?.resolvedStorageSource) requireValue(sources.every(source =>
+    isDeepStrictEqual(source, provenance.resolvedStorageSource)), "FIXED_SOURCE_BUILD_GENERATION_MISMATCH");
+  if (provenance?.fileHashes) {
+    const uris = new Set(sources.flatMap(source => {
+      const uri = `gs://${source.bucket}/${source.object}`;
+      return [uri, `${uri}#${source.generation}`];
+    }));
+    for (const [uri, hashes] of Object.entries(provenance.fileHashes)) {
+      requireValue(uris.has(uri) && hashes.fileHash.length > 0 && hashes.fileHash.length <= 3,
+        "FIXED_SOURCE_BUILD_HASH_SCOPE_REJECTED");
+      const seen = new Set();
+      for (const item of hashes.fileHash) {
+        requireValue(["MD5", "SHA256", "SHA512"].includes(item.type) && !seen.has(item.type), "FIXED_SOURCE_HASH_REJECTED");
+        seen.add(item.type); canonicalHash(item.value, {MD5: 16, SHA256: 32, SHA512: 64}[item.type]);
+      }
+    }
+  }
+}
+
+function objectMetadata(document, source) {
+  onlyKeys(document, OBJECT_FIELDS.split(","));
+  requireValue(document.bucket === source.bucket && document.name === source.object
+    && document.generation === source.generation, "FIXED_SOURCE_OBJECT_IDENTITY_MISMATCH");
+  requireValue(document.storageClass === "STANDARD" && !Object.hasOwn(document, "contentEncoding")
+    && !Object.hasOwn(document, "customerEncryption") && !Object.hasOwn(document, "kmsKeyName"),
+  "FIXED_SOURCE_STORAGE_CONDITIONS_REJECTED");
+  requireValue(typeof document.size === "string" && /^[1-9][0-9]{0,7}$/u.test(document.size)
+    && Number(document.size) <= FIXED_SOURCE_LIMITS.archiveBytes, "FIXED_SOURCE_SIZE_REJECTED");
+  requireValue(typeof document.metageneration === "string" && /^[1-9][0-9]{0,31}$/u.test(document.metageneration),
+    "FIXED_SOURCE_OBJECT_IDENTITY_MISMATCH");
+  canonicalHash(document.crc32c, 4);
+  if (Object.hasOwn(document, "md5Hash")) canonicalHash(document.md5Hash, 16);
+  return Number(document.size);
+}
+
+const crc32cTable = Array.from({length: 256}, (_, initial) => {
+  let value = initial;
+  for (let i = 0; i < 8; i++) value = (value >>> 1) ^ ((value & 1) ? 0x82f63b78 : 0);
+  return value >>> 0;
+});
+function crc32c(blob) {
+  let value = 0xffffffff;
+  for (const byte of blob) value = (value >>> 8) ^ crc32cTable[(value ^ byte) & 255];
+  const raw = Buffer.alloc(4); raw.writeUInt32BE((value ^ 0xffffffff) >>> 0);
+  return raw.toString("base64");
+}
+
+async function cancelUnread(response) {
+  try {await response.body?.cancel();} catch {} // Cancel without reading/logging an error body.
+}
+
+async function fixedBody(response, metadata, source, token, received) {
+  let reader;
+  const chunks = [];
+  let size = 0, complete = false;
+  try {
+    const encoding = response.headers.get("content-encoding");
+    requireValue(!encoding || encoding === "identity", "FIXED_SOURCE_CONTENT_ENCODING_REJECTED");
+    for (const [header, expected] of [["content-length", metadata.size], ["x-goog-generation", source.generation]]) {
+      const actual = response.headers.get(header);
+      requireValue(actual === null || actual === expected, "FIXED_SOURCE_TRANSPORT_IDENTITY_MISMATCH");
+    }
+    requireValue(response.body && typeof response.body.getReader === "function", "FIXED_SOURCE_BODY_REQUIRED");
+    reader = response.body.getReader();
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      size += value.length;
+      received(value.length);
+      requireValue(size <= Number(metadata.size) && size <= FIXED_SOURCE_LIMITS.archiveBytes,
+        "FIXED_SOURCE_BODY_TOO_LARGE");
+      chunks.push(Buffer.from(value));
+    }
+    requireValue(size === Number(metadata.size), "FIXED_SOURCE_BODY_SIZE_MISMATCH");
+    const blob = Buffer.concat(chunks);
+    try {
+      requireValue(crc32c(blob) === metadata.crc32c && (!metadata.md5Hash
+        || createHash("md5").update(blob).digest("base64") === metadata.md5Hash), "FIXED_SOURCE_BODY_HASH_MISMATCH");
+      requireValue(!blob.includes(Buffer.from(token)), "METADATA_TOKEN_REFLECTION_REJECTED");
+      complete = true;
+      return blob;
+    } finally {if (!complete) blob.fill(0);}
+  } finally {
+    for (const chunk of chunks) chunk.fill(0);
+    if (reader) {await reader.cancel().catch(() => {}); reader.releaseLock();}
+    else await cancelUnread(response);
+  }
+}
+
+export async function collectFixedUploadSources({accessToken}, {request, now = () => new Date().toISOString()} = {}) {
+  const diagnostics = {status: "STOPPED", method: "authenticated-fixed-generation", requests: 0,
+    bytesDownloaded: 0, deployedSourceVerified: false, hostingPromotionAuthorized: false};
+  const archives = new Map();
+  try {
+    validateFixedSourceContext();
+    // No implicit live transport; the existing metadata CLI cannot reach here.
+    requireValue(typeof request === "function", "FIXED_SOURCE_TRANSPORT_NOT_WIRED");
+    requireValue(typeof accessToken === "string" && accessToken.length > 0 && !/[\r\n]/u.test(accessToken), "METADATA_ACCESS_TOKEN_REQUIRED");
+    const capturedAt = now(), started = fixedTime(capturedAt);
+    const checkTime = () => {
+      const checked = fixedTime(now());
+      requireValue(started <= checked && checked - started < 10 * 60 * 1000, "FIXED_SOURCE_CAPTURE_EXPIRED");
+      return checked;
+    };
+    const get = async (url, json = true) => {
+      checkTime();
+      requireValue(++diagnostics.requests <= FIXED_SOURCE_LIMITS.gets, "FIXED_SOURCE_REQUEST_LIMIT");
+      const response = await request(url.href, {method: "GET", redirect: "error", cache: "no-store",
+        headers: {Authorization: `Bearer ${accessToken}`, Accept: json ? "application/json" : "application/octet-stream",
+          "Accept-Encoding": "identity"}, signal: AbortSignal.timeout(15000)});
+      try {
+        requireValue(![401, 403].includes(response.status), "METADATA_ACCESS_DENIED");
+        requireValue(response.status === 200 && !response.redirected && (!response.url || response.url === url.href), "METADATA_HTTP_FAILED");
+      } catch (error) {await cancelUnread(response); throw error;}
+      if (!json) return response;
+      try {
+        const document = await limitedJson(response);
+        requireValue(!JSON.stringify(document).includes(accessToken), "METADATA_TOKEN_REFLECTION_REJECTED");
+        return document;
+      } catch (error) {await cancelUnread(response); throw error;}
+    };
+    const readFunction = name => {
+      const url = new URL(`https://cloudfunctions.googleapis.com/v2/${PREFIX}/functions/${name}`);
+      url.searchParams.set("fields", FUNCTION_FIELDS); return get(url);
+    };
+    const readBuild = name => {
+      buildScope(name);
+      const url = new URL(`https://cloudbuild.googleapis.com/v1/${name}`);
+      url.searchParams.set("fields", BUILD_FIELDS); return get(url);
+    };
+    const objectUrl = (source, media = false) => {
+      const url = new URL(`https://storage.googleapis.com/storage/v1/b/${SOURCE_BUCKET}/o/${encodeURIComponent(source.object)}`);
+      url.searchParams.set("generation", source.generation);
+      url.searchParams.set("ifGenerationMatch", source.generation);
+      url.searchParams.set(media ? "alt" : "fields", media ? "media" : OBJECT_FIELDS);
+      return url;
+    };
+    const before = {}, sources = {}, builds = {}, objects = {};
+    for (const name of FUNCTIONS) {
+      const document = await readFunction(name);
+      sources[name] = fixedFunction(document, name, checkTime()); before[name] = document;
+    }
+    const references = [...new Set(FUNCTIONS.map(name => before[name].buildConfig.build))];
+    for (const ref of references) {
+      const document = await readBuild(ref);
+      fixedBuild(document, ref, FUNCTIONS.filter(name => before[name].buildConfig.build === ref).map(name => sources[name]), checkTime());
+      builds[ref] = document;
+    }
+    let total = 0;
+    // Validate BOTH object sizes and storage conditions before the first body.
+    for (const name of FUNCTIONS) {
+      const document = await get(objectUrl(sources[name]));
+      total += objectMetadata(document, sources[name]); objects[name] = document;
+    }
+    requireValue(total <= FIXED_SOURCE_LIMITS.totalBytes, "FIXED_SOURCE_TOTAL_TOO_LARGE");
+    for (const name of FUNCTIONS) {
+      const blob = await fixedBody(await get(objectUrl(sources[name], true), false), objects[name], sources[name], accessToken,
+        bytes => {diagnostics.bytesDownloaded += bytes;});
+      archives.set(name, blob);
+      const provenance = builds[before[name].buildConfig.build].sourceProvenance;
+      const uri = `gs://${SOURCE_BUCKET}/${sources[name].object}`;
+      for (const [key, hashes] of Object.entries(provenance?.fileHashes ?? {})) if ([uri, `${uri}#${sources[name].generation}`].includes(key)) {
+        for (const hash of hashes.fileHash) requireValue(createHash(hash.type.toLowerCase()).update(blob).digest("base64") === hash.value,
+          "FIXED_SOURCE_BUILD_HASH_MISMATCH");
+      }
+    }
+    const after = {}, afterBuilds = {};
+    for (const name of FUNCTIONS) {
+      const document = await readFunction(name); fixedFunction(document, name, checkTime());
+      requireValue(isDeepStrictEqual(document, before[name]), "FIXED_SOURCE_DEPLOYMENT_CHANGED"); after[name] = document;
+    }
+    for (const ref of references) {
+      const document = await readBuild(ref);
+      requireValue(isDeepStrictEqual(document, builds[ref]), "FIXED_SOURCE_BUILD_CHANGED"); afterBuilds[ref] = document;
+    }
+    const endsAt = now(); checkTime();
+    diagnostics.status = "FIXED_SOURCE_COLLECTED";
+    return Object.defineProperty({diagnostics}, "privateCapture", {value: {sourceSha: process.env.LKC_SOURCE_SHA,
+      runId: process.env.GITHUB_RUN_ID, capturedAt, endsAt, before, builds, objects, after, afterBuilds, archives}});
+  } catch (error) {
+    for (const blob of archives.values()) blob.fill(0);
+    diagnostics.reason = safeError(error);
+    return {diagnostics};
+  }
 }
 
 export async function metadataMain({argv = process.argv.slice(2), request, save = async result => {

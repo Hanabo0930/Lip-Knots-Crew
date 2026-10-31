@@ -4,6 +4,7 @@ import {spawnSync} from "node:child_process";
 import {test, beforeEach, afterEach} from "node:test";
 import vm from "node:vm";
 import {collectUploadMetadata, metadataMain, FUNCTION_FIELDS, BUILD_FIELDS} from "./collect-upload-metadata.mjs";
+import "./test-fixed-upload-sources.mjs";
 
 const PROJECT = "lip-knots-crew-staging", REGION = "asia-northeast1";
 const PREFIX = `projects/${PROJECT}/locations/${REGION}`;

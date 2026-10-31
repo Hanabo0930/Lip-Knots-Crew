@@ -1,6 +1,15 @@
 # STAGINGの固定世代コード照合：追加範囲のレビュー案
 
-2026-10-30。提案だけを記録する。固定ソース取得、検証方式の変更、Hosting/GAS/Functions/IAMの変更はまだ実施していない。
+2026-10-30。追加範囲の提案と、未接続のオフライン実装を記録する。実際の固定ソース取得、公開判定経路の変更、Hosting/GAS/Functions/IAMの変更はまだ実施していない。
+
+## オフラインで準備した実装
+
+- 既存`collect-upload-metadata.mjs`へ未接続の`collectFixedUploadSources`を追加。既存の読取診断CLIとworkflowからは呼ばれず、live transportの暗黙選択も行わない。公式Function・Buildの既存validatorを再利用し、固定の2object、最大12 GET、各10 MiB/合計20 MiB、STANDARD、世代・実バイト数・CRC32C/存在するMD5とBuild hash、取得前後の不変性を確認する。失敗時はstreamを取消し、追加通信を行わない。Requester Paysの有無をobject metadataから推測せず、`userProject`や課金headerを送らず、条件要求は停止する。
+- ZIP本文は非列挙のprivate captureだけに保持する。通常のJSON・console表示用に返すdiagnosticsは`deployedSourceVerified:false / hostingPromotionAuthorized:false`。callerの`verified`、取得後の自己計算digestや`COLLECTED`を公開許可へ変換しない。
+- 既存readiness validatorへ`strict=True`を追加。従来の保存資料経路は既定動作を維持する。厳格経路では完全inventory以外の秘密・未知ファイル、不正ZIP構造や特殊entryを拒否する。未索引の前後・隙間・圧縮後余剰bytesを拒否し、コメント・extra・Zip64を含まない保守的なclassic ZIPだけを受け付ける。この形式条件に合わない実資料も停止扱い。実ビルドが生成する`lib/**/*.js.map`も厳格inventoryへ含めて内容を照合する。
+- 合成ZIPの取得から厳格inventory照合までを接続した隔離試験、各GET段階の401/403/429/500、サイズ・世代・checksum・配備変化・期限・本文取消の試験を、既存の正式CI対象テストから実行する。合成試験であり、実配備ソースとの一致を確認した結果ではない。
+
+同一protected runへの真正なacceptance receipt結合、runner上の一回制御、POST直前の再照合、workflow入力・認証への接続はまだ実装していない。実取得とその費用の限定承認後に仕上げる。保存経路の独立pin、`VERIFIED_NO_FEE_SOURCE_PATH_REQUIRED`、現行公開guardを緩める変更はない。
 
 ## 確認済みの停止原因
 

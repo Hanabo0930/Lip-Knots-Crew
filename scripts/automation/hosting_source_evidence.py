@@ -27,6 +27,9 @@ MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_AGE = dt.timedelta(minutes=10)
 FIXED_METHOD = "authenticated-fixed-generation"
 FIXED_CONFIRMATION = "ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB"
+CONFIG_POLICY = "verified-env-diagnostic"
+CONFIG_METHOD = "authenticated-fixed-config-diagnostic"
+CONFIG_CONFIRMATION = "ACQUIRE_LKC_STAGING_FIXED_CONFIG_ONCE_20MIB"
 FIXED_ARCHIVE_MAX = 10 * 1024 * 1024
 FIXED_PLAN_MAX_AGE = dt.timedelta(minutes=30)
 FIXED_ARCHIVES = {name: name.lower() + ".zip" for name in FUNCTIONS}
@@ -346,14 +349,30 @@ def require_current_acceptance(file, fresh_result, env=None, now=None):
             "expiresAt": expected["expiresAt"]}
 
 
+def config_diagnostic_context(env=None):
+    env = os.environ if env is None else env
+    policy = env.get("LKC_SOURCE_PACKAGING_POLICY", "strict")
+    need(policy in {"strict", CONFIG_POLICY}, "SOURCE_PACKAGING_POLICY_REJECTED")
+    if policy == CONFIG_POLICY:
+        need(env.get("LKC_OPERATION") == "readiness"
+             and env.get("LKC_SOURCE_ACQUISITION") == "fixed-source-once"
+             and env.get("LKC_METADATA_ONLY") == "false"
+             and env.get("LKC_EVIDENCE_POLICY") == "source-provenance"
+             and env.get("LKC_SOURCE_ACQUISITION_CONFIRMATION") == CONFIG_CONFIRMATION,
+             "CONFIG_DIAGNOSTIC_EXPLICIT_REVIEW_REQUIRED")
+    return policy == CONFIG_POLICY
+
+
 def fixed_protected_context(source_sha, env=None):
     """The explicit authenticated route never borrows the retained review pin."""
     env = os.environ if env is None else env
+    config_diagnostic = config_diagnostic_context(env)
     _protected_context_base(source_sha, env)
     need(env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
          and env.get("GITHUB_SHA") == source_sha
          and env.get("LKC_SOURCE_ACQUISITION") == "fixed-source-once"
-         and env.get("LKC_SOURCE_ACQUISITION_CONFIRMATION") == FIXED_CONFIRMATION,
+         and env.get("LKC_SOURCE_ACQUISITION_CONFIRMATION")
+             == (CONFIG_CONFIRMATION if config_diagnostic else FIXED_CONFIRMATION),
          "FIXED_SOURCE_EXPLICIT_REVIEW_REQUIRED")
     runner_temp = pathlib.Path(env.get("RUNNER_TEMP", ""))
     need(runner_temp.is_absolute(), "SOURCE_EVIDENCE_PATH_REJECTED")
@@ -401,6 +420,25 @@ def _same_run_record(document, env):
          and type(document["runAttempt"]) is int and document["runAttempt"] == 1
          and document["sourceSha"] == env["LKC_SOURCE_SHA"]
          and document["operation"] == env["LKC_OPERATION"], "FIXED_SOURCE_RUN_BINDING_REJECTED")
+    if config_diagnostic_context(env):
+        need(document.get("packagingPolicy") == CONFIG_POLICY, "FIXED_SOURCE_POLICY_REJECTED")
+
+
+def _config_function_record(document, name, observed, readiness):
+    service = document.get("serviceConfig")
+    need(type(service) is dict, "CONFIG_METADATA_REJECTED")
+    keys(service, ["service", "revision", "allTrafficOnLatestRevision", "environmentVariables"])
+    values = service["environmentVariables"]
+    need(type(values) is dict and 1 <= len(values) <= 64
+         and all(type(k) is str and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", k)
+                 and type(v) is str and len(v.encode("utf-8")) <= 4096 and "\x00" not in v
+                 for k, v in values.items())
+         and len(json.dumps(values).encode()) <= 32768, "CONFIG_METADATA_REJECTED")
+    need(not {"NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"} & set(values),
+         "CONFIG_EXECUTION_OVERRIDE_REJECTED")
+    stripped = {**document, "serviceConfig": {k: v for k, v in service.items()
+                                             if k != "environmentVariables"}}
+    return function_record(stripped, name, observed, readiness)
 
 
 def _canonical_base64(value, length):
@@ -491,6 +529,7 @@ def verify_fixed_capture(root, source_sha, directory, readiness, *, preflight=Fa
     authenticated collector. Neither private files nor key are public artifacts.
     """
     env = os.environ if env is None else env
+    config_diagnostic = config_diagnostic_context(env)
     need(not preflight, "FIXED_SOURCE_PREFLIGHT_NOT_ACCEPTANCE")
     need(pathlib.Path(directory) == fixed_protected_context(source_sha, env), "FIXED_SOURCE_PRIVATE_PATH_REJECTED")
     directory = pathlib.Path(directory)
@@ -509,6 +548,8 @@ def verify_fixed_capture(root, source_sha, directory, readiness, *, preflight=Fa
              "FIXED_SOURCE_SIGNATURE_REJECTED")
     plan = _fixed_json(plan_raw)
     plan_fields = ["schemaVersion", "repository", "workflowRef", "runId", "runAttempt", "sourceSha", "operation", "createdAt"]
+    if config_diagnostic:
+        plan_fields.append("packagingPolicy")
     keys(plan, plan_fields)
     _same_run_record(plan, env)
     attempt = _fixed_json(_private_read(directory / "attempt.json", MAX_JSON))
@@ -518,7 +559,8 @@ def verify_fixed_capture(root, source_sha, directory, readiness, *, preflight=Fa
     keys(capture, [*plan_fields, "method", "capturedAt", "endsAt", "expiresAt", "before", "builds", "objects",
                    "after", "afterBuilds", "archives", "requestCount", "bytesDownloaded"])
     _same_run_record(capture, env)
-    need(capture["method"] == FIXED_METHOD and capture["createdAt"] == plan["createdAt"], "FIXED_SOURCE_METHOD_REJECTED")
+    method = CONFIG_METHOD if config_diagnostic else FIXED_METHOD
+    need(capture["method"] == method and capture["createdAt"] == plan["createdAt"], "FIXED_SOURCE_METHOD_REJECTED")
     created, started, before, after, expires = map(timestamp, [plan["createdAt"], attempt["startedAt"],
         capture["capturedAt"], capture["endsAt"], capture["expiresAt"]])
     checked = now or dt.datetime.now(dt.timezone.utc)
@@ -534,8 +576,9 @@ def verify_fixed_capture(root, source_sha, directory, readiness, *, preflight=Fa
         first, last = capture["before"][name], capture["after"][name]
         # The update may immediately precede the first GET. endsAt bounds both
         # observations; equality below binds their complete allowlisted content.
-        pins[name] = function_record(first, name, after, readiness)
-        need(function_record(last, name, after, readiness) == pins[name] and first == last,
+        record = _config_function_record if config_diagnostic else function_record
+        pins[name] = record(first, name, after, readiness)
+        need(record(last, name, after, readiness) == pins[name] and first == last,
              "SOURCE_DEPLOYMENT_CHANGED_DURING_CAPTURE")
         sources[name] = first["buildConfig"]["sourceProvenance"]["resolvedStorageSource"]
         need(sources[name]["object"] == name + "/function-source.zip", "SOURCE_OBJECT_UNVERIFIED")
@@ -556,7 +599,8 @@ def verify_fixed_capture(root, source_sha, directory, readiness, *, preflight=Fa
         raise EvidenceError("SOURCE_SHA_UNVERIFIED") from None
     need(head == source_sha, "SOURCE_SHA_MISMATCH")
     expected = readiness.expected_files(root, strict=True)
-    optional = readiness.expected_packaging_files(root)
+    optional = (readiness.expected_packaging_files(root, config_examples=True)
+                if config_diagnostic else readiness.expected_packaging_files(root))
     total = 0
     for name in FUNCTIONS:
         entry = capture["archives"][name]
@@ -571,11 +615,15 @@ def verify_fixed_capture(root, source_sha, directory, readiness, *, preflight=Fa
         for key_uri in (uri, uri.rsplit("#", 1)[0]):
             for kind, digest in build_hashes[pins[name]["build"]].get(key_uri, {}).items():
                 need(hashlib.new(kind, blob).hexdigest() == digest, "SOURCE_ARCHIVE_BUILD_HASH_MISMATCH")
-        readiness.verify_archive(blob, expected, strict=True, optional=optional)
+        if config_diagnostic:
+            readiness.verify_archive(blob, expected, strict=True, optional=optional,
+                verified_environment=capture["before"][name]["serviceConfig"]["environmentVariables"])
+        else:
+            readiness.verify_archive(blob, expected, strict=True, optional=optional)
     need(type(capture["bytesDownloaded"]) is int and capture["bytesDownloaded"] == total <= 2 * FIXED_ARCHIVE_MAX,
          "FIXED_SOURCE_TOTAL_TOO_LARGE")
     need((now or dt.datetime.now(dt.timezone.utc)) < expires, "SOURCE_EVIDENCE_EXPIRED_DURING_CHECK")
-    return {"status": "PASS", "sourceSha": source_sha, "evidenceMethod": FIXED_METHOD,
+    return {"status": "PASS", "sourceSha": source_sha, "evidenceMethod": method,
             "evidenceDigest": hashlib.sha256(capture_raw).hexdigest(),
             "functions": [{"name": name, "revision": pins[name]["revision"]} for name in FUNCTIONS],
             "verifiedFileCount": len(expected), "caseMailEnabled": False,
@@ -586,6 +634,7 @@ def verify_fixed_capture(root, source_sha, directory, readiness, *, preflight=Fa
 
 def bind_fixed_acceptance(result, env=None, now=None):
     env = os.environ if env is None else env
+    need(not config_diagnostic_context(env), "CONFIG_DIAGNOSTIC_NOT_MUTATION_AUTH")
     need(result.get("status") == "PASS" and result.get("evidenceMethod") == FIXED_METHOD,
          "SOURCE_ACCEPTANCE_REQUIRED")
     fixed_protected_context(result["sourceSha"], env)

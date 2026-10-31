@@ -431,6 +431,84 @@ class FixedSourceEvidenceTests(unittest.TestCase):
                 self.assertEqual(g.main(), 1)
             self.assertEqual(json.loads(evidence_file.read_text())["reason"], "SOURCE_ACQUISITION_REJECTED")
 
+    def enable_config_diagnostic(self):
+        self.env.update(LKC_SOURCE_PACKAGING_POLICY=e.CONFIG_POLICY,
+                        LKC_SOURCE_ACQUISITION_CONFIRMATION=e.CONFIG_CONFIRMATION)
+        for record in (self.plan, self.attempt, self.capture):
+            record["packagingPolicy"] = e.CONFIG_POLICY
+        self.capture["method"] = e.CONFIG_METHOD
+        values = {key: "SYNTHETIC_PRIVATE_VALUE" for key in g.DEPLOYMENT_CONFIG_KEYS}
+        values.update(APP_ENVIRONMENT="staging", EXPECTED_FIREBASE_PROJECT_ID=g.PROJECT,
+                      LKC_NOTIFICATION_DELIVERY_MODE="paused", LKC_SHEET_WRITE_MODE="paused",
+                      LKC_SUBMISSION_TRANSFER_MODE="paused")
+        config = "".join(key + "=" + values[key] + "\n" for key in sorted(values)).encode()
+        examples = {name: b"PUBLIC_EXAMPLE=synthetic\n" for name in g.CONFIG_EXAMPLES}
+        for name, raw in examples.items():
+            (self.root / "functions" / name).write_bytes(raw)
+        for name in e.FUNCTIONS:
+            for phase in ("before", "after"):
+                self.capture[phase][name]["serviceConfig"]["environmentVariables"] = copy.deepcopy(values)
+            self.blobs[name] = archive({**self.files, **examples, g.DEPLOYMENT_CONFIG: config})
+        self.update_archives()
+        self.save()
+
+    def test_config_diagnostic_verified_code_never_authorizes_mutation(self):
+        self.enable_config_diagnostic()
+        result = self.verify()
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["evidenceMethod"], e.CONFIG_METHOD)
+        self.assertFalse(result["hostingPromotionAuthorized"])
+        self.assertNotIn("SYNTHETIC_PRIVATE_VALUE", json.dumps(result))
+        for forged in (result, {**result, "evidenceMethod": e.FIXED_METHOD}):
+            with self.assertRaisesRegex(e.EvidenceError, "CONFIG_DIAGNOSTIC_NOT_MUTATION_AUTH"):
+                e.bind_fixed_acceptance(forged, self.env, NOW)
+
+    def test_config_diagnostic_rejects_wrong_mode_literal_or_policy_binding(self):
+        self.enable_config_diagnostic()
+        for changed in ({"LKC_OPERATION": "promote", "LKC_CONFIRMATION": "PROMOTE_LKC_STAGING_HOSTING"},
+                        {"LKC_METADATA_ONLY": "true"},
+                        {"LKC_SOURCE_ACQUISITION_CONFIRMATION": e.FIXED_CONFIRMATION},
+                        {"LKC_SOURCE_PACKAGING_POLICY": "unknown"}):
+            with self.subTest(changed=tuple(changed)), self.assertRaises(e.EvidenceError):
+                self.verify(env={**self.env, **changed})
+        self.capture["packagingPolicy"] = "strict"
+        self.save()
+        with self.assertRaisesRegex(e.EvidenceError, "FIXED_SOURCE_POLICY_REJECTED"):
+            self.verify()
+
+    def test_config_diagnostic_stops_if_official_settings_change(self):
+        self.enable_config_diagnostic()
+        self.capture["after"]["createUploadSession"]["serviceConfig"]["environmentVariables"]["DEFAULT_COMPANY_ID"] = "CHANGED_PRIVATE"
+        self.save()
+        with self.assertRaisesRegex(e.EvidenceError, "SOURCE_DEPLOYMENT_CHANGED_DURING_CAPTURE") as caught:
+            self.verify()
+        self.assertNotIn("CHANGED_PRIVATE", str(caught.exception))
+
+    def test_cli_config_diagnostic_has_no_publication_receipt_and_guard_is_read_only(self):
+        self.enable_config_diagnostic()
+        evidence_file = self.root / "api-readiness.json"
+        argv = ["check", "--root", str(self.root), "--source-sha", SHA, "--evidence", str(evidence_file)]
+        class FixtureDateTime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW
+        with patch.dict(os.environ, self.env, clear=True), patch.object(sys, "argv", argv), \
+             patch.object(g, "source_evidence_module", return_value=e), \
+             patch.object(e.dt, "datetime", FixtureDateTime), \
+             patch.object(e, "bind_fixed_acceptance", side_effect=AssertionError("ACCEPTANCE_FORBIDDEN")), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(g.main(), 0)
+            report = json.loads(evidence_file.read_text())
+            self.assertTrue(report["readinessOnly"])
+            self.assertFalse(report["acceptanceEligible"])
+            self.assertNotIn("acceptanceRun", report)
+            original = evidence_file.read_bytes()
+            with patch.object(sys, "argv", argv + ["--mutation-guard"]), contextlib.redirect_stdout(io.StringIO()) as guard:
+                self.assertEqual(g.main(), 1)
+            self.assertEqual(json.loads(guard.getvalue())["reason"], "CONFIG_DIAGNOSTIC_NOT_MUTATION_AUTH")
+            self.assertEqual(evidence_file.read_bytes(), original)
+            self.assertNotIn("SYNTHETIC_PRIVATE_VALUE", original.decode() + output.getvalue() + guard.getvalue())
+
     def test_cli_fixed_unknown_files_emit_bounded_hashes_and_never_accept_or_rewrite_receipt(self):
         names = [".env.SYNTHETIC_PRIVATE_NAME", "test/private-é.key"]
         names += [f"unlisted-{i:03d}.synthetic" for i in range(24)]

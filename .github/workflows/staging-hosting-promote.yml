@@ -32,9 +32,15 @@ on:
         type: choice
         options: [retained, fixed-source-once]
       source_acquisition_confirmation:
-        description: Fixed-source-once only; ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB
+        description: Strict ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB; config diagnostic ACQUIRE_LKC_STAGING_FIXED_CONFIG_ONCE_20MIB
         required: false
         type: string
+      source_packaging_policy:
+        description: Strict by default; verified-env-diagnostic privately compares source config with official Function settings, readiness only
+        required: false
+        default: strict
+        type: choice
+        options: [strict, verified-env-diagnostic]
       restore_run_id:
         description: Successful promotion run ID; required only for restore
         required: false
@@ -96,6 +102,7 @@ jobs:
       evidence_policy: ${{ steps.release.outputs.evidence_policy }}
       preview_run_id: ${{ steps.release.outputs.preview_run_id }}
       source_acquisition: ${{ steps.release.outputs.source_acquisition }}
+      source_packaging_policy: ${{ steps.release.outputs.source_packaging_policy }}
     steps:
       - name: Require the deliberate live-staging enable switch
         env:
@@ -126,6 +133,7 @@ jobs:
           LKC_LIMITED_EVIDENCE: ${{ inputs.limited_evidence }}
           LKC_SOURCE_ACQUISITION: ${{ github.event_name == 'workflow_run' && 'retained' || inputs.source_acquisition || 'retained' }}
           LKC_SOURCE_ACQUISITION_CONFIRMATION: ${{ inputs.source_acquisition_confirmation }}
+          LKC_SOURCE_PACKAGING_POLICY: ${{ inputs.source_packaging_policy || 'strict' }}
         run: |
           node scripts/automation/hosting-limited-pilot.mjs --guard-only
           if [[ "$LKC_METADATA_ONLY" == "true" && "$LKC_OPERATION" != "readiness" ]]; then
@@ -144,6 +152,18 @@ jobs:
             echo "HOSTING_OPERATION_ERROR=UNEXPECTED_RESTORE_RUN_ID"
             exit 1
           fi
+          case "$LKC_SOURCE_PACKAGING_POLICY" in
+            strict) fixed_confirmation="ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB" ;;
+            verified-env-diagnostic)
+              if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" || "$LKC_OPERATION" != "readiness" ||
+                    "$LKC_SOURCE_ACQUISITION" != "fixed-source-once" ]]; then
+                echo "HOSTING_OPERATION_ERROR=CONFIG_DIAGNOSTIC_READINESS_ONLY"
+                exit 1
+              fi
+              fixed_confirmation="ACQUIRE_LKC_STAGING_FIXED_CONFIG_ONCE_20MIB"
+              ;;
+            *) echo "HOSTING_OPERATION_ERROR=SOURCE_PACKAGING_POLICY_REJECTED"; exit 1 ;;
+          esac
           case "$LKC_SOURCE_ACQUISITION" in
             retained)
               if [[ -n "$LKC_SOURCE_ACQUISITION_CONFIRMATION" ]]; then
@@ -155,7 +175,7 @@ jobs:
               if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" || "$GITHUB_RUN_ATTEMPT" != "1" ||
                     "$LKC_OPERATION" == "restore" || "$LKC_METADATA_ONLY" != "false" ||
                     "$LKC_EVIDENCE_POLICY" != "source-provenance" ||
-                    "$LKC_SOURCE_ACQUISITION_CONFIRMATION" != "ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB" ]]; then
+                    "$LKC_SOURCE_ACQUISITION_CONFIRMATION" != "$fixed_confirmation" ]]; then
                 echo "HOSTING_OPERATION_ERROR=FIXED_SOURCE_EXPLICIT_REVIEW_REQUIRED"
                 exit 1
               fi
@@ -166,6 +186,7 @@ jobs:
           echo "metadata_only=$LKC_METADATA_ONLY" >> "$GITHUB_OUTPUT"
           echo "evidence_policy=$LKC_EVIDENCE_POLICY" >> "$GITHUB_OUTPUT"
           echo "source_acquisition=$LKC_SOURCE_ACQUISITION" >> "$GITHUB_OUTPUT"
+          echo "source_packaging_policy=$LKC_SOURCE_PACKAGING_POLICY" >> "$GITHUB_OUTPUT"
           echo "restore_run_id=$LKC_RESTORE_RUN_ID" >> "$GITHUB_OUTPUT"
           git fetch --no-tags origin main
           source_sha="$(git rev-parse origin/main)"
@@ -285,6 +306,7 @@ jobs:
       LKC_PREVIEW_RUN_ID: ${{ needs.guard.outputs.preview_run_id }}
       LKC_SOURCE_ACQUISITION: ${{ needs.guard.outputs.source_acquisition }}
       LKC_SOURCE_ACQUISITION_CONFIRMATION: ${{ inputs.source_acquisition_confirmation }}
+      LKC_SOURCE_PACKAGING_POLICY: ${{ needs.guard.outputs.source_packaging_policy }}
       LKC_CONFIRMATION: ${{ github.event_name == 'workflow_run' && 'PROMOTE_LKC_STAGING_HOSTING' || inputs.confirmation }}
       LKC_GCP_WORKLOAD_IDENTITY_PROVIDER: projects/740154137290/locations/global/workloadIdentityPools/lkc-github-staging/providers/lkc-main-workflows
       LKC_GCP_STAGING_DEPLOY_SERVICE_ACCOUNT: lkc-gh-staging-deploy@lip-knots-crew-staging.iam.gserviceaccount.com

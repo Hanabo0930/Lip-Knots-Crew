@@ -18,7 +18,7 @@ const ENV = {GITHUB_ACTIONS: "true", GITHUB_REPOSITORY: "Hanabo0930/Lip-Knots-Cr
   GITHUB_SHA: SHA, GITHUB_RUN_ID: RUN, GITHUB_RUN_ATTEMPT: "1", GITHUB_EVENT_NAME: "workflow_dispatch",
   LKC_OPERATION: "promote", LKC_METADATA_ONLY: "false", LKC_EVIDENCE_POLICY: "source-provenance",
   LKC_SOURCE_ACQUISITION: "fixed-source-once", LKC_SOURCE_ACQUISITION_CONFIRMATION: CONFIRM,
-  LKC_APPROVED_SOURCE_EVIDENCE_SHA256: ""};
+  LKC_APPROVED_SOURCE_EVIDENCE_SHA256: "", LKC_SOURCE_PACKAGING_POLICY: "strict"};
 async function context(callback) {
   const previous = Object.fromEntries(Object.keys(ENV).map(key => [key, process.env[key]]));
   Object.assign(process.env, ENV);
@@ -50,8 +50,9 @@ test("fixed workflow: deliberate manual acquisition guard precedes authenticatio
 
 test("fixed workflow: actual dispatch shell rejects unintended acquisition combinations", () => {
   const guard = step("Require current main, canonical CI and exact scope");
-  const start = guard.indexOf('          case "$LKC_SOURCE_ACQUISITION" in\n');
-  const end = guard.indexOf("          esac\n", start) + "          esac\n".length;
+  const start = guard.indexOf('          case "$LKC_SOURCE_PACKAGING_POLICY" in\n');
+  const acquisitionStart = guard.indexOf('          case "$LKC_SOURCE_ACQUISITION" in\n', start);
+  const end = guard.indexOf("          esac\n", acquisitionStart) + "          esac\n".length;
   assert(start >= 0 && end > start);
   const shell = guard.slice(start, end).split("\n").map(line => line.slice(10)).join("\n");
   const base = {...process.env, ...ENV};
@@ -67,6 +68,13 @@ test("fixed workflow: actual dispatch shell rejects unintended acquisition combi
     LKC_SOURCE_ACQUISITION: "retained", LKC_SOURCE_ACQUISITION_CONFIRMATION: ""}}).status, 0);
   assert.notEqual(spawnSync("bash", ["-euo", "pipefail", "-c", shell], {env: {...base,
     LKC_SOURCE_ACQUISITION: "retained"}}).status, 0);
+  const config = {...base, LKC_SOURCE_PACKAGING_POLICY: "verified-env-diagnostic", LKC_OPERATION: "readiness",
+    LKC_SOURCE_ACQUISITION_CONFIRMATION: "ACQUIRE_LKC_STAGING_FIXED_CONFIG_ONCE_20MIB"};
+  assert.equal(spawnSync("bash", ["-euo", "pipefail", "-c", shell], {env: config}).status, 0);
+  for (const changed of [{LKC_OPERATION: "promote"}, {LKC_SOURCE_ACQUISITION: "retained"},
+    {LKC_METADATA_ONLY: "true"}, {LKC_SOURCE_ACQUISITION_CONFIRMATION: CONFIRM},
+    {LKC_SOURCE_PACKAGING_POLICY: "unknown"}, {GITHUB_EVENT_NAME: "workflow_run"}])
+    assert.notEqual(spawnSync("bash", ["-euo", "pipefail", "-c", shell], {env: {...config, ...changed}}).status, 0);
 });
 
 test("fixed workflow: build, collection and strict readiness precede every Hosting change", () => {

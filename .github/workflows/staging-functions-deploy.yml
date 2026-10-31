@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Deploy Functions, run the single-mail smoke, or audit cancellation privacy read-only
+        description: Deploy Functions, refresh the upload pair source, smoke one mail, or audit privacy
         required: true
         type: choice
         options:
           - deploy
+          - upload-source-refresh
           - gmail-smoke
           - cancellation-privacy-audit
         default: deploy
@@ -54,7 +55,7 @@ jobs:
   guard:
     outputs:
       source_sha: ${{ steps.source-identity.outputs.source_sha }}
-    if: inputs.operation == 'deploy'
+    if: inputs.operation == 'deploy' || inputs.operation == 'upload-source-refresh'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -75,9 +76,19 @@ jobs:
           LKC_SOURCE_REF: ${{ inputs.source_ref }}
           LKC_FUNCTIONS: ${{ inputs.functions }}
           LKC_CONFIRMATION: ${{ inputs.confirmation }}
+          LKC_OPERATION: ${{ inputs.operation }}
+          LKC_TRANSFER_MODE_REQUESTED: ${{ inputs.transfer_mode }}
         run: |
+          lkc_mode=functions-deploy
+          if [[ "$LKC_OPERATION" == "upload-source-refresh" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/main" || "$LKC_TRANSFER_MODE_REQUESTED" != "preserve" || "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
+              echo UPLOAD_REFRESH_PROTECTED_CONTEXT_REQUIRED >&2
+              exit 1
+            fi
+            lkc_mode=functions-upload-source-refresh
+          fi
           node guardrails/scripts/automation/validate-staging-scope.mjs \
-            --mode functions-deploy \
+            --mode "$lkc_mode" \
             --project "$LKC_PROJECT_ID" \
             --region "$LKC_REGION" \
             --source-ref "$LKC_SOURCE_REF" \
@@ -129,11 +140,11 @@ jobs:
               '
 
   deploy:
-    if: inputs.operation == 'deploy'
+    if: inputs.operation == 'deploy' || inputs.operation == 'upload-source-refresh'
     needs: guard
     environment: lkc-staging-deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout trusted guardrails
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -173,6 +184,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       - name: Materialize verified staging Functions dotenv
         working-directory: source
+        if: inputs.operation == 'deploy'
         env:
           LKC_FUNCTIONS_ADMIN_EMAILS: ${{ vars.LKC_FUNCTIONS_ADMIN_EMAILS }}
           LKC_FUNCTIONS_EXECUTIVE_APPROVER_EMAILS: ${{ vars.LKC_FUNCTIONS_EXECUTIVE_APPROVER_EMAILS }}
@@ -234,6 +246,7 @@ jobs:
           echo "STAGING_DOTENV_KEY_COUNT=15"
       - name: Preserve or explicitly set submission transfer mode
         working-directory: guardrails
+        if: inputs.operation == 'deploy'
         env:
           LKC_TRANSFER_MODE_REQUESTED: ${{ inputs.transfer_mode }}
           LKC_FUNCTIONS: ${{ inputs.functions }}
@@ -247,7 +260,17 @@ jobs:
           LKC_FUNCTIONS: ${{ inputs.functions }}
           LKC_CONFIRMATION: ${{ inputs.confirmation }}
           LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
+          LKC_OPERATION: ${{ inputs.operation }}
+          LKC_TRANSFER_MODE_REQUESTED: ${{ inputs.transfer_mode }}
         run: bash scripts/automation/deploy-staging-functions.sh
+      - name: Retain bounded upload source-refresh result
+        if: always() && inputs.operation == 'upload-source-refresh'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upload-source-refresh-result
+          path: upload-source-refresh-result.json
+          if-no-files-found: error
+          retention-days: 14
 
   smoke-guard:
     if: inputs.operation == 'gmail-smoke'

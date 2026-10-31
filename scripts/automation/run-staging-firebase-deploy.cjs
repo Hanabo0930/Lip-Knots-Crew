@@ -64,12 +64,21 @@ function resolveCli(searchPath = process.env.PATH ?? "", io = fs) {
 }
 
 async function main() {
+  if (process.env.LKC_OPERATION === "upload-source-refresh") {
+    const {runUploadSourceRefresh} = await import(pathToFileURL(path.join(__dirname, "run-upload-source-refresh.mjs")).href);
+    const result = await runUploadSourceRefresh();
+    console.log(JSON.stringify(result));
+    if (!result.deployedFunctionsVerified || result.cleanup !== "DONE") process.exitCode = 1;
+    return;
+  }
   const {validatePlan} = await import(pathToFileURL(path.join(__dirname, "validate-staging-scope.mjs")).href);
   const plan = validatePlan({
     mode: "functions-deploy", project: process.env.LKC_PROJECT_ID,
     region: process.env.LKC_REGION, sourceRef: process.env.LKC_SOURCE_REF,
     functions: process.env.LKC_FUNCTIONS, confirmation: process.env.LKC_CONFIRMATION,
   });
+  if (plan.functions.some(name => ["createUploadSession", "finalizeStagedUpload"].includes(name)))
+    throw Error("UPLOAD_SOURCE_REFRESH_ROUTE_REQUIRED");
   const source = fs.realpathSync(process.env.LKC_SOURCE_DIRECTORY ?? "");
   if (!fs.statSync(path.join(source, "firebase.json")).isFile()) throw Error("INVALID_SOURCE_DIRECTORY");
   const {assertNotificationDeliveryPaused} = await import(pathToFileURL(path.join(__dirname, "validate-staging-notification-pause.mjs")).href);

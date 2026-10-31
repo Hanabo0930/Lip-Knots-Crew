@@ -227,12 +227,23 @@ jobs:
         run: |
           npm run test:automation-safety
           node --test scripts/automation/test-upload-metadata.mjs
+          node --test scripts/automation/test-upload-source-refresh.mjs
+          python3 scripts/automation/test-upload-source-package.py
+          node scripts/automation/test-functions-standalone-lock.mjs --install
           node --test scripts/automation/test-hosting-limited-pilot.mjs scripts/automation/test-hosting-pilot-metadata.mjs scripts/automation/test-hosting-limited-workflow.mjs
           node --test scripts/automation/test-hosting-promotion-history.mjs
           python3 scripts/automation/test-hosting-api-readiness.py
           python3 scripts/automation/test-sheet-worker-migration.py
           python3 scripts/automation/test-staging-worker-migration.py
           npm audit --omit=dev --audit-level=high
+      - name: Retain a rejected standalone lock for code review
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: functions-standalone-lock-review
+          path: functions-standalone-lock-candidate.json
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Publish security summary
         if: always()
         run: |

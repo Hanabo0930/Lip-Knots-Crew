@@ -44,6 +44,16 @@ def archive(files):
 
 
 class FixedSourceEvidenceTests(unittest.TestCase):
+    def test_source_refresh_namespace_does_not_admit_backups_or_arbitrary_paths(self):
+        for name in e.FUNCTIONS:
+            candidate = "lkc-upload-source-refresh/123456/" + "a" * 40 + "/" + name + ".zip"
+            self.assertTrue(e.fixed_upload_source_object(name, candidate))
+            self.assertTrue(e.fixed_upload_source_object(name, name + "/function-source.zip"))
+            for bad in [candidate.replace("refresh", "backups"), candidate.replace("/123456/", "/0/"),
+                        candidate.replace("a" * 40, "main"), candidate + "/extra", "../" + candidate,
+                        candidate.replace(name + ".zip", "other.zip")]:
+                self.assertFalse(e.fixed_upload_source_object(name, bad))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

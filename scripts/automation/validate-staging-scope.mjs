@@ -82,6 +82,15 @@ export function validatePlan(plan) {
     return { mode, project, region, sourceRef, functions };
   }
 
+  if (mode === "functions-upload-source-refresh") {
+    const functions = parseCsv(plan.functions);
+    if (sourceRef !== "main" || !sameSet(functions, ["createUploadSession", "finalizeStagedUpload"]))
+      throw new Error("UPLOAD_REFRESH_MAIN_EXACT_PAIR_REQUIRED");
+    if (plan.confirmation !== "REFRESH_LKC_STAGING_UPLOAD_SOURCE_PRESERVE")
+      throw new Error("UPLOAD_REFRESH_CONFIRMATION_REJECTED");
+    return {mode, project, region, sourceRef, functions: ["createUploadSession", "finalizeStagedUpload"]};
+  }
+
   if (mode === "functions-deploy") {
     const functions = parseCsv(plan.functions);
     if (!functions.length) throw new Error("FUNCTION_LIST_EMPTY");

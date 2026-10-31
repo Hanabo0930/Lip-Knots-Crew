@@ -7,9 +7,13 @@ lkc_source_ref="${LKC_SOURCE_REF:-main}"
 lkc_functions="${LKC_FUNCTIONS:-}"
 lkc_confirmation="${LKC_CONFIRMATION:-}"
 lkc_source_directory="${LKC_SOURCE_DIRECTORY:-}"
+lkc_mode="functions-deploy"
+if [[ "${LKC_OPERATION:-deploy}" == "upload-source-refresh" ]]; then
+  lkc_mode="functions-upload-source-refresh"
+fi
 
 node scripts/automation/validate-staging-scope.mjs \
-  --mode functions-deploy \
+  --mode "$lkc_mode" \
   --project "$lkc_project" \
   --region "$lkc_region" \
   --source-ref "$lkc_source_ref" \
@@ -35,6 +39,12 @@ echo "DEPLOY_STORAGE=false"
 lkc_trusted_runner="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run-staging-firebase-deploy.cjs"
 export LKC_PROJECT_ID="$lkc_project" LKC_REGION="$lkc_region" LKC_SOURCE_REF="$lkc_source_ref"
 export LKC_FUNCTIONS="$lkc_functions" LKC_CONFIRMATION="$lkc_confirmation" LKC_SOURCE_DIRECTORY="$lkc_source_directory"
+if [[ "$lkc_mode" == "functions-upload-source-refresh" ]]; then
+  # The existing owner runner is the sole upload source-update entrypoint. It
+  # never reaches the generic Firebase/Invoker-changing path below.
+  node "$lkc_trusted_runner"
+  exit $?
+fi
 npx --yes --package=firebase-tools@15.24.0 -- node "$lkc_trusted_runner"
 
 for function_name in "${function_names[@]}"; do

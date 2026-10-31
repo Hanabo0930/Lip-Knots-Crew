@@ -232,6 +232,90 @@ class ReadinessTests(unittest.TestCase):
                 self.assertNotIn(name, str(caught.exception))
                 self.assertNotIn("SYNTHETIC_PRIVATE_VALUE", str(caught.exception))
 
+    def config_fixture(self):
+        values = {key: "SYNTHETIC_PRIVATE_VALUE" for key in g.DEPLOYMENT_CONFIG_KEYS}
+        values.update(APP_ENVIRONMENT="staging", EXPECTED_FIREBASE_PROJECT_ID=g.PROJECT,
+                      LKC_NOTIFICATION_DELIVERY_MODE="paused", LKC_SHEET_WRITE_MODE="paused",
+                      LKC_SUBMISSION_TRANSFER_MODE="paused")
+        data = "".join(key + "=" + values[key] + "\n" for key in sorted(values)).encode()
+        return values, data
+
+    def test_private_config_exact_match_and_paused_state(self):
+        values, data = self.config_fixture()
+        self.assertIsNone(g.verify_deployment_config(data, values))
+        values["LKC_SUBMISSION_TRANSFER_MODE"] = "active"
+        active = data.replace(b"LKC_SUBMISSION_TRANSFER_MODE=paused", b"LKC_SUBMISSION_TRANSFER_MODE=active")
+        with self.assertRaisesRegex(g.ReadinessError, "CONFIG_PAUSE_STATE_REJECTED"):
+            g.verify_deployment_config(active, values)
+
+    def test_missing_or_changed_runtime_evidence_uses_only_path_hashes(self):
+        expected = g.expected_files(self.root, strict=True)
+        missing = self.files[0][0]
+        with self.assertRaisesRegex(g.MissingArchiveFilesError, "DEPLOYED_PACKAGE_INCOMPLETE") as caught:
+            g.verify_archive(archive([(n, v) for n, v in self.files if n != missing]), expected, strict=True)
+        self.assertEqual(caught.exception.diagnostics["pathSha256"], [g.hashlib.sha256(missing.encode()).hexdigest()])
+        changed = [(n, b"SYNTHETIC_CHANGED_CONTENT" if n == missing else v) for n, v in self.files]
+        with self.assertRaisesRegex(g.ArchiveContentMismatchError, "DEPLOYED_SOURCE_MISMATCH") as caught:
+            g.verify_archive(archive(changed), expected, strict=True)
+        self.assertEqual(caught.exception.diagnostics["firstMismatchPathSha256"], g.hashlib.sha256(missing.encode()).hexdigest())
+        self.assertNotIn(missing, str(caught.exception) + repr(caught.exception.__dict__))
+        self.assertNotIn("SYNTHETIC_CHANGED_CONTENT", repr(caught.exception.__dict__))
+
+    def test_private_config_mismatch_never_exposes_values(self):
+        values, data = self.config_fixture()
+        values["DEFAULT_COMPANY_ID"] = "SYNTHETIC_DIFFERENT_VALUE"
+        with self.assertRaisesRegex(g.ReadinessError, "CONFIG_RUNTIME_MISMATCH") as caught:
+            g.verify_deployment_config(data, values)
+        self.assertNotIn("SYNTHETIC", str(caught.exception) + repr(caught.exception.__dict__))
+
+    def test_private_config_rejects_expansion_comments_duplicates_and_unknown_keys(self):
+        values, data = self.config_fixture()
+        for bad in [data + b"DEFAULT_COMPANY_ID=x\n", data + b"UNKNOWN_KEY=x\n",
+                    data.replace(b"DEFAULT_COMPANY_ID=SYNTHETIC_PRIVATE_VALUE", b"DEFAULT_COMPANY_ID=${SECRET}"),
+                    data.replace(b"DEFAULT_COMPANY_ID=SYNTHETIC_PRIVATE_VALUE", b'DEFAULT_COMPANY_ID="x"'),
+                    data + b"# comment\n", data.replace(b"DEFAULT_COMPANY_ID=", b"DEFAULT_COMPANY_ID= "),
+                    data.replace(b"\n", b"\r\n"), data[:-1], data + b"\x00"]:
+            with self.subTest(length=len(bad)), self.assertRaises(g.ReadinessError):
+                g.verify_deployment_config(bad, values)
+
+    def test_private_config_metadata_limits_and_execution_overrides(self):
+        values, data = self.config_fixture()
+        for bad in [None, {}, {**values, "NODE_OPTIONS": "--import=synthetic"},
+                    {**values, "PRIVATE": "x" * 4097}, {**values, "PRIVATE": 123},
+                    {**values, "BAD KEY": "x"}, {**values, "PRIVATE": "x\x00y"}]:
+            with self.subTest(kind=type(bad).__name__), self.assertRaises(g.ReadinessError):
+                g.verify_deployment_config(data, bad)
+
+    def test_config_archive_needs_exact_public_examples_and_private_metadata(self):
+        values, data = self.config_fixture()
+        examples = []
+        for name in g.CONFIG_EXAMPLES:
+            raw = b"PUBLIC_EXAMPLE=synthetic\n"
+            (self.root / "functions" / name).write_bytes(raw)
+            examples.append((name, raw))
+        packaged = self.files + examples + [(g.DEPLOYMENT_CONFIG, data)]
+        expected = g.expected_files(self.root, strict=True)
+        optional = g.expected_packaging_files(self.root, config_examples=True)
+        with self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_UNEXPECTED_FILE"):
+            g.verify_archive(archive(packaged), expected, strict=True)
+        self.assertIsNone(g.verify_archive(archive(packaged), expected, strict=True,
+                                          optional=optional, verified_environment=values))
+        changed = [(name, raw + b"changed" if name == g.CONFIG_EXAMPLES[0] else raw)
+                   for name, raw in packaged]
+        with self.assertRaisesRegex(g.ReadinessError, "DEPLOYED_SOURCE_MISMATCH"):
+            g.verify_archive(archive(changed), expected, strict=True,
+                             optional=optional, verified_environment=values)
+
+    def test_config_archive_still_rejects_missing_config_and_other_secret_files(self):
+        values, data = self.config_fixture()
+        expected = g.expected_files(self.root, strict=True)
+        with self.assertRaisesRegex(g.ReadinessError, "CONFIG_FILE_REQUIRED"):
+            g.verify_archive(archive(self.files), expected, strict=True, verified_environment=values)
+        for name in [".env", ".env.production", "service-account.json"]:
+            with self.subTest(name=name), self.assertRaisesRegex(g.ReadinessError, "ARCHIVE_UNEXPECTED_FILE"):
+                g.verify_archive(archive(self.files + [(g.DEPLOYMENT_CONFIG, data), (name, b"PRIVATE")]),
+                                 expected, strict=True, verified_environment=values)
+
     def test_strict_unknown_file_failure_retains_only_path_hashes_without_reading_members(self):
         names = [".env.SYNTHETIC_PRIVATE_NAME", "test/private-é.key"]
         blob = archive(self.files + [(name, b"SYNTHETIC_PRIVATE_CONTENT") for name in names])

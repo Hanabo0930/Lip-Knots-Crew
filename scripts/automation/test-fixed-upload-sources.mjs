@@ -8,7 +8,7 @@ import {mkdtemp, readFile, writeFile, readdir, rm, chmod, symlink, link, mkdir, 
 import {tmpdir} from "node:os";
 import path from "node:path";
 import {createHmac} from "node:crypto";
-import {collectFixedUploadSources, fixedSourceMain, FIXED_SOURCE_LIMITS, OBJECT_FIELDS, FUNCTION_FIELDS, BUILD_FIELDS} from "./collect-upload-metadata.mjs";
+import {collectFixedUploadSources, fixedSourceMain, FIXED_SOURCE_LIMITS, OBJECT_FIELDS, FUNCTION_FIELDS, CONFIG_FUNCTION_FIELDS, BUILD_FIELDS} from "./collect-upload-metadata.mjs";
 
 const PROJECT = "lip-knots-crew-staging", PREFIX = `projects/${PROJECT}/locations/asia-northeast1`;
 const BUCKET = "gcf-v2-sources-740154137290-asia-northeast1";
@@ -24,7 +24,7 @@ const ENV = {GITHUB_ACTIONS: "true", GITHUB_REPOSITORY: "Hanabo0930/Lip-Knots-Cr
   GITHUB_SHA: "a".repeat(40), LKC_SOURCE_SHA: "a".repeat(40), LKC_PROJECT_ID: PROJECT,
   LKC_REGION: "asia-northeast1", LKC_OPERATION: "readiness", LKC_METADATA_ONLY: "false",
   LKC_CONFIRMATION: "CHECK_LKC_STAGING_HOSTING_READINESS", LKC_EVIDENCE_POLICY: "source-provenance",
-  LKC_SOURCE_ACQUISITION: "fixed-source-once",
+  LKC_SOURCE_ACQUISITION: "fixed-source-once", LKC_SOURCE_PACKAGING_POLICY: "strict",
   LKC_SOURCE_ACQUISITION_CONFIRMATION: "ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB"};
 
 async function isolated(callback) {
@@ -72,7 +72,7 @@ function transport(data = fixtures(), change) {
     if (url.hostname === "cloudfunctions.googleapis.com") {
       kind = "function"; name = url.pathname.split("/").at(-1);
       assert(NAMES.includes(name)); assert.equal(url.pathname, `/v2/${PREFIX}/functions/${name}`);
-      assert.equal(url.searchParams.get("fields"), FUNCTION_FIELDS); document = structuredClone(data.functions[name]);
+      assert.equal(url.searchParams.get("fields"), data.configDiagnostic ? CONFIG_FUNCTION_FIELDS : FUNCTION_FIELDS); document = structuredClone(data.functions[name]);
     } else if (url.hostname === "cloudbuild.googleapis.com") {
       kind = "build"; name = url.pathname.slice(4);
       assert(Object.hasOwn(data.builds, name)); assert.equal(url.searchParams.get("fields"), BUILD_FIELDS);
@@ -94,6 +94,60 @@ function transport(data = fixtures(), change) {
   }};
 }
 const collect = io => collectFixedUploadSources({accessToken: TOKEN}, io);
+
+test("config diagnostic: private Function settings stay out of public diagnostics", () => isolated(async () => {
+  process.env.LKC_SOURCE_PACKAGING_POLICY = "verified-env-diagnostic";
+  process.env.LKC_SOURCE_ACQUISITION_CONFIRMATION = "ACQUIRE_LKC_STAGING_FIXED_CONFIG_ONCE_20MIB";
+  const data = fixtures(); data.configDiagnostic = true;
+  for (const name of NAMES) data.functions[name].serviceConfig.environmentVariables = {SYNTHETIC_PRIVATE: "PRIVATE_CONFIG_VALUE"};
+  const io = transport(data), result = await collectFixedUploadSources({accessToken: TOKEN}, io);
+  assert.equal(result.diagnostics.status, "FIXED_SOURCE_COLLECTED");
+  assert.equal(result.diagnostics.method, "authenticated-fixed-config-diagnostic");
+  assert.equal(result.diagnostics.requests, 10);
+  assert(!JSON.stringify(result).includes("PRIVATE_CONFIG_VALUE"));
+  assert(!inspect(result).includes("PRIVATE_CONFIG_VALUE"));
+  assert.equal(result.privateCapture.before.createUploadSession.serviceConfig.environmentVariables.SYNTHETIC_PRIVATE, "PRIVATE_CONFIG_VALUE");
+}));
+
+test("config diagnostic: wrong confirmation or promote stops before any request", () => isolated(async () => {
+  process.env.LKC_SOURCE_PACKAGING_POLICY = "verified-env-diagnostic";
+  let io = transport();
+  assert.equal((await collectFixedUploadSources({accessToken: TOKEN}, io)).diagnostics.status, "STOPPED");
+  assert.equal(io.calls.length, 0);
+  process.env.LKC_SOURCE_ACQUISITION_CONFIRMATION = "ACQUIRE_LKC_STAGING_FIXED_CONFIG_ONCE_20MIB";
+  process.env.LKC_OPERATION = "promote"; process.env.LKC_CONFIRMATION = "PROMOTE_LKC_STAGING_HOSTING";
+  io = transport();
+  assert.equal((await collectFixedUploadSources({accessToken: TOKEN}, io)).diagnostics.reason, "CONFIG_DIAGNOSTIC_READINESS_ONLY");
+  assert.equal(io.calls.length, 0);
+}));
+
+test("strict collector: private settings remain forbidden without diagnostic policy", () => isolated(async () => {
+  const data = fixtures();
+  data.functions.createUploadSession.serviceConfig.environmentVariables = {PRIVATE: "SYNTHETIC_PRIVATE_VALUE"};
+  const io = transport(data), result = await collectFixedUploadSources({accessToken: TOKEN}, io);
+  assert.equal(result.diagnostics.status, "STOPPED");
+  assert.equal(result.diagnostics.reason, "RESPONSE_FIELDS_REJECTED");
+  assert.equal(io.calls.length, 1);
+  assert(!JSON.stringify(result).includes("SYNTHETIC_PRIVATE_VALUE"));
+}));
+
+test("config diagnostic: changed or executable official environment stops privately", () => isolated(async () => {
+  process.env.LKC_SOURCE_PACKAGING_POLICY = "verified-env-diagnostic";
+  process.env.LKC_SOURCE_ACQUISITION_CONFIRMATION = "ACQUIRE_LKC_STAGING_FIXED_CONFIG_ONCE_20MIB";
+  const data = fixtures(); data.configDiagnostic = true;
+  for (const name of NAMES) data.functions[name].serviceConfig.environmentVariables = {SYNTHETIC_PRIVATE: "PRIVATE_CONFIG_VALUE"};
+  const io = transport(data, ({kind, document, calls}) => {
+    if (kind === "function" && calls.filter(c => c.url.hostname === "cloudfunctions.googleapis.com").length > 2)
+      document.serviceConfig.environmentVariables.SYNTHETIC_PRIVATE = "PRIVATE_CHANGED_VALUE";
+  });
+  const result = await collectFixedUploadSources({accessToken: TOKEN}, io);
+  assert.equal(result.diagnostics.reason, "FIXED_SOURCE_DEPLOYMENT_CHANGED");
+  assert(!JSON.stringify(result).includes("PRIVATE_"));
+  data.functions.createUploadSession.serviceConfig.environmentVariables.NODE_OPTIONS = "--import=private";
+  const bad = transport(data), denied = await collectFixedUploadSources({accessToken: TOKEN}, bad);
+  assert.equal(denied.diagnostics.reason, "FIXED_SOURCE_CONFIG_EXECUTION_OVERRIDE_REJECTED");
+  assert.equal(bad.calls.length, 1);
+}));
 
 test("fixed collector: official hosts, fixed generations, ten/twelve GETs and no promotion authority", () => isolated(async () => {
   for (const distinct of [false, true]) {
@@ -431,10 +485,27 @@ test("fixed CLI: failed acquisition records its one attempt and no private captu
   assert.equal(await run("--cleanup-fixed-source"), 0); assert.deepEqual(await readdir(directory), []);
 }));
 
-test("fixed CLI: signed synthetic acquisition reaches strict Python verification and same-run mutation receipt", () => privateFixture(async ({temporary, directory, run}) => {
+for (const configMode of [false, true]) test(configMode
+  ? "config CLI: signed private settings reach Python but never create mutation authority"
+  : "fixed CLI: signed synthetic acquisition reaches strict Python verification and same-run mutation receipt", () => privateFixture(async ({temporary, directory, run}) => {
   const sourceRoot = path.join(temporary, "source"), files = {
     "package.json": '{"main":"lib/index.js"}', "lib/index.js": "exports.synthetic=1;", "lib/uploads.js": "exports.synthetic=1;",
     "lib/uploads.js.map": '{"version":3}', "src/uploads.ts": "export const synthetic=1;", "case-mail-runtime/synthetic.cjs": "module.exports={};"};
+  let configValues;
+  if (configMode) {
+    process.env.LKC_SOURCE_PACKAGING_POLICY = "verified-env-diagnostic";
+    process.env.LKC_SOURCE_ACQUISITION_CONFIRMATION = "ACQUIRE_LKC_STAGING_FIXED_CONFIG_ONCE_20MIB";
+    const fixture = spawnSync("python3", ["-c", `import importlib.util,json
+spec=importlib.util.spec_from_file_location("config_fixture","scripts/automation/check-hosting-api-readiness.py")
+g=importlib.util.module_from_spec(spec);spec.loader.exec_module(g)
+values={k:"SYNTHETIC_PRIVATE_VALUE" for k in g.DEPLOYMENT_CONFIG_KEYS}
+values.update(APP_ENVIRONMENT="staging",EXPECTED_FIREBASE_PROJECT_ID=g.PROJECT,LKC_NOTIFICATION_DELIVERY_MODE="paused",LKC_SHEET_WRITE_MODE="paused",LKC_SUBMISSION_TRANSFER_MODE="paused")
+print(json.dumps(values))`], {encoding: "utf8"});
+    assert.equal(fixture.status, 0, fixture.stderr); configValues = JSON.parse(fixture.stdout);
+    for (const name of [".env.example", ".env.production.example", ".env.staging.example"])
+      files[name] = "PUBLIC_EXAMPLE=synthetic\n";
+    files[`.env.${PROJECT}`] = Object.keys(configValues).sort().map(key => `${key}=${configValues[key]}\n`).join("");
+  }
   for (const [name, bytes] of Object.entries(files)) {
     const target = path.join(sourceRoot, "functions", name); await mkdir(path.dirname(target), {recursive: true}); await writeFile(target, bytes);
   }
@@ -447,6 +518,10 @@ with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED) as archive:
 print(base64.b64encode(out.getvalue()).decode())`], {encoding: "utf8", input: JSON.stringify(files)});
   assert.equal(packed.status, 0, packed.stderr);
   const data = fixtures(true); data.bytes = Buffer.from(packed.stdout.trim(), "base64");
+  if (configMode) {
+    data.configDiagnostic = true;
+    for (const name of NAMES) data.functions[name].serviceConfig.environmentVariables = structuredClone(configValues);
+  }
   let crc = 0xffffffff;
   for (const byte of data.bytes) {crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0x82f63b78 : 0);}
   const checksum = Buffer.alloc(4); checksum.writeUInt32BE((crc ^ 0xffffffff) >>> 0);
@@ -464,15 +539,22 @@ g=load("fixed_bridge_readiness","check-hosting-api-readiness.py");e=load("fixed_
 root=pathlib.Path(sys.argv[1]);directory=pathlib.Path(sys.argv[2]);now=datetime.datetime.fromisoformat("2026-10-30T00:05:00+00:00")
 with patch.object(g.subprocess,"check_output",return_value=os.environ["LKC_SOURCE_SHA"].encode()):
  result=e.verify_fixed_capture(root,os.environ["LKC_SOURCE_SHA"],directory,g,now=now)
- receipt=e.bind_fixed_acceptance(result,now=now)
- target=pathlib.Path(os.environ["LKC_EVIDENCE_DIR"])/"api-readiness.json";target.write_text(json.dumps(receipt));target.chmod(0o600)
- fresh=e.verify_fixed_capture(root,os.environ["LKC_SOURCE_SHA"],directory,g,now=now)
- current=e.require_current_fixed_acceptance(target,fresh,now=now)
-assert current["evidenceMethod"]=="authenticated-fixed-generation" and current["runId"]==os.environ["GITHUB_RUN_ID"]
+ if os.environ.get("LKC_SOURCE_PACKAGING_POLICY")=="verified-env-diagnostic":
+  assert result["evidenceMethod"]==e.CONFIG_METHOD
+  try:e.bind_fixed_acceptance(result,now=now)
+  except e.EvidenceError as error:assert str(error)=="CONFIG_DIAGNOSTIC_NOT_MUTATION_AUTH"
+  else:raise AssertionError("CONFIG_PUBLICATION_FORBIDDEN")
+ else:
+  receipt=e.bind_fixed_acceptance(result,now=now)
+  target=pathlib.Path(os.environ["LKC_EVIDENCE_DIR"])/"api-readiness.json";target.write_text(json.dumps(receipt));target.chmod(0o600)
+  fresh=e.verify_fixed_capture(root,os.environ["LKC_SOURCE_SHA"],directory,g,now=now)
+  current=e.require_current_fixed_acceptance(target,fresh,now=now)
+  assert current["evidenceMethod"]=="authenticated-fixed-generation" and current["runId"]==os.environ["GITHUB_RUN_ID"]
 assert result["hostingPromotionAuthorized"] is False
 print("SYNTHETIC_FIXED_SOURCE_TO_MUTATION_GUARD=PASS")`, sourceRoot, directory], {encoding: "utf8"});
   assert.equal(verified.status, 0, verified.stderr); assert.match(verified.stdout, /SYNTHETIC_FIXED_SOURCE_TO_MUTATION_GUARD=PASS/u);
   assert(!verified.stdout.includes(TOKEN));
+  assert(!verified.stdout.includes("SYNTHETIC_PRIVATE_VALUE"));
 }));
 
 test("fixed CLI: partial source output without its attempt latch is never reacquired", () => privateFixture(async ({directory, run, output}) => {

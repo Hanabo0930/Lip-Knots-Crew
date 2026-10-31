@@ -67,6 +67,20 @@ archiveの実バイト数とtransportの整合性を確認し、取得した実�
 
 診断修正の隔離試験と通常CIを終えても、自動で実取得を繰り返さない。追加が必要な場合は、現在mainの新しい通常手動`readiness`実行を、対象2API・各10 MiB/計20 MiB・最大12 GET・追加試行1回・転送費用の可能性という範囲で提示する。`readiness`はHostingを変更しない。権限追加、別identity、Functions/GAS配備、停止解除は含めない。
 
+## #513の結果と設定比較専用の次工程
+
+本人の「1 / 1でよろしくー」は同一の承認として扱い、待機中の#512を取消し、追加1回だけ#513（run41168058347、main70d81f1e24ad8006c4349b24e666b4ce347a70d3、attempt1）を実行した。10 GET・2,758,448 bytesを取得し、`ARCHIVE_UNEXPECTED_FILE`で停止、private cleanup成功、Hosting/Functions/GASの変更なし。この追加枠は消化済みで、取得の通算は2回である。
+
+保存された4件のパスSHA256を公開リポジトリの候補と照合すると、`.env.example`、`.env.production.example`、`.env.staging.example`、`.env.lip-knots-crew-staging`に一致する。最後の候補名は既存の配備workflowから導出した。原始ZIPを再取得して読んだ結果ではなく、設定値やコード一致は未確認である。
+
+新しい`source_packaging_policy=verified-env-diagnostic`は、既存の同じ取得・検証処理を使う診断専用の選択肢。既定の`strict`およびretained方式を緩めない。手動readiness、metadata_only=false、fixed-source-once、source-provenanceと専用確認語`ACQUIRE_LKC_STAGING_FIXED_CONFIG_ONCE_20MIB`が必要で、promote/restoreには使えない。
+
+次回の具体的な読取範囲は既存2APIのFunction metadataに`serviceConfig.environmentVariables`を追加することと、同じ固定generationの2 ZIP（各10 MiB、計20 MiB、最大12 GET、1回、転送料の可能性）だけ。公式metadataを取得前後で比較し、設定mapの変化も停止理由とする。既存権限のみを使い、権限追加・別identity・Secrets API・Hosting/Functions/GAS書込・実業務データ・停止解除を含めない。**この新方式の実取得は未承認で、#513の承認を流用しない。**
+
+private領域内で、公開example3ファイルは現在リポジトリの内容hashと照合し、生成設定ファイル1件は既存writerの16項目をliteralなKEY=valueとして解析して公式設定値と完全照合する。プロジェクト固定と通知・シート・転記の3モードpausedを確認する。未知項目、展開構文、実行環境override、別env/鍵ファイル、欠落、内容差、ZIP構造不正は停止する。全runtime/publicファイルの照合を設定比較に先行させる。欠落パスは最大16件のSHA256、最初の内容不一致もパスSHA256だけで診断し、本文・設定値は出力しない。
+
+成功しても`readinessOnly=true`、`acceptanceEligible=false`で、公開用receiptは作らない。mutation guardとreceipt bindingでも明示拒否する。設定とソースの一致診断を公開承認へ読み替えない。実データを取得する前に通常CIとレビューを完了し、上記の追加読取範囲を本人に提示する。
+
 ## 公式仕様
 
 - [Cloud Build SourceProvenance / BuildOptions](https://docs.cloud.google.com/build/docs/api/reference/rest/v1/projects.builds)

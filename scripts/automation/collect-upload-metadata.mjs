@@ -18,6 +18,12 @@ export const FIXED_SOURCE_LIMITS = Object.freeze({archiveBytes: 10 * 1024 * 1024
 export const OBJECT_FIELDS = "bucket,name,generation,metageneration,size,storageClass,md5Hash,crc32c,contentEncoding,customerEncryption,kmsKeyName";
 const SOURCE_BUCKET = "gcf-v2-sources-740154137290-asia-northeast1";
 export const FUNCTION_FIELDS = "name,environment,state,updateTime,buildConfig(build,runtime,entryPoint,sourceProvenance(resolvedStorageSource(bucket,object,generation))),serviceConfig(service,revision,allTrafficOnLatestRevision)";
+export const CONFIG_FUNCTION_FIELDS = FUNCTION_FIELDS.replace("allTrafficOnLatestRevision)",
+  "allTrafficOnLatestRevision,environmentVariables)");
+const CONFIG_POLICY = "verified-env-diagnostic";
+const CONFIG_CONFIRMATION = "ACQUIRE_LKC_STAGING_FIXED_CONFIG_ONCE_20MIB";
+const configDiagnostic = () => process.env.LKC_SOURCE_PACKAGING_POLICY === CONFIG_POLICY;
+const fixedMethod = () => configDiagnostic() ? "authenticated-fixed-config-diagnostic" : "authenticated-fixed-generation";
 export const BUILD_FIELDS = "name,id,projectId,status,createTime,startTime,finishTime,sourceProvenance(resolvedStorageSource(bucket,object,generation),fileHashes),results(images(digest))";
 class MetadataError extends Error {}
 const requireValue = (condition, code) => {if (!condition) throw new MetadataError(code);};
@@ -215,12 +221,16 @@ export function validateFixedSourceContext() {
     eventName: process.env.GITHUB_EVENT_NAME, confirmation: process.env.LKC_CONFIRMATION,
     projectId: process.env.LKC_PROJECT_ID, region: process.env.LKC_REGION,
     sourceRef: process.env.GITHUB_REF_NAME, runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT)});
+  requireValue(["strict", CONFIG_POLICY].includes(process.env.LKC_SOURCE_PACKAGING_POLICY ?? "strict")
+    && (!configDiagnostic() || process.env.LKC_OPERATION === "readiness"),
+  "CONFIG_DIAGNOSTIC_READINESS_ONLY");
   requireValue(process.env.GITHUB_EVENT_NAME === "workflow_dispatch"
     && process.env.GITHUB_RUN_ATTEMPT === "1"
     && ["readiness", "promote"].includes(process.env.LKC_OPERATION) && process.env.LKC_METADATA_ONLY === "false"
     && process.env.LKC_EVIDENCE_POLICY === "source-provenance"
     && process.env.LKC_SOURCE_ACQUISITION === "fixed-source-once"
-    && process.env.LKC_SOURCE_ACQUISITION_CONFIRMATION === "ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB",
+    && process.env.LKC_SOURCE_ACQUISITION_CONFIRMATION === (configDiagnostic()
+      ? CONFIG_CONFIRMATION : "ACQUIRE_LKC_STAGING_FIXED_SOURCE_ONCE_20MIB"),
   "FIXED_SOURCE_EXPLICIT_REVIEW_REQUIRED");
   requireValue(/^[a-f0-9]{40}$/u.test(process.env.LKC_SOURCE_SHA ?? "")
     && process.env.GITHUB_SHA === process.env.LKC_SOURCE_SHA
@@ -235,7 +245,18 @@ function fixedTime(value) {
 }
 
 function fixedFunction(document, name, observed) {
-  validateFunction(document, name);
+  if (configDiagnostic()) {
+    const service = document.serviceConfig, values = service?.environmentVariables;
+    onlyKeys(service, ["service", "revision", "allTrafficOnLatestRevision", "environmentVariables"]);
+    requireValue(plain(values) && Object.keys(values).length > 0 && Object.keys(values).length <= 64
+      && Object.entries(values).every(([key, value]) => /^[A-Za-z_][A-Za-z0-9_]{0,127}$/u.test(key)
+        && typeof value === "string" && Buffer.byteLength(value, "utf8") <= 4096 && !value.includes("\u0000"))
+      && Buffer.byteLength(JSON.stringify(values), "utf8") <= 32768, "FIXED_SOURCE_CONFIG_METADATA_REJECTED");
+    requireValue(!["NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"].some(key => Object.hasOwn(values, key)),
+      "FIXED_SOURCE_CONFIG_EXECUTION_OVERRIDE_REJECTED");
+    const {environmentVariables, ...identity} = service;
+    validateFunction({...document, serviceConfig: identity}, name);
+  } else validateFunction(document, name);
   requireValue(document.environment === "GEN_2" && document.state === "ACTIVE"
     && document.buildConfig?.runtime === "nodejs22" && document.buildConfig.entryPoint === name
     && document.serviceConfig?.service === `${PREFIX}/services/${name.toLowerCase()}`
@@ -355,7 +376,7 @@ async function fixedBody(response, metadata, source, token, received) {
 }
 
 export async function collectFixedUploadSources({accessToken}, {request, now = () => new Date().toISOString()} = {}) {
-  const diagnostics = {status: "STOPPED", method: "authenticated-fixed-generation", requests: 0,
+  const diagnostics = {status: "STOPPED", method: fixedMethod(), requests: 0,
     bytesDownloaded: 0, deployedSourceVerified: false, hostingPromotionAuthorized: false};
   const archives = new Map();
   try {
@@ -388,7 +409,7 @@ export async function collectFixedUploadSources({accessToken}, {request, now = (
     };
     const readFunction = name => {
       const url = new URL(`https://cloudfunctions.googleapis.com/v2/${PREFIX}/functions/${name}`);
-      url.searchParams.set("fields", FUNCTION_FIELDS); return get(url);
+      url.searchParams.set("fields", configDiagnostic() ? CONFIG_FUNCTION_FIELDS : FUNCTION_FIELDS); return get(url);
     };
     const readBuild = name => {
       buildScope(name);
@@ -459,7 +480,8 @@ const FIXED_FLAGS = ["--fixed-source-guard", "--collect-fixed-source", "--cleanu
 function fixedIdentity() {
   return {schemaVersion: 1, repository: process.env.GITHUB_REPOSITORY,
     workflowRef: process.env.GITHUB_WORKFLOW_REF, runId: process.env.GITHUB_RUN_ID, runAttempt: 1,
-    sourceSha: process.env.LKC_SOURCE_SHA, operation: process.env.LKC_OPERATION};
+    sourceSha: process.env.LKC_SOURCE_SHA, operation: process.env.LKC_OPERATION,
+    ...(configDiagnostic() ? {packagingPolicy: CONFIG_POLICY} : {})};
 }
 
 async function noLinkedParents(target) {
@@ -558,7 +580,8 @@ async function loadFixedPlan(now) {
     const signature = (await readPrivate(directory, "plan.hmac", 64)).toString("utf8");
     requireValue(equalMac(signature, mac(key, bytes)), "FIXED_SOURCE_PLAN_SIGNATURE_REJECTED");
     let plan; try {plan = JSON.parse(bytes.toString("utf8"));} catch {throw new MetadataError("FIXED_SOURCE_PLAN_REJECTED");}
-    requireValue(plain(plan) && Object.keys(plan).length === PLAN_FIELDS.length && PLAN_FIELDS.every(field => Object.hasOwn(plan, field))
+    const planFields = [...PLAN_FIELDS, ...(configDiagnostic() ? ["packagingPolicy"] : [])];
+    requireValue(plain(plan) && Object.keys(plan).length === planFields.length && planFields.every(field => Object.hasOwn(plan, field))
       && Object.entries(fixedIdentity()).every(([field, value]) => plan[field] === value), "FIXED_SOURCE_PLAN_REJECTED");
     const current = fixedTime(now()), created = fixedTime(plan.createdAt);
     requireValue(created <= current && current - created < 30 * 60 * 1000, "FIXED_SOURCE_PLAN_EXPIRED");
@@ -609,7 +632,7 @@ export async function fixedSourceMain({argv = process.argv.slice(2), request = g
     if (argv[0] === "--fixed-source-guard") {await createFixedPlan(now); emit("HOSTING_FIXED_SOURCE_GUARD=READY"); return 0;}
     if (argv[0] === "--cleanup-fixed-source") {await cleanupFixedPlan(); emit("HOSTING_FIXED_SOURCE_CLEANUP=DONE"); return 0;}
     let state, capture;
-    let diagnostics = {status: "STOPPED", method: "authenticated-fixed-generation", requests: 0,
+    let diagnostics = {status: "STOPPED", method: fixedMethod(), requests: 0,
       bytesDownloaded: 0, deployedSourceVerified: false, hostingPromotionAuthorized: false};
     try {
       state = await loadFixedPlan(now);
@@ -626,7 +649,7 @@ export async function fixedSourceMain({argv = process.argv.slice(2), request = g
           archives[name] = {file: filename, sha256: createHash("sha256").update(blob).digest("hex"), size: blob.length};
           await writePrivate(state.directory, filename, blob);
         }
-        const bytes = serialize({...fixedIdentity(), method: "authenticated-fixed-generation", createdAt: state.plan.createdAt,
+        const bytes = serialize({...fixedIdentity(), method: fixedMethod(), createdAt: state.plan.createdAt,
           capturedAt: capture.capturedAt, endsAt: capture.endsAt, expiresAt: new Date(fixedTime(capture.capturedAt) + 10 * 60 * 1000).toISOString(),
           before: capture.before, builds: capture.builds, objects: capture.objects, after: capture.after, afterBuilds: capture.afterBuilds,
           archives, requestCount: diagnostics.requests, bytesDownloaded: diagnostics.bytesDownloaded});

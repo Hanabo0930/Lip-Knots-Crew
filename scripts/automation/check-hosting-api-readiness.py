@@ -22,6 +22,50 @@ MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_FIXED_ARCHIVE = 10 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 10000
 MAX_ARCHIVE_DIAGNOSTIC_PATHS = 16
+CONFIG_EXAMPLES = (".env.example", ".env.production.example", ".env.staging.example")
+DEPLOYMENT_CONFIG = ".env." + PROJECT
+DEPLOYMENT_CONFIG_KEYS = frozenset((
+    "APP_ENVIRONMENT", "LKC_NOTIFICATION_DELIVERY_MODE", "LKC_SHEET_WRITE_MODE",
+    "EXPECTED_FIREBASE_PROJECT_ID", "ADMIN_EMAILS", "EXECUTIVE_APPROVER_EMAILS",
+    "PRODUCTION_FIREBASE_PROJECT_ID", "APPROVAL_PACKAGE_KEY_ID", "DEFAULT_COMPANY_ID",
+    "STAFF_APP_URL", "ADMIN_APP_URL", "MAIL_FROM", "GMAIL_DELEGATED_USER",
+    "PUBLIC_LOGIN_GATEWAY_URL", "FILE_PREVIEW_GATEWAY_URL", "LKC_SUBMISSION_TRANSFER_MODE"))
+
+def verify_deployment_config(data, observed_environment):
+    """Private comparison only; never return file contents, keys or values."""
+    require(type(data) is bytes and 0 < len(data) <= 32768, "CONFIG_FILE_SIZE_REJECTED")
+    require(type(observed_environment) is dict and 1 <= len(observed_environment) <= 64,
+            "CONFIG_METADATA_REJECTED")
+    require(all(type(k) is str and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", k)
+                and type(v) is str and len(v.encode("utf-8")) <= 4096 and "\x00" not in v
+                for k, v in observed_environment.items())
+            and len(json.dumps(observed_environment).encode()) <= 32768,
+            "CONFIG_METADATA_REJECTED")
+    require(not {"NODE_OPTIONS", "NODE_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH"}
+            & set(observed_environment), "CONFIG_EXECUTION_OVERRIDE_REJECTED")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError:
+        raise ReadinessError("CONFIG_FILE_FORMAT_REJECTED") from None
+    # Accept only the current workflow's literal KEY=value writer. No dotenv
+    # expansion, quoted values, comments, multiline values or executable syntax.
+    require(text.endswith("\n") and "\r" not in text and "\x00" not in text,
+            "CONFIG_FILE_FORMAT_REJECTED")
+    found = {}
+    for line in text[:-1].split("\n"):
+        key, sep, value = line.partition("=")
+        require(sep and key in DEPLOYMENT_CONFIG_KEYS and key not in found
+                and value and value == value.strip() and len(value.encode()) <= 4096
+                and all(32 <= ord(c) <= 126 for c in value)
+                and not any(c in value for c in "'\"`$#\\"), "CONFIG_FILE_FORMAT_REJECTED")
+        found[key] = value
+    require(set(found) == DEPLOYMENT_CONFIG_KEYS, "CONFIG_FILE_KEYS_REJECTED")
+    require(all(observed_environment.get(k) == v for k, v in found.items()),
+            "CONFIG_RUNTIME_MISMATCH")
+    require(all(found[k] == v for k, v in {
+        "APP_ENVIRONMENT": "staging", "EXPECTED_FIREBASE_PROJECT_ID": PROJECT,
+        "LKC_NOTIFICATION_DELIVERY_MODE": "paused", "LKC_SHEET_WRITE_MODE": "paused",
+        "LKC_SUBMISSION_TRANSFER_MODE": "paused"}.items()), "CONFIG_PAUSE_STATE_REJECTED")
 
 class ReadinessError(Exception):
     pass
@@ -40,6 +84,27 @@ class UnexpectedArchiveFilesError(ReadinessError):
     def diagnostics(self):
         return {"unexpectedFileCount": self.unexpected_file_count,
                 "pathSha256": list(self.path_sha256), "truncated": self.truncated}
+
+class MissingArchiveFilesError(ReadinessError):
+    def __init__(self, names):
+        super().__init__("DEPLOYED_PACKAGE_INCOMPLETE")
+        hashes = sorted(hashlib.sha256(name.encode("utf-8")).hexdigest() for name in names)
+        self.missing_file_count = len(hashes)
+        self.path_sha256 = tuple(hashes[:MAX_ARCHIVE_DIAGNOSTIC_PATHS])
+
+    @property
+    def diagnostics(self):
+        return {"missingFileCount": self.missing_file_count, "pathSha256": list(self.path_sha256),
+                "truncated": self.missing_file_count > MAX_ARCHIVE_DIAGNOSTIC_PATHS}
+
+class ArchiveContentMismatchError(ReadinessError):
+    def __init__(self, name):
+        super().__init__("DEPLOYED_SOURCE_MISMATCH")
+        self.path_sha256 = hashlib.sha256(name.encode("utf-8")).hexdigest()
+
+    @property
+    def diagnostics(self):
+        return {"firstMismatchPathSha256": self.path_sha256}
 
 def require(condition, code):
     if not condition:
@@ -68,20 +133,24 @@ def expected_files(root, *, strict=False):
     require(json.loads((base / "package.json").read_text("utf-8")).get("main") == "lib/index.js", "LOCAL_ENTRY_UNEXPECTED")
     return {p.relative_to(base).as_posix(): digest(p.read_bytes()) for p in files}
 
-def expected_packaging_files(root):
+def expected_packaging_files(root, *, config_examples=False):
     """Exact current non-runtime files a Firebase source ZIP may include.
 
     These names are optional, never a prefix allowance: a present archive member
     must match its current repository bytes. Runtime inventory remains required.
-    The current package has root TS configs and TypeScript tests only; env/key
-    files and other formats are deliberately not candidates.
+    The default package permits root TS configs and TypeScript tests only.
+    An explicitly selected diagnostic may also compare three public templates;
+    the generated private config is handled separately against official values.
     """
     base = pathlib.Path(root) / "functions"
     candidates = [*base.glob("tsconfig*.json"), *(base / "test").rglob("*.ts")]
+    if config_examples:
+        candidates.extend(base / name for name in CONFIG_EXAMPLES)
     result = {}
     for file in candidates:
         name = file.relative_to(base).as_posix()
-        require(bool(re.fullmatch(r"tsconfig(?:[.][A-Za-z0-9_-]+)*[.]json|test/[A-Za-z0-9_./-]+[.]ts", name))
+        require((bool(re.fullmatch(r"tsconfig(?:[.][A-Za-z0-9_-]+)*[.]json|test/[A-Za-z0-9_./-]+[.]ts", name))
+                 or (config_examples and name in CONFIG_EXAMPLES))
                 and all(part not in {"", ".", ".."} for part in name.split("/")),
                 "LOCAL_PACKAGING_PATH_REJECTED")
         for ancestor in (file, *file.parents):
@@ -199,7 +268,7 @@ def strict_zip_data(blob, entry, bounds):
     require(len(data) == entry.file_size and zlib.crc32(data) == entry.CRC, "ARCHIVE_UNREADABLE")
     return data
 
-def verify_archive(blob, expected, *, strict=False, optional=None):
+def verify_archive(blob, expected, *, strict=False, optional=None, verified_environment=None):
     # The existing retained-source route keeps its historical policy. Fresh
     # authenticated acquisition additionally rejects every unapproved file,
     # even when it would not participate in the legacy code inventory.
@@ -208,6 +277,10 @@ def verify_archive(blob, expected, *, strict=False, optional=None):
     if strict:
         require(type(optional) is dict and not set(expected) & set(optional), "ARCHIVE_OPTIONAL_INVENTORY_REJECTED")
     allowed = {**expected, **optional} if strict else expected
+    if verified_environment is not None:
+        require(strict, "CONFIG_STRICT_ARCHIVE_REQUIRED")
+        require(DEPLOYMENT_CONFIG not in allowed, "CONFIG_OPTIONAL_INVENTORY_REJECTED")
+        allowed = {**allowed, DEPLOYMENT_CONFIG: None}
     try:
         with zipfile.ZipFile(io.BytesIO(blob)) as archive:
             entries = archive.infolist()
@@ -240,8 +313,9 @@ def verify_archive(blob, expected, *, strict=False, optional=None):
                             raise UnexpectedArchiveFilesError([
                                 item.filename for item in entries
                                 if not item.is_dir() and item.filename not in allowed])
-                require(set(expected) <= {entry.filename for entry in entries if not entry.is_dir()},
-                        "DEPLOYED_PACKAGE_INCOMPLETE")
+                missing = set(expected) - {entry.filename for entry in entries if not entry.is_dir()}
+                if missing:
+                    raise MissingArchiveFilesError(missing)
             require(len(names) == len(set(names)), "DUPLICATE_ARCHIVE_PATH")
             require(all(not n.startswith("/") and "\\" not in n and ".." not in n.split("/") for n in names), "UNSAFE_ARCHIVE_PATH")
             require(sum(i.file_size for i in entries) <= MAX_ARCHIVE, "ARCHIVE_TOO_LARGE")
@@ -251,6 +325,10 @@ def verify_archive(blob, expected, *, strict=False, optional=None):
                     if entry.is_dir():
                         require(strict_zip_data(blob, entry, payloads[entry.filename]) == b"",
                                 "ARCHIVE_DIRECTORY_REJECTED")
+                if verified_environment is not None:
+                    require(DEPLOYMENT_CONFIG in names, "CONFIG_FILE_REQUIRED")
+                    config_entry = archive.getinfo(DEPLOYMENT_CONFIG)
+                    require(config_entry.file_size <= 32768, "CONFIG_FILE_SIZE_REJECTED")
             suffixes = (".js", ".cjs", ".ts", ".json", ".js.map") if strict else (".js", ".cjs", ".ts", ".json")
             relevant = {n for n in names if n.startswith(("lib/", "src/", "case-mail-runtime/")) and n.endswith(suffixes)}
             require(relevant == {n for n in expected if n.startswith(("lib/", "src/", "case-mail-runtime/"))}, "DEPLOYED_CODE_INVENTORY_MISMATCH")
@@ -263,7 +341,14 @@ def verify_archive(blob, expected, *, strict=False, optional=None):
                     data = strict_zip_data(blob, archive.getinfo(name), payloads[name])
                 else:
                     data = archive.read(name)
+                if strict and digest(data) != sha:
+                    raise ArchiveContentMismatchError(name)
                 require(digest(data) == sha, "DEPLOYED_SOURCE_MISMATCH")
+            if strict and verified_environment is not None:
+                # Compare all required runtime/public files first. A config
+                # failure can never conceal an unverified code inventory.
+                verify_deployment_config(strict_zip_data(blob, config_entry,
+                    payloads[DEPLOYMENT_CONFIG]), verified_environment)
     except (zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError, EOFError, UnicodeError, zlib.error, struct.error):
         raise ReadinessError("ARCHIVE_UNREADABLE") from None
 
@@ -311,11 +396,17 @@ def main():
                                      expected_files=expected_files, expected_packaging_files=expected_packaging_files,
                                      subprocess=subprocess)
         acquisition = os.environ.get("LKC_SOURCE_ACQUISITION", "retained")
+        config_diagnostic = evidence.config_diagnostic_context(os.environ)
         if acquisition == "fixed-source-once":
+            evidence.need(not (config_diagnostic and args.mutation_guard),
+                          "CONFIG_DIAGNOSTIC_NOT_MUTATION_AUTH")
             directory = evidence.fixed_protected_context(args.source_sha)
             result = evidence.verify_fixed_capture(args.root.resolve(), args.source_sha, directory,
                                                    validators, preflight=args.preflight)
-            if args.mutation_guard:
+            if config_diagnostic:
+                # Diagnostic PASS never becomes a publication receipt.
+                result = {**result, "readinessOnly": True, "acceptanceEligible": False}
+            elif args.mutation_guard:
                 result = evidence.require_current_fixed_acceptance(args.evidence.absolute(), result)
             else:
                 result = evidence.bind_fixed_acceptance(result)
@@ -331,7 +422,8 @@ def main():
     except (ReadinessError, evidence.EvidenceError, OSError, ValueError, TypeError, AttributeError, RecursionError) as error:
         code = str(error) if isinstance(error, (ReadinessError, evidence.EvidenceError)) else "READINESS_INPUT_INVALID"
         result = {"status": "STOPPED", "reason": code}
-        if os.environ.get("LKC_SOURCE_ACQUISITION") == "fixed-source-once" and type(error) is UnexpectedArchiveFilesError:
+        if os.environ.get("LKC_SOURCE_ACQUISITION") == "fixed-source-once" and type(error) in {
+                UnexpectedArchiveFilesError, MissingArchiveFilesError, ArchiveContentMismatchError}:
             result["diagnostics"] = error.diagnostics
     if args.mutation_guard:
         # Read-only revalidation: never overwrite/renew the accepted receipt.

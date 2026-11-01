@@ -7,7 +7,8 @@ import { notificationQueueId, queueDocumentData } from "./notification-core";
 import { companyFromClaims, requireAdmin, requireAuth, staffFromClaims } from "./utils";
 import { assertProductionOperational } from "./system-safety";
 const ReasonEnum=z.enum(["手ブレで文字が読めません","画像が暗い・反射しています","一部が切れています","レシート全体が写っていません","金額・日付が確認できません","その他"]);
-const CreateSchema=z.object({expectedRevision:z.number().int().nonnegative().optional(),jobId:z.string().min(1),type:z.enum(["report","sales_floor"]),sourceSubmissionId:z.string().optional(),sourceFileId:z.string().optional(),reasons:z.array(ReasonEnum).min(1).max(6),note:z.string().max(1000).default("")}).refine(v=>!v.sourceFileId||!!v.sourceSubmissionId,{message:"元ファイルの提出IDが必要です"});
+const OptionalSourceIdSchema=z.string().nullish().transform(value=>value??undefined);
+const CreateSchema=z.object({expectedRevision:z.number().int().nonnegative().optional(),jobId:z.string().min(1),type:z.enum(["report","sales_floor"]),sourceSubmissionId:OptionalSourceIdSchema,sourceFileId:OptionalSourceIdSchema,reasons:z.array(ReasonEnum).min(1).max(6),note:z.string().max(1000).default("")}).refine(v=>!v.sourceFileId||!!v.sourceSubmissionId,{message:"元ファイルの提出IDが必要です"});
 const CompleteSchema=z.object({requestId:z.string().min(1)});
 export const createResubmissionRequest = onCall(async request => {
  const session=requireAdmin(request),companyId=companyFromClaims(session.token);

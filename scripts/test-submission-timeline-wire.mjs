@@ -19,14 +19,15 @@ export async function runSubmissionTimelineWireTests(harness) {
   const endpoint='https://example.invalid/timeline';
   const originalFetch=globalThis.fetch;
   const requests=[];
-  let h=harness(),deleteApp,app;
+  let h=harness(),deleteApp,app,operation='timeline';
   globalThis.fetch=async (url,options)=>{
     assert.equal(String(url),endpoint,'All real network access is refused');
     assert.equal(options.method,'POST');
     const body=JSON.parse(options.body);
     requests.push(body.data);
     try {
-      const data=await h.views.getSubmissionTimeline({auth:h.admin,data:body.data});
+      const handler=operation==='timeline'?h.views.getSubmissionTimeline:h.requests.createResubmissionRequest;
+      const data=await handler({auth:h.admin,data:body.data});
       return new Response(JSON.stringify({data}),{status:200,headers:{'Content-Type':'application/json'}});
     } catch {
       return new Response(JSON.stringify({error:{status:'INVALID_ARGUMENT',message:'Synthetic request rejected'}}),{status:400,headers:{'Content-Type':'application/json'}});
@@ -91,6 +92,57 @@ export async function runSubmissionTimelineWireTests(harness) {
     await assert.rejects(h.views.getSubmissionTimeline({auth:{...h.staff,token:{...h.staff.token,staffId:'foreign-staff'}},data}),{code:'permission-denied'});
     assert.equal(h.queryReads,0,'Null compatibility must not bypass company or assignment authorization');
     console.log(JSON.stringify({submissionTimelineWire:{passed:true,transport:'Actual Firebase SDK with a fixed fake endpoint; no real network or data writes'}}));
+    operation='resubmission';
+    const createStart=appSource.indexOf('  async function createResubmission()');
+    const createEnd=appSource.indexOf('  async function refreshResubmissionList(',createStart);
+    assert.ok(createStart>=0&&createEnd>createStart,'Actual resubmission action must be found');
+    const createLoader=compile(appSource.slice(createStart,createEnd));
+    async function createUI(type,sourceFile=null) {
+      const user={uid:'synthetic-admin'},state={busy:false,review:false,messages:[],reloads:0};
+      const context={
+        resubmissionNeedsReviewRef:{current:false},resubmissionPendingRef:{current:false},
+        jobs:[{id:'synthetic-job'}],mailSubmissionHeld:()=>false,selectedAdminJobId:'synthetic-job',
+        timelineReady:true,timelinePendingRef:{current:null},resubmitReasons:['その他'],resubmitNote:'',
+        selectedSourceFile:sourceFile,submissionTimeline:sourceFile?[{files:[sourceFile]}]:[],
+        firebaseConfigured:true,functions,auth:{currentUser:user},timelineKey:'scope',timelineKeyRef:{current:'scope'},resubmitType:type,
+        setMessage:value=>state.messages.push(value),setResubmissionBusy:value=>state.busy=value,setResubmissionNeedsReview:value=>state.review=value,
+        loadResubmissions:async guard=>{assert.equal(guard(),true);state.reloads++;},
+        httpsCallable:(service,name)=>{assert.equal(service,functions);assert.equal(name,'createResubmissionRequest');return callable;},
+      };
+      runInNewContext(createLoader,context);
+      await context.createResubmission();
+      assert.equal(state.busy,false);assert.equal(state.review,false);assert.equal(context.resubmissionPendingRef.current,false);
+      assert.equal(state.reloads,1,'The actual UI must reach the accepted/reload path');
+      assert.ok(state.messages.includes('再提出依頼を送りました。'));
+    }
+    for(const type of ['report','sales_floor']) {
+      h=harness();await createUI(type);
+      for(const key of ['sourceSubmissionId','sourceFileId'])assert.equal(Object.hasOwn(requests.at(-1),key),false,'Whole-case UI requests must omit source identifiers');
+      assert.equal(h.list('resubmissionRequests').length,1);assert.equal(h.list('notificationQueue').length,1);
+      assert.equal(h.list('resubmissionRequests')[0].sourceSubmissionId,null);assert.equal(h.list('resubmissionRequests')[0].sourceFileId,null);
+      h=harness();
+      const response=await callable({jobId:'synthetic-job',type,reasons:['その他'],sourceSubmissionId:undefined,sourceFileId:undefined});
+      assert.equal(typeof response.data.requestId,'string');
+      assert.equal(requests.at(-1).sourceSubmissionId,null);assert.equal(requests.at(-1).sourceFileId,null);
+      assert.equal(h.list('resubmissionRequests').length,1,'Existing SDK clients must create the same whole-case request');
+      h=harness();const source=await h.start(1,{type});await h.finish(source.files[0]);
+      const sourceFile={id:source.files[0].fileId,submissionId:source.submissionId,status:'completed'};
+      await createUI(type,sourceFile);
+      assert.equal(requests.at(-1).sourceSubmissionId,sourceFile.submissionId);assert.equal(requests.at(-1).sourceFileId,sourceFile.id);
+      assert.equal(h.list('resubmissionRequests')[0].sourceFileId,sourceFile.id,'Targeted requests must keep the validated completed source');
+    }
+    for(const invalid of [{sourceSubmissionId:null,sourceFileId:'orphan'},{sourceSubmissionId:17,sourceFileId:null},{sourceSubmissionId:null,sourceFileId:[]}]) {
+      h=harness();await assert.rejects(callable({jobId:'synthetic-job',type:'report',reasons:['その他'],...invalid}),{code:'functions/invalid-argument'});
+      assert.equal(h.list('resubmissionRequests').length,0);assert.equal(h.list('notificationQueue').length,0);
+    }
+    const wholeCase={jobId:'synthetic-job',type:'report',reasons:['その他'],sourceSubmissionId:null,sourceFileId:null};
+    h=harness();
+    await assert.rejects(h.requests.createResubmissionRequest({data:wholeCase}),{code:'unauthenticated'});
+    await assert.rejects(h.requests.createResubmissionRequest({auth:h.staff,data:wholeCase}),{code:'permission-denied'});
+    await h.updateRecord('jobs/synthetic-job',{status:'cancelled',cancelled:true});
+    await assert.rejects(h.requests.createResubmissionRequest({auth:h.admin,data:wholeCase}),{code:'failed-precondition'});
+    assert.equal(h.list('resubmissionRequests').length,0);assert.equal(h.list('notificationQueue').length,0);
+    console.log(JSON.stringify({resubmissionWire:{passed:true,transport:'Actual SDK/UI/handler; only synthetic requests and synthetic notification records; no real delivery'}}));
   } finally {
     if(app)await deleteApp(app);
     globalThis.fetch=originalFetch;

@@ -2928,7 +2928,7 @@ async function previewRowCreation() {
         setResubmissions(current=>[{id:crypto.randomUUID(),jobId:selectedAdminJobId,staffId:"s1",type:resubmitType,reasons:resubmitReasons,note:resubmitNote,status:"open",sourceSubmissionId:selectedSourceFile?.submissionId,sourceFileId:selectedSourceFile?.id},...current]);
         setMessage("デモ：再提出依頼を送りました。");return;
       }
-      await httpsCallable(functions!,"createResubmissionRequest")({jobId:selectedAdminJobId,...(jobs.find(job=>job.id===selectedAdminJobId)?.mailIntake?{expectedRevision:jobs.find(job=>job.id===selectedAdminJobId)?.revision}:{}),type:resubmitType,reasons:resubmitReasons,note:resubmitNote,sourceSubmissionId:selectedSourceFile?.submissionId,sourceFileId:selectedSourceFile?.id});
+      await httpsCallable(functions!,"createResubmissionRequest")({jobId:selectedAdminJobId,...(jobs.find(job=>job.id===selectedAdminJobId)?.mailIntake?{expectedRevision:jobs.find(job=>job.id===selectedAdminJobId)?.revision}:{}),type:resubmitType,reasons:resubmitReasons,note:resubmitNote,...(selectedSourceFile?{sourceSubmissionId:selectedSourceFile.submissionId,sourceFileId:selectedSourceFile.id}:{})});
       accepted=true;
       if(!isCurrent())return;
       setMessage("再提出依頼を送りました。");

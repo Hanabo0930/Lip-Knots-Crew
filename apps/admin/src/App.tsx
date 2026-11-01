@@ -730,7 +730,7 @@ type JobEditForm = {
 };
 
 const blankJobForm:JobForm = {
-  workDate:"2026-08-01", clientName:"", storeName:"", makerName:"",
+  workDate:new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Tokyo",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date()), clientName:"", storeName:"", makerName:"",
   storeAddress:"", storeNearestStation:"",
   menuName:"", entryTime:"9:45", workTime:"10:00～18:00", subcontractorName:"",
   slots:"1", basePay:"10000", publicationMode:"draft", publishAt:"",

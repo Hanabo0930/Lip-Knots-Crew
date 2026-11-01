@@ -9,6 +9,19 @@ These rules apply to every automated coding agent working in this repository.
 - Production access, production deploys, and production credentials are prohibited.
 - Never print secrets, access tokens, ID tokens, environment files, personal data, or complete cloud resource policies.
 
+## Approved source-bucket privacy setting (2026-11-01)
+
+The president explicitly approved changing only
+`iamConfiguration.publicAccessPrevention` from `inherited` to `enforced` on
+`gcf-v2-sources-740154137290-asia-northeast1` in the staging project. This
+applies to every object in this shared source bucket. Use the existing protected
+Functions owner route and identity, a fresh metageneration precondition, one
+single-field PATCH, and full metadata/policy readback. Already enforced means
+verify without writing. Do not add permissions, edit bindings or ancestor policy,
+change other buckets/settings, retry an unknown result, or automatically weaken
+the setting. Keep this separately confirmed operation apart from source refresh
+apply; its result does not authorize source acquisition or real business writes.
+
 ## Git safety
 
 - Work on a dedicated `cursor/*` or `automation/*` branch.
@@ -374,3 +387,4 @@ Standing completion authorization includes the ten admin core callables listed a
 - 本人はPR239の `docs/cancellation-private-history-review.md` に提示した範囲に「おけ、進めといて」と回答。jobsのスタッフ読取をopenまたはassignedかつ本人に絞るRules、本人取得5クエリ、対応jobs COLLECTION索引1定義（companyId/assignedStaffId/status/dateKey ASC）、旧キャッシュ破棄・拒否時除去、今後の取消通知の一般文言化を許可する。
 - 対象は `lip-knots-crew-staging` のみ。会社境界・管理者・activeStaff・書込禁止を保持し、案件ID/スタッフID/履歴/所有lockを削除しない。実送信・過去通知の一括削除・データ補正・IAM・GAS・本番・原本業務書込・停止解除は含めない。
 - 隔離試験、全取消writerのstatus/flag同時更新確認、現存する矛盾文書ゼロの読取監査、固定版退避と復元手順を配備前提とする。不完全/拒否/矛盾は停止。索引READY→対応アプリ→Rulesの順にし、旧クエリを先に拒否しない。既存の通常CI/保護/配備経路を迂回しない。
+

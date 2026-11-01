@@ -15,6 +15,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PREFIX = `projects/${S.project}/locations/${S.region}`;
 const CF = 'https://cloudfunctions.googleapis.com/v2/';
 const STORAGE = 'https://storage.googleapis.com';
+export const UPLOAD_BACKUP_PRIVACY_CONFIRMATION = 'ENFORCE_LKC_STAGING_UPLOAD_BACKUP_PUBLIC_ACCESS_PREVENTION';
 const fail = code => { throw Error(code); };
 const need = (condition, code) => { if (!condition) fail(code); };
 const sha = data => createHash('sha256').update(data).digest('hex');
@@ -44,6 +45,8 @@ export function validateUploadRefreshContext(env) {
   'UPLOAD_REFRESH_PROTECTED_CONTEXT_REQUIRED');
   need(!env.LKC_UPLOAD_WRITE_CONFIRMATION || env.LKC_UPLOAD_WRITE_CONFIRMATION === 'APPLY_LKC_STAGING_UPLOAD_SOURCE_REFRESH',
     'UPLOAD_REFRESH_WRITE_CONFIRMATION_REJECTED');
+  need(!env.LKC_UPLOAD_PRIVACY_CONFIRMATION || (env.LKC_UPLOAD_PRIVACY_CONFIRMATION === UPLOAD_BACKUP_PRIVACY_CONFIRMATION
+    && !env.LKC_UPLOAD_WRITE_CONFIRMATION), 'UPLOAD_REFRESH_PRIVACY_CONFIRMATION_REJECTED');
 }
 
 export function uploadRefreshPreflightSummary(before, bucket) {
@@ -67,9 +70,9 @@ export function uploadRefreshPreflightSummary(before, bucket) {
 
 // One request, bounded response, no redirects and no mutation retries. The
 // inherited ADC/WIF identity supplies headers; credentials are never displayed.
-export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch) {
+export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch, {allowBackupPrivacyEnforcement = false} = {}) {
   const counters = {requests: 0, metadataBytes: 0, mediaBytes: 0, writesAttempted: 0};
-  const seenMutations = new Set(), counts = {uploads: 0, copies: 0, config: 0, patches: 0, media: 0};
+  const seenMutations = new Set(), counts = {uploads: 0, copies: 0, config: 0, patches: 0, media: 0, bucketPrivacy: 0};
   const allowed = new Set(['cloudfunctions.googleapis.com', 'run.googleapis.com',
     `${S.region}-run.googleapis.com`, 'eventarc.googleapis.com', 'storage.googleapis.com',
     'cloudresourcemanager.googleapis.com']);
@@ -103,6 +106,11 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch) {
       && body.buildConfig.source.storageSource?.bucket === S.bucket
       && /^[1-9][0-9]{0,19}$/.test(body.buildConfig.source.storageSource.generation ?? '')
       && destination.test(body.buildConfig.source.storageSource.object ?? '');
+    const bucketPrivacyPatch = allowBackupPrivacyEnforcement === true && method === 'PATCH'
+      && url.hostname === 'storage.googleapis.com' && url.pathname === `/storage/v1/b/${S.bucket}`
+      && /^[1-9][0-9]{0,19}$/.test(url.searchParams.get('ifMetagenerationMatch') ?? '')
+      && url.search === '?ifMetagenerationMatch=' + url.searchParams.get('ifMetagenerationMatch')
+      && isDeepStrictEqual(body, {iamConfiguration: {publicAccessPrevention: 'enforced'}});
     const upload = method === 'POST' && url.hostname === 'storage.googleapis.com'
       && url.pathname === `/upload/storage/v1/b/${S.bucket}/o`
       && url.searchParams.get('uploadType') === 'media' && url.searchParams.get('ifGenerationMatch') === '0'
@@ -113,8 +121,9 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch) {
       && /^[1-9][0-9]{0,19}$/.test(url.searchParams.get('sourceGeneration') ?? '')
       && url.searchParams.get('sourceGeneration') === url.searchParams.get('ifSourceGenerationMatch')
       && destination.test(decodeURIComponent(copyParts[2])) && isDeepStrictEqual(body, {});
-    need(read || policyRead || effectivePolicyRead || patch || upload || copyRequest, 'UPLOAD_REFRESH_HTTP_SCOPE_REJECTED');
-    counters.lastRequestKind = effectivePolicyRead ? 'project-effective-public-access' : policyRead ? 'project-policy' : patch ? 'function-source-update' : upload ? 'private-object-create'
+    need(read || policyRead || effectivePolicyRead || patch || bucketPrivacyPatch || upload || copyRequest, 'UPLOAD_REFRESH_HTTP_SCOPE_REJECTED');
+    counters.lastRequestKind = bucketPrivacyPatch ? 'backup-bucket-public-access-prevention-update'
+      : effectivePolicyRead ? 'project-effective-public-access' : policyRead ? 'project-policy' : patch ? 'function-source-update' : upload ? 'private-object-create'
       : copyRequest ? 'source-backup-copy' : url.pathname.endsWith(':getIamPolicy') ? 'invoker-policy'
       : url.hostname === 'storage.googleapis.com' ? 'storage-metadata' : url.hostname === 'eventarc.googleapis.com' ? 'event-trigger'
       : url.hostname === 'cloudresourcemanager.googleapis.com' ? 'project-metadata'
@@ -126,10 +135,11 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch) {
         || S.functions.some(name => decodeURIComponent(url.pathname.split('/o/')[1] ?? '') === `${name}/function-source.zip`))
       && decodeURIComponent(url.pathname.split('/o/')[1] ?? '').endsWith('.zip') && ++counts.media <= 2),
     'UPLOAD_REFRESH_MEDIA_SCOPE_REJECTED');
-    if (patch || upload || copyRequest) {
+    if (patch || bucketPrivacyPatch || upload || copyRequest) {
       const mutationKey = method + ':' + url.href + (patch ? ':' + JSON.stringify(body.buildConfig.source) : '');
       need(!seenMutations.has(mutationKey), 'UPLOAD_REFRESH_MUTATION_ALREADY_ATTEMPTED'); seenMutations.add(mutationKey);
       if (patch) need(++counts.patches <= 4, 'UPLOAD_REFRESH_MUTATION_LIMIT');
+      if (bucketPrivacyPatch) need(++counts.bucketPrivacy <= 1, 'UPLOAD_REFRESH_MUTATION_LIMIT');
       if (copyRequest) need(++counts.copies <= 2, 'UPLOAD_REFRESH_MUTATION_LIMIT');
       if (upload) need(url.searchParams.get('name').endsWith('.zip') ? ++counts.uploads <= 2 : ++counts.config <= 1,
         'UPLOAD_REFRESH_MUTATION_LIMIT');
@@ -196,19 +206,51 @@ export function uploadRefreshReader(api) {
     }
     return pair;
   }
-  async function readBucket() {
+  async function readBucket({skipEffectivePublicAccessPrevention = false} = {}) {
     const bucket = await get(`${STORAGE}/storage/v1/b/${S.bucket}`);
     bucket.policy = policy(await get(`${STORAGE}/storage/v1/b/${S.bucket}/iam?optionsRequestedPolicyVersion=3`));
     bucket.project = await get(`https://cloudresourcemanager.googleapis.com/v1/projects/${S.project}`);
     bucket.projectPolicy = policy(await api.request(`https://cloudresourcemanager.googleapis.com/v1/projects/${S.project}:getIamPolicy`,
       {method: 'POST', body: {options: {requestedPolicyVersion: 3}}, readOnlyPost: true}));
-    if (bucket.iamConfiguration?.publicAccessPrevention === 'inherited' && bucket.project?.parent) {
+    if (!skipEffectivePublicAccessPrevention && bucket.iamConfiguration?.publicAccessPrevention === 'inherited' && bucket.project?.parent) {
       bucket.effectivePublicAccessPrevention = await api.request(`https://cloudresourcemanager.googleapis.com/v1/projects/${S.project}:getEffectiveOrgPolicy`,
         {method: 'POST', body: {constraint: UPLOAD_PUBLIC_ACCESS_CONSTRAINT}, readOnlyPost: true});
     }
     return bucket;
   }
   return {readPair, readBucket};
+}
+
+// The president approved this one bucket setting on 2026-11-01. Use the
+// existing protected owner identity, a fresh conflict guard and one PATCH.
+// Full before/after metadata and policies stay in memory, never in artifacts.
+export async function enforceUploadBackupPrivacy(api, reader) {
+  const read = () => reader.readBucket({skipEffectivePublicAccessPrevention: true});
+  const validate = bucket => need(bucket?.name === S.bucket && bucket.projectNumber === S.projectNumber
+    && bucket.location === S.region.toUpperCase() && bucket.iamConfiguration?.uniformBucketLevelAccess?.enabled === true
+    && bucket.project?.projectId === S.project && bucket.project.projectNumber === S.projectNumber
+    && bucket.project.lifecycleState === 'ACTIVE' && /^[1-9][0-9]{0,19}$/.test(bucket.metageneration ?? '')
+    && ['inherited', 'enforced'].includes(bucket.iamConfiguration.publicAccessPrevention),
+  'UPLOAD_REFRESH_PRIVACY_BUCKET_NOT_VERIFIED');
+  const before = await read(); validate(before);
+  if (before.iamConfiguration.publicAccessPrevention === 'enforced')
+    return {summary: {status: 'ALREADY_ENFORCED', changed: false}};
+  const fresh = await read(); validate(fresh);
+  need(isDeepStrictEqual(fresh, before), 'UPLOAD_REFRESH_PRIVACY_BEFORE_IMAGE_DRIFT');
+  const url = new URL(`${STORAGE}/storage/v1/b/${S.bucket}`);
+  url.searchParams.set('ifMetagenerationMatch', fresh.metageneration);
+  await api.request(url, {method: 'PATCH', body: {iamConfiguration: {publicAccessPrevention: 'enforced'}}});
+  const after = await read(); validate(after);
+  need(after.iamConfiguration.publicAccessPrevention === 'enforced'
+    && BigInt(after.metageneration) === BigInt(fresh.metageneration) + 1n,
+  'UPLOAD_REFRESH_PRIVACY_READBACK_NOT_VERIFIED');
+  const comparable = bucket => {
+    const {metageneration, updated, etag, ...stable} = structuredClone(bucket);
+    delete stable.iamConfiguration.publicAccessPrevention;
+    return stable;
+  };
+  need(isDeepStrictEqual(comparable(after), comparable(fresh)), 'UPLOAD_REFRESH_PRIVACY_OTHER_SETTINGS_CHANGED');
+  return {summary: {status: 'ENFORCED_AND_VERIFIED', changed: true}};
 }
 
 function pinnedObject(metadata) {
@@ -339,14 +381,21 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
     else {
       const require = createRequire(path.join(root, 'package.json'));
       const {GoogleAuth} = require('google-auth-library');
-      api = authenticatedUploadRefreshAPI(await new GoogleAuth({scopes: ['https://www.googleapis.com/auth/cloud-platform']}).getClient());
+      api = authenticatedUploadRefreshAPI(await new GoogleAuth({scopes: ['https://www.googleapis.com/auth/cloud-platform']}).getClient(), fetch,
+        {allowBackupPrivacyEnforcement: env.LKC_UPLOAD_PRIVACY_CONFIRMATION === UPLOAD_BACKUP_PRIVACY_CONFIRMATION});
     }
-    const reader = uploadRefreshReader(api), before = await reader.readPair(), bucket = await reader.readBucket();
+    const reader = uploadRefreshReader(api);
+    if (env.LKC_UPLOAD_PRIVACY_CONFIRMATION) {
+      result.backupPrivacyEnforcement = {status: 'REQUESTED_RESULT_UNVERIFIED', changed: null};
+      result.backupPrivacyEnforcement = (await enforceUploadBackupPrivacy(api, reader)).summary;
+    }
+    const before = await reader.readPair(), bucket = await reader.readBucket();
     result.preflight = uploadRefreshPreflightSummary(before, bucket);
     assertUploadRefreshBeforeImages(before, bucket);
     if (!env.LKC_UPLOAD_WRITE_CONFIRMATION) {
       result = {...result, status: 'UPLOAD_SOURCE_PREFLIGHT_VERIFIED', sourceRefreshPreflightVerified: true,
-        environment: dependencies.api ? 'isolated-test' : 'staging-read-only'};
+        environment: dependencies.api ? 'isolated-test' : env.LKC_UPLOAD_PRIVACY_CONFIRMATION
+          ? 'staging-bucket-privacy-and-read-only-preflight' : 'staging-read-only'};
       return result;
     }
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-upload-source-refresh-')); fs.chmodSync(temporary, 0o700);
@@ -403,3 +452,4 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
   }
   return result;
 }
+

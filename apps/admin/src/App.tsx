@@ -2866,7 +2866,7 @@ async function previewRowCreation() {
       }
       if (!functions) return;
       const callable = httpsCallable(functions, "getSubmissionTimeline");
-      const response = await callable({ jobId:selectedAdminJobId, type:resubmitType, previewFile });
+      const response = await callable({ jobId:selectedAdminJobId, type:resubmitType, ...(previewFile ? {previewFile} : {}) });
       if(!isCurrent())return;
       const {mergeSubmissionTimeline}=await import("./submission-timeline");
       if(!isCurrent())return;

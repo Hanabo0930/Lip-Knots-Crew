@@ -13,6 +13,12 @@ function validate(text){
  assert.deepEqual(Object.keys(w.on),['workflow_dispatch']);
  assert.deepEqual(w.on.workflow_dispatch.inputs.operation.options,['deploy','upload-source-refresh','gmail-smoke','cancellation-privacy-audit']);
  assert.equal(w.on.workflow_dispatch.inputs.operation.default,'deploy');
+ assert.equal(w.on.workflow_dispatch.inputs.upload_privacy_confirmation.default,'');
+ for(const job of ['guard','deploy']) {
+  const step=w.jobs[job].steps.find(s=>s.env?.LKC_UPLOAD_WRITE_CONFIRMATION);
+  assert.equal(step.env.LKC_UPLOAD_PRIVACY_CONFIRMATION,'${{ inputs.upload_privacy_confirmation }}');
+ }
+ assert(w.jobs.guard.steps.find(s=>s.name==='Validate requested scope').run.includes('UPLOAD_REFRESH_PRIVACY_CONFIRMATION_REJECTED'));
  const deployOnly="inputs.operation == 'deploy' || inputs.operation == 'upload-source-refresh'";
  assert.equal(w.jobs.guard.if,deployOnly);assert.equal(w.jobs.deploy.if,deployOnly);
  assert.equal(w.jobs['smoke-guard'].if,"inputs.operation == 'gmail-smoke'");assert(w.jobs['gmail-smoke'].if.includes("inputs.operation == 'gmail-smoke'"));
@@ -82,3 +88,4 @@ try{
  assert.notEqual(run(recheck,{FAKE_MAIN:'b'.repeat(40)}).status,0,'Main changed during protected review');passed++;
 }finally{fs.rmSync(tmp,{recursive:true,force:true});}
 console.log(JSON.stringify({schema:'LK_STAGING_CANCELLATION_PRIVACY_WORKFLOW_GUARD_TESTS_V2',passed,cloudOperations:false,entrypoint:'staging-functions-deploy.yml',IAMChanges:false}));
+

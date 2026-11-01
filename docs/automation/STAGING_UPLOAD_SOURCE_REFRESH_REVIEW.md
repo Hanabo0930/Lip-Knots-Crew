@@ -87,6 +87,38 @@ Primary API/semantics:
 
 ## Read-only preflight before an apply review
 
+### Approved single-bucket privacy update (2026-11-01)
+
+The president explicitly approved `iamConfiguration.publicAccessPrevention`:
+`inherited` -> `enforced` on the one shared source bucket above, including its
+effect on public-principal access to every object in that bucket. The existing
+owner workflow accepts this separately confirmed action with
+`upload_privacy_confirmation=ENFORCE_LKC_STAGING_UPLOAD_BACKUP_PUBLIC_ACCESS_PREVENTION`.
+Keep `upload_write_confirmation` empty. The protected main/first-attempt/CI/source
+checks and existing deploy identity are unchanged; mixed source-apply and privacy
+confirmations are rejected. With both optional confirmations empty, preflight
+remains read-only.
+
+The owner reads full bucket metadata and the existing bucket/project policies,
+verifies the exact project, region, UBLA and numeric metageneration, then compares
+a second fresh snapshot. Already-enforced state requires no mutation. Inherited
+state permits one PATCH containing only the approved field, guarded by that
+fresh metageneration. Full readback must show enforced, exactly the next
+metageneration, and unchanged other settings and policies; only the provider's
+etag/update-time are excluded from that comparison. The raw observations remain
+private in memory. Unknown, conflicting, denied or unverifiable results stop;
+there is no retry, role grant or automatic weakening rollback.
+
+Only after privacy readback does the ordinary metadata preflight run. This action
+does not acquire sources, create backup/package objects or update Functions, and
+successful bucket enforcement alone does not claim source deployment or business
+acceptance. The bounded result reports the setting operation separately from
+the preflight, preserving an unverified outcome if readback cannot finish.
+
+Primary contracts:
+- https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/patch
+- https://docs.cloud.google.com/storage/docs/public-access-prevention
+
 The same operation defaults to read-only. It captures and validates only metadata,
 returns bounded mode/privacy/Invoker states, and cleans the private observations.
 It performs no package build/upload, backup, source media GET, Function PATCH or
@@ -189,3 +221,4 @@ and all held unsupported cases retain their existing implementation and boundari
 - [GCS generation-precondition copy](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/copy)
 - [GCS create-only upload](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/insert)
 - [Run service metadata](https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.services/get)
+

@@ -9,7 +9,7 @@ import {createRequire} from 'node:module';
 import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, prepareUploadSourceRefresh, uploadBackupRequests,
   verifyUploadBackups, uploadSourceOnlyPatch, runUploadRefreshTransaction} from './upload-source-refresh-contract.mjs';
 import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUploadRefreshObject, runUploadSourceRefresh,
-  uploadRefreshCloudOwner} from './run-upload-source-refresh.mjs';
+  uploadRefreshCloudOwner, enforceUploadBackupPrivacy, UPLOAD_BACKUP_PRIVACY_CONFIRMATION} from './run-upload-source-refresh.mjs';
 import {validatePlan} from './validate-staging-scope.mjs';
 const copy = value => structuredClone(value), prefix = `projects/${S.project}/locations/${S.region}`;
 const privateValue = 'synthetic-private-value-do-not-publish';
@@ -282,6 +282,104 @@ test('only the exact protected existing workflow and main pair can execute', () 
   assert.throws(() => validatePlan({mode: 'functions-upload-source-refresh', functions: S.functions.join(',') + ',bootstrapSession',
     confirmation: context().LKC_CONFIRMATION}));
 });
+test('bucket privacy confirmation is separate, exact and cannot enable source refresh writes', () => {
+  assert.doesNotThrow(() => validateUploadRefreshContext({...context(), LKC_UPLOAD_WRITE_CONFIRMATION: '',
+    LKC_UPLOAD_PRIVACY_CONFIRMATION: UPLOAD_BACKUP_PRIVACY_CONFIRMATION}));
+  for (const value of ['true', 'enforced', UPLOAD_BACKUP_PRIVACY_CONFIRMATION + ' '])
+    assert.throws(() => validateUploadRefreshContext({...context(), LKC_UPLOAD_WRITE_CONFIRMATION: '',
+      LKC_UPLOAD_PRIVACY_CONFIRMATION: value}), /PRIVACY_CONFIRMATION_REJECTED/);
+  assert.throws(() => validateUploadRefreshContext({...context(), LKC_UPLOAD_PRIVACY_CONFIRMATION: UPLOAD_BACKUP_PRIVACY_CONFIRMATION}),
+    /PRIVACY_CONFIRMATION_REJECTED/);
+});
+function privacyFixture() {
+  const bucket = copy(fixture().bucket);
+  Object.assign(bucket, {metageneration: '42', etag: 'private-etag-42', updated: '2026-11-01T00:00:00Z',
+    labels: {preserve: privateValue}, unknownFutureSetting: {preserve: true}});
+  bucket.project.parent = {type: 'organization', id: '123'};
+  bucket.iamConfiguration.publicAccessPrevention = 'inherited';
+  return bucket;
+}
+function privacyOwner({before = privacyFixture(), changeFresh, changeAfter, failPatch} = {}) {
+  let reads = 0, patches = 0, current = copy(before);
+  return {counts: () => ({reads, patches}), reader: {readBucket: async options => {
+    assert.deepEqual(options, {skipEffectivePublicAccessPrevention: true});
+    reads++; if (reads === 2) changeFresh?.(current); if (reads === 3) changeAfter?.(current);
+    return copy(current);
+  }}, api: {request: async (value, options) => {
+    patches++;
+    assert.equal(String(value), `https://storage.googleapis.com/storage/v1/b/${S.bucket}?ifMetagenerationMatch=42`);
+    assert.deepEqual(options, {method: 'PATCH', body: {iamConfiguration: {publicAccessPrevention: 'enforced'}}});
+    if (failPatch) throw failPatch;
+    current.iamConfiguration.publicAccessPrevention = 'enforced'; current.metageneration = '43';
+    current.etag = 'private-etag-43'; current.updated = '2026-11-01T00:01:00Z'; return copy(current);
+  }}};
+}
+test('approved bucket privacy update preserves all unknown metadata and policies and emits only a bounded summary', async () => {
+  const owner = privacyOwner(), result = await enforceUploadBackupPrivacy(owner.api, owner.reader);
+  assert.deepEqual(result, {summary: {status: 'ENFORCED_AND_VERIFIED', changed: true}});
+  assert.deepEqual(owner.counts(), {reads: 3, patches: 1});
+  assert.doesNotMatch(JSON.stringify(result), /private-etag|unknownFutureSetting|synthetic-private|bindings/);
+});
+test('an already enforced bucket is verified without a write', async () => {
+  const before = privacyFixture(); before.iamConfiguration.publicAccessPrevention = 'enforced';
+  const owner = privacyOwner({before});
+  assert.deepEqual(await enforceUploadBackupPrivacy(owner.api, owner.reader), {summary: {status: 'ALREADY_ENFORCED', changed: false}});
+  assert.deepEqual(owner.counts(), {reads: 1, patches: 0});
+});
+for (const [label, mutate] of [
+  ['bucket', b => b.name = 'other'], ['project number', b => b.projectNumber = '123'],
+  ['region', b => b.location = 'US'], ['UBLA', b => b.iamConfiguration.uniformBucketLevelAccess.enabled = false],
+  ['missing generation', b => delete b.metageneration], ['bad generation', b => b.metageneration = '0'],
+  ['project identity', b => b.project.projectId = 'other'], ['inactive project', b => b.project.lifecycleState = 'DELETE_REQUESTED'],
+  ['unknown privacy', b => b.iamConfiguration.publicAccessPrevention = 'unknown'],
+]) test('bucket privacy precondition rejects ' + label + ' without a write', async () => {
+  const before = privacyFixture(); mutate(before); const owner = privacyOwner({before});
+  await assert.rejects(enforceUploadBackupPrivacy(owner.api, owner.reader), /PRIVACY_BUCKET_NOT_VERIFIED/);
+  assert.equal(owner.counts().patches, 0);
+});
+test('bucket privacy drift before PATCH stops without writing', async () => {
+  const owner = privacyOwner({changeFresh: b => b.unknownFutureSetting.preserve = false});
+  await assert.rejects(enforceUploadBackupPrivacy(owner.api, owner.reader), /PRIVACY_BEFORE_IMAGE_DRIFT/);
+  assert.equal(owner.counts().patches, 0);
+});
+for (const status of [403, 409, 412, null]) test('bucket privacy rejection or unknown result never repeats PATCH: ' + status, async () => {
+  const error = Object.assign(Error(status ? 'UPLOAD_REFRESH_HTTP_REJECTED' : 'UPLOAD_REFRESH_HTTP_OUTCOME_UNKNOWN'),
+    status ? {httpStatus: status} : {});
+  const owner = privacyOwner({failPatch: error});
+  await assert.rejects(enforceUploadBackupPrivacy(owner.api, owner.reader), error);
+  assert.equal(owner.counts().patches, 1);
+});
+for (const [label, mutate] of [
+  ['not enforced', b => b.iamConfiguration.publicAccessPrevention = 'inherited'],
+  ['generation drift', b => b.metageneration = '44'], ['unknown setting', b => b.unknownFutureSetting.preserve = false],
+  ['bucket policy', b => b.policy.etag = 'changed'], ['project policy', b => b.projectPolicy.bindings.push({role: 'other', members: []})],
+]) test('bucket privacy readback detects ' + label + ' without undo or retry', async () => {
+  const owner = privacyOwner({changeAfter: mutate});
+  await assert.rejects(enforceUploadBackupPrivacy(owner.api, owner.reader), /PRIVACY_(READBACK_NOT_VERIFIED|OTHER_SETTINGS_CHANGED)/);
+  assert.equal(owner.counts().patches, 1);
+});
+test('bucket PATCH transport requires the explicit capability and exact field, target and conflict guard', async () => {
+  const url = `https://storage.googleapis.com/storage/v1/b/${S.bucket}?ifMetagenerationMatch=42`;
+  const body = {iamConfiguration: {publicAccessPrevention: 'enforced'}};
+  let calls = 0;
+  const auth = {getRequestHeaders: async () => ({authorization: 'synthetic'})};
+  const fake = async () => {calls++; return new Response('{}');};
+  const normal = authenticatedUploadRefreshAPI(auth, fake);
+  await assert.rejects(normal.request(url, {method: 'PATCH', body}), /HTTP_SCOPE_REJECTED/);
+  const enabled = authenticatedUploadRefreshAPI(auth, fake, {allowBackupPrivacyEnforcement: true});
+  for (const [target, patchBody] of [
+    [url.replace(S.bucket, 'another-bucket'), body], [url.split('?')[0], body],
+    [url + '&predefinedAcl=private', body], [url.replace('42', '0'), body],
+    [url, {iamConfiguration: {publicAccessPrevention: 'inherited'}}],
+    [url, {iamConfiguration: {publicAccessPrevention: 'enforced', uniformBucketLevelAccess: {enabled: true}}}],
+    [url, {...body, labels: {unexpected: 'yes'}}],
+  ]) await assert.rejects(enabled.request(target, {method: 'PATCH', body: patchBody}), /HTTP_SCOPE_REJECTED/);
+  assert.equal(calls, 0);
+  await enabled.request(url, {method: 'PATCH', body, readOnlyPost: true});
+  assert.equal(calls, 1); assert.equal(enabled.counters.writesAttempted, 1);
+  await assert.rejects(enabled.request(url.replace('42', '43'), {method: 'PATCH', body}), /MUTATION_LIMIT/);
+  assert.equal(calls, 1);
+});
 test('invalid source identity cannot leak a private value into the bounded result', async () => {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'lkc-invalid-source-context-'));
   try {
@@ -349,7 +447,7 @@ test('the existing workflow owns the route and private data is never selected as
   assert.ok(shell.indexOf('functions-upload-source-refresh') < shell.indexOf('npx --yes'));
 });
 
-for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified', 'read-only-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight'])
+for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified', 'read-only-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
   test('isolated existing-runner integration: ' + scenario, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-refresh-integration-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
@@ -364,6 +462,12 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
     git(['-c', 'user.name=Isolated test', '-c', 'user.email=isolated@example.invalid', 'commit', '-m', 'Synthetic source']);
     const f = fixture(), pair = copy(f.before), objects = new Map(), bodies = new Map(), mutations = [];
     let generation = 200, patches = 0, probes = 0;
+    const privacyOperation = scenario.startsWith('privacy-');
+    if (privacyOperation) {
+      Object.assign(f.bucket, {metageneration: '42', updated: '2026-11-01T00:00:00Z', etag: 'private-etag', labels: {preserve: privateValue}});
+      f.bucket.project.parent = {type: 'organization', id: '123'};
+      if (scenario !== 'privacy-already-enforced-preflight') f.bucket.iamConfiguration.publicAccessPrevention = 'inherited';
+    }
     const configKeys = ['ADMIN_EMAILS', 'EXECUTIVE_APPROVER_EMAILS', 'PRODUCTION_FIREBASE_PROJECT_ID', 'APPROVAL_PACKAGE_KEY_ID',
       'DEFAULT_COMPANY_ID', 'STAFF_APP_URL', 'ADMIN_APP_URL', 'MAIL_FROM', 'GMAIL_DELEGATED_USER', 'PUBLIC_LOGIN_GATEWAY_URL', 'FILE_PREVIEW_GATEWAY_URL'];
     for (const name of S.functions) {
@@ -388,6 +492,16 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       assert.equal(options.redirect, 'error');
       if (method === 'GET' && url.hostname === 'storage.googleapis.com' && p === `/storage/v1/b/${S.bucket}`) {
         const {policy, project, projectPolicy, effectivePublicAccessPrevention, ...bucket} = f.bucket; return json(bucket);
+      }
+      if (method === 'PATCH' && url.hostname === 'storage.googleapis.com' && p === `/storage/v1/b/${S.bucket}`) {
+        assert.equal(url.search, '?ifMetagenerationMatch=42');
+        assert.deepEqual(JSON.parse(options.body), {iamConfiguration: {publicAccessPrevention: 'enforced'}});
+        mutations.push({method, path: p, kind: 'bucket-privacy'});
+        if (scenario === 'privacy-conflict-preflight') return new Response('', {status: 412});
+        f.bucket.iamConfiguration.publicAccessPrevention = 'enforced'; f.bucket.metageneration = '43';
+        if (scenario === 'privacy-after-drift-preflight') f.bucket.labels.unexpected = 'drift';
+        if (scenario === 'privacy-unknown-preflight') throw Error(privateValue);
+        const {policy, project, projectPolicy, ...bucket} = f.bucket; return json(bucket);
       }
       if (url.hostname === 'cloudresourcemanager.googleapis.com' && p.endsWith(':getEffectiveOrgPolicy')) {
         assert.equal(method,'POST'); assert.deepEqual(JSON.parse(options.body),{constraint:UPLOAD_PUBLIC_ACCESS_CONSTRAINT});
@@ -446,9 +560,11 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       }
       assert.fail('Unexpected isolated request: ' + method + ' ' + p);
     };
-    const api = authenticatedUploadRefreshAPI({getRequestHeaders: async () => ({authorization: 'Bearer synthetic-only'})}, fakeFetch);
+    const api = authenticatedUploadRefreshAPI({getRequestHeaders: async () => ({authorization: 'Bearer synthetic-only'})}, fakeFetch,
+      {allowBackupPrivacyEnforcement: privacyOperation});
     const env = {...context(), GITHUB_SHA: git(['rev-parse', 'HEAD']), LKC_VERIFIED_SOURCE_SHA: git(['rev-parse', 'HEAD']), LKC_SOURCE_DIRECTORY: root, GITHUB_WORKSPACE: root};
     if (scenario.endsWith('preflight')) env.LKC_UPLOAD_WRITE_CONFIRMATION = '';
+    if (privacyOperation) env.LKC_UPLOAD_PRIVACY_CONFIRMATION = UPLOAD_BACKUP_PRIVACY_CONFIRMATION;
     const result = await runUploadSourceRefresh(env, {api, fetch: async (url, options) => {
       probes++; assert.equal(url.hostname, 'createuploadsession-synthetic-an.a.run.app');
       assert.deepEqual(JSON.parse(options.body), {data: {}});
@@ -458,7 +574,22 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
     assert.equal(result.cloudWritesAttempted, false);
     const artifact = fs.readFileSync(path.join(root, 'upload-source-refresh-result.json'), 'utf8');
     assert.doesNotMatch(artifact, new RegExp(privateValue)); assert.doesNotMatch(artifact, /secretEnvironmentVariables|PRIVATE_BUILD_SETTING/);
-    if (['organization-unverified-preflight','organization-policy-forbidden-preflight'].includes(scenario)) {
+    if (privacyOperation) {
+      assert.equal(patches, 0); assert.equal(probes, 0); assert.equal(result.mediaBytes, 0);
+      assert.ok(mutations.every(m => m.kind === 'bucket-privacy'));
+      if (['privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'].includes(scenario)) {
+        assert.equal(result.status, 'STOPPED_SAFELY'); assert.equal(mutations.length, 1);
+        assert.equal(result.backupPrivacyEnforcement.status, 'REQUESTED_RESULT_UNVERIFIED');
+        assert.equal(result.reason, scenario === 'privacy-conflict-preflight' ? 'UPLOAD_REFRESH_HTTP_REJECTED'
+          : scenario === 'privacy-unknown-preflight' ? 'UPLOAD_REFRESH_HTTP_OUTCOME_UNKNOWN' : 'UPLOAD_REFRESH_PRIVACY_OTHER_SETTINGS_CHANGED');
+        if (scenario === 'privacy-conflict-preflight') assert.equal(result.httpStatus, 412);
+      } else {
+        assert.equal(result.status, 'UPLOAD_SOURCE_PREFLIGHT_VERIFIED'); assert.equal(result.sourceRefreshPreflightVerified, true);
+        const changed = scenario !== 'privacy-already-enforced-preflight';
+        assert.deepEqual(result.backupPrivacyEnforcement, {status: changed ? 'ENFORCED_AND_VERIFIED' : 'ALREADY_ENFORCED', changed});
+        assert.equal(mutations.length, changed ? 1 : 0);
+      }
+    } else if (['organization-unverified-preflight','organization-policy-forbidden-preflight'].includes(scenario)) {
       assert.equal(result.status, 'STOPPED_SAFELY');
       assert.equal(result.reason, scenario === 'organization-unverified-preflight'
         ? 'UPLOAD_REFRESH_EFFECTIVE_PUBLIC_ACCESS_PREVENTION_NOT_VERIFIED' : 'UPLOAD_REFRESH_HTTP_REJECTED');
@@ -480,3 +611,4 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       assert.equal(result.reason, 'UPLOAD_REFRESH_PRIVATE_BUCKET_NOT_VERIFIED'); assert.equal(mutations.length, 0);
     }
   });
+

@@ -42,6 +42,11 @@ on:
         required: false
         type: string
         default: ""
+      upload_privacy_confirmation:
+        description: Only the approved shared source bucket PAP setting; type ENFORCE_LKC_STAGING_UPLOAD_BACKUP_PUBLIC_ACCESS_PREVENTION and leave upload_write_confirmation empty
+        required: false
+        type: string
+        default: ""
 
 permissions:
   actions: read
@@ -84,8 +89,13 @@ jobs:
           LKC_OPERATION: ${{ inputs.operation }}
           LKC_TRANSFER_MODE_REQUESTED: ${{ inputs.transfer_mode }}
           LKC_UPLOAD_WRITE_CONFIRMATION: ${{ inputs.upload_write_confirmation }}
+          LKC_UPLOAD_PRIVACY_CONFIRMATION: ${{ inputs.upload_privacy_confirmation }}
         run: |
           lkc_mode=functions-deploy
+          if [[ -n "$LKC_UPLOAD_PRIVACY_CONFIRMATION" && ( "$LKC_OPERATION" != "upload-source-refresh" || "$LKC_UPLOAD_PRIVACY_CONFIRMATION" != "ENFORCE_LKC_STAGING_UPLOAD_BACKUP_PUBLIC_ACCESS_PREVENTION" || -n "$LKC_UPLOAD_WRITE_CONFIRMATION" ) ]]; then
+            echo UPLOAD_REFRESH_PRIVACY_CONFIRMATION_REJECTED >&2
+            exit 1
+          fi
           if [[ "$LKC_OPERATION" == "upload-source-refresh" ]]; then
             if [[ "$GITHUB_REF" != "refs/heads/main" || "$LKC_TRANSFER_MODE_REQUESTED" != "preserve" || "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
               echo UPLOAD_REFRESH_PROTECTED_CONTEXT_REQUIRED >&2
@@ -273,6 +283,7 @@ jobs:
           LKC_OPERATION: ${{ inputs.operation }}
           LKC_TRANSFER_MODE_REQUESTED: ${{ inputs.transfer_mode }}
           LKC_UPLOAD_WRITE_CONFIRMATION: ${{ inputs.upload_write_confirmation }}
+          LKC_UPLOAD_PRIVACY_CONFIRMATION: ${{ inputs.upload_privacy_confirmation }}
         run: bash scripts/automation/deploy-staging-functions.sh
       - name: Retain bounded upload source-refresh result
         if: always() && inputs.operation == 'upload-source-refresh'
@@ -512,3 +523,4 @@ jobs:
           path: ${{ runner.temp }}/cancellation-privacy-audit/privacy-audit.json
           if-no-files-found: warn
           retention-days: 7
+

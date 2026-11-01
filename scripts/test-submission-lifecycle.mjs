@@ -1,6 +1,7 @@
 import {createSubmissionAcceptanceKit} from './submission-acceptance-kit.mjs';
 import {preparePausedReplay,executePausedReplay,REPLAY_DRIVE_ROOT} from './replay-paused-submission.mjs';
 import {verifySubmissionAcceptanceResult} from './submission-acceptance-result.mjs';
+import {runSubmissionTimelineWireTests} from './test-submission-timeline-wire.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -952,4 +953,5 @@ await test('case-mail material unchanged import retains print; changed revision 
  await h.netprint.updateNetPrintNumbers({auth:h.admin,data:{jobId:m.jobId,numbers:['12345678'],expectedRevision:m.job().revision}});const item=h.job().netPrint.items[0];await h.netprint.markNetPrintPrinted({auth:h.staff,data:{jobId:m.jobId,itemId:item.id,expectedRevision:m.job().revision}});m.records.set('jobs/'+m.jobId,copy(h.job()));await m.importRow();assert.equal(m.job().netPrint.items[0].printed,true);
  m.row[14]='10:00-18:00';await m.importRow();assert.equal(m.job().netPrint.items[0].printed,false);assert.equal(m.job().netPrint.needsPrintReview,true);
 });
+await test('timeline Firebase SDK wire compatibility',()=>runSubmissionTimelineWireTests(harness));
 console.log(JSON.stringify({passed:results.filter(r=>r.ok).length,results,boundary:'Complete actual modules, synthetic callable/Storage/Drive and in-memory DB. No external network, real login, emulator, concurrent SDK transactions or delivery.'},null,2));if(results.some(r=>!r.ok))process.exitCode=1;

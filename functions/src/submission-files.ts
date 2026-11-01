@@ -15,7 +15,8 @@ const PreviewIdSchema = z.string().min(1).refine((value) => value.trim().length 
 const TimelineSchema = z.object({
   jobId: z.string().min(1),
   type: z.enum(["report", "sales_floor"]),
-  previewFile: z.object({ submissionId: PreviewIdSchema, fileId: PreviewIdSchema }).optional(),
+  // Existing Firebase clients serialize an undefined optional property as null.
+  previewFile: z.object({ submissionId: PreviewIdSchema, fileId: PreviewIdSchema }).nullish().transform((value) => value ?? undefined),
 });
 const ComparisonSchema = z.object({ requestId: z.string().min(1) });
 const ProcessingStatusSchema = z.object({

@@ -87,7 +87,7 @@ export async function runSubmissionTimelineWireTests(harness) {
     h=harness();
     const data={jobId:'synthetic-job',type:'report',previewFile:null};
     await assert.rejects(h.views.getSubmissionTimeline({data}),{code:'unauthenticated'});
-    await assert.rejects(h.views.getSubmissionTimeline({auth:{...h.admin,token:{...h.admin.token,companyId:'foreign-company'}},data}),{code:'permission-denied'});
+    await assert.rejects(h.views.getSubmissionTimeline({auth:{...h.admin,token:{...h.admin.token,companyId:'foreign-company'}},data}),{code:'not-found'});
     await assert.rejects(h.views.getSubmissionTimeline({auth:{...h.staff,token:{...h.staff.token,staffId:'foreign-staff'}},data}),{code:'permission-denied'});
     assert.equal(h.queryReads,0,'Null compatibility must not bypass company or assignment authorization');
     console.log(JSON.stringify({submissionTimelineWire:{passed:true,transport:'Actual Firebase SDK with a fixed fake endpoint; no real network or data writes'}}));

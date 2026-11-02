@@ -8,7 +8,8 @@ import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, prepareUploadSourceRefresh, uploadBackupRequests,
-  verifyUploadBackups, uploadSourceOnlyPatch, runUploadRefreshTransaction} from './upload-source-refresh-contract.mjs';
+  verifyUploadBackups, uploadSourceOnlyPatch, runUploadRefreshTransaction,
+  uploadExactEventFilterValue} from './upload-source-refresh-contract.mjs';
 import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUploadRefreshObject, runUploadSourceRefresh,
   uploadRefreshCloudOwner, enforceUploadBackupPrivacy, UPLOAD_BACKUP_PRIVACY_CONFIRMATION,
   uploadRefreshStorageTriggerSummary, uploadRefreshPreflightSummary} from './run-upload-source-refresh.mjs';
@@ -44,7 +45,8 @@ function fixture() {
       fn.eventTrigger = {trigger: `${prefix}/triggers/existing-finalizer`, eventType: 'google.cloud.storage.object.v1.finalized',
         eventFilters: [{attribute: 'bucket', value: 'synthetic-submissions-bucket'}], serviceAccountEmail: 'existing@example.invalid'};
       trigger = {name: fn.eventTrigger.trigger, uid: 'existing-trigger-uid', serviceAccount: 'existing@example.invalid',
-        eventFilters: {bucket: 'synthetic-submissions-bucket', type: fn.eventTrigger.eventType},
+        eventFilters: [{attribute: 'bucket', value: 'synthetic-submissions-bucket'},
+          {attribute: 'type', value: fn.eventTrigger.eventType}],
         destination: {cloudRun: {service: name.toLowerCase(), region: S.region}}};
     }
     before[name] = {fn, service, policy: emptyPolicy(), functionPolicy: emptyPolicy(), trigger,
@@ -66,6 +68,22 @@ const triggerCheckNames = ['functionEventTypeMatches', 'functionTriggerInScope',
   'functionBucketSeparateFromSource', 'triggerRecordPresent', 'triggerNameMatches', 'triggerUidPresent',
   'destinationServiceMatches', 'destinationRegionMatches', 'bucketFilterMatches', 'eventTypeFilterMatches',
   'triggerServiceAccountMatches', 'invokerIamCheckEnabled'];
+test('actual REST EventFilter arrays match in either order and preserve raw trigger records', () => {
+  const f = fixture(), record = f.before.finalizeStagedUpload;
+  record.trigger.eventFilters.reverse();
+  const before = copy(f.before);
+  assert.equal(uploadExactEventFilterValue(record.trigger.eventFilters, 'bucket'), 'synthetic-submissions-bucket');
+  assert.doesNotThrow(() => prepareUploadSourceRefresh(f));
+  assert.ok(Object.values(uploadRefreshStorageTriggerSummary(record)).every(value => value === true));
+  assert.deepEqual(f.before, before);
+});
+test('literal filter reader rejects malformed, missing and ambiguous REST filters', () => {
+  const valid = {attribute: 'bucket', value: 'synthetic-submissions-bucket'};
+  for (const filters of [undefined, null, {}, {bucket: valid.value}, [], [null], [valid, {...valid, value: ''}],
+    [{...valid, value: ''}], [{...valid, value: 42}], [{...valid, operator: 'path_pattern'}],
+    [{...valid, operator: 'unknown'}]]) assert.equal(uploadExactEventFilterValue(filters, 'bucket'), undefined);
+  assert.equal(uploadExactEventFilterValue([{...valid, operator: ''}], 'bucket'), valid.value);
+});
 test('Storage trigger diagnostics expose only fixed boolean checks without private configuration', () => {
   const f = fixture();
   Object.assign(f.before.finalizeStagedUpload.trigger, {privateValue, futurePrivateSetting: {value: privateValue}});
@@ -86,15 +104,21 @@ for (const [label, check, mutate] of [
   ['missing bucket filter', 'singleFunctionBucketFilter', r => r.fn.eventTrigger.eventFilters = []],
   ['duplicate bucket filter', 'singleFunctionBucketFilter', r => r.fn.eventTrigger.eventFilters.push(copy(r.fn.eventTrigger.eventFilters[0]))],
   ['source bucket', 'functionBucketSeparateFromSource', r => {
-    r.fn.eventTrigger.eventFilters[0].value = S.bucket; r.trigger.eventFilters.bucket = S.bucket;
+    r.fn.eventTrigger.eventFilters[0].value = S.bucket; r.trigger.eventFilters[0].value = S.bucket;
   }],
   ['missing trigger', 'triggerRecordPresent', r => r.trigger = null],
   ['trigger name mismatch', 'triggerNameMatches', r => r.trigger.name += '-other'],
   ['missing trigger UID', 'triggerUidPresent', r => delete r.trigger.uid],
   ['destination service mismatch', 'destinationServiceMatches', r => r.trigger.destination.cloudRun.service = 'other'],
   ['destination region mismatch', 'destinationRegionMatches', r => r.trigger.destination.cloudRun.region = 'other'],
-  ['bucket filter mismatch', 'bucketFilterMatches', r => r.trigger.eventFilters.bucket = 'other'],
-  ['event type filter mismatch', 'eventTypeFilterMatches', r => r.trigger.eventFilters.type = 'other'],
+  ['bucket filter mismatch', 'bucketFilterMatches', r => r.trigger.eventFilters[0].value = 'other'],
+  ['event type filter mismatch', 'eventTypeFilterMatches', r => r.trigger.eventFilters[1].value = 'other'],
+  ['non-REST filter map', 'bucketFilterMatches', r => r.trigger.eventFilters = {
+    bucket: 'synthetic-submissions-bucket', type: r.fn.eventTrigger.eventType}],
+  ['duplicate Eventarc bucket filter', 'bucketFilterMatches', r => r.trigger.eventFilters.push(copy(r.trigger.eventFilters[0]))],
+  ['duplicate Eventarc type filter', 'eventTypeFilterMatches', r => r.trigger.eventFilters.push(copy(r.trigger.eventFilters[1]))],
+  ['pattern Eventarc bucket filter', 'bucketFilterMatches', r => r.trigger.eventFilters[0].operator = 'match-path-pattern'],
+  ['pattern Function bucket filter', 'functionBucketSeparateFromSource', r => r.fn.eventTrigger.eventFilters[0].operator = 'match-path-pattern'],
   ['missing trigger principal', 'triggerServiceAccountMatches', r => delete r.fn.eventTrigger.serviceAccountEmail],
   ['overlong trigger principal', 'triggerServiceAccountMatches', r => r.fn.eventTrigger.serviceAccountEmail = 'a'.repeat(2049)],
   ['control character in trigger principal', 'triggerServiceAccountMatches', r => r.fn.eventTrigger.serviceAccountEmail += String.fromCharCode(0)],
@@ -177,8 +201,8 @@ for (const [label, mutate] of [
   ['missing Run variable', f => f.before.createUploadSession.service.spec.template.spec.containers[0].env.pop()],
   ['unready revision', f => f.before.createUploadSession.service.status.latestReadyRevisionName = 'other'],
   ['public finalizer', f => f.before.finalizeStagedUpload.service.metadata.annotations['run.googleapis.com/invoker-iam-disabled'] = 'true'],
-  ['wrong event bucket', f => f.before.finalizeStagedUpload.trigger.eventFilters.bucket = 'other'],
-  ['source writes would trigger finalizer', f => { f.before.finalizeStagedUpload.fn.eventTrigger.eventFilters[0].value = S.bucket; f.before.finalizeStagedUpload.trigger.eventFilters.bucket = S.bucket; }],
+  ['wrong event bucket', f => f.before.finalizeStagedUpload.trigger.eventFilters[0].value = 'other'],
+  ['source writes would trigger finalizer', f => { f.before.finalizeStagedUpload.fn.eventTrigger.eventFilters[0].value = S.bucket; f.before.finalizeStagedUpload.trigger.eventFilters[0].value = S.bucket; }],
   ['changed trigger principal', f => f.before.finalizeStagedUpload.trigger.serviceAccount = 'other@example.invalid'],
   ['mutable secret alias', f => f.before.createUploadSession.fn.serviceConfig.secretEnvironmentVariables[0].version = 'latest'],
   ['unbounded private snapshot', f => f.before.createUploadSession.fn.description = 'x'.repeat(S.configBytes)],

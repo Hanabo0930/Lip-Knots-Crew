@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {validatePlan} from './validate-staging-scope.mjs';
 import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, assertUploadRefreshBeforeImages,
   prepareUploadSourceRefresh, runUploadRefreshTransaction, bindUploadSourceVerification,
-  bindUploadFailedSource, uploadVerifiedSources} from './upload-source-refresh-contract.mjs';
+  bindUploadFailedSource, uploadVerifiedSources, uploadExactEventFilterValue} from './upload-source-refresh-contract.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PREFIX = `projects/${S.project}/locations/${S.region}`;
@@ -63,7 +63,7 @@ export function uploadRefreshStorageTriggerSummary(record) {
   const text = value => typeof value === 'string' && value.length > 0 && value.length <= 2048 && !/[\u0000-\u001f]/u.test(value);
   const bucketFilters = Array.isArray(event?.eventFilters)
     ? event.eventFilters.filter(filter => filter?.attribute === 'bucket' && text(filter.value)) : [];
-  const bucket = bucketFilters[0]?.value;
+  const bucket = uploadExactEventFilterValue(event?.eventFilters, 'bucket');
   return {
     functionEventTypeMatches: event?.eventType === 'google.cloud.storage.object.v1.finalized',
     functionTriggerInScope: typeof event?.trigger === 'string' && event.trigger.startsWith(`${PREFIX}/triggers/`),
@@ -75,8 +75,8 @@ export function uploadRefreshStorageTriggerSummary(record) {
     triggerUidPresent: Boolean(trigger?.uid),
     destinationServiceMatches: trigger?.destination?.cloudRun?.service === 'finalizestagedupload',
     destinationRegionMatches: trigger?.destination?.cloudRun?.region === S.region,
-    bucketFilterMatches: text(bucket) && trigger?.eventFilters?.bucket === bucket,
-    eventTypeFilterMatches: text(event?.eventType) && trigger?.eventFilters?.type === event.eventType,
+    bucketFilterMatches: text(bucket) && uploadExactEventFilterValue(trigger?.eventFilters, 'bucket') === bucket,
+    eventTypeFilterMatches: text(event?.eventType) && uploadExactEventFilterValue(trigger?.eventFilters, 'type') === event.eventType,
     triggerServiceAccountMatches: text(event?.serviceAccountEmail) && trigger?.serviceAccount === event.serviceAccountEmail,
     invokerIamCheckEnabled: [undefined, 'false'].includes(record?.service?.metadata?.annotations?.['run.googleapis.com/invoker-iam-disabled']),
   };

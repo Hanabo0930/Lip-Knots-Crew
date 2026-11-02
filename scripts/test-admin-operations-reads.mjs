@@ -10,7 +10,7 @@ assert.ok(planStart>=0&&planEnd>planStart&&effectStart>=0&&effectEnd>effectStart
 const planCode=source.slice(planStart,planEnd).replace('(view: string): number[]','(view)');
 const effectCode=source.slice(effectStart,effectEnd);
 const names=[...effectCode.matchAll(/\b(load\w+)\([^;\n]*isCurrentRun\)/g)].map(match=>match[1]);
-assert.equal(names.length,10);assert.ok(!names.includes('loadMonthHistory'));
+assert.equal(names.length,11);assert.ok(names.includes('loadMonthHistory'),'the retained guarded reader is never requested by these views');
 const panelLine=source.split('\n').find(line=>line.trim().startsWith('function operationsPanelReady('));assert.ok(panelLine);
 const panelCode=panelLine.replace('(view:string)','(view)');
 const flush=()=>new Promise(resolve=>setImmediate(resolve));

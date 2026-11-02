@@ -25,7 +25,7 @@ const end=source.indexOf('  // 提出履歴は案件・種類・認証ごとに�
 assert.ok(start>=0&&end>start);
 const effectSource=source.slice(start,end);
 const calls=[...effectSource.matchAll(/\b(load\w+)\([^;\n]*isCurrentRun\)/g)].map(match=>match[1]);
-assert.equal(calls.length,10);
+assert.equal(calls.length,11);
 const startup=source.slice(source.indexOf('  useEffect(() => {\n    const activeAuth=auth;'),start);
 assert.match(startup,/loadProductionControlStatus\(canRead\)/);
 for(const name of calls)assert.ok(!startup.includes(name+'('),'Operations call leaked into startup: '+name);

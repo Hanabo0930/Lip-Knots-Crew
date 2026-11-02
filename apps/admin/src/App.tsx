@@ -1399,6 +1399,7 @@ const [monthBusy, setMonthBusy] = useState(false);
       ()=>loadProductionTelemetryStatus(isCurrentRun),
       ()=>loadProductionDeploymentReadiness(isCurrentRun),
       ()=>loadProductionReleaseEvidenceStatus(true,isCurrentRun),
+      ()=>loadMonthHistory(isCurrentRun),
     ].map((read,index)=>({read,index})).filter(({index})=>required.includes(index)&&(!readState.completed.has(index)||retryFailed&&readState.failed.has(index)));
     if(!reads.length){setOperationsLoadState(required.some(index=>readState.failed.has(index))?"error":"ready");return;}
     setOperationsLoadState("loading");

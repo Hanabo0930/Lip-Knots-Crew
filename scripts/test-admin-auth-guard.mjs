@@ -102,11 +102,14 @@ const gateEnd = source.indexOf('\n\n  const unresolved =', gateStart);
 assert.ok(gateStart >= 0 && gateEnd > gateStart, 'the actual Admin login gate must be present');
 const gate = `(() => { ${source.slice(gateStart, gateEnd)}; return null; })()`;
 const gateJs = ts.transpileModule(gate, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
-function renderGate({ configured = true, user = null, authorized = false, retained = false, ready = false, message = '', authMessage = '' } = {}) {
-  const element = runInNewContext(gateJs, { React, firebaseConfigured: configured, user, adminAuthorized: authorized, adminShellRetained:retained, retryAdminTokenRef:{current:null}, adminSessionReady: ready, message, adminAuthorizationMessage: authMessage, login: () => {}, auth: {}, signOut: () => {} });
+function renderGate({ configured = true, user = null, authorized = false, retained = false, ready = false, message = '', authMessage = '', loginMessage = '', loginBusy = false } = {}) {
+  const element = runInNewContext(gateJs, { React, firebaseConfigured: configured, user, adminAuthorized: authorized, adminShellRetained:retained, retryAdminTokenRef:{current:null}, adminSessionReady: ready, message, adminAuthorizationMessage: authMessage, loginMessage, loginBusy, login: () => {}, auth: {}, signOut: () => {} });
   return element ? renderToStaticMarkup(element) : null;
 }
 assert.match(renderGate(), /管理者Googleアカウント/);
+assert.match(renderGate({loginMessage:'synthetic login failure'}), /role="alert">synthetic login failure/);
+assert.match(renderGate({loginBusy:true}), /disabled=""[^>]*>Googleログイン中/);
+assert.doesNotMatch(renderGate({user:{uid:'synthetic-staff'},loginMessage:'synthetic login failure'}), /synthetic login failure/);
 assert.match(renderGate({ user: { uid: 'synthetic-staff' }, authMessage: '管理者アカウントでログインしてください。' }), /管理者アカウント/);
 assert.doesNotMatch(renderGate({ user: { uid: 'synthetic-staff' }, message: 'synthetic-private-message' }), /synthetic-private-message/);
 assert.match(renderGate({ user: { uid: 'synthetic-admin' } }), /確認中/);

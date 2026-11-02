@@ -1,3 +1,5 @@
+await import('./test-admin-login-recovery.mjs');
+await import('./test-admin-operations-reads.mjs');
 await import('./test-admin-auth-guard.mjs');
 await import('./test-admin-session-transitions.mjs');
 await import('./test-admin-push-auth-transition.mjs');
@@ -28,21 +30,7 @@ const startup=source.slice(source.indexOf('  useEffect(() => {\n    const active
 assert.match(startup,/loadProductionControlStatus\(canRead\)/);
 for(const name of calls)assert.ok(!startup.includes(name+'('),'Operations call leaked into startup: '+name);
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};}
-for(const scenario of ['closed','not-ready','success','failure','cancelled','account-changed']){
- const states=[],gates=[];let cleanup;
- const scope={operationsRequested:scenario!=='closed',adminSessionReady:scenario!=='not-ready',firebaseConfigured:true,user:{uid:'first'},functions:{},auth:{currentUser:{uid:'first'}},operationsRetry:0,adminAuthorized:true,adminAuthorizationReadyRef:{current:true},operationsReadsRef:{current:{retry:0,completed:new Set(),failed:new Set()}},setOperationsLoadState:value=>states.push(value),useEffect:fn=>{cleanup=fn();}};
- scope.auth.currentUser=scope.user;
- for(const name of calls)scope[name]=()=>{const gate=deferred();gates.push(gate);return gate.promise;};
- runInNewContext(ts.transpileModule(effectSource,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,scope);
- if(['closed','not-ready'].includes(scenario)){assert.equal(gates.length,0);assert.deepEqual(states,[]);continue;}
- assert.equal(gates.length,11);assert.deepEqual(states,['loading']);
- if(scenario==='cancelled')cleanup();
- if(scenario==='account-changed')scope.auth.currentUser={uid:'second'};
- gates.forEach((gate,index)=>scenario==='failure'&&index===0?gate.reject(new Error('offline')):gate.resolve());
- await Promise.allSettled(gates.map(gate=>gate.promise));await new Promise(resolve=>setImmediate(resolve));
- assert.deepEqual(states,['cancelled','account-changed'].includes(scenario)?['loading']:['loading',scenario==='failure'?'error':'ready']);
-}
-console.log('Admin workspace logic passed: 11 deferred loaders, global control retained, closed/not-ready/success/failure/cancel/account cases.');
+console.log('Admin workspace startup passed: operational reads remain deferred; per-view recovery is covered by the actual-App operations suite.');
 // 大量の合成案件でも、絞込漏れ・重複・ページ境界の欠落を防ぐ。
 const searchScope={exports:{}};
 runInNewContext(ts.transpileModule(readFileSync('apps/admin/src/job-search.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,searchScope);

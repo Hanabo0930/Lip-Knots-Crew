@@ -9,7 +9,7 @@ import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, prepareUploadSourceRefresh, uploadBackupRequests,
   verifyUploadBackups, uploadSourceOnlyPatch, runUploadRefreshTransaction,
-  uploadExactEventFilterValue} from './upload-source-refresh-contract.mjs';
+  uploadExactEventFilterValue, uploadStorageTriggerDestinationSummary} from './upload-source-refresh-contract.mjs';
 import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUploadRefreshObject, runUploadSourceRefresh,
   uploadRefreshCloudOwner, enforceUploadBackupPrivacy, UPLOAD_BACKUP_PRIVACY_CONFIRMATION,
   uploadRefreshStorageTriggerSummary, uploadRefreshPreflightSummary} from './run-upload-source-refresh.mjs';
@@ -68,6 +68,42 @@ const triggerCheckNames = ['functionEventTypeMatches', 'functionTriggerInScope',
   'functionBucketSeparateFromSource', 'triggerRecordPresent', 'triggerNameMatches', 'triggerUidPresent',
   'destinationServiceMatches', 'destinationRegionMatches', 'bucketFilterMatches', 'eventTypeFilterMatches',
   'triggerServiceAccountMatches', 'invokerIamCheckEnabled'];
+for (const kind of ['cloudRun', 'cloudFunction', 'cloudFunctionProjectNumber']) test('documented exact destination accepted and raw record retained: ' + kind, async () => {
+  const f = fixture(), record = f.before.finalizeStagedUpload;
+  if (kind !== 'cloudRun') record.trigger.destination = {cloudFunction: kind === 'cloudFunction' ? record.fn.name
+    : record.fn.name.replace('/' + S.project + '/', '/' + S.projectNumber + '/')};
+  const expectedKind = kind === 'cloudRun' ? 'cloudRun' : 'cloudFunction';
+  const snapshot = copy(f.before), owner = simulatedOwner(f);
+  assert.deepEqual(uploadStorageTriggerDestinationSummary(record.trigger.destination),
+    {kind: expectedKind, serviceMatches: true, regionMatches: true});
+  assert.ok(Object.values(uploadRefreshStorageTriggerSummary(record)).every(value => value === true));
+  assert.equal(uploadRefreshPreflightSummary(f.before, f.bucket).storageTriggerDestinationType, expectedKind);
+  const plan = prepareUploadSourceRefresh(f);
+  assert.deepEqual(f.before, snapshot);
+  const result = await runUploadRefreshTransaction(plan, owner);
+  assert.equal(result.status, 'SOURCE_ONLY_CONTRACT_VERIFIED');
+  assert.equal(JSON.stringify(result).includes('example.invalid'), false);
+});
+for (const [label, destination] of [
+  ['wrong project', {cloudFunction: 'projects/other/locations/' + S.region + '/functions/finalizeStagedUpload'}],
+  ['wrong project number', {cloudFunction: 'projects/999999999999/locations/' + S.region + '/functions/finalizeStagedUpload'}],
+  ['wrong region', {cloudFunction: 'projects/' + S.project + '/locations/other/functions/finalizeStagedUpload'}],
+  ['wrong function', {cloudFunction: prefix + '/functions/createUploadSession'}],
+  ['service resource is not a function', {cloudFunction: prefix + '/services/finalizestagedupload'}],
+  ['missing function name', {cloudFunction: ''}],
+  ['mixed union', {cloudFunction: prefix + '/functions/finalizeStagedUpload', cloudRun: {service: 'finalizestagedupload', region: S.region}}],
+  ['other union', {workflow: prefix + '/workflows/finalizeStagedUpload'}],
+  ['unknown union', {futureDestination: privateValue}],
+  ['malformed Run target', {cloudRun: null}],
+  ['missing target', undefined],
+]) test('reject unsupported or mismatched destination without exposing its value: ' + label, () => {
+  const f = fixture(); f.before.finalizeStagedUpload.trigger.destination = destination;
+  const summary = uploadStorageTriggerDestinationSummary(destination);
+  assert.deepEqual(summary, {kind: Object.hasOwn(destination ?? {}, 'cloudFunction') && label !== 'mixed union'
+    ? 'cloudFunction' : label === 'malformed Run target' ? 'cloudRun' : 'UNVERIFIED', serviceMatches: false, regionMatches: false});
+  assert.throws(() => prepareUploadSourceRefresh(f), /UPLOAD_REFRESH_STORAGE_TRIGGER_NOT_VERIFIED/);
+  assert.equal(JSON.stringify(summary).includes(privateValue), false);
+});
 test('actual REST EventFilter arrays match in either order and preserve raw trigger records', () => {
   const f = fixture(), record = f.before.finalizeStagedUpload;
   record.trigger.eventFilters.reverse();
@@ -332,6 +368,7 @@ for (const [label, mutate] of [
   ['resource limit', p => p.createUploadSession.service.spec.template.spec.containers[0].resources.limits.memory = '2Gi'],
   ['Invoker', p => p.createUploadSession.service.metadata.annotations['run.googleapis.com/invoker-iam-disabled'] = 'false'],
   ['future unknown field', p => p.createUploadSession.fn.futureConfig = {enabled: true}],
+  ['equivalent destination representation', p => p.finalizeStagedUpload.trigger.destination = {cloudFunction: p.finalizeStagedUpload.fn.name}],
   ['untouched peer revision', p => p.finalizeStagedUpload.fn.serviceConfig.revision = 'finalizestagedupload-00123-other'],
 ]) test('drift stops further writes rather than overwriting it: ' + label, async () => {
   const f = fixture(), owner = simulatedOwner(f, {driftAfterUpdate: mutate});
@@ -519,7 +556,7 @@ test('the existing workflow owns the route and private data is never selected as
   assert.ok(shell.indexOf('functions-upload-source-refresh') < shell.indexOf('npx --yes'));
 });
 
-for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified', 'read-only-preflight', 'trigger-mismatch-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
+for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified', 'read-only-preflight', 'trigger-mismatch-preflight', 'function-destination-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
   test('isolated existing-runner integration: ' + scenario, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-refresh-integration-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
@@ -548,6 +585,8 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       objects.set(pair[name].object.name + '#' + pair[name].object.generation, copy(pair[name].object));
     }
     if (scenario === 'trigger-mismatch-preflight') pair.finalizeStagedUpload.trigger.destination.cloudRun.service = 'other';
+    if (scenario === 'function-destination-preflight') pair.finalizeStagedUpload.trigger.destination =
+      {cloudFunction: pair.finalizeStagedUpload.fn.name};
     if (scenario === 'private-bucket-unverified') f.bucket.iamConfiguration.publicAccessPrevention = 'UNVERIFIED';
     if (scenario === 'inherited-private-preflight') f.bucket.iamConfiguration.publicAccessPrevention = 'inherited';
     if (scenario.startsWith('organization-')) {
@@ -687,6 +726,8 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       assert.equal(patches,0); assert.equal(probes,0); assert.equal(mutations.length,0); assert.equal(result.mediaBytes,0);
     } else if (scenario.endsWith('preflight')) {
       assert.equal(result.status, 'UPLOAD_SOURCE_PREFLIGHT_VERIFIED'); assert.equal(result.sourceRefreshPreflightVerified, true);
+      assert.equal(result.preflight.storageTriggerDestinationType, scenario === 'function-destination-preflight' ? 'cloudFunction' : 'cloudRun');
+      assert.ok(Object.values(result.preflight.storageTrigger).every(value => value === true));
       assert.equal(patches, 0); assert.equal(probes, 0); assert.equal(mutations.length, 0); assert.equal(result.mediaBytes, 0);
     } else if (scenario.endsWith('success')) {
       assert.equal(result.status, 'SOURCE_ONLY_CONTRACT_VERIFIED'); assert.equal(patches, 2); assert.equal(probes, 1);

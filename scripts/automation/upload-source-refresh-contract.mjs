@@ -38,6 +38,24 @@ export function uploadExactEventFilterValue(filters, attribute) {
     || ![undefined, ''].includes(matches[0].operator)) return undefined;
   return matches[0].value;
 }
+// Eventarc exposes a managed Functions destination as a full Function resource
+// name. Match that exact fixed target, or the existing exact Cloud Run target.
+// No destination is rewritten, and ambiguous union members are rejected.
+// https://docs.cloud.google.com/eventarc/docs/reference/rest/v1/projects.locations.triggers#Destination
+export function uploadStorageTriggerDestinationSummary(destination) {
+  const members = plain(destination)
+    ? ['cloudRun', 'cloudFunction', 'gke', 'workflow', 'httpEndpoint'].filter(key => Object.hasOwn(destination, key)) : [];
+  const kind = members.length === 1 && ['cloudRun', 'cloudFunction'].includes(members[0]) ? members[0] : 'UNVERIFIED';
+  // The fixed ID/number pair is independently bound by the project metadata,
+  // source-bucket project number and Run namespace checks in this contract.
+  const functionMatches = kind === 'cloudFunction' && [S.project, S.projectNumber].some(project =>
+    destination.cloudFunction === `projects/${project}/locations/${S.region}/functions/finalizeStagedUpload`);
+  return {kind,
+    serviceMatches: functionMatches || (kind === 'cloudRun' && plain(destination.cloudRun)
+      && destination.cloudRun.service === 'finalizestagedupload'),
+    regionMatches: functionMatches || (kind === 'cloudRun' && plain(destination.cloudRun)
+      && destination.cloudRun.region === S.region)};
+}
 const base64 = (value, count) => typeof value === 'string' && Buffer.from(value, 'base64').length === count
   && Buffer.from(value, 'base64').toString('base64') === value;
 function freeze(value) {
@@ -133,12 +151,12 @@ function validateRecord(record, name, active = true) {
     requireValue(!fn.eventTrigger && record.trigger === null, 'UPLOAD_REFRESH_ENTRY_TRIGGER_INVALID');
   } else {
     const event = fn.eventTrigger, eventBucket = uploadExactEventFilterValue(event?.eventFilters, 'bucket');
+    const destination = uploadStorageTriggerDestinationSummary(record.trigger?.destination);
     requireValue(event?.eventType === 'google.cloud.storage.object.v1.finalized'
       && event.trigger?.startsWith(`${PREFIX}/triggers/`)
       && eventBucket !== undefined && eventBucket !== S.bucket
       && plain(record.trigger) && record.trigger.name === event.trigger
-      && record.trigger.uid && record.trigger.destination?.cloudRun?.service === name.toLowerCase()
-      && record.trigger.destination.cloudRun.region === S.region
+      && record.trigger.uid && destination.serviceMatches && destination.regionMatches
       && uploadExactEventFilterValue(record.trigger.eventFilters, 'bucket') === eventBucket
       && uploadExactEventFilterValue(record.trigger.eventFilters, 'type') === event.eventType
       && text(event.serviceAccountEmail) && record.trigger.serviceAccount === event.serviceAccountEmail

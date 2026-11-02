@@ -3084,6 +3084,7 @@ async function previewRowCreation() {
     setExpenseJobId(jobId);
     if (!jobId) {setExpenseBusy(expenseWriteRef.current!==null);return;}
     if (firebaseConfigured&&(!functions||!user||!adminSessionReady)) {setExpenseBusy(expenseWriteRef.current!==null);return;}
+    setMessage("");
     expenseLoadRef.current=version;setExpenseBusy(true);setExpenseStatus("読込中");
     try {
       let values:Record<string,unknown>={};let note="";let status="デモ読込済み";let reviewVersion:string|undefined;let holdReason:string|undefined;

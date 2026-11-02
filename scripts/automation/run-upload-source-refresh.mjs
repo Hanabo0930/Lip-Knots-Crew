@@ -55,6 +55,33 @@ export function validateUploadRefreshContext(env) {
     && !env.LKC_UPLOAD_WRITE_CONFIRMATION), 'UPLOAD_REFRESH_PRIVACY_CONFIRMATION_REJECTED');
 }
 
+// Diagnose the existing Storage-trigger assertions using the records already
+// read by preflight. Only fixed check names and booleans leave memory; this
+// neither authorizes a refresh nor replaces the contract validator below.
+export function uploadRefreshStorageTriggerSummary(record) {
+  const event = record?.fn?.eventTrigger, trigger = record?.trigger;
+  const text = value => typeof value === 'string' && value.length > 0 && value.length <= 2048 && !/[\u0000-\u001f]/u.test(value);
+  const bucketFilters = Array.isArray(event?.eventFilters)
+    ? event.eventFilters.filter(filter => filter?.attribute === 'bucket' && text(filter.value)) : [];
+  const bucket = bucketFilters[0]?.value;
+  return {
+    functionEventTypeMatches: event?.eventType === 'google.cloud.storage.object.v1.finalized',
+    functionTriggerInScope: typeof event?.trigger === 'string' && event.trigger.startsWith(`${PREFIX}/triggers/`),
+    singleFunctionBucketFilter: bucketFilters.length === 1,
+    functionBucketSeparateFromSource: text(bucket) && bucket !== S.bucket,
+    triggerRecordPresent: trigger !== null && typeof trigger === 'object' && !Array.isArray(trigger)
+      && Object.getPrototypeOf(trigger) === Object.prototype,
+    triggerNameMatches: text(event?.trigger) && trigger?.name === event.trigger,
+    triggerUidPresent: Boolean(trigger?.uid),
+    destinationServiceMatches: trigger?.destination?.cloudRun?.service === 'finalizestagedupload',
+    destinationRegionMatches: trigger?.destination?.cloudRun?.region === S.region,
+    bucketFilterMatches: text(bucket) && trigger?.eventFilters?.bucket === bucket,
+    eventTypeFilterMatches: text(event?.eventType) && trigger?.eventFilters?.type === event.eventType,
+    triggerServiceAccountMatches: text(event?.serviceAccountEmail) && trigger?.serviceAccount === event.serviceAccountEmail,
+    invokerIamCheckEnabled: [undefined, 'false'].includes(record?.service?.metadata?.annotations?.['run.googleapis.com/invoker-iam-disabled']),
+  };
+}
+
 export function uploadRefreshPreflightSummary(before, bucket) {
   const mode = value => value === undefined ? 'UNSET' : ['paused', 'active', 'acceptance'].includes(value) ? value : 'UNVERIFIED';
   return {functions: S.functions.map(name => ({name,
@@ -65,6 +92,7 @@ export function uploadRefreshPreflightSummary(before, bucket) {
       .map(key => [key, mode(before[name]?.fn?.serviceConfig?.environmentVariables?.[key])])),
     invokerIamDisabled: ['true', 'false'].includes(before[name]?.service?.metadata?.annotations?.['run.googleapis.com/invoker-iam-disabled'])
       ? before[name].service.metadata.annotations['run.googleapis.com/invoker-iam-disabled'] : 'UNSET'})),
+    storageTrigger: uploadRefreshStorageTriggerSummary(before?.finalizeStagedUpload),
     backupBucket: {publicAccessPrevention: ['enforced', 'inherited'].includes(bucket?.iamConfiguration?.publicAccessPrevention)
       ? bucket.iamConfiguration.publicAccessPrevention : 'UNVERIFIED',
     uniformBucketLevelAccess: bucket?.iamConfiguration?.uniformBucketLevelAccess?.enabled === true,
@@ -485,4 +513,5 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
   }
   return result;
 }
+
 

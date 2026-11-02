@@ -10,7 +10,8 @@ import {createRequire} from 'node:module';
 import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, prepareUploadSourceRefresh, uploadBackupRequests,
   verifyUploadBackups, uploadSourceOnlyPatch, runUploadRefreshTransaction} from './upload-source-refresh-contract.mjs';
 import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUploadRefreshObject, runUploadSourceRefresh,
-  uploadRefreshCloudOwner, enforceUploadBackupPrivacy, UPLOAD_BACKUP_PRIVACY_CONFIRMATION} from './run-upload-source-refresh.mjs';
+  uploadRefreshCloudOwner, enforceUploadBackupPrivacy, UPLOAD_BACKUP_PRIVACY_CONFIRMATION,
+  uploadRefreshStorageTriggerSummary, uploadRefreshPreflightSummary} from './run-upload-source-refresh.mjs';
 import {validatePlan} from './validate-staging-scope.mjs';
 const copy = value => structuredClone(value), prefix = `projects/${S.project}/locations/${S.region}`;
 const privateValue = 'synthetic-private-value-do-not-publish';
@@ -61,6 +62,52 @@ function fixture() {
       policy: emptyPolicy(), project: {projectId: S.project, projectNumber: S.projectNumber, lifecycleState: 'ACTIVE'},
       projectPolicy: emptyPolicy()}};
 }
+const triggerCheckNames = ['functionEventTypeMatches', 'functionTriggerInScope', 'singleFunctionBucketFilter',
+  'functionBucketSeparateFromSource', 'triggerRecordPresent', 'triggerNameMatches', 'triggerUidPresent',
+  'destinationServiceMatches', 'destinationRegionMatches', 'bucketFilterMatches', 'eventTypeFilterMatches',
+  'triggerServiceAccountMatches', 'invokerIamCheckEnabled'];
+test('Storage trigger diagnostics expose only fixed boolean checks without private configuration', () => {
+  const f = fixture();
+  Object.assign(f.before.finalizeStagedUpload.trigger, {privateValue, futurePrivateSetting: {value: privateValue}});
+  const snapshot = copy(f.before);
+  const summary = uploadRefreshStorageTriggerSummary(f.before.finalizeStagedUpload);
+  assert.deepEqual(Object.keys(summary), triggerCheckNames);
+  assert.ok(Object.values(summary).every(value => value === true));
+  assert.deepEqual(uploadRefreshPreflightSummary(f.before, f.bucket).storageTrigger, summary);
+  assert.deepEqual(f.before, snapshot);
+  assert.doesNotMatch(JSON.stringify(summary), /example\.invalid|synthetic-submissions-bucket|existing-finalizer|synthetic-private|futurePrivateSetting/);
+  assert.ok(Object.values(uploadRefreshStorageTriggerSummary(undefined)).every(value => typeof value === 'boolean'));
+  assert.doesNotThrow(() => prepareUploadSourceRefresh(f));
+});
+for (const [label, check, mutate] of [
+  ['missing event', 'functionEventTypeMatches', r => delete r.fn.eventTrigger],
+  ['wrong event type', 'functionEventTypeMatches', r => r.fn.eventTrigger.eventType = 'other'],
+  ['foreign trigger', 'functionTriggerInScope', r => r.fn.eventTrigger.trigger = 'projects/other/triggers/private'],
+  ['missing bucket filter', 'singleFunctionBucketFilter', r => r.fn.eventTrigger.eventFilters = []],
+  ['duplicate bucket filter', 'singleFunctionBucketFilter', r => r.fn.eventTrigger.eventFilters.push(copy(r.fn.eventTrigger.eventFilters[0]))],
+  ['source bucket', 'functionBucketSeparateFromSource', r => {
+    r.fn.eventTrigger.eventFilters[0].value = S.bucket; r.trigger.eventFilters.bucket = S.bucket;
+  }],
+  ['missing trigger', 'triggerRecordPresent', r => r.trigger = null],
+  ['trigger name mismatch', 'triggerNameMatches', r => r.trigger.name += '-other'],
+  ['missing trigger UID', 'triggerUidPresent', r => delete r.trigger.uid],
+  ['destination service mismatch', 'destinationServiceMatches', r => r.trigger.destination.cloudRun.service = 'other'],
+  ['destination region mismatch', 'destinationRegionMatches', r => r.trigger.destination.cloudRun.region = 'other'],
+  ['bucket filter mismatch', 'bucketFilterMatches', r => r.trigger.eventFilters.bucket = 'other'],
+  ['event type filter mismatch', 'eventTypeFilterMatches', r => r.trigger.eventFilters.type = 'other'],
+  ['missing trigger principal', 'triggerServiceAccountMatches', r => delete r.fn.eventTrigger.serviceAccountEmail],
+  ['overlong trigger principal', 'triggerServiceAccountMatches', r => r.fn.eventTrigger.serviceAccountEmail = 'a'.repeat(2049)],
+  ['control character in trigger principal', 'triggerServiceAccountMatches', r => r.fn.eventTrigger.serviceAccountEmail += String.fromCharCode(0)],
+  ['trigger principal mismatch', 'triggerServiceAccountMatches', r => r.trigger.serviceAccount = 'other@example.invalid'],
+  ['Invoker IAM disabled', 'invokerIamCheckEnabled', r => r.service.metadata.annotations['run.googleapis.com/invoker-iam-disabled'] = 'true'],
+]) test('Storage trigger diagnostic retains contract rejection: ' + label, () => {
+  const f = fixture(); mutate(f.before.finalizeStagedUpload);
+  const summary = uploadRefreshStorageTriggerSummary(f.before.finalizeStagedUpload);
+  assert.equal(summary[check], false);
+  assert.deepEqual(Object.keys(summary), triggerCheckNames);
+  assert.ok(Object.values(summary).every(value => typeof value === 'boolean'));
+  assert.throws(() => prepareUploadSourceRefresh(f), /UPLOAD_REFRESH_STORAGE_TRIGGER_NOT_VERIFIED/);
+});
 function receipts(requests) {
   return requests.map((r, i) => ({bucket: r.destination.bucket, name: r.destination.object, generation: String(100 + i),
     size: r.expectedSize, md5Hash: r.expectedMd5, ...(r.expectedCrc32c ? {crc32c: r.expectedCrc32c} : {})}));
@@ -448,7 +495,7 @@ test('the existing workflow owns the route and private data is never selected as
   assert.ok(shell.indexOf('functions-upload-source-refresh') < shell.indexOf('npx --yes'));
 });
 
-for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified', 'read-only-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
+for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified', 'read-only-preflight', 'trigger-mismatch-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
   test('isolated existing-runner integration: ' + scenario, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-refresh-integration-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
@@ -476,6 +523,7 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       pair[name].service.spec.template.spec.containers[0].env = Object.entries(pair[name].fn.serviceConfig.environmentVariables).map(([name, value]) => ({name, value}));
       objects.set(pair[name].object.name + '#' + pair[name].object.generation, copy(pair[name].object));
     }
+    if (scenario === 'trigger-mismatch-preflight') pair.finalizeStagedUpload.trigger.destination.cloudRun.service = 'other';
     if (scenario === 'private-bucket-unverified') f.bucket.iamConfiguration.publicAccessPrevention = 'UNVERIFIED';
     if (scenario === 'inherited-private-preflight') f.bucket.iamConfiguration.publicAccessPrevention = 'inherited';
     if (scenario.startsWith('organization-')) {
@@ -600,6 +648,13 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
         assert.deepEqual(result.backupPrivacyEnforcement, {status: changed ? 'ENFORCED_AND_VERIFIED' : 'ALREADY_ENFORCED', changed});
         assert.equal(mutations.length, changed ? 1 : 0);
       }
+    } else if (scenario === 'trigger-mismatch-preflight') {
+      assert.equal(result.status, 'STOPPED_SAFELY');
+      assert.equal(result.reason, 'UPLOAD_REFRESH_STORAGE_TRIGGER_NOT_VERIFIED');
+      assert.equal(result.preflight.storageTrigger.destinationServiceMatches, false);
+      assert.ok(Object.entries(result.preflight.storageTrigger).every(([key, value]) =>
+        key === 'destinationServiceMatches' || value === true));
+      assert.equal(patches, 0); assert.equal(probes, 0); assert.equal(mutations.length, 0); assert.equal(result.mediaBytes, 0);
     } else if (['organization-unverified-preflight','organization-policy-forbidden-preflight'].includes(scenario)) {
       assert.equal(result.status, 'STOPPED_SAFELY');
       assert.equal(result.reason, scenario === 'organization-unverified-preflight'
@@ -622,4 +677,5 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       assert.equal(result.reason, 'UPLOAD_REFRESH_PRIVATE_BUCKET_NOT_VERIFIED'); assert.equal(mutations.length, 0);
     }
   });
+
 

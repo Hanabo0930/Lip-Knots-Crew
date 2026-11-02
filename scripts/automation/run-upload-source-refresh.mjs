@@ -16,6 +16,12 @@ const PREFIX = `projects/${S.project}/locations/${S.region}`;
 const CF = 'https://cloudfunctions.googleapis.com/v2/';
 const STORAGE = 'https://storage.googleapis.com';
 export const UPLOAD_BACKUP_PRIVACY_CONFIRMATION = 'ENFORCE_LKC_STAGING_UPLOAD_BACKUP_PUBLIC_ACCESS_PREVENTION';
+export const UPLOAD_BACKUP_PERMISSION_NAMES = Object.freeze([
+  'storage.buckets.get', 'storage.buckets.getIamPolicy',
+  'storage.buckets.update', 'storage.buckets.setIamPolicy',
+]);
+const backupPermissionURL = new URL(`${STORAGE}/storage/v1/b/${S.bucket}/iam/testPermissions`);
+for (const permission of UPLOAD_BACKUP_PERMISSION_NAMES) backupPermissionURL.searchParams.append('permissions', permission);
 const fail = code => { throw Error(code); };
 const need = (condition, code) => { if (!condition) fail(code); };
 const sha = data => createHash('sha256').update(data).digest('hex');
@@ -68,6 +74,27 @@ export function uploadRefreshPreflightSummary(before, bucket) {
       : bucket?.project?.parent ? 'UNVERIFIED' : 'none'}, sourceMediaRead: false};
 }
 
+// One read-only self-test with the existing deployment identity. A failed or
+// malformed response is unknown, never evidence that a permission is absent.
+export async function inspectUploadBackupPermissions(api) {
+  try {
+    const response = await api.request(backupPermissionURL.href);
+    const held = response?.permissions === undefined ? [] : response.permissions;
+    need(response?.kind === 'storage#testIamPermissionsResponse'
+      && Object.keys(response).every(key => ['kind', 'permissions'].includes(key))
+      && Array.isArray(held) && held.length <= UPLOAD_BACKUP_PERMISSION_NAMES.length
+      && new Set(held).size === held.length
+      && held.every(name => UPLOAD_BACKUP_PERMISSION_NAMES.includes(name)),
+    'UPLOAD_REFRESH_BACKUP_PERMISSIONS_UNVERIFIED');
+    const permissions = Object.fromEntries(UPLOAD_BACKUP_PERMISSION_NAMES.map(name => [name, held.includes(name)]));
+    return {status: 'VERIFIED_CALLER_PERMISSIONS', permissions,
+      privacyUpdatePermissionsPresent: permissions['storage.buckets.update'] && permissions['storage.buckets.setIamPolicy']};
+  } catch (error) {
+    return {status: 'UNVERIFIED', reason: safeError(error),
+      ...(Number.isInteger(error?.httpStatus) ? {httpStatus: error.httpStatus} : {})};
+  }
+}
+
 // One request, bounded response, no redirects and no mutation retries. The
 // inherited ADC/WIF identity supplies headers; credentials are never displayed.
 export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch, {allowBackupPrivacyEnforcement = false} = {}) {
@@ -98,6 +125,8 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch, {allowBac
     const effectivePolicyRead = readOnlyPost && method === 'POST' && !url.search && url.hostname === 'cloudresourcemanager.googleapis.com'
       && url.pathname === `/v1/projects/${S.project}:getEffectiveOrgPolicy`
       && isDeepStrictEqual(body, {constraint: UPLOAD_PUBLIC_ACCESS_CONSTRAINT});
+    const permissionRead = method === 'GET' && body === undefined && !media && !readOnlyPost
+      && url.href === backupPermissionURL.href;
     const patch = method === 'PATCH' && url.hostname === 'cloudfunctions.googleapis.com' && exactFunction
       && url.search === '?updateMask=buildConfig.source' && body?.name === url.pathname.slice(4)
       && Object.keys(body).sort().join(',') === 'buildConfig,name'
@@ -121,8 +150,9 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch, {allowBac
       && /^[1-9][0-9]{0,19}$/.test(url.searchParams.get('sourceGeneration') ?? '')
       && url.searchParams.get('sourceGeneration') === url.searchParams.get('ifSourceGenerationMatch')
       && destination.test(decodeURIComponent(copyParts[2])) && isDeepStrictEqual(body, {});
-    need(read || policyRead || effectivePolicyRead || patch || bucketPrivacyPatch || upload || copyRequest, 'UPLOAD_REFRESH_HTTP_SCOPE_REJECTED');
+    need(read || policyRead || effectivePolicyRead || permissionRead || patch || bucketPrivacyPatch || upload || copyRequest, 'UPLOAD_REFRESH_HTTP_SCOPE_REJECTED');
     counters.lastRequestKind = bucketPrivacyPatch ? 'backup-bucket-public-access-prevention-update'
+      : permissionRead ? 'backup-bucket-permission-self-test'
       : effectivePolicyRead ? 'project-effective-public-access' : policyRead ? 'project-policy' : patch ? 'function-source-update' : upload ? 'private-object-create'
       : copyRequest ? 'source-backup-copy' : url.pathname.endsWith(':getIamPolicy') ? 'invoker-policy'
       : url.hostname === 'storage.googleapis.com' ? 'storage-metadata' : url.hostname === 'eventarc.googleapis.com' ? 'event-trigger'
@@ -385,6 +415,9 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
         {allowBackupPrivacyEnforcement: env.LKC_UPLOAD_PRIVACY_CONFIRMATION === UPLOAD_BACKUP_PRIVACY_CONFIRMATION});
     }
     const reader = uploadRefreshReader(api);
+    if (!env.LKC_UPLOAD_WRITE_CONFIRMATION && !env.LKC_UPLOAD_PRIVACY_CONFIRMATION) {
+      result.backupBucketPermissions = await inspectUploadBackupPermissions(api);
+    }
     if (env.LKC_UPLOAD_PRIVACY_CONFIRMATION) {
       result.backupPrivacyEnforcement = {status: 'REQUESTED_RESULT_UNVERIFIED', changed: null};
       result.backupPrivacyEnforcement = (await enforceUploadBackupPrivacy(api, reader)).summary;

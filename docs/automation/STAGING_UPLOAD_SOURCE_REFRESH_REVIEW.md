@@ -87,6 +87,29 @@ Primary API/semantics:
 
 ## Read-only preflight before an apply review
 
+### Read-only caller permission diagnosis (2026-11-02)
+
+With both optional write/privacy confirmations empty, the existing protected
+owner performs one fixed-bucket `buckets.testIamPermissions` GET using the same
+ADC/WIF deployment identity. It tests only `storage.buckets.get`,
+`storage.buckets.getIamPolicy`, `storage.buckets.update` and
+`storage.buckets.setIamPolicy`. Google requires the last two permissions for a
+public-access-prevention PATCH; possession of ordinary bucket-update permission
+alone does not prove that this setting may be changed.
+
+The bounded result retains four booleans only after a valid permission response.
+A denied, failed or malformed self-test remains `UNVERIFIED`, never four false
+permissions. The result is recorded before the existing metadata preflight, so
+an effective-policy read failure cannot hide the independent permission result.
+The self-test has no request body, source media, role grant, policy update or
+setting PATCH and is counted within the existing request/metadata bounds. It is
+not added to the separately confirmed privacy update or source-apply path.
+No workflow, identity, write authorization or acquisition budget changes.
+
+Primary contracts:
+- https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/testIamPermissions
+- https://docs.cloud.google.com/storage/docs/json_api/v1/buckets/patch
+
 ### Approved single-bucket privacy update (2026-11-01)
 
 The president explicitly approved `iamConfiguration.publicAccessPrevention`:

@@ -40,6 +40,7 @@ jobs:
           node scripts/test-admin-action-confirmation.mjs
           node scripts/test-native-creation-retry-client.mjs
           node scripts/test-admin-expense-recovery.mjs
+          node scripts/test-admin-edit-panel.mjs
           node scripts/test-admin-expense-status.mjs
       - name: Validate Staff workflows and company isolation
         run: |

@@ -13,9 +13,9 @@ const code=ts.transpileModule(fs.readFileSync('apps/admin/src/expense-readiness.
 const blank={transportation:'',purchase8:'',purchase10:'',netPrintCost:'',postageCost:''};
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
 function setup(realIssueLoader=false){
- const state={values:{...blank},note:'',status:'未読込',busy:false,ready:false,messages:[],calls:[],refreshes:0,confirmations:0};
+ const state={values:{...blank},note:'',status:'未読込',busy:false,ready:false,message:'',messages:[],calls:[],refreshes:0,confirmations:0};
  const user={uid:'synthetic-admin'};const ctx={Error,Symbol,Map,comparisonVersionRef:{current:0},comparisonRequestRef:{current:null},resubmissionListVersionRef:{current:0},setResubmissions:v=>state.resubmissions=v,setComparison:v=>state.comparison=typeof v==='function'?v(state.comparison):v,issuesVersionRef:{current:0},operationEpochRef:{current:0},operationLocksRef:{current:new Map()},setOperationKeys:v=>state.operationKeys=v,loadJobs:async()=>{state.refreshes++;if(state.refreshFailure)throw Error("refresh offline");},blankExpense:blank,auth:{currentUser:user},adminSessionReady:true,firebaseConfigured:true,functions:{},jobs:[{id:'A',expenses:{transportation:1}},{id:'B',expenses:{transportation:2}}],expenseJobId:'A',expenseValues:{...blank},expenseNote:'',expenseVersionRef:{current:0},expenseReadyRef:{current:null},expenseLoadRef:{current:null},expenseWriteRef:{current:null},
- openWorkspace:()=>{},window:{confirm:()=>{state.confirmations++;return true;}},setExpenseJobId:v=>ctx.expenseJobId=v,setExpenseValues:v=>{state.values=v;ctx.expenseValues=v;},setExpenseNote:v=>{state.note=v;ctx.expenseNote=v;},setExpenseStatus:v=>state.status=v,setExpenseBusy:v=>state.busy=v,setExpenseReady:v=>state.ready=v,setMessage:v=>state.messages.push(v),
+ openWorkspace:()=>{},window:{confirm:()=>{state.confirmations++;return true;}},setExpenseJobId:v=>ctx.expenseJobId=v,setExpenseValues:v=>{state.values=v;ctx.expenseValues=v;},setExpenseNote:v=>{state.note=v;ctx.expenseNote=v;},setExpenseStatus:v=>state.status=v,setExpenseBusy:v=>state.busy=v,setExpenseReady:v=>state.ready=v,setMessage:v=>{state.message=v;if(v)state.messages.push(v);},
  httpsCallable:(_f,name)=>input=>{const gate=deferred();state.calls.push({name,input,gate});return gate.promise;},loadSheetIssues:async()=>{state.refreshes++;if(state.refreshFailure)throw Error('refresh offline');}};
  if(realIssueLoader){ctx.canApplyAuthResult=guard=>!guard||guard();ctx.setIssuesBusy=v=>state.issuesBusy=v;ctx.setManualIssuesNextCursor=v=>state.manualCursor=v;ctx.setSheetIssues=v=>state.issues=typeof v==='function'?v(state.issues??[]):v;const issueStart=source.indexOf('  async function loadSheetIssues('),issueEnd=source.indexOf('  async function retrySheetIssue(',issueStart);assert.ok(issueStart>=0&&issueEnd>issueStart);runInNewContext(ts.transpileModule(source.slice(issueStart,issueEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);}
  runInNewContext(code,ctx);const completeRead=(index,id,value)=>state.calls[index].gate.resolve({data:{job:{id},currentValues:{transportation:value}}});
@@ -23,6 +23,31 @@ function setup(realIssueLoader=false){
  return{state,ctx,completeRead,ready};
 }
 const results=[];async function test(name,fn){try{await fn();results.push({name,passed:true});}catch(e){results.push({name,passed:false,error:e.message});}}
+function initialExpenseSelection(firebaseConfigured,demoJobs=[{id:'synthetic-demo-only'}]){
+ const declaration=source.split('\n').find(line=>line.includes('const [expenseJobId, setExpenseJobId] = useState('));
+ assert.ok(declaration,'Use the real App expense selection, not a fixture-only default');
+ return runInNewContext('const useState=value=>[value,()=>{}];'+declaration+'\nexpenseJobId;',{firebaseConfigured,demoJobs});
+}
+await test('connected initial expense selection never loads a demo job',async()=>{
+ const h=setup();h.ctx.expenseJobId=initialExpenseSelection(true);
+ assert.equal(h.ctx.expenseJobId,'');await h.ctx.loadExpenseReview(h.ctx.expenseJobId);
+ assert.equal(h.state.calls.length,0);assert.equal(h.state.ready,false);
+ const read=h.ctx.loadExpenseReview('B');assert.deepEqual(h.state.calls.map(call=>[call.name,call.input.jobId]),[['getExpenseReview','B']]);
+ h.completeRead(0,'B',2);await read;assert.equal(h.state.ready,true);assert.equal(h.state.values.transportation,'2');
+});
+await test('a new expense read clears the previous failure before and after success',async()=>{
+ const h=setup(),failed=h.ctx.loadExpenseReview('A');h.state.calls[0].gate.reject(Error('synthetic previous read failure'));await failed;
+ assert.equal(h.state.message,'synthetic previous read failure');assert.equal(h.state.ready,false);
+ const read=h.ctx.loadExpenseReview('B');assert.equal(h.state.message,'');
+ h.completeRead(1,'B',2);await read;assert.equal(h.state.message,'');assert.equal(h.state.ready,true);
+ assert.deepEqual(h.state.calls.map(call=>call.name),['getExpenseReview','getExpenseReview']);
+});
+await test('demo initial expense selection remains usable without a remote request',async()=>{
+ const h=setup();h.ctx.firebaseConfigured=false;h.ctx.expenseJobId=initialExpenseSelection(false,[{id:'B'}]);
+ assert.equal(h.ctx.expenseJobId,'B');await h.ctx.loadExpenseReview(h.ctx.expenseJobId);
+ assert.equal(h.state.calls.length,0);assert.equal(h.state.ready,true);assert.equal(h.state.values.transportation,'2');
+ assert.equal(initialExpenseSelection(false,[]),'');
+});
 await test('latest load wins reverse responses',async()=>{const h=setup();const a=h.ctx.loadExpenseReview('A'),b=h.ctx.loadExpenseReview('B');h.completeRead(1,'B',2);await b;h.completeRead(0,'A',1);await a;assert.equal(h.state.values.transportation,'2');});
 await test('failed switched load cannot save previous values',async()=>{const h=setup();await h.ready();const b=h.ctx.loadExpenseReview('B');h.state.calls[1].gate.reject(Error('offline'));await b;void h.ctx.saveExpenseDraft();assert.equal(h.state.calls.length,2);assert.equal(h.state.values.transportation,'');});
 await test('unloaded form cannot save or confirm',async()=>{const h=setup();void h.ctx.saveExpenseDraft();void h.ctx.completeExpense();assert.equal(h.state.calls.length,0);assert.equal(h.state.confirmations,0);});

@@ -491,3 +491,6 @@ if(process.argv.includes("--browser")){const {verifyStaffOfflineNavigation}=awai
 if(process.argv.includes("--browser")) await import("./test-admin-recruitment-draft-browser.mjs");
 
 if(process.argv.includes("--browser")) await import("./test-admin-owner-publication-browser.mjs");
+
+// Exercise the real connected-mode expense initial selection in the existing Chromium job.
+if(process.argv.includes("--browser")) await import("./test-admin-expense-browser.mjs");

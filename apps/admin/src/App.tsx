@@ -1029,7 +1029,7 @@ function AdminSession({sessionUser,onAuthorizationRejected}:{sessionUser:User|nu
   const [operationKeys,setOperationKeys]=useState<string[]>([]);
   const pushBusy=operationKeys.includes("push");
   const [expenseFocusRequest,setExpenseFocusRequest]=useState(0);
-  const [expenseJobId, setExpenseJobId] = useState(demoJobs[0]?.id ?? "");
+  const [expenseJobId, setExpenseJobId] = useState(firebaseConfigured ? "" : demoJobs[0]?.id ?? "");
   const [expenseValues, setExpenseValues] = useState<ExpenseValues>(blankExpense);
   const [expenseNote, setExpenseNote] = useState("");
   const [expenseStatus, setExpenseStatus] = useState("未読込");
@@ -1189,7 +1189,7 @@ const [monthBusy, setMonthBusy] = useState(false);
       closeComparison();expenseVersionRef.current++;
       setStaffDirectoryMessage("");closeStaffPerformance();closeStaffDevices();resubmissionListVersionRef.current++;issuesVersionRef.current++;operationEpochRef.current++;operationLocksRef.current.clear();setOperationKeys([]);setIssuesBusy(false);setManualIssuesNextCursor(null);dashboardVersionRef.current++;setDashboardBusy(false);setDashboardError("");
       expenseReadyRef.current=null;expenseLoadRef.current=null;expenseWriteRef.current=null;
-      setExpenseReady(false);setExpenseBusy(false);setExpenseValues(blankExpense);setExpenseNote("");setExpenseStatus("未読込");
+      setExpenseJobId("");setExpenseReady(false);setExpenseBusy(false);setExpenseValues(blankExpense);setExpenseNote("");setExpenseStatus("未読込");
       exportRunRef.current=null;setExportBusy(false);
       adminJobActionRef.current=null;
       setJobCreateBusy(false);setJobEditBusy(false);
@@ -3084,6 +3084,7 @@ async function previewRowCreation() {
     setExpenseJobId(jobId);
     if (!jobId) {setExpenseBusy(expenseWriteRef.current!==null);return;}
     if (firebaseConfigured&&(!functions||!user||!adminSessionReady)) {setExpenseBusy(expenseWriteRef.current!==null);return;}
+    setMessage("");
     expenseLoadRef.current=version;setExpenseBusy(true);setExpenseStatus("読込中");
     try {
       let values:Record<string,unknown>={};let note="";let status="デモ読込済み";let reviewVersion:string|undefined;let holdReason:string|undefined;

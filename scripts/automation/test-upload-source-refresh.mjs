@@ -68,14 +68,16 @@ const triggerCheckNames = ['functionEventTypeMatches', 'functionTriggerInScope',
   'functionBucketSeparateFromSource', 'triggerRecordPresent', 'triggerNameMatches', 'triggerUidPresent',
   'destinationServiceMatches', 'destinationRegionMatches', 'bucketFilterMatches', 'eventTypeFilterMatches',
   'triggerServiceAccountMatches', 'invokerIamCheckEnabled'];
-for (const kind of ['cloudRun', 'cloudFunction']) test('documented exact destination accepted and raw record retained: ' + kind, async () => {
+for (const kind of ['cloudRun', 'cloudFunction', 'cloudFunctionProjectNumber']) test('documented exact destination accepted and raw record retained: ' + kind, async () => {
   const f = fixture(), record = f.before.finalizeStagedUpload;
-  if (kind === 'cloudFunction') record.trigger.destination = {cloudFunction: record.fn.name};
+  if (kind !== 'cloudRun') record.trigger.destination = {cloudFunction: kind === 'cloudFunction' ? record.fn.name
+    : record.fn.name.replace('/' + S.project + '/', '/' + S.projectNumber + '/')};
+  const expectedKind = kind === 'cloudRun' ? 'cloudRun' : 'cloudFunction';
   const snapshot = copy(f.before), owner = simulatedOwner(f);
   assert.deepEqual(uploadStorageTriggerDestinationSummary(record.trigger.destination),
-    {kind, serviceMatches: true, regionMatches: true});
+    {kind: expectedKind, serviceMatches: true, regionMatches: true});
   assert.ok(Object.values(uploadRefreshStorageTriggerSummary(record)).every(value => value === true));
-  assert.equal(uploadRefreshPreflightSummary(f.before, f.bucket).storageTriggerDestinationType, kind);
+  assert.equal(uploadRefreshPreflightSummary(f.before, f.bucket).storageTriggerDestinationType, expectedKind);
   const plan = prepareUploadSourceRefresh(f);
   assert.deepEqual(f.before, snapshot);
   const result = await runUploadRefreshTransaction(plan, owner);
@@ -84,6 +86,7 @@ for (const kind of ['cloudRun', 'cloudFunction']) test('documented exact destina
 });
 for (const [label, destination] of [
   ['wrong project', {cloudFunction: 'projects/other/locations/' + S.region + '/functions/finalizeStagedUpload'}],
+  ['wrong project number', {cloudFunction: 'projects/999999999999/locations/' + S.region + '/functions/finalizeStagedUpload'}],
   ['wrong region', {cloudFunction: 'projects/' + S.project + '/locations/other/functions/finalizeStagedUpload'}],
   ['wrong function', {cloudFunction: prefix + '/functions/createUploadSession'}],
   ['service resource is not a function', {cloudFunction: prefix + '/services/finalizestagedupload'}],

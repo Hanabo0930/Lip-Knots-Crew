@@ -46,8 +46,10 @@ export function uploadStorageTriggerDestinationSummary(destination) {
   const members = plain(destination)
     ? ['cloudRun', 'cloudFunction', 'gke', 'workflow', 'httpEndpoint'].filter(key => Object.hasOwn(destination, key)) : [];
   const kind = members.length === 1 && ['cloudRun', 'cloudFunction'].includes(members[0]) ? members[0] : 'UNVERIFIED';
-  const functionMatches = kind === 'cloudFunction'
-    && destination.cloudFunction === `${PREFIX}/functions/finalizeStagedUpload`;
+  // The fixed ID/number pair is independently bound by the project metadata,
+  // source-bucket project number and Run namespace checks in this contract.
+  const functionMatches = kind === 'cloudFunction' && [S.project, S.projectNumber].some(project =>
+    destination.cloudFunction === `projects/${project}/locations/${S.region}/functions/finalizeStagedUpload`);
   return {kind,
     serviceMatches: functionMatches || (kind === 'cloudRun' && plain(destination.cloudRun)
       && destination.cloudRun.service === 'finalizestagedupload'),

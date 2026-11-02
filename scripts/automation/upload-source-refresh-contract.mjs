@@ -28,6 +28,16 @@ const digest = (value, algorithm = 'sha256') => createHash(algorithm).update(val
 const omit = (value, keys) => Object.fromEntries(Object.entries(value ?? {}).filter(([key]) => !keys.includes(key)));
 const decimal = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value);
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 2048 && !/[\u0000-\u001f]/u.test(value);
+// Cloud Functions v2 and Eventarc v1 both return an unordered EventFilter[].
+// Require one literal filter; never reinterpret a map, duplicate or pattern.
+// https://docs.cloud.google.com/eventarc/docs/reference/rest/v1/projects.locations.triggers#EventFilter
+export function uploadExactEventFilterValue(filters, attribute) {
+  if (!Array.isArray(filters)) return undefined;
+  const matches = filters.filter(filter => plain(filter) && filter.attribute === attribute);
+  if (matches.length !== 1 || !text(matches[0].value)
+    || ![undefined, ''].includes(matches[0].operator)) return undefined;
+  return matches[0].value;
+}
 const base64 = (value, count) => typeof value === 'string' && Buffer.from(value, 'base64').length === count
   && Buffer.from(value, 'base64').toString('base64') === value;
 function freeze(value) {
@@ -122,16 +132,15 @@ function validateRecord(record, name, active = true) {
   if (name === 'createUploadSession') {
     requireValue(!fn.eventTrigger && record.trigger === null, 'UPLOAD_REFRESH_ENTRY_TRIGGER_INVALID');
   } else {
-    const event = fn.eventTrigger;
+    const event = fn.eventTrigger, eventBucket = uploadExactEventFilterValue(event?.eventFilters, 'bucket');
     requireValue(event?.eventType === 'google.cloud.storage.object.v1.finalized'
       && event.trigger?.startsWith(`${PREFIX}/triggers/`)
-      && event.eventFilters?.filter(f => f.attribute === 'bucket' && text(f.value)).length === 1
-      && event.eventFilters.find(f => f.attribute === 'bucket').value !== S.bucket
+      && eventBucket !== undefined && eventBucket !== S.bucket
       && plain(record.trigger) && record.trigger.name === event.trigger
       && record.trigger.uid && record.trigger.destination?.cloudRun?.service === name.toLowerCase()
       && record.trigger.destination.cloudRun.region === S.region
-      && record.trigger.eventFilters?.bucket === event.eventFilters.find(f => f.attribute === 'bucket').value
-      && record.trigger.eventFilters.type === event.eventType
+      && uploadExactEventFilterValue(record.trigger.eventFilters, 'bucket') === eventBucket
+      && uploadExactEventFilterValue(record.trigger.eventFilters, 'type') === event.eventType
       && text(event.serviceAccountEmail) && record.trigger.serviceAccount === event.serviceAccountEmail
       && [undefined, 'false'].includes(service.metadata.annotations['run.googleapis.com/invoker-iam-disabled']),
     'UPLOAD_REFRESH_STORAGE_TRIGGER_NOT_VERIFIED');
@@ -380,3 +389,4 @@ export async function runUploadRefreshTransaction(plan, owner, execution = 'isol
     return stopped(/^UPLOAD_REFRESH_[A-Z_]+$/.test(error.message) ? error.message : 'UPLOAD_REFRESH_VERIFICATION_UNKNOWN');
   }
 }
+

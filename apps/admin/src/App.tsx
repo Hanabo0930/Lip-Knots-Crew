@@ -3658,6 +3658,10 @@ async function saveJobEditAction(isCurrent:()=>boolean) {
       setMessage("変更はありません。");
       return;
     }
+    if(jobs.find(job=>job.id===jobEditId)?.caseListSource&&Object.keys(fields).some(key=>key!=="storeAddress"&&key!=="storeNearestStation")) {
+      setMessage("案件リスト連携では住所と最寄駅だけを編集できます。担当・勤務条件・金額は現在の値を保持しています。");
+      return;
+    }
     if(!window.confirm("変更を保存しますか？"))return;
     setJobEditBusy(true);
     if(!firebaseConfigured) {

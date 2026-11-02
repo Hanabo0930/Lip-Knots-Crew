@@ -818,6 +818,26 @@ function WorkspacePanel({group,view,activeView,visitedViews,active,visited,ready
   return <div className="workspace-panel" data-view={viewKey(group,view)} hidden={active!==group||activeView!==view}><PanelBoundary>{children}</PanelBoundary></div>;
 }
 
+const operationsReadLabels = ["導入チェック", "試用状況", "試用結果の確認", "段階配布", "復旧リハーサル", "公開切替", "運用監視", "監視接続", "公開準備", "公開の確認記録"];
+function operationsReadIndexes(view: string): number[] {
+  switch (view) {
+    case "readiness": return [0];
+    case "invites": return [1, 2, 3];
+    case "release": return [4, 5, 6, 7, 8, 9];
+    default: return [];
+  }
+}
+function adminLoginErrorMessage(error: unknown): string {
+  const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "string" ? error.code : "";
+  switch (code) {
+    case "auth/popup-blocked": return "ログイン画面を開けませんでした。ブラウザーでポップアップを許可して、もう一度お試しください。";
+    case "auth/popup-closed-by-user": return "Googleのログイン画面が閉じられました。もう一度ログインしてください。";
+    case "auth/unauthorized-domain": return "この画面のアドレスではGoogleログインを利用できません。通常の管理画面からログインしてください。";
+    case "auth/network-request-failed": return "Googleに接続できませんでした。通信状態を確認して、もう一度お試しください。";
+    default: return "Googleログインを完了できませんでした。時間を置いて、もう一度お試しください。";
+  }
+}
+
 export default function App() {
   const [identity,setIdentity]=useState<{user:User|null;generation:number}|null>(()=>auth?null:{user:null,generation:0});
   const [rejectedIdentity,setRejectedIdentity]=useState<User|null>(null);
@@ -837,6 +857,10 @@ export default function App() {
 
 function AdminSession({sessionUser,onAuthorizationRejected}:{sessionUser:User|null;onAuthorizationRejected:()=>void}) {
   const [user, setUser] = useState<User | null>(null);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginMessage, setLoginMessage] = useState("");
+  const loginAttemptRef = useRef<object | null>(null);
+  useEffect(() => () => { loginAttemptRef.current = null; }, []);
   const [motionPaused,setMotionPaused]=useState(()=>{try{return localStorage.getItem("lkc.admin.motionPaused")==="true";}catch{return false;}});
   function toggleMotion(){setMotionPaused(current=>{const next=!current;try{localStorage.setItem("lkc.admin.motionPaused",String(next));}catch{/* 設定を保存できなくても画面内の切替は利用できる。 */}return next;});}
   const [workspace,setWorkspace]=useState<AdminWorkspace>("overview");
@@ -851,11 +875,15 @@ function AdminSession({sessionUser,onAuthorizationRejected}:{sessionUser:User|nu
   const adminAuthorizationReadyRef=useRef(!firebaseConfigured);
   const retryAdminTokenRef=useRef<(()=>void)|null>(null);
   const [recruitmentMailEntry]=useState(()=>isRecruitmentMailEntry(window.location.href));
-  const [operationsLoadState,setOperationsLoadState]=useState<"idle"|"loading"|"ready"|"error">("idle");
+  const [workspaceView,setWorkspaceView]=useState("home");
+  const [operationsLoad,setOperationsLoad]=useState<{view:string;state:"idle"|"loading"|"ready"|"error"}>({view:"",state:"idle"});
   const [operationsRetry,setOperationsRetry]=useState(0);
   const operationsReadsRef=useRef({retry:0,completed:new Set<number>(),failed:new Set<number>()});
-  const operationsRequested=visitedWorkspaces.includes("operations");
-  const [workspaceView,setWorkspaceView]=useState("home");
+  const operationsRequested=workspace==="operations";
+  function operationsPanelReady(view:string){return !firebaseConfigured||operationsReadIndexes(view).every(index=>operationsReadsRef.current.completed.has(index));}
+  const operationsFailedIndexes=operationsReadIndexes(workspaceView).filter(index=>operationsReadsRef.current.failed.has(index));
+  const operationsLoadState=operationsLoad.view===workspaceView?operationsLoad.state:operationsPanelReady(workspaceView)?operationsFailedIndexes.length?"error":"ready":"idle";
+  function setOperationsLoadState(state:"idle"|"loading"|"ready"|"error"){setOperationsLoad({view:workspaceView,state});}
   const [visitedViews,setVisitedViews]=useState<string[]>(["overview:home"]);
   function openWorkspace(next:AdminWorkspace,view=workspaceViews[next][0].id){
     if(!workspaceViews[next].some(item=>item.id===view))return;
@@ -1356,8 +1384,10 @@ const [monthBusy, setMonthBusy] = useState(false);
     let cancelled=false;
     const currentUser=user;
     const isCurrentRun=()=>!cancelled&&auth?.currentUser===currentUser;
-    if(operationsReadsRef.current.retry!==operationsRetry)operationsReadsRef.current={retry:operationsRetry,completed:new Set<number>(),failed:new Set<number>()};
     const readState=operationsReadsRef.current;
+    const retryFailed=readState.retry!==operationsRetry;
+    readState.retry=operationsRetry;
+    const required=operationsReadIndexes(workspaceView);
     const reads=[
       ()=>loadPilotReadiness(isCurrentRun),
       ()=>loadPilotRolloutStatus(isCurrentRun),
@@ -1369,19 +1399,18 @@ const [monthBusy, setMonthBusy] = useState(false);
       ()=>loadProductionTelemetryStatus(isCurrentRun),
       ()=>loadProductionDeploymentReadiness(isCurrentRun),
       ()=>loadProductionReleaseEvidenceStatus(true,isCurrentRun),
-      ()=>loadMonthHistory(isCurrentRun),
-    ].map((read,index)=>({read,index})).filter(({index})=>!readState.completed.has(index));
-    if(!reads.length)return;
+    ].map((read,index)=>({read,index})).filter(({index})=>required.includes(index)&&(!readState.completed.has(index)||retryFailed&&readState.failed.has(index)));
+    if(!reads.length){setOperationsLoadState(required.some(index=>readState.failed.has(index))?"error":"ready");return;}
     setOperationsLoadState("loading");
     void Promise.allSettled(reads.map(async({read,index})=>{
-      try{await read();if(isCurrentRun())readState.completed.add(index);}
+      try{await read();if(isCurrentRun()){readState.completed.add(index);readState.failed.delete(index);}}
       catch(error){if(isCurrentRun()){readState.completed.add(index);readState.failed.add(index);}throw error;}
     })).then(()=>{
       if(!isCurrentRun())return;
-      setOperationsLoadState(readState.failed.size?"error":"ready");
+      setOperationsLoadState(required.some(index=>readState.failed.has(index))?"error":"ready");
     });
     return()=>{cancelled=true;};
-  },[user,adminSessionReady,adminAuthorized,operationsRequested,operationsRetry]);
+  },[user,adminSessionReady,adminAuthorized,operationsRequested,operationsRetry,workspaceView]);
 
   // 提出履歴は案件・種類・認証ごとに応答を分離する。
   useEffect(() => {
@@ -1870,9 +1899,24 @@ async function previewRowCreation() {
   async function disablePush(){await runPushAction("disable");}
   async function testPush(){await runPushAction("test");}
   async function login() {
-    if (!auth) return;
-    const provider = new GoogleAuthProvider();
-    await signInWithPopup(auth, provider);
+    if (!auth || loginAttemptRef.current) return;
+    const activeAuth=auth, startingUser=activeAuth.currentUser;
+    const attempt={};
+    loginAttemptRef.current=attempt;
+    const isCurrent=()=>loginAttemptRef.current===attempt&&auth===activeAuth&&activeAuth.currentUser===startingUser;
+    setLoginMessage("");
+    setLoginBusy(true);
+    try {
+      await signInWithPopup(activeAuth, new GoogleAuthProvider());
+    } catch(error) {
+      if(isCurrent())setLoginMessage(adminLoginErrorMessage(error));
+    } finally {
+      if(loginAttemptRef.current===attempt){
+        const current=isCurrent();
+        loginAttemptRef.current=null;
+        if(current)setLoginBusy(false);
+      }
+    }
   }
 
   async function loadAdminDirectory(guard?:AuthRunGuard,includeJobs=true) {
@@ -3710,7 +3754,8 @@ function downloadCsv(filename:string,content:string) {
             <button onClick={() => auth && signOut(auth)}>ログアウト</button>
           </> : <>
             <p>管理者Googleアカウントでログインしてください。</p>
-            <button onClick={login}>Googleでログイン</button>
+            {loginMessage&&<p role="alert">{loginMessage}</p>}
+            <button onClick={login} disabled={loginBusy}>{loginBusy?"Googleログイン中…":"Googleでログイン"}</button>
           </>}
         </section>
       </main>
@@ -3759,8 +3804,8 @@ function downloadCsv(filename:string,content:string) {
         {workspace==="jobs"&&workspaceView==="list"&&<button className="ghost" onClick={()=>openWorkspace("jobs","import")}>原本を確認する <span aria-hidden="true">↗</span></button>}
         <LiquidOrb/>
       </div>
-      {workspace==="operations"&&firebaseConfigured&&operationsLoadState!=="ready"&&<section className="panel" role="status">
-        {operationsLoadState==="error"?<><p>一部の運用情報を読み込めませんでした。取得できた情報だけ表示しています。通信状態を確認して、もう一度お試しください。</p><button onClick={()=>setOperationsRetry(value=>value+1)}>もう一度読み込む</button></>:<p>運用情報を読み込んでいます…</p>}
+      {workspace==="operations"&&firebaseConfigured&&operationsReadIndexes(workspaceView).length>0&&operationsLoadState!=="ready"&&<section className="panel" role="status">
+        {operationsLoadState==="error"?<><p>この画面の情報を一部読み込めませんでした。未取得の項目：{operationsFailedIndexes.map(index=>operationsReadLabels[index]).join("、")}。取得できた情報だけ表示しています。</p><button onClick={()=>setOperationsRetry(value=>value+1)}>読み込めなかった情報を再読込</button></>:<p>この画面の情報を読み込んでいます…</p>}
       </section>}
       <WorkspacePanel view="import" activeView={workspaceView} visitedViews={visitedViews} group="jobs" active={workspace} visited={visitedWorkspaces} ready={true}><section className="panel sync-panel" id="shift-import" tabIndex={-1} aria-label="原本の確認と取込">
         <div className="sync-head">
@@ -3797,7 +3842,7 @@ function downloadCsv(filename:string,content:string) {
           <p>粗利予定 <strong>{dashboardBusy?"集計中…":dashboard?yen(dashboard.finance.bookedGrossProfit):"集計待ち"}</strong></p>
         </article>
       </section></WorkspacePanel>
-      <WorkspacePanel view="release" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel production-control-panel">
+      <WorkspacePanel view="release" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={operationsPanelReady("release")}><section className="panel production-control-panel">
         <div className="production-control-head">
           <div>
             <h2>本番公開承認・全体停止</h2>
@@ -4042,7 +4087,7 @@ function downloadCsv(filename:string,content:string) {
         </div>
         <div className="production-actions"><button className="ghost" onClick={()=>loadProductionControlStatus()} disabled={productionBusy}>状態を再読込</button><small>環境：{productionControl?.environment??"demo"} / generation {productionControl?.control.generation??0}</small></div>
       </section></WorkspacePanel>
-      <WorkspacePanel view="notifications" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel push-panel">
+      <WorkspacePanel view="notifications" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={operationsPanelReady("notifications")}><section className="panel push-panel">
         <div className="sync-head">
           <div>
             <h2>管理者プッシュ通知</h2>
@@ -4064,7 +4109,7 @@ function downloadCsv(filename:string,content:string) {
         </div>
       </section></WorkspacePanel>
 
-<WorkspacePanel view="readiness" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel pilot-panel">
+<WorkspacePanel view="readiness" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={operationsPanelReady("readiness")}><section className="panel pilot-panel">
   <div className="sync-head">
     <div>
       <h2>本番導入チェック</h2>
@@ -4179,7 +4224,7 @@ function downloadCsv(filename:string,content:string) {
 
 
 
-      <WorkspacePanel view="staff-sync" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel sync-panel">
+      <WorkspacePanel view="staff-sync" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={operationsPanelReady("staff-sync")}><section className="panel sync-panel">
         <div className="sync-head">
           <div>
             <h2>スタッフ名簿同期</h2>
@@ -4414,7 +4459,7 @@ function downloadCsv(filename:string,content:string) {
         )}
       </section></WorkspacePanel>
 
-      <WorkspacePanel view="invites" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={!firebaseConfigured||operationsLoadState==="ready"||operationsLoadState==="error"}><section className="panel">
+      <WorkspacePanel view="invites" activeView={workspaceView} visitedViews={visitedViews} group="operations" active={workspace} visited={visitedWorkspaces} ready={operationsPanelReady("invites")}><section className="panel">
         <div className="sync-head">
           <div>
             <h2>未ログイン者への案内</h2>

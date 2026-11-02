@@ -35,26 +35,29 @@ second.props.onAuthorizationRejected();assert.equal(renderBoundary().type,'main'
 emit(null);const back=emit(a);assert.equal(back.type,SessionStub);assert.notEqual(back.key,first.key,'a later sign-in cannot inherit old form state');
 
 const operationsStart=source.indexOf('  useEffect(()=>{',source.indexOf('// 運用情報'));
-const operationsEndMarker='  },[user,adminSessionReady,adminAuthorized,operationsRequested,operationsRetry]);';
+const operationsEndMarker='  },[user,adminSessionReady,adminAuthorized,operationsRequested,operationsRetry,workspaceView]);';
 const operationsEnd=source.indexOf(operationsEndMarker,operationsStart);
 assert.ok(operationsStart>=0&&operationsEnd>operationsStart);
 const operations=source.slice(operationsStart,operationsEnd+operationsEndMarker.length);
 const operationsJs=compile(operations);
+const planStart=source.indexOf('function operationsReadIndexes('),planEnd=source.indexOf('\nfunction adminLoginErrorMessage(',planStart);
+assert.ok(planStart>=0&&planEnd>planStart);
+const planScope={};runInNewContext(compile(source.slice(planStart,planEnd)),planScope);
 function operationsHarness(gate=null,gateName=null){
   const current={uid:'synthetic-admin'},state={calls:[],results:[],cleanup:null};
-  const scope={operationsRequested:true,adminSessionReady:true,adminAuthorized:true,adminAuthorizationReadyRef:{current:true},firebaseConfigured:true,user:current,auth:{currentUser:current},functions:{},operationsRetry:0,operationsReadsRef:{current:{retry:0,completed:new Set(),failed:new Set()}},
+  const scope={operationsRequested:true,workspaceView:'invites',operationsReadIndexes:planScope.operationsReadIndexes,adminSessionReady:true,adminAuthorized:true,adminAuthorizationReadyRef:{current:true},firebaseConfigured:true,user:current,auth:{currentUser:current},functions:{},operationsRetry:0,operationsReadsRef:{current:{retry:0,completed:new Set(),failed:new Set()}},
     useEffect:fn=>{state.cleanup=fn();},setOperationsLoadState:value=>state.results.push(value),Promise};
   for(const m of operations.matchAll(/\b(load[A-Z][A-Za-z0-9_]*)\(/g))scope[m[1]]=async()=>{state.calls.push(m[1]);if(gate&&(!gateName||gateName===m[1]))await gate.promise;};
   return{state,scope,render(authorized=true,retry=scope.operationsRetry,ready=authorized){state.cleanup?.();scope.adminAuthorized=authorized;scope.adminAuthorizationReadyRef.current=ready;scope.operationsRetry=retry;runInNewContext(operationsJs,scope);}};
 }
-const completed=operationsHarness();completed.render();await flush();assert.equal(completed.state.calls.length,11);
-completed.render(false);completed.render(true);await flush();assert.equal(completed.state.calls.length,11,'finished operations reads do not repeat on a token check');
-completed.render(true,1);await flush();assert.equal(completed.state.calls.length,22,'explicit read retry remains available');
+const completed=operationsHarness();completed.render();await flush();assert.equal(completed.state.calls.length,3);
+completed.render(false);completed.render(true);await flush();assert.equal(completed.state.calls.length,3,'finished view reads do not repeat on a token check');
+completed.render(true,1);await flush();assert.equal(completed.state.calls.length,3,'a retry does not replay successful reads');
 const held=deferred(),interrupted=operationsHarness(held);interrupted.render();await flush();interrupted.render(false);interrupted.render(true);held.resolve();await flush();
-assert.equal(interrupted.state.calls.length,22,'unconfirmed reads are resumed');const count=interrupted.state.calls.length;interrupted.render(false);interrupted.render(true);await flush();assert.equal(interrupted.state.calls.length,count);
-const one=deferred(),partial=operationsHarness(one,'loadMonthHistory');partial.render();await flush();partial.render(false);partial.render(true);one.resolve();await flush();assert.equal(partial.state.calls.length,12,'only the one unfinished read repeats');
-assert.equal(partial.state.calls.filter(name=>name==='loadPilotReadiness').length,1);assert.equal(partial.state.calls.filter(name=>name==='loadMonthHistory').length,2);
-const staleRender=operationsHarness();staleRender.render(true,0,false);await flush();assert.equal(staleRender.state.calls.length,0,'a synchronous token event overrides stale render authorization');staleRender.render(true);await flush();assert.equal(staleRender.state.calls.length,11);
+assert.equal(interrupted.state.calls.length,6,'unconfirmed view reads are resumed');const count=interrupted.state.calls.length;interrupted.render(false);interrupted.render(true);await flush();assert.equal(interrupted.state.calls.length,count);
+const one=deferred(),partial=operationsHarness(one,'loadStagedRolloutStatus');partial.render();await flush();partial.render(false);partial.render(true);one.resolve();await flush();assert.equal(partial.state.calls.length,4,'only the one unfinished view read repeats');
+assert.equal(partial.state.calls.filter(name=>name==='loadPilotRolloutStatus').length,1);assert.equal(partial.state.calls.filter(name=>name==='loadStagedRolloutStatus').length,2);
+const staleRender=operationsHarness();staleRender.render(true,0,false);await flush();assert.equal(staleRender.state.calls.length,0,'a synchronous token event overrides stale render authorization');staleRender.render(true);await flush();assert.equal(staleRender.state.calls.length,3);
 
 const timelineStart=source.indexOf('  useEffect(() => {',source.indexOf('// 提出履歴'));
 const timelineEndMarker='  }, [user, selectedAdminJobId, resubmitType]);';

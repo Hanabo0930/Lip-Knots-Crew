@@ -1,4 +1,5 @@
 import test from 'node:test';
+import './test-upload-backup-permissions.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -490,6 +491,12 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
     const fakeFetch = async (value, options) => {
       const url = new URL(value), method = options.method, p = url.pathname;
       assert.equal(options.redirect, 'error');
+      if (method === 'GET' && url.hostname === 'storage.googleapis.com' && p === `/storage/v1/b/${S.bucket}/iam/testPermissions`) {
+        const permissions = ['storage.buckets.get', 'storage.buckets.getIamPolicy', 'storage.buckets.update', 'storage.buckets.setIamPolicy'];
+        assert.deepEqual(url.searchParams.getAll('permissions'), permissions);
+        assert.equal(options.body, undefined);
+        return json({kind: 'storage#testIamPermissionsResponse', permissions});
+      }
       if (method === 'GET' && url.hostname === 'storage.googleapis.com' && p === `/storage/v1/b/${S.bucket}`) {
         const {policy, project, projectPolicy, effectivePublicAccessPrevention, ...bucket} = f.bucket; return json(bucket);
       }
@@ -572,6 +579,10 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
     }});
     assert.equal(result.cleanup, 'DONE'); assert.equal(result.deployedFunctionsVerified, false);
     assert.equal(result.cloudWritesAttempted, false);
+    if (!env.LKC_UPLOAD_WRITE_CONFIRMATION && !env.LKC_UPLOAD_PRIVACY_CONFIRMATION) {
+      assert.equal(result.backupBucketPermissions.status, 'VERIFIED_CALLER_PERMISSIONS');
+      assert.equal(result.backupBucketPermissions.privacyUpdatePermissionsPresent, true);
+    } else assert.equal(Object.hasOwn(result, 'backupBucketPermissions'), false);
     const artifact = fs.readFileSync(path.join(root, 'upload-source-refresh-result.json'), 'utf8');
     assert.doesNotMatch(artifact, new RegExp(privateValue)); assert.doesNotMatch(artifact, /secretEnvironmentVariables|PRIVATE_BUILD_SETTING/);
     if (privacyOperation) {

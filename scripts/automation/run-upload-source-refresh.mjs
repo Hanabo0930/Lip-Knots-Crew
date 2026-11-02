@@ -9,7 +9,8 @@ import {fileURLToPath} from 'node:url';
 import {validatePlan} from './validate-staging-scope.mjs';
 import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, assertUploadRefreshBeforeImages,
   prepareUploadSourceRefresh, runUploadRefreshTransaction, bindUploadSourceVerification,
-  bindUploadFailedSource, uploadVerifiedSources, uploadExactEventFilterValue} from './upload-source-refresh-contract.mjs';
+  bindUploadFailedSource, uploadVerifiedSources, uploadExactEventFilterValue,
+  uploadStorageTriggerDestinationSummary} from './upload-source-refresh-contract.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PREFIX = `projects/${S.project}/locations/${S.region}`;
@@ -60,6 +61,7 @@ export function validateUploadRefreshContext(env) {
 // neither authorizes a refresh nor replaces the contract validator below.
 export function uploadRefreshStorageTriggerSummary(record) {
   const event = record?.fn?.eventTrigger, trigger = record?.trigger;
+  const destination = uploadStorageTriggerDestinationSummary(trigger?.destination);
   const text = value => typeof value === 'string' && value.length > 0 && value.length <= 2048 && !/[\u0000-\u001f]/u.test(value);
   const bucketFilters = Array.isArray(event?.eventFilters)
     ? event.eventFilters.filter(filter => filter?.attribute === 'bucket' && text(filter.value)) : [];
@@ -73,8 +75,8 @@ export function uploadRefreshStorageTriggerSummary(record) {
       && Object.getPrototypeOf(trigger) === Object.prototype,
     triggerNameMatches: text(event?.trigger) && trigger?.name === event.trigger,
     triggerUidPresent: Boolean(trigger?.uid),
-    destinationServiceMatches: trigger?.destination?.cloudRun?.service === 'finalizestagedupload',
-    destinationRegionMatches: trigger?.destination?.cloudRun?.region === S.region,
+    destinationServiceMatches: destination.serviceMatches,
+    destinationRegionMatches: destination.regionMatches,
     bucketFilterMatches: text(bucket) && uploadExactEventFilterValue(trigger?.eventFilters, 'bucket') === bucket,
     eventTypeFilterMatches: text(event?.eventType) && uploadExactEventFilterValue(trigger?.eventFilters, 'type') === event.eventType,
     triggerServiceAccountMatches: text(event?.serviceAccountEmail) && trigger?.serviceAccount === event.serviceAccountEmail,
@@ -93,6 +95,7 @@ export function uploadRefreshPreflightSummary(before, bucket) {
     invokerIamDisabled: ['true', 'false'].includes(before[name]?.service?.metadata?.annotations?.['run.googleapis.com/invoker-iam-disabled'])
       ? before[name].service.metadata.annotations['run.googleapis.com/invoker-iam-disabled'] : 'UNSET'})),
     storageTrigger: uploadRefreshStorageTriggerSummary(before?.finalizeStagedUpload),
+    storageTriggerDestinationType: uploadStorageTriggerDestinationSummary(before?.finalizeStagedUpload?.trigger?.destination).kind,
     backupBucket: {publicAccessPrevention: ['enforced', 'inherited'].includes(bucket?.iamConfiguration?.publicAccessPrevention)
       ? bucket.iamConfiguration.publicAccessPrevention : 'UNVERIFIED',
     uniformBucketLevelAccess: bucket?.iamConfiguration?.uniformBucketLevelAccess?.enabled === true,

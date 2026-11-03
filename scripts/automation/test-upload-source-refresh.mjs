@@ -1,5 +1,6 @@
 import test from 'node:test';
 import './test-upload-backup-permissions.mjs';
+import './test-upload-http-failure-summary.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -556,7 +557,7 @@ test('the existing workflow owns the route and private data is never selected as
   assert.ok(shell.indexOf('functions-upload-source-refresh') < shell.indexOf('npx --yes'));
 });
 
-for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'private-bucket-unverified', 'read-only-preflight', 'trigger-mismatch-preflight', 'function-destination-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
+for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'object-create-forbidden', 'private-bucket-unverified', 'read-only-preflight', 'trigger-mismatch-preflight', 'function-destination-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
   test('isolated existing-runner integration: ' + scenario, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-refresh-integration-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
@@ -639,6 +640,13 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
         return url.searchParams.get('alt') === 'media' ? new Response(Buffer.from(bodies.get(key))) : json(objects.get(key));
       }
       if (method === 'POST' && p.startsWith('/upload/')) {
+        if (scenario === 'object-create-forbidden') {
+          mutations.push({method, path: p, kind: 'rejected-create'});
+          return new Response(JSON.stringify({error: {code: 403, message: privateValue, details: [{
+            '@type': 'type.googleapis.com/google.rpc.ErrorInfo', domain: 'global', reason: 'forbidden',
+            metadata: {permission: 'storage.objects.create', resource: privateValue, error_info_id: privateValue},
+          }]}}), {status: 403, headers: {'content-type': 'application/json'}});
+        }
         const name = url.searchParams.get('name'), buffer = Buffer.from(options.body), info = {bucket: S.bucket, name,
           generation: String(++generation), size: String(buffer.length), md5Hash: createHash('md5').update(buffer).digest('base64'),
           crc32c: Buffer.alloc(4, 3).toString('base64')};
@@ -711,6 +719,15 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
         assert.deepEqual(result.backupPrivacyEnforcement, {status: changed ? 'ENFORCED_AND_VERIFIED' : 'ALREADY_ENFORCED', changed});
         assert.equal(mutations.length, changed ? 1 : 0);
       }
+    } else if (scenario === 'object-create-forbidden') {
+      assert.equal(result.status, 'STOPPED_SAFELY'); assert.equal(result.reason, 'UPLOAD_REFRESH_HTTP_REJECTED');
+      assert.equal(result.httpStatus, 403); assert.equal(result.lastRequestKind, 'private-object-create');
+      assert.deepEqual(result.httpFailure, {captureStatus: 'STRUCTURED_RESPONSE', reasonCodes: ['STORAGE_FORBIDDEN'],
+        objectCreatePermissionMentioned: true, causeEstablished: false});
+      assert.equal(result.requests, 31); assert.equal(api.counters.writesAttempted, 1);
+      assert.equal(patches, 0); assert.equal(probes, 0); assert.equal(result.mediaBytes, 0);
+      assert.deepEqual(mutations.map(m => m.kind), ['rejected-create']);
+      assert.deepEqual(JSON.parse(artifact).httpFailure, result.httpFailure);
     } else if (scenario === 'trigger-mismatch-preflight') {
       assert.equal(result.status, 'STOPPED_SAFELY');
       assert.equal(result.reason, 'UPLOAD_REFRESH_STORAGE_TRIGGER_NOT_VERIFIED');
@@ -742,5 +759,6 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       assert.equal(result.reason, 'UPLOAD_REFRESH_PRIVATE_BUCKET_NOT_VERIFIED'); assert.equal(mutations.length, 0);
     }
   });
+
 
 

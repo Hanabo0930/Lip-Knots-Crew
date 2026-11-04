@@ -87,6 +87,35 @@ Primary API/semantics:
 
 ## Read-only preflight before an apply review
 
+### Bounded rejected-response diagnostics (2026-11-03 candidate)
+
+The owner can retain a fixed projection from the response already returned by a
+failed Storage 403 request. It adds no request, retry, permission self-test,
+workflow or cloud operation. Capture reads at most 8 KiB, 64 chunks and one
+second, counts received bytes in the existing metadata budget, and discards
+compressed, malformed, incomplete or oversized responses. Failure to capture
+does not change the known HTTP rejection or allow the operation to continue.
+
+Only allowlisted Storage/global reason enums, documented IAM/organization
+ErrorInfo enums and a boolean for an exact `storage.objects.create` mention
+leave memory. Messages, principals, resource paths, error IDs, URLs, policy
+values and arbitrary metadata are not retained. The runner accepts only a
+privately branded projection. `causeEstablished` stays false: a reason or
+permission mention does not establish which role, condition, inheritance or
+deny caused the rejection. Unknown evidence remains unavailable.
+
+This source candidate does not recover the discarded response from historical
+run84, authorize a retry, retarget the approved 070 source pin, consume the
+remaining source acquisition, or change IAM, paused modes or business data.
+Canonical CI covers the projection, hostile/slow responses and the existing
+runner's first-create-403 stop with no subsequent request or Function PATCH.
+Actual execution remains subject to the existing review and authorization.
+
+Primary response formats:
+- https://docs.cloud.google.com/storage/docs/json_api/v1/status-codes
+- https://docs.cloud.google.com/iam/docs/permission-error-messages
+- https://docs.cloud.google.com/resource-manager/docs/organization-restrictions/error-messages
+
 ### Read-only caller permission diagnosis (2026-11-02)
 
 With both optional write/privacy confirmations empty, the existing protected
@@ -244,4 +273,5 @@ and all held unsupported cases retain their existing implementation and boundari
 - [GCS generation-precondition copy](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/copy)
 - [GCS create-only upload](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/insert)
 - [Run service metadata](https://docs.cloud.google.com/run/docs/reference/rest/v1/namespaces.services/get)
+
 

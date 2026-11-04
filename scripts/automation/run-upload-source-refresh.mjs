@@ -7,6 +7,7 @@ import {createHash} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
 import {fileURLToPath} from 'node:url';
 import {validatePlan} from './validate-staging-scope.mjs';
+import {uploadHttpRejection, uploadHttpFailureSummary} from './upload-http-failure-summary.mjs';
 import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, assertUploadRefreshBeforeImages,
   prepareUploadSourceRefresh, runUploadRefreshTransaction, bindUploadSourceVerification,
   bindUploadFailedSource, uploadVerifiedSources, uploadExactEventFilterValue,
@@ -121,8 +122,10 @@ export async function inspectUploadBackupPermissions(api) {
     return {status: 'VERIFIED_CALLER_PERMISSIONS', permissions,
       privacyUpdatePermissionsPresent: permissions['storage.buckets.update'] && permissions['storage.buckets.setIamPolicy']};
   } catch (error) {
+    const httpFailure = uploadHttpFailureSummary(error);
     return {status: 'UNVERIFIED', reason: safeError(error),
-      ...(Number.isInteger(error?.httpStatus) ? {httpStatus: error.httpStatus} : {})};
+      ...(Number.isInteger(error?.httpStatus) ? {httpStatus: error.httpStatus} : {}),
+      ...(httpFailure ? {httpFailure} : {})};
   }
 }
 
@@ -205,6 +208,7 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch, {allowBac
       if (upload) need(url.searchParams.get('name').endsWith('.zip') ? ++counts.uploads <= 2 : ++counts.config <= 1,
         'UPLOAD_REFRESH_MUTATION_LIMIT');
     }
+    need(counters.metadataBytes < 16 * 1024 * 1024, 'UPLOAD_REFRESH_RESPONSE_TOO_LARGE');
     need(++counters.requests <= 700, 'UPLOAD_REFRESH_REQUEST_LIMIT');
     let headers;
     try { headers = new Headers(await auth.getRequestHeaders(url.href)); }
@@ -220,8 +224,8 @@ export function authenticatedUploadRefreshAPI(auth, fetchImpl = fetch, {allowBac
     try { response = await fetchImpl(url, {method, headers, body: data, redirect: 'error', signal: AbortSignal.timeout(45000)}); }
     catch { fail('UPLOAD_REFRESH_HTTP_OUTCOME_UNKNOWN'); }
     if (!response.ok) {
-      await response.body?.cancel();
-      const error = Error('UPLOAD_REFRESH_HTTP_REJECTED'); error.httpStatus = response.status; throw error;
+      throw await uploadHttpRejection(response, counters,
+        {captureStorage403: url.hostname === 'storage.googleapis.com' && !media});
     }
     need(!response.headers.get('content-encoding') || response.headers.get('content-encoding') === 'identity',
       'UPLOAD_REFRESH_HTTP_ENCODING_REJECTED');
@@ -501,6 +505,8 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
   } catch (error) {
     result = {...result, status: 'STOPPED_SAFELY', reason: safeError(error), deployedFunctionsVerified: false};
     if (Number.isInteger(error.httpStatus)) result.httpStatus = error.httpStatus;
+    const httpFailure = uploadHttpFailureSummary(error);
+    if (httpFailure) result.httpFailure = httpFailure;
   } finally {
     for (const buffer of privateBuffers) buffer.fill(0);
     try { if (temporary) fs.rmSync(temporary, {recursive: true, force: true}); result.cleanup = 'DONE'; }
@@ -516,5 +522,6 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
   }
   return result;
 }
+
 
 

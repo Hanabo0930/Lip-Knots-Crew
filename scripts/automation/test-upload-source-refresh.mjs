@@ -217,6 +217,66 @@ function generatedRunMetadata(record, sequence = 1) {
     'serving.knative.dev/lastModifier': `modifier-${sequence}@example.invalid`,
   });
 }
+const buildImageAnnotation = 'run.googleapis.com/build-image-uri';
+const stagingImageRepo = `${S.region}-docker.pkg.dev/${S.project}/gcf-artifacts/`;
+function generatedRunImage(record, name, sequence, artifactName) {
+  generatedRunMetadata(record, sequence);
+  record.fn.buildConfig.dockerRepository = `${prefix}/repositories/gcf-artifacts`;
+  record.service.metadata.labels = {'goog-drz-cloudfunctions-id': name.toLowerCase()};
+  const artifact = artifactName ?? `${S.project.replaceAll('-', '--')}__${S.region.replaceAll('-', '--')}__${name.replace(/[A-Z]/g, c => '_' + c.toLowerCase())}`;
+  const path = stagingImageRepo + artifact;
+  record.service.metadata.annotations[buildImageAnnotation] = `${path}:version_${sequence}`;
+  record.service.spec.template.spec.containers[0].image = `${path}@sha256:${String(sequence).repeat(64)}`;
+}
+test('source-only verification accepts a rebuilt image tied to the same Function and repository', async () => {
+  const f = fixture();
+  for (const name of S.functions) generatedRunImage(f.before[name], name, 1);
+  const owner = simulatedOwner(f, {driftAfterUpdate: (pair, update) => {
+    const name = S.functions[update - 1];
+    generatedRunImage(pair[name], name, update + 1);
+  }});
+  const result = await runUploadRefreshTransaction(prepareUploadSourceRefresh(f), owner);
+  assert.equal(result.status, 'SOURCE_ONLY_CONTRACT_VERIFIED');
+  assert.deepEqual(owner.calls, ['backup', 'update:createUploadSession', 'update:finalizeStagedUpload']);
+});
+for (const [label, mutate] of [
+  ['different artifact repository', record => {
+    record.service.metadata.annotations[buildImageAnnotation] =
+      record.service.metadata.annotations[buildImageAnnotation].replace('/gcf-artifacts/', '/different-repo/');
+    const container = record.service.spec.template.spec.containers[0];
+    container.image = container.image.replace('/gcf-artifacts/', '/different-repo/');
+  }],
+  ['unrelated image name in the same repository', record => {
+    record.service.metadata.annotations[buildImageAnnotation] = stagingImageRepo + 'other_function:version_2';
+    record.service.spec.template.spec.containers[0].image = stagingImageRepo + 'other_function:version_2';
+  }],
+  ['unbound container image', record => {
+    record.service.spec.template.spec.containers[0].image = stagingImageRepo + 'other_function:version_2';
+  }],
+]) test('source-only verification rejects a ' + label, async () => {
+  const f = fixture(), name = 'createUploadSession';
+  generatedRunImage(f.before[name], name, 1);
+  const owner = simulatedOwner(f, {driftAfterUpdate: pair => {
+    generatedRunImage(pair[name], name, 2);
+    mutate(pair[name]);
+  }});
+  const result = await runUploadRefreshTransaction(prepareUploadSourceRefresh(f), owner);
+  assert.equal(result.reason, 'UPLOAD_REFRESH_CONFIGURATION_CHANGED');
+  assert.equal(result.configurationDrift.runServiceChanged, true);
+  assert.equal(result.updates, 1);
+});
+test('a build image change before the source write still fails the raw before-image check', async () => {
+  const f = fixture(), name = 'createUploadSession';
+  generatedRunImage(f.before[name], name, 1);
+  const owner = simulatedOwner(f, {readMutation: pair => {
+    pair[name].service.metadata.annotations[buildImageAnnotation] =
+      pair[name].service.metadata.annotations[buildImageAnnotation].replace(':version_1', ':version_2');
+  }});
+  const result = await runUploadRefreshTransaction(prepareUploadSourceRefresh(f), owner);
+  assert.equal(result.reason, 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
+  assert.equal(result.updates, 0);
+  assert.deepEqual(owner.calls, []);
+});
 test('source-only verification accepts bound generated Run build and audit metadata after each update', async () => {
   const f = fixture();
   for (const name of S.functions) generatedRunMetadata(f.before[name]);

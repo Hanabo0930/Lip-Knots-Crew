@@ -11,7 +11,8 @@ import {uploadHttpRejection, uploadHttpFailureSummary} from './upload-http-failu
 import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, assertUploadRefreshBeforeImages,
   prepareUploadSourceRefresh, runUploadRefreshTransaction, bindUploadSourceVerification,
   bindUploadFailedSource, uploadVerifiedSources, uploadExactEventFilterValue,
-  uploadStorageTriggerDestinationSummary} from './upload-source-refresh-contract.mjs';
+  uploadStorageTriggerDestinationSummary, assertUploadRefreshPairUnchanged,
+  uploadImageDriftSummary} from './upload-source-refresh-contract.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PREFIX = `projects/${S.project}/locations/${S.region}`;
@@ -469,7 +470,7 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-upload-source-refresh-')); fs.chmodSync(temporary, 0o700);
     const packages = JSON.parse(execFileSync('python3', [path.join(HERE, 'package-upload-source-refresh.py'), '--root', root, '--output', temporary],
       {encoding: 'utf8', maxBuffer: 65536, stdio: ['ignore', 'pipe', 'pipe']}));
-    need(isDeepStrictEqual(await reader.readPair(), before), 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
+    assertUploadRefreshPairUnchanged(before, await reader.readPair(), {phase: 'PACKAGE_PREWRITE'});
     const replacements = {}, replacementObjects = {}, localHashes = {};
     for (const name of S.functions) {
       need(packages[name]?.path === path.join(temporary, name + '.zip'), 'UPLOAD_REFRESH_PACKAGE_PATH_REJECTED');
@@ -491,7 +492,7 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
         const ref = after[name].fn.buildConfig.sourceProvenance.resolvedStorageSource;
         need(isDeepStrictEqual(ref, verifiedSources[name]), 'UPLOAD_REFRESH_SOURCE_CHANGED');
       }
-      need(isDeepStrictEqual(await reader.readPair(), after), 'UPLOAD_REFRESH_AFTER_IMAGE_DRIFT');
+      assertUploadRefreshPairUnchanged(after, await reader.readPair(), {phase: 'FINAL_AFTER_IMAGE'});
       const uri = new URL(after.createUploadSession.fn.serviceConfig.uri);
       need(uri.protocol === 'https:' && uri.hostname.endsWith('.run.app') && !uri.username && !uri.password
         && !uri.search && !uri.hash && !uri.port && uri.pathname === '/', 'UPLOAD_REFRESH_PROBE_URI_REJECTED');
@@ -507,6 +508,8 @@ export async function runUploadSourceRefresh(env = process.env, dependencies = {
     if (Number.isInteger(error.httpStatus)) result.httpStatus = error.httpStatus;
     const httpFailure = uploadHttpFailureSummary(error);
     if (httpFailure) result.httpFailure = httpFailure;
+    const drift = uploadImageDriftSummary(error);
+    if (drift) result.imageDrift = drift;
   } finally {
     for (const buffer of privateBuffers) buffer.fill(0);
     try { if (temporary) fs.rmSync(temporary, {recursive: true, force: true}); result.cleanup = 'DONE'; }

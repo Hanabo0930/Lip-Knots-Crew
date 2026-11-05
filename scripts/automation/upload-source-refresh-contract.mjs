@@ -17,6 +17,7 @@ const PREFIX = `projects/${S.project}/locations/${S.region}`;
 const privatePlans = new WeakMap(), verifiedBackups = new WeakMap(), consumed = new WeakSet();
 const sourceReceipts = new WeakMap(), verifiedFinalSources = new WeakMap();
 const beforeImageDriftEvidence = new WeakMap();
+const configurationDriftEvidence = new WeakMap();
 const fail = code => { throw Error(code); };
 const requireValue = (condition, code) => { if (!condition) fail(code); };
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -209,6 +210,8 @@ function validateRecord(record, name, active = true) {
   requireValue(Object.entries(conf.environmentVariables).every(([key, value]) => serviceEnv[key] === value)
     && Object.hasOwn(conf.environmentVariables, 'LKC_SHEET_WRITE_MODE') === Object.hasOwn(serviceEnv, 'LKC_SHEET_WRITE_MODE'),
     'UPLOAD_REFRESH_FUNCTION_SERVICE_ENV_MISMATCH');
+  requireValue(generatedRunAnnotationKeys(record) !== undefined,
+    'UPLOAD_REFRESH_GENERATED_RUN_METADATA_NOT_VERIFIED');
   privatePolicy(record.policy);
   privatePolicy(record.functionPolicy);
   if (name === 'createUploadSession') {
@@ -236,9 +239,36 @@ function functionSettings(fn) {
   value.serviceConfig = omit(fn.serviceConfig, ['revision', 'uri']);
   return value;
 }
-function serviceSettings(service) {
+// These four Service annotations describe a completed build or its audit
+// identity. A source-only Functions update changes them as generated output.
+// Build/source annotations must agree with the same pinned Function record;
+// never ignore a prefix, arbitrary annotation, or a functional build setting.
+// https://docs.cloud.google.com/run/docs/reference/rest/v1/ObjectMeta
+// https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services
+function generatedRunAnnotationKeys(record) {
+  const annotations = record.service.metadata.annotations, fn = record.fn;
+  const keys = [];
+  const accept = (key, valid) => {
+    if (!Object.hasOwn(annotations, key)) return true;
+    if (!valid(annotations[key])) return false;
+    keys.push(key); return true;
+  };
+  const ref = fn.buildConfig.sourceProvenance.resolvedStorageSource;
+  const buildName = new RegExp(`^projects/(?:${S.project}|${S.projectNumber})/locations/${S.region}/builds/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$`);
+  if (!accept('run.googleapis.com/build-name', value => value === fn.buildConfig.build && buildName.test(value))
+    || !accept('run.googleapis.com/build-source-location', value =>
+      value === `gs://${ref.bucket}/${ref.object}#${ref.generation}`)
+    || !accept('run.googleapis.com/operation-id', value => typeof value === 'string'
+      && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value))
+    || !accept('serving.knative.dev/lastModifier', value => text(value)
+      && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value))) return undefined;
+  return keys;
+}
+function serviceSettings(record) {
+  const service = record.service;
   const value = omit(service, ['status']);
   value.metadata = omit(service.metadata, ['creationTimestamp', 'resourceVersion', 'generation', 'selfLink', 'uid']);
+  value.metadata.annotations = omit(service.metadata.annotations, generatedRunAnnotationKeys(record));
   value.spec = clone(service.spec);
   value.spec.template.metadata = omit(value.spec.template.metadata, ['name', 'creationTimestamp']);
   value.spec.template.spec.containers = value.spec.template.spec.containers.map(container => omit(container, ['image']));
@@ -250,13 +280,23 @@ function triggerSettings(record) {
   const trigger = comparableEventarcTrigger(record);
   return trigger === undefined || trigger === null ? trigger : omit(trigger, ['createTime', 'updateTime', 'etag', 'conditions']);
 }
-function sameSettings(before, after) {
-  return isDeepStrictEqual(functionSettings(before.fn), functionSettings(after.fn))
-    && isDeepStrictEqual(serviceSettings(before.service), serviceSettings(after.service))
-    && isDeepStrictEqual(omit(before.policy, ['etag']), omit(after.policy, ['etag']))
-    && isDeepStrictEqual(omit(before.functionPolicy, ['etag']), omit(after.functionPolicy, ['etag']))
-    && triggerSettings(before) !== undefined && triggerSettings(after) !== undefined
-    && isDeepStrictEqual(triggerSettings(before), triggerSettings(after));
+function assertSameSettings(before, after, name) {
+  const summary = {function: name,
+    functionChanged: !isDeepStrictEqual(functionSettings(before.fn), functionSettings(after.fn)),
+    runServiceChanged: !isDeepStrictEqual(serviceSettings(before), serviceSettings(after)),
+    runPolicyChanged: !isDeepStrictEqual(omit(before.policy, ['etag']), omit(after.policy, ['etag'])),
+    functionPolicyChanged: !isDeepStrictEqual(omit(before.functionPolicy, ['etag']), omit(after.functionPolicy, ['etag'])),
+    eventarcTriggerChanged: triggerSettings(before) === undefined || triggerSettings(after) === undefined
+      || !isDeepStrictEqual(triggerSettings(before), triggerSettings(after))};
+  if (Object.entries(summary).every(([key, value]) => key === 'function' || value === false)) return;
+  const error = Error('UPLOAD_REFRESH_CONFIGURATION_CHANGED');
+  configurationDriftEvidence.set(error, freeze(summary));
+  throw error;
+}
+// Only a fixed domain summary created by this module may leave memory.
+export function uploadConfigurationDriftSummary(error) {
+  const summary = configurationDriftEvidence.get(error);
+  return summary ? clone(summary) : undefined;
 }
 function verifyPair(plan, observed, sources, allowedFailed = []) {
   const p = state(plan);
@@ -264,7 +304,7 @@ function verifyPair(plan, observed, sources, allowedFailed = []) {
     'UPLOAD_REFRESH_PAIR_REQUIRED');
   for (const name of S.functions) {
     validateRecord(observed[name], name, !allowedFailed.includes(name));
-    requireValue(sameSettings(p.before[name], observed[name]), 'UPLOAD_REFRESH_CONFIGURATION_CHANGED');
+    assertSameSettings(p.before[name], observed[name], name);
     requireValue(isDeepStrictEqual(observed[name].fn.buildConfig.sourceProvenance.resolvedStorageSource, sources[name]),
       'UPLOAD_REFRESH_SOURCE_CHANGED');
   }
@@ -471,8 +511,10 @@ export async function runUploadRefreshTransaction(plan, owner, execution = 'isol
     return outcome({status: 'SOURCE_ONLY_CONTRACT_VERIFIED'});
   } catch (error) {
     const drift = uploadImageDriftSummary(error);
+    const configurationDrift = uploadConfigurationDriftSummary(error);
     return {...stopped(/^UPLOAD_REFRESH_[A-Z_]+$/.test(error.message) ? error.message : 'UPLOAD_REFRESH_VERIFICATION_UNKNOWN'),
-      ...(drift ? {imageDrift: drift} : {})};
+      ...(drift ? {imageDrift: drift} : {}), ...(configurationDrift ? {configurationDrift} : {})};
   }
 }
+
 

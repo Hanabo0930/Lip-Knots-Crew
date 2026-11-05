@@ -11,7 +11,7 @@ import {createRequire} from 'node:module';
 import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, prepareUploadSourceRefresh, uploadBackupRequests,
   verifyUploadBackups, uploadSourceOnlyPatch, runUploadRefreshTransaction,
   uploadExactEventFilterValue, uploadStorageTriggerDestinationSummary, assertUploadRefreshPairUnchanged,
-  uploadImageDriftSummary} from './upload-source-refresh-contract.mjs';
+  uploadImageDriftSummary, uploadConfigurationDriftSummary} from './upload-source-refresh-contract.mjs';
 import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUploadRefreshObject, runUploadSourceRefresh,
   uploadRefreshCloudOwner, enforceUploadBackupPrivacy, UPLOAD_BACKUP_PRIVACY_CONFIRMATION,
   uploadRefreshStorageTriggerSummary, uploadRefreshPreflightSummary} from './run-upload-source-refresh.mjs';
@@ -206,6 +206,81 @@ function simulatedOwner(input, {failAt = 0, partialFailure = false, unknownAt = 
     },
   };
 }
+function generatedRunMetadata(record, sequence = 1) {
+  const id = `00000000-0000-0000-0000-${String(sequence).padStart(12, '0')}`;
+  const ref = record.fn.buildConfig.sourceProvenance.resolvedStorageSource;
+  record.fn.buildConfig.build = `${prefix}/builds/${id}`;
+  Object.assign(record.service.metadata.annotations, {
+    'run.googleapis.com/build-name': record.fn.buildConfig.build,
+    'run.googleapis.com/build-source-location': `gs://${ref.bucket}/${ref.object}#${ref.generation}`,
+    'run.googleapis.com/operation-id': id,
+    'serving.knative.dev/lastModifier': `modifier-${sequence}@example.invalid`,
+  });
+}
+test('source-only verification accepts bound generated Run build and audit metadata after each update', async () => {
+  const f = fixture();
+  for (const name of S.functions) generatedRunMetadata(f.before[name]);
+  const snapshot = copy(f.before), plan = prepareUploadSourceRefresh(f);
+  const owner = simulatedOwner(f, {driftAfterUpdate: (pair, update) =>
+    generatedRunMetadata(pair[S.functions[update - 1]], update + 1)});
+  const result = await runUploadRefreshTransaction(plan, owner);
+  assert.equal(result.status, 'SOURCE_ONLY_CONTRACT_VERIFIED');
+  assert.deepEqual(owner.calls, ['backup', 'update:createUploadSession', 'update:finalizeStagedUpload']);
+  assert.deepEqual(f.before, snapshot);
+  assert.deepEqual(JSON.parse(uploadBackupRequests(plan)[2].body).before, snapshot);
+});
+for (const key of ['run.googleapis.com/build-name', 'run.googleapis.com/build-source-location',
+  'run.googleapis.com/operation-id', 'serving.knative.dev/lastModifier'])
+  test('generated metadata still rejects prewrite drift: ' + key, async () => {
+    const f = fixture();
+    for (const name of S.functions) generatedRunMetadata(f.before[name]);
+    const plan = prepareUploadSourceRefresh(f), owner = simulatedOwner(f, {readMutation: pair =>
+      pair.createUploadSession.service.metadata.annotations[key] = privateValue});
+    const result = await runUploadRefreshTransaction(plan, owner);
+    assert.equal(result.reason, 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
+    assert.equal(result.updates, 0); assert.deepEqual(owner.calls, []);
+  });
+for (const key of ['run.googleapis.com/ingress', 'run.googleapis.com/invoker-iam-disabled',
+  'run.googleapis.com/build-service-account', 'run.googleapis.com/build-environment-variables',
+  'run.googleapis.com/build-unrecognized'])
+  test('post-update comparison retains real and unknown Run settings: ' + key, async () => {
+    const f = fixture(), owner = simulatedOwner(f, {driftAfterUpdate: pair =>
+      pair.createUploadSession.service.metadata.annotations[key] =
+        key.endsWith('invoker-iam-disabled') ? 'false' : privateValue});
+    const result = await runUploadRefreshTransaction(prepareUploadSourceRefresh(f), owner);
+    assert.equal(result.reason, 'UPLOAD_REFRESH_CONFIGURATION_CHANGED');
+    assert.equal(result.restores, 0);
+    assert.deepEqual(owner.calls, ['backup', 'update:createUploadSession']);
+    assert.equal(result.configurationDrift.function, 'createUploadSession');
+    assert.equal(result.configurationDrift.runServiceChanged, true);
+    assert.deepEqual(Object.keys(result.configurationDrift), ['function', 'functionChanged', 'runServiceChanged',
+      'runPolicyChanged', 'functionPolicyChanged', 'eventarcTriggerChanged']);
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(privateValue));
+  });
+for (const [key, value] of [
+  ['run.googleapis.com/build-name', `${prefix}/builds/99999999-0000-0000-0000-000000000001`],
+  ['run.googleapis.com/build-name', 'projects/other/locations/elsewhere/builds/00000000-0000-0000-0000-000000000001'],
+  ['run.googleapis.com/build-source-location', `gs://${S.bucket}/other.zip#17`],
+  ['run.googleapis.com/operation-id', privateValue],
+  ['serving.knative.dev/lastModifier', privateValue],
+]) test('generated metadata must be valid and bound to the same Function: ' + key + '/' + value.length, async () => {
+  const f = fixture(); generatedRunMetadata(f.before.createUploadSession);
+  f.before.createUploadSession.service.metadata.annotations[key] = value;
+  assert.throws(() => prepareUploadSourceRefresh(f), /GENERATED_RUN_METADATA_NOT_VERIFIED/);
+  const clean = fixture(); generatedRunMetadata(clean.before.createUploadSession);
+  const owner = simulatedOwner(clean, {driftAfterUpdate: pair => {
+    generatedRunMetadata(pair.createUploadSession, 2);
+    pair.createUploadSession.service.metadata.annotations[key] = value;
+  }});
+  const result = await runUploadRefreshTransaction(prepareUploadSourceRefresh(clean), owner);
+  assert.equal(result.reason, 'UPLOAD_REFRESH_GENERATED_RUN_METADATA_NOT_VERIFIED');
+  assert.deepEqual(owner.calls, ['backup', 'update:createUploadSession']);
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(privateValue));
+});
+test('configuration diagnostics reject forged provider evidence and contain only fixed domains', () => {
+  assert.equal(uploadConfigurationDriftSummary(Object.assign(Error(privateValue), {
+    configurationDrift: {function: privateValue}})), undefined);
+});
 test('consecutive Eventarc filter permutations preserve the source-only transaction and raw before-images', async () => {
   const f = fixture(), before = copy(f.before);
   const plan = prepareUploadSourceRefresh(f), owner = simulatedOwner(f, {
@@ -646,7 +721,7 @@ test('the existing workflow owns the route and private data is never selected as
   assert.ok(shell.indexOf('functions-upload-source-refresh') < shell.indexOf('npx --yes'));
 });
 
-for (const scenario of ['success', 'eventarc-order-success', 'snapshot-drift', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'object-create-forbidden', 'private-bucket-unverified', 'read-only-preflight', 'trigger-mismatch-preflight', 'function-destination-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
+for (const scenario of ['success', 'eventarc-order-success', 'snapshot-drift', 'managed-success', 'managed-metadata-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'object-create-forbidden', 'private-bucket-unverified', 'read-only-preflight', 'trigger-mismatch-preflight', 'function-destination-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
   test('isolated existing-runner integration: ' + scenario, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-refresh-integration-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
@@ -673,6 +748,7 @@ for (const scenario of ['success', 'eventarc-order-success', 'snapshot-drift', '
       for (const key of configKeys) pair[name].fn.serviceConfig.environmentVariables[key] = 'synthetic-' + key;
       pair[name].service.spec.template.spec.containers[0].env = Object.entries(pair[name].fn.serviceConfig.environmentVariables).map(([name, value]) => ({name, value}));
       objects.set(pair[name].object.name + '#' + pair[name].object.generation, copy(pair[name].object));
+      if (scenario === 'managed-metadata-success') generatedRunMetadata(pair[name]);
     }
     if (scenario === 'trigger-mismatch-preflight') pair.finalizeStagedUpload.trigger.destination.cloudRun.service = 'other';
     if (scenario === 'function-destination-preflight') pair.finalizeStagedUpload.trigger.destination =
@@ -771,6 +847,7 @@ for (const scenario of ['success', 'eventarc-order-success', 'snapshot-drift', '
         record.service.status.latestReadyRevisionName = record.service.status.latestCreatedRevisionName = revision;
         record.service.status.traffic[0].revisionName = revision;
         record.service.spec.template.spec.containers[0].image = 'generated-image-' + patches;
+        if (scenario === 'managed-metadata-success') generatedRunMetadata(record, patches + 1);
         mutations.push({method, name, source: copy(body.buildConfig.source.storageSource)});
         if (scenario === 'unknown-second' && patches === 2) throw Error(privateValue);
         const failed = scenario.endsWith('second-failure') && patches === 2;
@@ -864,6 +941,7 @@ for (const scenario of ['success', 'eventarc-order-success', 'snapshot-drift', '
       assert.equal(result.reason, 'UPLOAD_REFRESH_PRIVATE_BUCKET_NOT_VERIFIED'); assert.equal(mutations.length, 0);
     }
   });
+
 
 
 

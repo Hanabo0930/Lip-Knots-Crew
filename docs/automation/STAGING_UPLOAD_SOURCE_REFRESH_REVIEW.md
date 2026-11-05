@@ -116,6 +116,44 @@ Primary response formats:
 - https://docs.cloud.google.com/iam/docs/permission-error-messages
 - https://docs.cloud.google.com/resource-manager/docs/organization-restrictions/error-messages
 
+### Eventarc filter order and bounded snapshot drift evidence (2026-11-05 candidate)
+
+Actual source apply #86/run41935760071 at exact main
+`2934f535065c3d68578e05c7b8015f1b2ae2de93` stopped with
+`UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT` after local packaging and before its first
+object create. It made 26 metadata requests, zero source media reads and zero
+Cloud writes. The retained summary does not identify the differing field, so
+the actual cause of #86 remains **unproven**. Do not rerun it to regenerate
+diagnostic evidence or assume this candidate fixes that historical cause.
+
+The [official Eventarc Trigger contract](https://docs.cloud.google.com/eventarc/docs/reference/rest/v1/projects.locations.triggers)
+defines `eventFilters[]` as an unordered list. Consecutive responses with the
+same literal filters in a different order demonstrated a false-positive in the
+raw snapshot equality check. The comparison now sorts copies of only the
+existing finalizer's Eventarc `trigger.eventFilters`: exactly one literal
+`bucket` and one literal finalized-event `type`, with their existing values.
+Duplicates, unknown attributes/fields/operators, patterns and changed values
+fail closed. Function records, Run records, policies, source metadata and every
+other field remain strict. Original observations, private manifests, backup
+inputs and restoration records retain their original arrays and values.
+
+The same comparison applies to every existing pre-write pair/peer check,
+post-update/restoration settings verification and the final after-image check.
+An actual mismatch retains only a fixed phase enum and fixed per-Function
+domain booleans in `imageDrift`. No field names derived from provider data,
+paths, hashes, settings, policy contents or credentials are emitted. Only a
+privately branded comparison error can supply this evidence. All comparisons
+use snapshots already read at those sites: no requests, retries, source reads,
+permissions or mutation routes were added. The single-snapshot metadata-only
+preflight remains unchanged and does not manufacture a drift diagnosis.
+
+Isolated regressions cover consecutive permutations, raw before-image retention,
+reverse restoration, genuine drift and invalid-filter rejection, diagnostic
+redaction, and the full runner through its final after-image comparison. Normal
+Node22 canonical CI is still required. A successful code test is not another
+Cloud attempt, a new approved source SHA, an extension of the November5 noon JST
+grant, consumption/reset of the remaining acquisition, or Hosting approval.
+
 ### Read-only caller permission diagnosis (2026-11-02)
 
 With both optional write/privacy confirmations empty, the existing protected

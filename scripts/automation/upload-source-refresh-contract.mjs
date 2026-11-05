@@ -16,6 +16,7 @@ const S = UPLOAD_REFRESH_SCOPE;
 const PREFIX = `projects/${S.project}/locations/${S.region}`;
 const privatePlans = new WeakMap(), verifiedBackups = new WeakMap(), consumed = new WeakSet();
 const sourceReceipts = new WeakMap(), verifiedFinalSources = new WeakMap();
+const beforeImageDriftEvidence = new WeakMap();
 const fail = code => { throw Error(code); };
 const requireValue = (condition, code) => { if (!condition) fail(code); };
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -37,6 +38,69 @@ export function uploadExactEventFilterValue(filters, attribute) {
   if (matches.length !== 1 || !text(matches[0].value)
     || ![undefined, ''].includes(matches[0].operator)) return undefined;
   return matches[0].value;
+}
+// Eventarc explicitly defines Trigger.eventFilters as an unordered list. Only
+// the fixed Storage trigger's literal bucket/type filters may be reordered for
+// comparison. Keep the actual records (including the private before-image) raw.
+// https://docs.cloud.google.com/eventarc/docs/reference/rest/v1/projects.locations.triggers
+function comparableEventarcTrigger(record) {
+  if (record?.trigger === null) return null;
+  const trigger = record?.trigger, filters = trigger?.eventFilters;
+  const bucket = uploadExactEventFilterValue(record?.fn?.eventTrigger?.eventFilters, 'bucket');
+  if (!plain(trigger) || !Array.isArray(filters) || filters.length !== 2 || !text(bucket) || bucket === S.bucket
+    || !filters.every(filter => plain(filter)
+      && Object.keys(filter).every(key => ['attribute', 'value', 'operator'].includes(key))
+      && ['bucket', 'type'].includes(filter.attribute) && text(filter.value)
+      && [undefined, ''].includes(filter.operator))
+    || new Set(filters.map(filter => filter.attribute)).size !== 2
+    || uploadExactEventFilterValue(filters, 'bucket') !== bucket
+    || uploadExactEventFilterValue(filters, 'type') !== 'google.cloud.storage.object.v1.finalized') return undefined;
+  return {...trigger, eventFilters: filters.map(filter => ({...filter}))
+    .sort((a, b) => a.attribute < b.attribute ? -1 : 1)};
+}
+function comparableRecord(record, name) {
+  if (!plain(record)) return undefined;
+  if (name !== 'finalizeStagedUpload') return record;
+  const trigger = comparableEventarcTrigger(record);
+  return trigger === undefined || trigger === null ? undefined : {...record, trigger};
+}
+const pairShape = pair => plain(pair)
+  && Object.keys(pair).sort().join(',') === [...S.functions].sort().join(',');
+const driftPhases = ['PACKAGE_PREWRITE', 'TRANSACTION_INITIAL', 'BACKUP_POSTWRITE', 'FUNCTION_PREWRITE', 'UNTOUCHED_PEER', 'FINAL_AFTER_IMAGE'];
+const recordKeys = ['fn', 'service', 'policy', 'functionPolicy', 'trigger', 'object'];
+export function assertUploadRefreshPairUnchanged(before, observed, {phase, names = S.functions} = {}) {
+  requireValue(driftPhases.includes(phase) && Array.isArray(names) && names.length > 0
+    && names.length <= S.functions.length && new Set(names).size === names.length
+    && names.every(name => S.functions.includes(name)), 'UPLOAD_REFRESH_COMPARISON_SCOPE_INVALID');
+  const shapesMatch = pairShape(before) && pairShape(observed);
+  const compared = name => names.includes(name);
+  const sameRecord = name => {
+    const a = comparableRecord(before?.[name], name), b = comparableRecord(observed?.[name], name);
+    return a !== undefined && b !== undefined && isDeepStrictEqual(a, b);
+  };
+  if (shapesMatch && names.every(sameRecord)) return;
+  const summary = {phase, pairShapeChanged: !shapesMatch};
+  for (const name of S.functions) {
+    const a = before?.[name], b = observed?.[name], active = compared(name);
+    const ca = comparableRecord(a, name), cb = comparableRecord(b, name);
+    const changed = field => active && !isDeepStrictEqual(a?.[field], b?.[field]);
+    summary[name] = {compared: active, functionChanged: changed('fn'), runServiceChanged: changed('service'),
+      runPolicyChanged: changed('policy'), functionPolicyChanged: changed('functionPolicy'),
+      eventarcTriggerChanged: changed('trigger'), sourceObjectChanged: changed('object'),
+      unknownRecordFieldsChanged: active && !isDeepStrictEqual(omit(a, recordKeys), omit(b, recordKeys)),
+      invalidEventarcFilters: active && name === 'finalizeStagedUpload' && (ca === undefined || cb === undefined),
+      eventarcOrderOnly: active && name === 'finalizeStagedUpload' && changed('trigger')
+        && ca !== undefined && cb !== undefined && isDeepStrictEqual(ca, cb)};
+  }
+  const error = Error(phase === 'FINAL_AFTER_IMAGE' ? 'UPLOAD_REFRESH_AFTER_IMAGE_DRIFT' : 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
+  beforeImageDriftEvidence.set(error, freeze(summary));
+  throw error;
+}
+// Only evidence produced by the assertion above may leave memory. Provider or
+// callback errors cannot supply arbitrary properties to the retained result.
+export function uploadImageDriftSummary(error) {
+  const summary = beforeImageDriftEvidence.get(error);
+  return summary ? clone(summary) : undefined;
 }
 // Eventarc exposes a managed Functions destination as a full Function resource
 // name. Match that exact fixed target, or the existing exact Cloud Run target.
@@ -182,15 +246,17 @@ function serviceSettings(service) {
   if (value.spec.traffic) value.spec.traffic = value.spec.traffic.map(t => omit(t, ['revisionName']));
   return value;
 }
-function triggerSettings(trigger) {
-  return trigger === null ? null : omit(trigger, ['createTime', 'updateTime', 'etag', 'conditions']);
+function triggerSettings(record) {
+  const trigger = comparableEventarcTrigger(record);
+  return trigger === undefined || trigger === null ? trigger : omit(trigger, ['createTime', 'updateTime', 'etag', 'conditions']);
 }
 function sameSettings(before, after) {
   return isDeepStrictEqual(functionSettings(before.fn), functionSettings(after.fn))
     && isDeepStrictEqual(serviceSettings(before.service), serviceSettings(after.service))
     && isDeepStrictEqual(omit(before.policy, ['etag']), omit(after.policy, ['etag']))
     && isDeepStrictEqual(omit(before.functionPolicy, ['etag']), omit(after.functionPolicy, ['etag']))
-    && isDeepStrictEqual(triggerSettings(before.trigger), triggerSettings(after.trigger));
+    && triggerSettings(before) !== undefined && triggerSettings(after) !== undefined
+    && isDeepStrictEqual(triggerSettings(before), triggerSettings(after));
 }
 function verifyPair(plan, observed, sources, allowedFailed = []) {
   const p = state(plan);
@@ -356,13 +422,13 @@ export async function runUploadRefreshTransaction(plan, owner, execution = 'isol
   const expected = clone(p.oldSources), attempted = [];
   try {
     const initial = await owner.readPair();
-    requireValue(isDeepStrictEqual(initial, p.before), 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
+    assertUploadRefreshPairUnchanged(p.before, initial, {phase: 'TRANSACTION_INITIAL'});
     backupAttempted = true;
     verifyUploadBackups(plan, await owner.saveBackups(uploadBackupRequests(plan)));
     let lastPair = await owner.readPair();
-    requireValue(isDeepStrictEqual(lastPair, p.before), 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
+    assertUploadRefreshPairUnchanged(p.before, lastPair, {phase: 'BACKUP_POSTWRITE'});
     for (const name of S.functions) {
-      requireValue(isDeepStrictEqual(await owner.readPair(), lastPair), 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
+      assertUploadRefreshPairUnchanged(lastPair, await owner.readPair(), {phase: 'FUNCTION_PREWRITE'});
       attempted.push(name); updates++;
       let result;
       try { result = await owner.updateOne(uploadSourceOnlyPatch(plan, name)); }
@@ -397,14 +463,16 @@ export async function runUploadRefreshTransaction(plan, owner, execution = 'isol
       expected[name] = acceptedSource(plan, name, result.verifiedSource, false, execution);
       const observed = await owner.readPair();
       for (const peer of S.functions.filter(n => !attempted.includes(n)))
-        requireValue(isDeepStrictEqual(observed[peer], p.before[peer]), 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
+        assertUploadRefreshPairUnchanged(p.before, observed, {phase: 'UNTOUCHED_PEER', names: [peer]});
       verifyPair(plan, observed, expected);
       lastPair = observed;
     }
     verifiedFinalSources.set(plan, freeze(clone(expected)));
     return outcome({status: 'SOURCE_ONLY_CONTRACT_VERIFIED'});
   } catch (error) {
-    return stopped(/^UPLOAD_REFRESH_[A-Z_]+$/.test(error.message) ? error.message : 'UPLOAD_REFRESH_VERIFICATION_UNKNOWN');
+    const drift = uploadImageDriftSummary(error);
+    return {...stopped(/^UPLOAD_REFRESH_[A-Z_]+$/.test(error.message) ? error.message : 'UPLOAD_REFRESH_VERIFICATION_UNKNOWN'),
+      ...(drift ? {imageDrift: drift} : {})};
   }
 }
 

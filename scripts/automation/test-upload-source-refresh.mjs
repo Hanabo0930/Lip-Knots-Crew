@@ -10,7 +10,8 @@ import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {UPLOAD_REFRESH_SCOPE as S, UPLOAD_PUBLIC_ACCESS_CONSTRAINT, uploadEffectivePublicAccessPreventionEnforced, prepareUploadSourceRefresh, uploadBackupRequests,
   verifyUploadBackups, uploadSourceOnlyPatch, runUploadRefreshTransaction,
-  uploadExactEventFilterValue, uploadStorageTriggerDestinationSummary} from './upload-source-refresh-contract.mjs';
+  uploadExactEventFilterValue, uploadStorageTriggerDestinationSummary, assertUploadRefreshPairUnchanged,
+  uploadImageDriftSummary} from './upload-source-refresh-contract.mjs';
 import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUploadRefreshObject, runUploadSourceRefresh,
   uploadRefreshCloudOwner, enforceUploadBackupPrivacy, UPLOAD_BACKUP_PRIVACY_CONFIRMATION,
   uploadRefreshStorageTriggerSummary, uploadRefreshPreflightSummary} from './run-upload-source-refresh.mjs';
@@ -205,6 +206,94 @@ function simulatedOwner(input, {failAt = 0, partialFailure = false, unknownAt = 
     },
   };
 }
+test('consecutive Eventarc filter permutations preserve the source-only transaction and raw before-images', async () => {
+  const f = fixture(), before = copy(f.before);
+  const plan = prepareUploadSourceRefresh(f), owner = simulatedOwner(f, {
+    readMutation: current => current.finalizeStagedUpload.trigger.eventFilters.reverse(),
+  });
+  const result = await runUploadRefreshTransaction(plan, owner);
+  assert.equal(result.status, 'SOURCE_ONLY_CONTRACT_VERIFIED');
+  assert.deepEqual(owner.calls, ['backup', 'update:createUploadSession', 'update:finalizeStagedUpload']);
+  assert.deepEqual(f.before, before);
+  const manifest = JSON.parse(uploadBackupRequests(plan)[2].body.toString());
+  assert.deepEqual(manifest.before.finalizeStagedUpload.trigger.eventFilters,
+    before.finalizeStagedUpload.trigger.eventFilters);
+});
+test('filter permutations preserve reverse restoration after a known terminal second update failure', async () => {
+  const f = fixture(), plan = prepareUploadSourceRefresh(f), owner = simulatedOwner(f, {
+    failAt: 2, partialFailure: true,
+    readMutation: current => current.finalizeStagedUpload.trigger.eventFilters.reverse(),
+  });
+  const result = await runUploadRefreshTransaction(plan, owner);
+  assert.equal(result.status, 'PAIR_RESTORE_VERIFIED');
+  assert.equal(result.updates, 2); assert.equal(result.restores, 2);
+  assert.deepEqual(owner.calls, ['backup', 'update:createUploadSession', 'update:finalizeStagedUpload',
+    'restore:finalizeStagedUpload', 'restore:createUploadSession']);
+});
+test('real trigger drift during terminal failure prevents unsafe restoration despite equivalent filter order', async () => {
+  const f = fixture(), plan = prepareUploadSourceRefresh(f), owner = simulatedOwner(f, {
+    failAt: 2, partialFailure: true,
+    readMutation: current => {
+      current.finalizeStagedUpload.trigger.eventFilters.reverse();
+      if (current.finalizeStagedUpload.fn.state === 'FAILED')
+        current.finalizeStagedUpload.trigger.destination.cloudRun.service = 'other';
+    },
+  });
+  const result = await runUploadRefreshTransaction(plan, owner);
+  assert.equal(result.status, 'STOPPED_SAFELY'); assert.equal(result.restores, 0);
+  assert.deepEqual(owner.calls, ['backup', 'update:createUploadSession', 'update:finalizeStagedUpload']);
+});
+for (const [label, mutate, domain] of [
+  ['function environment', r => r.fn.serviceConfig.environmentVariables.EXTRA_PRIVATE_SETTING = 'changed', 'functionChanged'],
+  ['run environment order', r => r.service.spec.template.spec.containers[0].env.reverse(), 'runServiceChanged'],
+  ['run policy', r => r.policy.etag = privateValue, 'runPolicyChanged'],
+  ['function policy', r => r.functionPolicy.future = privateValue, 'functionPolicyChanged'],
+  ['trigger destination', r => r.trigger.destination.cloudRun.service = privateValue, 'eventarcTriggerChanged'],
+  ['trigger future field', r => r.trigger.future = privateValue, 'eventarcTriggerChanged'],
+  ['source metadata', r => r.object.generation = '18', 'sourceObjectChanged'],
+  ['unknown record field', r => r.future = privateValue, 'unknownRecordFieldsChanged'],
+]) test('pair comparison keeps real changes strict: ' + label, () => {
+  const f = fixture(), observed = copy(f.before); mutate(observed.finalizeStagedUpload);
+  assert.throws(() => assertUploadRefreshPairUnchanged(f.before, observed, {phase: 'PACKAGE_PREWRITE'}), error => {
+    assert.equal(error.message, 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
+    const summary = uploadImageDriftSummary(error);
+    assert.equal(summary.phase, 'PACKAGE_PREWRITE'); assert.equal(summary.finalizeStagedUpload[domain], true);
+    assert.equal(summary.createUploadSession.functionChanged, false);
+    assert.ok(JSON.stringify(summary).length < 1400);
+    assert.doesNotMatch(JSON.stringify(summary), new RegExp(privateValue));
+    for (const [key, value] of Object.entries(summary)) if (key !== 'phase')
+      assert.ok(typeof value === 'boolean' || Object.values(value).every(item => typeof item === 'boolean'));
+    return true;
+  });
+});
+for (const [label, mutate] of [
+  ['duplicate attribute', filters => filters[1] = copy(filters[0])],
+  ['unknown attribute', filters => filters[1].attribute = privateValue],
+  ['unknown operator', filters => filters[0].operator = privateValue],
+  ['pattern operator', filters => filters[0].operator = 'match-path-pattern'],
+  ['unknown filter field', filters => filters[0].future = privateValue],
+  ['empty value', filters => filters[0].value = ''],
+  ['changed bucket', filters => filters[0].value = privateValue],
+  ['changed type', filters => filters[1].value = privateValue],
+  ['malformed member', filters => filters[0] = null],
+  ['extra member', filters => filters.push(copy(filters[0]))],
+]) test('pair comparison refuses malformed or changed Eventarc filters: ' + label, () => {
+  const f = fixture(), observed = copy(f.before); mutate(observed.finalizeStagedUpload.trigger.eventFilters);
+  assert.throws(() => assertUploadRefreshPairUnchanged(f.before, observed, {phase: 'PACKAGE_PREWRITE'}), error => {
+    assert.equal(uploadImageDriftSummary(error).finalizeStagedUpload.invalidEventarcFilters, true); return true;
+  });
+});
+test('comparison evidence is privately branded, scoped and retains the final-after error reason', () => {
+  assert.equal(uploadImageDriftSummary(Object.assign(Error(privateValue), {imageDrift: {phase: privateValue}})), undefined);
+  const f = fixture(), observed = copy(f.before); observed.finalizeStagedUpload.trigger.future = privateValue;
+  assert.throws(() => assertUploadRefreshPairUnchanged(f.before, observed, {phase: privateValue}), /COMPARISON_SCOPE_INVALID/);
+  assert.throws(() => assertUploadRefreshPairUnchanged(f.before, observed, {phase: 'UNTOUCHED_PEER', names: ['other']}), /COMPARISON_SCOPE_INVALID/);
+  assert.throws(() => assertUploadRefreshPairUnchanged(f.before, observed, {phase: 'FINAL_AFTER_IMAGE'}), error => {
+    assert.equal(error.message, 'UPLOAD_REFRESH_AFTER_IMAGE_DRIFT');
+    const summary = uploadImageDriftSummary(error); summary.finalizeStagedUpload.functionChanged = true;
+    assert.equal(uploadImageDriftSummary(error).finalizeStagedUpload.functionChanged, false); return true;
+  });
+});
 test('private plans never serialize settings, config bodies or backup payloads', () => {
   const plan = prepareUploadSourceRefresh(fixture());
   assert.doesNotMatch(JSON.stringify(plan), new RegExp(privateValue));
@@ -557,7 +646,7 @@ test('the existing workflow owns the route and private data is never selected as
   assert.ok(shell.indexOf('functions-upload-source-refresh') < shell.indexOf('npx --yes'));
 });
 
-for (const scenario of ['success', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'object-create-forbidden', 'private-bucket-unverified', 'read-only-preflight', 'trigger-mismatch-preflight', 'function-destination-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
+for (const scenario of ['success', 'eventarc-order-success', 'snapshot-drift', 'managed-success', 'second-failure', 'managed-second-failure', 'unknown-second', 'object-create-forbidden', 'private-bucket-unverified', 'read-only-preflight', 'trigger-mismatch-preflight', 'function-destination-preflight', 'inherited-private-preflight', 'organization-enforced-preflight', 'organization-unverified-preflight', 'organization-policy-forbidden-preflight', 'privacy-enforce-preflight', 'privacy-already-enforced-preflight', 'privacy-conflict-preflight', 'privacy-unknown-preflight', 'privacy-after-drift-preflight'])
   test('isolated existing-runner integration: ' + scenario, async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-refresh-integration-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
@@ -571,7 +660,7 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
     git(['init', '--initial-branch=automation/upload-refresh-isolation']); git(['add', '--all']);
     git(['-c', 'user.name=Isolated test', '-c', 'user.email=isolated@example.invalid', 'commit', '-m', 'Synthetic source']);
     const f = fixture(), pair = copy(f.before), objects = new Map(), bodies = new Map(), mutations = [];
-    let generation = 200, patches = 0, probes = 0;
+    let generation = 200, patches = 0, probes = 0, triggerReads = 0;
     const privacyOperation = scenario.startsWith('privacy-');
     if (privacyOperation) {
       Object.assign(f.bucket, {metageneration: '42', updated: '2026-11-01T00:00:00Z', etag: 'private-etag', labels: {preserve: privateValue}});
@@ -632,7 +721,12 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       if (method === 'GET' && url.hostname === `${S.region}-run.googleapis.com`) {
         const name = S.functions.find(n => n.toLowerCase() === p.split('/').at(-1)); return json(pair[name].service);
       }
-      if (method === 'GET' && url.hostname === 'eventarc.googleapis.com') return json(pair.finalizeStagedUpload.trigger);
+      if (method === 'GET' && url.hostname === 'eventarc.googleapis.com') {
+        const trigger = copy(pair.finalizeStagedUpload.trigger); triggerReads++;
+        if (scenario === 'eventarc-order-success' && triggerReads % 2 === 0) trigger.eventFilters.reverse();
+        if (scenario === 'snapshot-drift' && triggerReads === 2) trigger.future = privateValue;
+        return json(trigger);
+      }
       if (method === 'GET' && url.hostname === 'cloudfunctions.googleapis.com') return json(pair[p.split('/').at(-1)].fn);
       if (method === 'GET' && url.hostname === 'storage.googleapis.com' && p.includes('/o/')) {
         const name = decodeURIComponent(p.split('/o/')[1]), key = name + '#' + url.searchParams.get('generation');
@@ -719,6 +813,13 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
         assert.deepEqual(result.backupPrivacyEnforcement, {status: changed ? 'ENFORCED_AND_VERIFIED' : 'ALREADY_ENFORCED', changed});
         assert.equal(mutations.length, changed ? 1 : 0);
       }
+    } else if (scenario === 'snapshot-drift') {
+      assert.equal(result.status, 'STOPPED_SAFELY'); assert.equal(result.reason, 'UPLOAD_REFRESH_BEFORE_IMAGE_DRIFT');
+      assert.equal(result.imageDrift.phase, 'PACKAGE_PREWRITE');
+      assert.equal(result.imageDrift.finalizeStagedUpload.eventarcTriggerChanged, true);
+      assert.equal(result.requests, 26); assert.equal(patches, 0); assert.equal(probes, 0);
+      assert.equal(mutations.length, 0); assert.equal(result.mediaBytes, 0); assert.equal(api.counters.writesAttempted, 0);
+      assert.deepEqual(JSON.parse(artifact).imageDrift, result.imageDrift);
     } else if (scenario === 'object-create-forbidden') {
       assert.equal(result.status, 'STOPPED_SAFELY'); assert.equal(result.reason, 'UPLOAD_REFRESH_HTTP_REJECTED');
       assert.equal(result.httpStatus, 403); assert.equal(result.lastRequestKind, 'private-object-create');
@@ -750,6 +851,10 @@ for (const scenario of ['success', 'managed-success', 'second-failure', 'managed
       assert.equal(result.status, 'SOURCE_ONLY_CONTRACT_VERIFIED'); assert.equal(patches, 2); assert.equal(probes, 1);
       assert.equal(result.deployedPackageBytesVerified, true); assert.equal(result.unauthenticatedRejectionVerified, true);
       assert.equal(mutations.filter(m => m.method === 'POST').length, 5);
+      if (scenario === 'eventarc-order-success') {
+        assert.ok(triggerReads >= 10, 'Order permutations cover the runner final-after pair comparison');
+        assert.equal(Object.hasOwn(result, 'imageDrift'), false);
+      }
     } else if (scenario.endsWith('second-failure')) {
       assert.equal(result.status, 'PAIR_RESTORE_VERIFIED'); assert.equal(patches, 4); assert.equal(probes, 0);
       assert.ok(mutations.filter(m => m.method === 'PATCH').slice(-2).every(m => m.source.object.startsWith('lkc-upload-source-backups/')));

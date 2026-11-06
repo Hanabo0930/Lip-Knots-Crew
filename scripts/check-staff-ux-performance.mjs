@@ -512,7 +512,7 @@ assert.match(
 );
 assert.match(
   app,
-  /const nextShift=nextShiftJob\(myJobs,businessDate\);[\s\S]*<h2>次回シフト<\/h2>[\s\S]*nextShift\?<article[\s\S]*openShiftJob\(nextShift\)/u,
+  /const nextShift=nextShiftJob\(myJobs,businessDate\);[\s\S]*<h2>次回シフト<\/h2>[\s\S]*nextShift\?<article[\s\S]*openShiftJob\(nextShift(?:\)|,)/u,
   "The next-shift card must not follow an older shift selected elsewhere in the app.",
 );
 assert.match(

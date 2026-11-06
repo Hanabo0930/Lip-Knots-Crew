@@ -103,7 +103,7 @@ const scope = {
   myJobs: [{ id: "assigned" }], authLoadVersionRef:{current:0}, navigationVersionRef:{current:0}, isSubmissionActionPending:()=>false, isPending:()=>false, loadTaskJob:async()=>null,
   setMessage: () => events.push("error"), navigate: value => events.push(value),
   setSelectedJob: () => events.push("selected"),
-  openShiftJob: () => events.push("selected"),
+  openShiftJob: (_job,onOpened) => {events.push("selected");onOpened?.();return true;},
   startSubmission: async (type, job, request) => events.push([type, job.id, request]),
 };
 runInNewContext(ts.transpileModule(handler, {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, scope);
@@ -129,6 +129,12 @@ for (const kind of ["precontact", "netprint"]) {
   await scope.openTask({jobId:"assigned",kind});
   assert.deepEqual(events,["selected","shifts"]);
 }
+{
+ const acceptedOpen=scope.openShiftJob;scope.openShiftJob=()=>false;
+ for(const kind of ["precontact","netprint"]){events.length=0;await scope.openTask({jobId:"assigned",kind});assert.deepEqual(events,[],"Declined shift changes must not navigate");}
+ scope.openShiftJob=acceptedOpen;
+}
+
 
 
 {
@@ -136,7 +142,7 @@ for (const kind of ["precontact", "netprint"]) {
  for(const change of ['none','navigation','account'])for(const outcome of ['success','missing','failure']){
   const events=[];let finish;
   const ctx={mailOpen:true,mailPanelVersion:{current:0},setShowMailApplications:value=>ctx.mailOpen=value,myJobs:[],authLoadVersionRef:{current:1},navigationVersionRef:{current:0},isSubmissionActionPending:()=>false,isPending:()=>false,
-   loadTaskJob:()=>new Promise((resolve,reject)=>{finish={resolve,reject};}),setMessage:value=>events.push(['message',value]),openShiftJob:job=>events.push(['selected',job.id]),startSubmission:async()=>{},
+   loadTaskJob:()=>new Promise((resolve,reject)=>{finish={resolve,reject};}),setMessage:value=>events.push(['message',value]),openShiftJob:(job,onOpened)=>{events.push(['selected',job.id]);onOpened?.();return true;},startSubmission:async()=>{},
    shiftNotification:{cancel:()=>{}},resubmissionNotification:{cancel:()=>{}},setShowAccountMenu:()=>{},setShowDevices:()=>{},closeDiagnostics:()=>{},setView:value=>events.push(['view',value]),window:{scrollTo:()=>{}},openJobsStatus:'ready'};
   runInNewContext(ts.transpileModule(navigation+handler,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);
   const pending=ctx.openTask({jobId:'target',kind:'netprint'});

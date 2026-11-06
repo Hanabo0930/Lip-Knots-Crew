@@ -50,6 +50,8 @@ jobs:
           node scripts/test-staff-shift-cards.mjs
           node scripts/test-staff-application-confirmation.mjs
           node scripts/test-staff-manual-refresh.mjs
+          node scripts/test-staff-refresh-selection.mjs
+          node scripts/test-staff-refresh-react-batch.mjs
           node scripts/test-staff-past-shift-history.mjs
       - name: Install browser for local-only Staff demo checks
         run: npx playwright install --with-deps chromium --only-shell

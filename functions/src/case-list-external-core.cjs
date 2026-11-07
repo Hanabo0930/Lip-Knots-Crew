@@ -91,6 +91,7 @@ function createConnection(s) {
   need(input?.clientNameUpConfirmed===true,'EXPLICIT_NAME_UP_CONFIRMATION_REQUIRED');
   const r=await authorized(queueId,uid,token),origin=assertOriginal(r,queueId);
   if(r.externalSelection) {
+   need(r.externalSelection.gasPreview?.producerSchema==='LK_NAMEUP_TRANSFER_V1','LEGACY_EXTERNAL_SELECTION_REQUIRES_REVIEW');
    need(r.externalSelection.selectedBy===uid && r.externalSelection.queueId===queueId &&
     hash(r.externalSelection.original)===hash(originalIdentity(r)),'SELECTION_CHANGED');
    return {kind:'ALREADY_SELECTED',selection:r.externalSelection};
@@ -123,6 +124,7 @@ function createConnection(s) {
    preview.sourceHash && preview.ledgerHash && Number.isInteger(preview.sheetId) &&
    [55,56].includes(preview.width),'GAS_PREVIEW_REQUIRED');
   need(/^[a-f0-9]{64}$/.test(preview.approvedProof??'') && /^[a-f0-9]{64}$/.test(preview.checkedProof??''),'EXTERNAL_EXPECTED_GAS_PROOF_REQUIRED');
+  need(preview.producerSchema==='LK_NAMEUP_TRANSFER_V1'&&/^[a-f0-9]{64}$/.test(preview.nameUpExpected??''),'EXTERNAL_NAMEUP_FINGERPRINT_REQUIRED');
   need(cells.every(c=>c&&typeof c==='object'&&!c.$unknown),'SOURCE_FULL_ROW_REQUIRED');
   const expectedMapped=Native.mapSource(cells,r.job.caseId,preview.width),expectedFees=FEE.map(i=>cellValue(cells[i+1]));
   need(expectedFees.every(v=>typeof v==='number'&&Number.isFinite(v)),'SOURCE_FINANCIAL_VALUES_REQUIRED');
@@ -153,6 +155,7 @@ function createConnection(s) {
    selection.queueId===queueId && selection.jobId===before.jobId && selection.caseId===before.job.caseId &&
    selection.origin===origin && selection.clientNameUpConfirmed===true &&
    hash(selection.original)===hash(originalIdentity(before)),'PROTECTED_SELECTION_MISMATCH');
+  need(selection.gasPreview?.producerSchema==='LK_NAMEUP_TRANSFER_V1','LEGACY_EXTERNAL_SELECTION_REQUIRES_REVIEW');
   const snap=await s.readSheets(queueId,'archive'),p=selection.gasPreview;
   need(snap.readStartedAt<=snap.observedAt && snap.observedAt<=s.now() &&
    s.now()-snap.readStartedAt<=60_000,'READBACK_NOT_CURRENT');
@@ -178,10 +181,11 @@ function createConnection(s) {
    receipt.intentRef.key===p.intentKey && receipt.intentRef.groupId===(p.groupId??null) &&
    receipt.preimage.sourceHash===p.sourceHash && receipt.preimage.ledgerHash===p.ledgerHash &&
    receipt.preimage.groupHash===(p.groupHash??null) &&
-   receipt.selection.approvedProof===p.approvedProof && receipt.selection.checkedProof===p.checkedProof &&
-   receipt.selection.actorHash===s.gasDigest(snap.ownerEmail) &&
-   ['OWNER_CONFIRMATION_AT_THIS_CALL','SCOPED_PILOT_AT_THIS_CALL'].includes(receipt.selection.confirmation),
+   receipt.selection.actorHash===s.gasDigest(snap.ownerEmail),
    'RECEIPT_PREVIEW_BINDING_MISMATCH');
+  if(p.producerSchema==='LK_NAMEUP_TRANSFER_V1')assertNameUpSelection(selection,receipt,snap,s.now());
+  else need(receipt.selection.approvedProof===p.approvedProof&&receipt.selection.checkedProof===p.checkedProof&&
+    ['OWNER_CONFIRMATION_AT_THIS_CALL','SCOPED_PILOT_AT_THIS_CALL'].includes(receipt.selection.confirmation),'RECEIPT_PREVIEW_BINDING_MISMATCH');
   need(Number.isFinite(Date.parse(receipt.intentRef.createdAt)) &&
    Date.parse(receipt.intentRef.createdAt)>=selection.selectedAt &&
    Date.parse(receipt.intentRef.createdAt)<=snap.observedAt &&
@@ -216,8 +220,19 @@ function createConnection(s) {
   const actual={businessHash:s.gasDigest(cells.slice(0,54).map(c=>[c.userEnteredValue??{},c.effectiveValue??{}])),
    writableHash:s.gasDigest(cells.map(c=>Object.fromEntries(['userEnteredValue','note','userEnteredFormat','dataValidation','textFormatRuns','chipRuns'].filter(k=>Object.hasOwn(c,k)).map(k=>[k,c[k]])))),
    financialHash:s.gasDigest(fees.map(i=>values[i]))};
+  // Sheets adjusts the operational B-row date formula after later insertions.
+  // Current fields were independently checked above; compare the saved receipt
+  // at its original row without weakening the business or financial checks.
+  let recorded=actual;
+  if(p.producerSchema==='LK_NAMEUP_TRANSFER_V1'&&t.rowHint!==hit.row){
+   need(Number.isInteger(t.rowHint)&&t.rowHint>=2&&t.rowHint<=hit.month.rowCount,'RECEIPT_ORIGINAL_ROW_REQUIRED');
+   const atReceipt=clone(cells),day=values[8];
+   atReceipt[8].userEnteredValue={formulaValue:s.expectedDateFormula(t.rowHint,j.assignedStaffName,day)};
+   recorded={businessHash:s.gasDigest(atReceipt.slice(0,54).map(c=>[c.userEnteredValue??{},c.effectiveValue??{}])),
+    writableHash:s.gasDigest(atReceipt.map(writable)),financialHash:actual.financialHash};
+  }
   need(read.book===p.book && read.sheetId===p.sheetId && read.caseId===p.caseId && read.date===p.date &&
-   read.width===p.width && Object.entries(actual).every(([k,v])=>read[k]===v),'MONTH_READBACK_CHANGED');
+   read.width===p.width && Object.entries(recorded).every(([k,v])=>read[k]===v),'MONTH_READBACK_CHANGED');
   const ackBody={schema:ACCEPTED,companyId:j.companyId,jobId:before.jobId,queueId,caseId:p.caseId,
    assignedJobRevision:j.revision,staffId:j.assignedStaffId,dateKey:j.dateKey,origin,
    selectionHash:selection.selectionHash,receiptHash:receipt.receiptHash,original:selection.original,
@@ -286,6 +301,18 @@ function createConnection(s) {
   return {externalAcceptanceHash:a.acceptanceHash,sourceReadStartedAtMs:snap.readStartedAt,observedAt:snap.observedAt};
  }
  return Object.freeze({select,reconcile,resolvePrivateRef,validateAcceptedSnapshot});
+}
+function assertNameUpSelection(selection,receipt,snapshot,now) {
+ const part=receipt.selection,context=part.nameUp,p=selection.gasPreview;
+ need(part.confirmation==='VERIFIED_NAMEUP_SENT_AT_THIS_CALL'&&
+  Object.keys(part).sort().join('|')==='actorHash|authorizedFingerprint|confirmation|nameUp|preparedFingerprint'&&
+  part.preparedFingerprint===p.nameUpExpected&&part.authorizedFingerprint===p.nameUpExpected&&
+  context?.schema==='LK_NAMEUP_TRANSFER_V1'&&context.caseId===p.caseId&&context.expectedFingerprint===p.nameUpExpected&&
+  /^[a-f0-9]{64}$/.test(context.digest??'')&&/^[a-z0-9_\-]{1,160}$/i.test(context.messageId??''),'NAMEUP_SENT_BINDING_REQUIRED');
+ const prepared=Date.parse(context.preparedAt),authorized=Date.parse(context.authorizedAt),intent=Date.parse(receipt.intentRef.createdAt);
+ need(Number.isFinite(prepared)&&Number.isFinite(authorized)&&prepared>=selection.selectedAt&&
+  authorized>=prepared&&authorized-prepared<3*60*1000&&authorized<=intent&&intent<=snapshot.observedAt&&intent<=now,
+  'NAMEUP_PREPARATION_NOT_CURRENT');
 }
 function assertOperationalDefaults(selection,receipt,cells,row,expectedDateFormula) {
  // Exact V14 defaults are checked separately from immutable business fields.

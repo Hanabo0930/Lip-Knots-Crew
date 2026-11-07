@@ -169,7 +169,7 @@ function archiveFixture(f,{formula=true}={}){
  for(let i=0;i<54;i++)if(![8,17].includes(i))mapped[i].effectiveValue=copy(f.cells[i+1]?.effectiveValue??{});
  mapped.push({},literal(CASE));
  const writable=c=>Object.fromEntries(['userEnteredValue','note','userEnteredFormat','dataValidation','textFormatRuns','chipRuns'].filter(k=>Object.hasOwn(c,k)).map(k=>[k,copy(c[k])]));
- const body={schema:'LK_CASE_TRANSFER_SELECTION_READBACK_V1',intentRef:{key:p.intentKey,groupId:null,createdAt:at},target:{book:BOOK,sheetId:434431224,width:56,caseId:CASE,date:DATE,rowHint:3},preimage:{sourceHash:p.sourceHash,ledgerHash:p.ledgerHash,groupHash:null},selection:{approvedProof:p.approvedProof,checkedProof:p.checkedProof,actorHash:shaValue('owner@example.invalid'),confirmation:'OWNER_CONFIRMATION_AT_THIS_CALL'},recordedAt:'2026-11-07 12:00:00',
+ const body={schema:'LK_CASE_TRANSFER_SELECTION_READBACK_V1',intentRef:{key:p.intentKey,groupId:null,createdAt:at},target:{book:BOOK,sheetId:434431224,width:56,caseId:CASE,date:DATE,rowHint:3},preimage:{sourceHash:p.sourceHash,ledgerHash:p.ledgerHash,groupHash:null},selection:{preparedFingerprint:p.nameUpExpected,authorizedFingerprint:p.nameUpExpected,actorHash:shaValue('owner@example.invalid'),confirmation:'VERIFIED_NAMEUP_SENT_AT_THIS_CALL',nameUp:{schema:'LK_NAMEUP_TRANSFER_V1',caseId:CASE,expectedFingerprint:p.nameUpExpected,digest:'b'.repeat(64),messageId:'synthetic_message_001',preparedAt:at,authorizedAt:at}},recordedAt:'2026-11-07 12:00:00',
  monthlyReadback:{book:BOOK,sheetId:434431224,caseId:CASE,date:DATE,width:56,businessHash:shaValue(mapped.slice(0,54).map(c=>[c.userEnteredValue??{},c.effectiveValue??{}])),writableHash:shaValue(mapped.map(writable)),financialHash:shaValue(feeIndices.map(i=>cellValue(mapped[i]))),observedAt:at}};
  const receipt={...body,receiptHash:shaValue(body)},ledger=sheetsData.get(2026102605).get(4),prior=JSON.parse(cellValue(ledger[19]));
  const saved={...prior,monthlyTransfer:{kind:'MONTHLY_TRANSFER',book:BOOK,sheetId:434431224,fixedId:CASE,selectionAndReadback:receipt}};
@@ -342,8 +342,8 @@ async function submissionPreflight(job,selectedId=jobId){
   assert.equal(nativeCalls,manual?0:1,'only original application Source C projection is mocked as a Google write; external route must never transfer');
  });
  const negatives=[
- ['arbitrary valid-hex approved proof with recomputed receipt hash',f=>changeReceipt(r=>r.selection.approvedProof='a'.repeat(64)),/RECEIPT_PREVIEW_BINDING_MISMATCH/],
- ['arbitrary valid-hex checked proof with recomputed receipt hash',f=>changeReceipt(r=>r.selection.checkedProof='b'.repeat(64)),/RECEIPT_PREVIEW_BINDING_MISMATCH/],
+ ['arbitrary valid-hex prepared fingerprint with recomputed receipt hash',f=>changeReceipt(r=>r.selection.preparedFingerprint='a'.repeat(64)),/NAMEUP_SENT_BINDING_REQUIRED/],
+ ['arbitrary valid-hex authorized fingerprint with recomputed receipt hash',f=>changeReceipt(r=>r.selection.authorizedFingerprint='b'.repeat(64)),/NAMEUP_SENT_BINDING_REQUIRED/],
  ['different immutable note plus self-rehashed receipt',f=>{const c=sheetsData.get(434431224).get(3);c[16].note='unapproved synthetic note';changeReceipt(r=>{r.monthlyReadback.writableHash=shaValue(c.map(x=>Object.fromEntries(['userEnteredValue','note','userEnteredFormat','dataValidation','textFormatRuns','chipRuns'].filter(k=>Object.hasOwn(x,k)).map(k=>[k,x[k]]))));});},/PROTECTED_EXPECTED_MONTH_CONTENT_MISMATCH/],
  ['different fee plus self-rehashed receipt',f=>{const c=sheetsData.get(434431224).get(3);c[36]=literal(500);changeReceipt(r=>{r.monthlyReadback.financialHash=shaValue(feeIndices.map(i=>cellValue(c[i])));});},/PROTECTED_EXPECTED_MONTH_CONTENT_MISMATCH|PROTECTED_EXPECTED_FINANCIAL_MISMATCH/],
  ['ledger cancellation',f=>sheetsData.get(2026102605).get(4)[17]=literal(true),/LEDGER_SELECTION_OR_CANCEL_MISMATCH/],
@@ -425,7 +425,32 @@ async function submissionPreflight(job,selectedId=jobId){
   const entry=helpers.inspectCaseList(rows,ledger,new Date().toISOString(),BOOK).jobs[0];assert(entry.holdReasons.includes('LEDGER_SOURCE_CANCELLATION_REVIEW'));
   assert.throws(()=>helpers.confirmedCaseListCandidate(rows,ledger,CASE,{expectedSourceRevision:entry.source.sourceRevision,confirmedFields:{vacancy:true}},new Date().toISOString(),OWNER,BOOK),/CASE_LIST_ASSIGNMENT_RECONCILIATION_REQUIRED/);
  });
- const report={scope:'Whole Crew product functions use the REAL V17 planner/proof/digest and LK_SD 2.0.1 formula, with synthetic Sheets/Firestore/Auth transport only. Archive fixtures still represent GAS output rather than executing real GAS or Sheets formula evaluation.',
+
+ for(const manual of [false,true])await test('V22 archived row moves by later insertion without trusting its obsolete row hint '+(manual?'manual':'application'),async()=>{
+  const f=await start(manual,true);archiveFixture(f);
+  const table=sheetsData.get(434431224),current=copy(table.get(3)),total=table.get(4),other=copy(current);
+  other[1]=literal('SECOND_SYNTHETIC_STAFF');other[10]=literal('SECOND_SYNTHETIC_STORE');other[13]=literal('9:00');other[55]=literal('LKCASE_00000000-0000-0000-0000-000000000003');
+  table.set(3,other);table.set(4,current);table.set(5,total);
+  current[8].userEnteredValue.formulaValue=load('case-list-gas-date-formula').expectedStaffDateFormula(4,NAME,cellValue(current[8]));
+  total[1].userEnteredValue.formulaValue='="（"&(COUNTIF($A$2:$A$5, A5)-1)&"人）"';total[1].effectiveValue={stringValue:'（3人）'};
+  metadata.sheets.find(s=>s.properties.sheetId===434431224).properties.gridProperties.rowCount=6;
+  await reconcile(f);assert.equal(documents.get('jobs/'+jobId).sheetRef.currentRow,4);assert.equal(documents.get('jobs/'+jobId).assignmentSheetWrite.queueId,f.queueId);
+ });
+ for(const [name,mutate]of [
+  ['different name-up fingerprint',r=>r.selection.nameUp.expectedFingerprint='a'.repeat(64)],
+  ['missing verified message ID',r=>r.selection.nameUp.messageId=''],
+  ['legacy owner confirmation substituted for verified send',r=>r.selection.confirmation='OWNER_CONFIRMATION_AT_THIS_CALL'],
+  ['legacy approval fields substituted for fingerprint',r=>r.selection.approvedProof='a'.repeat(64)],
+  ['preparation predates protected selection',r=>r.selection.nameUp.preparedAt='2020-01-01T00:00:00.000Z'],
+  ['name-up confirmation exceeds three-minute window',r=>r.selection.nameUp.preparedAt=new Date(Date.parse(r.selection.nameUp.authorizedAt)-180000).toISOString()],
+ ])await test('V22 receipt keeps original pending queue when '+name,async()=>{
+  const f=await start(false,true);archiveFixture(f);changeReceipt(mutate);
+  await assert.rejects(()=>reconcile(f),/NAMEUP_SENT_BINDING_REQUIRED|NAMEUP_PREPARATION_NOT_CURRENT/);
+  assert.equal(documents.get('jobs/'+jobId).applicationUnconfirmed,true);assert.equal(documents.get('jobs/'+jobId).assignmentSheetWrite.queueId,f.queueId);assert.equal([...documents.keys()].filter(k=>k.startsWith('sheetSyncQueue/')).length,1);
+ });
+
+
+ const report={scope:'Whole Crew product functions use the REAL single-case planner/proof/fingerprint shared by V17 and V22 and LK_SD 2.0.1 formula, with synthetic Sheets/Firestore/Auth transport only. Archive fixtures still represent GAS output rather than executing real GAS or Sheets formula evaluation.',
  tests:results.length,passed:results.filter(r=>r.passed).length,failed:results.filter(r=>!r.passed).length,results,realApiCalls:0,realDataWrites:0,confirmedJourneyComplete:false,
  realProofProvider:true,realDateProvider:true,domainProviderSubstitutions:0,sdkTransportDoubles:true,actualGasExecution:false,
  originalGASOracle:'Exact monthRows/proof/batch/digest excerpts; planner is the reviewed original port, with independently pinned expected position shape',

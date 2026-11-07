@@ -12,9 +12,9 @@ const OLD_WORKER = "processSafeSheetWrite";
 // この固定値はソース検査用であり、実行時IAMや本番有効化の承認ではない。
 export const retryWorkerSourcePins = Object.freeze({
   // Independently reviewed external readback dependencies; defaults stay read-only.
-  "functions/src/case-list-external-core.cjs": "8e4e13a454169f11353dc080fcb9ef21f2a29e9b0e5ee99e4d9ce866be802943",
+  "functions/src/case-list-external-core.cjs": "44e5ca25ce8819e7a4972a0a31918e6286f176da92b79cefa383909a1c7a94c8",
   "functions/src/case-list-external-mode.ts": "6d415de924e5fdfc3e44d00e6e6ee098625c453a6dbf0aa0e962828b38526efb",
-  "functions/src/case-list-external-transfer.ts": "ba8cad0c5334e5154f767e38cebb8730a5a5cf497ad3c46c23d236161e1fd355",
+  "functions/src/case-list-external-transfer.ts": "fc877f969dce79af1fe68f5b2d03f1d40ebe3a6b552c1918288381e8753110c8",
   "functions/src/case-list-gas-date-formula.ts": "b9e37bf557d63da36740b94b94f338a9a248512b48e97a3b339ff1e8768ce931",
   "functions/src/case-list-gas-planner.cjs": "07035fe0242d79b9d4d8264b0f8bbcc22cfd4e343932a20d40e42336f85c6ca6",
   "functions/src/case-list-gas-proof.ts": "e9f7de3f9983b84c9e8d62d70fa1b81b7a7788b13f0f1b5502a207b9d0f5a082",

@@ -105,7 +105,8 @@ async function previewFor(r: Data) {
     gasPreview: { book: snapshot.spreadsheetId, caseId: r.job.caseId, date: r.job.dateKey, sheetId: month[0]!.sheetId,
       width: month[0]!.columnCount, intentKey: "LK_TRANSFER_V1:" + snapshot.spreadsheetId + ":" + r.job.caseId,
       groupId: null, groupHash: null, sourceHash: sourceHash(c), ledgerHash: ledgerHash(ledgerCells as Data[]),
-      approvedProof: proof.approvedProof, checkedProof: proof.checkedProof } };
+      approvedProof: proof.approvedProof, checkedProof: proof.checkedProof,
+      producerSchema: "LK_NAMEUP_TRANSFER_V1", nameUpExpected: proof.batchFingerprint } };
 }
 
 async function runExternal(queueRef: Ref, uid: string, token: Data, select: boolean, input?: Data): Promise<Data> {

@@ -497,12 +497,51 @@ function checkCaseListManualSelection(block, whole) {
   return ['manualPendingAssignmentFields(manualObservation)','currentStaff.active!==true','currentStaff.displayName!==manualObservation.canonicalStaffName','old.assignmentSheetWrite?.queueId!==priorManual.queueId'].every(part=>source.includes(part));
 }
 
+function checkCaseListBindingRead(block, whole) {
+  if (!whole.includes('"read-case-list-gas-binding"')) return true;
+  const start=block.indexOf('if(input.action==="read-case-list-gas-binding"){');
+  const end=block.indexOf('if(input.action==="select-case-list-gas-monthly"){',start);
+  if(start<0||end<=start)return false;
+  const route=block.slice(start,end);
+  if(!['require("./case-list-external-transfer")','constbinding=awaitexternal.readExternalCaseListSelectionBinding(ref,session.uid,session.token);',
+    'return{status:"EXTERNAL_BINDING_READ",queueId:ref.id,binding,sourceWrites:0,monthlyWrites:0};'].every(part=>route.includes(part))||
+    /\.(?:add|create|set|update|delete|commit)\(/.test(route)||route.includes('request.data.'))return false;
+  const external=sourceFile('functions/src/case-list-external-transfer.ts').replace(/\s+/g,'');
+  const from=external.indexOf('exportasyncfunctionreadExternalCaseListSelectionBinding('),to=external.indexOf('exportasyncfunctionresolveExternalCaseListSheetRef(',from);
+  if(from<0||to<=from)return false;
+  const reader=external.slice(from,to);
+  if(!['assertOwner(uid,token,String(token.companyId??""));','ID.test(token.companyId??"")&&ID.test(queueRef.id)',
+    'returndb.runTransaction(asynctx=>{','constinitial=(awaittx.get(queueRef)).data();',
+    'initial&&initial.companyId===token.companyId&&initial.operation==="case_list.assign"',
+    'constr=awaitrecordsFor(queueRef,tx);','r.leaseActive=r.lease?.activeUntilinstanceofTimestamp&&r.lease.activeUntil.toMillis()>Date.now();',
+    'authorize:(actor:string,auth:Data)=>assertOwner(actor,auth,initial!.companyId)',
+    'assertAuthority:authority','readProtected:async()=>r',
+    'readSheets:async()=>{throwError("BINDING_SHEETS_READ_FORBIDDEN");}',
+    'transaction:async()=>{throwError("BINDING_WRITE_FORBIDDEN");}',
+    'returnconnection.readSelectionBinding(queueRef.id,uid,token);','},{readOnly:true});'].every(part=>reader.includes(part))||
+    /\.(?:add|create|set|update|delete|commit)\(/.test(reader))return false;
+  const core=sourceFile('functions/src/case-list-external-core.cjs').replace(/\s+/g,'');
+  const pending=core.slice(core.indexOf('functionpendingSelection('),core.indexOf('functionreceiptFrom('));
+  const read=core.slice(core.indexOf('asyncfunctionreadSelectionBinding('),core.indexOf('asyncfunctionselect('));
+  return ['origin=assertOriginal(r,queueId)','selection?.schema===SCHEMA&&selection.selectionHash===hash(body)',
+    'selection.selectedBy===uid&&selection.companyId===r.job.companyId','selection.queueId===queueId&&selection.jobId===r.jobId&&selection.caseId===r.job.caseId',
+    'selection.origin===origin&&selection.clientNameUpConfirmed===true','hash(selection.original)===hash(originalIdentity(r))',
+    'selection.gasPreview?.producerSchema===\'LK_NAMEUP_TRANSFER_V1\''].every(part=>pending.includes(part))&&
+    ['constr=awaitauthorized(queueId,uid,token);','need(!r.externalAcceptance,\'EXTERNAL_BINDING_PENDING_ONLY\');',
+    'pendingSelection(r,queueId,uid)','s.assertAuthority(queueId,r);',
+    'r.queue.status===\'blocked\'&&r.queue.errorType===\'external_transfer_selected\'',
+    'Number.isSafeInteger(selection.selectedAt)&&selection.selectedAt<=s.now()',
+    '/^[a-f0-9]{64}$/.test(p.nameUpExpected??\'\')&&Number.isInteger(p.sheetId)&&p.book===r.config.spreadsheetId',
+    'returnclone({queueId,companyId:r.job.companyId,jobId:r.jobId,caseId:r.job.caseId,origin,staffId:a.staffId,dateKey:a.dateKey,expectedJobRevision:a.expectedJobRevision,assignedJobRevision:a.assignedJobRevision,sourceRevision:a.sourceRevision,selectedBy:selection.selectedBy,selectedAt:selection.selectedAt,selectionHash:selection.selectionHash,gas:{book:p.book,sheetId:p.sheetId,nameUpExpected:p.nameUpExpected}});'].every(part=>read.includes(part))&&
+    !/s\.(?:transaction|readSheets)\(/.test(read);
+}
+
 function checkCaseListOwnerSelection(block, whole) {
-  if (!checkCaseListManualSelection(block, whole) || !checkCaseListExternalSelection(block, whole)) return false;
+  if (!checkCaseListManualSelection(block, whole) || !checkCaseListExternalSelection(block, whole) || !checkCaseListBindingRead(block, whole)) return false;
   // Historical sources have no selection action. Keep their exact legacy
   // schema/read-only checks; a new selection route must pass every new guard.
   if (whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list"]).default("note"),});') && !whole.includes('"select-case-list-monthly"')) return true;
-  const actions = whole.includes('"select-case-list-gas-monthly"') ? '["note","reconcile-case-list","select-case-list-monthly","select-case-list-gas-monthly"]' : '["note","reconcile-case-list","select-case-list-monthly"]';
+  const actions = whole.includes('"read-case-list-gas-binding"') ? '["note","reconcile-case-list","select-case-list-monthly","select-case-list-gas-monthly","read-case-list-gas-binding"]' : whole.includes('"select-case-list-gas-monthly"') ? '["note","reconcile-case-list","select-case-list-monthly","select-case-list-gas-monthly"]' : '["note","reconcile-case-list","select-case-list-monthly"]';
   if (!whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(' + actions + ').default("note"),reviewKey:z.string().regex(/^[a-f0-9]{64}$/).optional(),clientNameUpConfirmed:z.literal(true).optional(),});')) return false;
   const start = block.indexOf('if(input.action==="select-case-list-monthly"){'), end = block.indexOf('if(input.action==="reconcile-case-list"){');
   if (start < 0 || end <= start) return false;

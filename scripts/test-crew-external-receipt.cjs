@@ -270,6 +270,20 @@ async function pendingSubmissionBackend(cancelled=false){
  ])await test('binding / '+name+' cannot read a protected selection',async()=>{
   const f=await start(false,true);await bindingHasNoSideEffects(async()=>assert.rejects(()=>admin.acknowledgeSheetWriteIssue({auth:{uid,token},data:{queueId:f.queueId,action:'read-case-list-gas-binding'}})));
  });
+ await test('binding / unauthenticated action ignores owner claims supplied in its body',async()=>{
+  const f=await start(false,true),reads=documentReads.length;
+  await bindingHasNoSideEffects(async()=>assert.rejects(()=>admin.acknowledgeSheetWriteIssue({data:{queueId:f.queueId,action:'read-case-list-gas-binding',token:owner.auth.token}})));
+  assert.equal(documentReads.length,reads);
+ });
+ await test('binding / non-executive admin cannot use the metadata action',async()=>{
+  const f=await start(false,true),reads=documentReads.length;
+  await bindingHasNoSideEffects(async()=>assert.rejects(()=>admin.acknowledgeSheetWriteIssue({auth:{uid:OWNER,token:{...owner.auth.token,email:'ordinary-admin@example.invalid'}},data:{queueId:f.queueId,action:'read-case-list-gas-binding'}})));
+  assert.equal(documentReads.length,reads);
+ });
+ await test('binding / a different authenticated executive UID cannot inherit the original selection',async()=>{
+  const f=await start(false,true),uid='different_executive';
+  await bindingHasNoSideEffects(async()=>assert.rejects(()=>admin.acknowledgeSheetWriteIssue({auth:{uid,token:{...owner.auth.token,uid}},data:{queueId:f.queueId,action:'read-case-list-gas-binding'}}),/PROTECTED_SELECTION_MISMATCH/));
+ });
  await test('binding / active company lease is observed without takeover',async()=>{
   const f=await start(false,true);documents.set('caseListSyncLocks/'+COMPANY,{companyId:COMPANY,tokenId:'other_operation',activeUntil:Stamp.fromMillis(Clock.now()+60_000)});await bindingHasNoSideEffects(async()=>assert.rejects(()=>binding(f),/OTHER_TRANSFER_IN_PROGRESS/));
  });

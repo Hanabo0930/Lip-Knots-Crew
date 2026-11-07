@@ -6,6 +6,7 @@ const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^
 const modules={previewStaffImport:'staff-import',syncStaffDirectoryReadOnly:'staff-import',previewShiftImport:'shift-import',syncShiftSheetsReadOnly:'shift-import',retrySheetWriteIssue:'admin-operations',acknowledgeSheetWriteIssue:'admin-operations'};
 const sources=Object.fromEntries([...new Set([...Object.values(modules),'sheet-reader','case-list-source','case-list-source-core','case-list-monthly-worker','case-list-external-transfer'])].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
 sources['functions/src/case-list-monthly-controller.cjs']=read('functions/src/case-list-monthly-controller.cjs');
+sources['functions/src/case-list-external-core.cjs']=read('functions/src/case-list-external-core.cjs');
 let cases=0;
 function run(name,change){
  const files={...sources};change?.(files);
@@ -18,6 +19,12 @@ function reject(name,before,after,{whole=false,module=modules[name]}={}){
  const marker=module==='admin-operations'?'\n});':'\n);',end=whole?source.length:source.indexOf(marker,start)+marker.length;
  const block=source.slice(start,end);assert.ok(block.includes(before),name+': mutation target '+before);
  assert.deepEqual(run(name,files=>{files[p]=source.slice(0,start)+block.replace(before,after)+source.slice(end);}),{passed:false,exitCode:1},name+': '+before);cases++;
+}
+function rejectIn(name,module,startMarker,endMarker,before,after){
+ const p='functions/src/'+module+(module.endsWith('.cjs')?'':'.ts'),source=sources[p],start=source.indexOf(startMarker),end=source.indexOf(endMarker,start);
+ assert.ok(start>=0&&end>start,'Scoped guard mutation range: '+module);
+ const block=source.slice(start,end);assert.ok(block.includes(before),'Scoped mutation target: '+before);
+ assert.deepEqual(run(name,files=>{files[p]=source.slice(0,start)+block.replace(before,after)+source.slice(end);}),{passed:false,exitCode:1},name+': scoped '+before);cases++;
 }
 for(const [name,module]of Object.entries(modules)){
  assert.deepEqual(run(name),{passed:true,exitCode:0},name);cases++;
@@ -224,6 +231,39 @@ for(const [before,after]of [
  ['return db.runTransaction(async tx => {\n    if (externalReceiptMode) assertExternalIntakeEnabled();','return db.runTransaction(async tx => {'],
  ['assertCaseListMonthlyAuthority(queueId, queue, nextJob, currentStaff, dayLock, config, manualConditions);\n    if (externalReceiptMode) assertExternalIntakeEnabled();','assertCaseListMonthlyAuthority(queueId, queue, nextJob, currentStaff, dayLock, config, manualConditions);'],
 ])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-monthly-worker'});
+// The new metadata view must not widen legacy actions or become a transfer or
+// a credential-bearing endpoint. Existing mutation cases above remain intact.
+for(const [before,after]of [
+ ['readExternalCaseListSelectionBinding(ref, session.uid, session.token)','readExternalCaseListSelectionBinding(ref, request.data.uid, session.token)'],
+ ['readExternalCaseListSelectionBinding(ref, session.uid, session.token)','readExternalCaseListSelectionBinding(ref, session.uid, request.data.token)'],
+ ['status: "EXTERNAL_BINDING_READ"','status: "EXTERNAL_READBACK_VERIFIED"'],
+ ['const binding = await external.readExternalCaseListSelectionBinding','await ref.update({status:"completed"}); const binding = await external.readExternalCaseListSelectionBinding'],
+])reject('acknowledgeSheetWriteIssue',before,after);
+for(const [before,after]of [
+ ['assertOwner(uid, token, String(token.companyId ?? ""));',''],
+ ['ID.test(token.companyId ?? "") && ID.test(queueRef.id)','true'],
+ ['initial && initial.companyId === token.companyId && initial.operation === "case_list.assign"','true'],
+ ['const r = await recordsFor(queueRef, tx);','const r = await recordsFor(queueRef);'],
+ ['r.leaseActive = r.lease?.activeUntil instanceof Timestamp && r.lease.activeUntil.toMillis() > Date.now();','r.leaseActive = false;'],
+ ['authorize: (actor: string, auth: Data) => assertOwner(actor, auth, initial!.companyId)','authorize: () => {}'],
+ ['readSheets: async () => { throw Error("BINDING_SHEETS_READ_FORBIDDEN"); }','readSheets: async () => ({})'],
+ ['transaction: async () => { throw Error("BINDING_WRITE_FORBIDDEN"); }','transaction: async () => ({})'],
+ ['return connection.readSelectionBinding(queueRef.id, uid, token);','return connection.readSelectionBinding(queueRef.id, "untrusted", token);'],
+ ['}, { readOnly: true });','}, { readOnly: false });'],
+])rejectIn('acknowledgeSheetWriteIssue','case-list-external-transfer','export async function readExternalCaseListSelectionBinding(','export async function resolveExternalCaseListSheetRef(',before,after);
+for(const [before,after]of [
+ ['selection.selectedBy===uid && selection.companyId===r.job.companyId','true'],
+ ['hash(selection.original)===hash(originalIdentity(r))','true'],
+ ['const {origin,selection}=pendingSelection(r,queueId,uid)','const {origin,selection}={origin:"CREW_APPLICATION",selection:r.externalSelection}'],
+ ['s.assertAuthority(queueId,r);',''],
+ ['Number.isSafeInteger(selection.selectedAt) && selection.selectedAt<=s.now()','true'],
+ ["/^[a-f0-9]{64}$/.test(p.nameUpExpected??'') && Number.isInteger(p.sheetId) && p.book===r.config.spreadsheetId",'true'],
+ ['return clone({queueId,companyId:r.job.companyId','return clone({token,queueId,companyId:r.job.companyId'],
+])rejectIn('acknowledgeSheetWriteIssue','case-list-external-core.cjs',
+ before.startsWith('selection.')||before.startsWith('hash(')?'function pendingSelection(':'async function readSelectionBinding(',
+ before.startsWith('selection.')||before.startsWith('hash(')?'function receiptFrom(':'async function select(',before,after);
+assert.deepEqual(run('acknowledgeSheetWriteIssue',files=>{for(const p of Object.keys(files))files[p]=files[p].replace(/\r?\n/g,'\r\n');}),{passed:true,exitCode:0},'Current normal sources preserve auth checks with CRLF');cases++;
+reject('acknowledgeSheetWriteIssue','"select-case-list-gas-monthly", "read-case-list-gas-binding"','"select-case-list-gas-monthly", "read-case-list-gas-binding", "unreviewed-extra-action"',{whole:true});
 reject('retrySheetWriteIssue','data.operation === "case_list.assign" || !canManuallyRetrySheetWrite({','!canManuallyRetrySheetWrite({');
 const allowed=JSON.parse(read('config/automation/staging-safety.json')).allowedFunctions;
 assert.ok(Object.keys(modules).every(n=>allowed.includes(n)));assert.ok(!allowed.includes('syncStaffDirectoryScheduled')&&!allowed.includes('syncShiftSheetsScheduled'));cases++;

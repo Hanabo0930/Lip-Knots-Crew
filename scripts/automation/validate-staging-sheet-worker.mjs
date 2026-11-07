@@ -35,7 +35,7 @@ export const retryWorkerSourcePins = Object.freeze({
   "functions/src/case-list-source-core.ts": "f57879a56d30d5e36c85c76a3c370e1c06a442d115dab2a423e6cad96874ce69",
   "functions/src/case-list-monthly-controller.cjs": "d2c82e3e01a09bab126a8b58b4842df12e462234e12d5ee4408f3df029660ca4",
   "functions/src/case-list-monthly-adapter.cjs": "2d56999a4bc6b99424c16ebffd15a2c76d7800b69775906b9c365a99be648845",
-  "functions/src/case-list-monthly-compact.cjs": "16befe4b95e389bdf6ea3750e7e858e725a3e2f41ded14931fc739d434fddea0",
+  "functions/src/case-list-monthly-compact.cjs": "fc0b67415e64be5f10222266cb51c339e28ac9d9808e3bdd086c1510ac1e3cb5",
   "functions/src/case-list-projection.cjs": "059f39d152981e9e9566c276332f9db7da6442dd99fe3ec12e28c587ff9a3326",
   "functions/src/case-id.ts": "7c03676a32947d8c7a81a8a5b7600c1870ccd2c41b036362bf3e8dd475422d87",
   // Reviewed capture-before-clear and BL-only legacy ACK guard; pure validation, no new I/O.

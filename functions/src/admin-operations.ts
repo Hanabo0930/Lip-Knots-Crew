@@ -30,7 +30,7 @@ const QueueActionSchema = z.object({
 });
 
 const AcknowledgeQueueSchema = QueueActionSchema.extend({
-  action: z.enum(["note", "reconcile-case-list", "select-case-list-monthly"]).default("note"),
+  action: z.enum(["note", "reconcile-case-list", "select-case-list-monthly", "select-case-list-gas-monthly"]).default("note"),
   reviewKey: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   clientNameUpConfirmed: z.literal(true).optional(),
 });
@@ -185,6 +185,18 @@ export const retrySheetWriteIssue = onCall(async (request) => {
 export const acknowledgeSheetWriteIssue = onCall(async (request) => {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
+  if (request.data?.action === "select-case-list-manual-gas-monthly") {
+    const externalManualSchema = ManualSelectionSchema.extend({ action: z.literal("select-case-list-manual-gas-monthly") });
+    const input = externalManualSchema.parse(request.data);
+    await assertProductionOperational(companyId);
+    const monthly: typeof import("./case-list-monthly-worker") = require("./case-list-monthly-worker");
+    const result = await monthly.selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, input, true);
+    const queueRef = db.collection("sheetSyncQueue").doc(String(result.queueId));
+    const queue = (await queueRef.get()).data();
+    const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
+    return external.selectExternalCaseListMonthlyTransfer(queueRef, session.uid, session.token,
+      { reviewKey: queue?.caseListPhase?.continuationHash, clientNameUpConfirmed: true });
+  }
   if (request.data?.action === "select-case-list-manual-monthly") {
     const manualInput = ManualSelectionSchema.parse(request.data);
     await assertProductionOperational(companyId);
@@ -199,6 +211,14 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
   }
   const input = AcknowledgeQueueSchema.parse(request.data ?? {});
   const ref = db.collection("sheetSyncQueue").doc(input.queueId);
+  if (input.action === "select-case-list-gas-monthly") {
+    if (!input.reviewKey || input.clientNameUpConfirmed !== true) throw new HttpsError("invalid-argument", "ネームアップ済みの確認と対象の選択が必要です。");
+    await assertProductionOperational(companyId);
+    const snap = await ref.get();
+    if (!snap.exists || snap.data()?.companyId !== companyId || snap.data()?.operation !== "case_list.assign") throw new HttpsError("not-found", "移行対象が見つかりません。");
+    const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
+    return external.selectExternalCaseListMonthlyTransfer(ref, session.uid, session.token, input);
+  }
   if (input.action === "select-case-list-monthly") {
     if (!input.reviewKey || input.clientNameUpConfirmed !== true) throw new HttpsError("invalid-argument", "ネームアップ済みの確認と移行対象の選択が必要です。");
     await assertProductionOperational(companyId);

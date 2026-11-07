@@ -56,13 +56,13 @@ function applyRead(metadata,read,allowed,states,full){
 }
 function requireColumns(s,row,columns){need(columns.every(c=>s.known[row]?.has(c)),'COMPACT_COVERAGE_INCOMPLETE');}
 function uniqueIds(s,column,start,code){const map=new Map();for(let r=start;r<s.bound.rowCount;r++){requireColumns(s,r,[column]);const id=text(s.rows[r][column]);if(!id)continue;need(!map.has(id.toLowerCase()),code);map.set(id.toLowerCase(),{id,row:r});}return map;}
-function prepare(metadataInput,indexReads,caseId){const metadata=book(metadataInput),b=bindings(metadata);need(/^LKCASE_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(caseId),'COMPACT_CASE_ID_REQUIRED');const states=new Map([b.source,b.ledger,...b.months].map(x=>[x.sheetId,state(x)])),allowed=indexRectangles(b);need(Array.isArray(indexReads)&&indexReads.length,'COMPACT_INDEX_READ_REQUIRED');for(const read of indexReads)applyRead(metadata,read,allowed,states,false);
+function prepare(metadataInput,indexReads,caseId,allowSourceAbsent=false){const metadata=book(metadataInput),b=bindings(metadata);need(/^LKCASE_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(caseId),'COMPACT_CASE_ID_REQUIRED');const states=new Map([b.source,b.ledger,...b.months].map(x=>[x.sheetId,state(x)])),allowed=indexRectangles(b);need(Array.isArray(indexReads)&&indexReads.length,'COMPACT_INDEX_READ_REQUIRED');for(const read of indexReads)applyRead(metadata,read,allowed,states,false);
   const source=states.get(b.source.sheetId),ledger=states.get(b.ledger.sheetId);requireColumns(source,0,[...Array(65).keys()]);requireColumns(ledger,2,[...Array(25).keys()]);const header=source.rows[0].map(text);need(header.every((h,i)=>h===HEADERS[i]||(i===0&&['キャンセル','月別転記'].includes(h))),'COMPACT_SOURCE_HEADERS');need(canonical(ledger.rows[2].map(text))===canonical(LEDGER_HEADERS),'COMPACT_LEDGER_HEADERS');
   for(let r=1;r<b.source.rowCount;r++){requireColumns(source,r,SOURCE_COLUMNS);if(!text(source.rows[r][60]))need(![1,2,10].some(c=>{const u=source.rows[r][c].userEnteredValue||{};return !Object.hasOwn(u,'formulaValue')&&(Object.values(u)[0]??'')!=='';}),'COMPACT_SOURCE_ID_MISSING');}
   const sourceIds=uniqueIds(source,60,1,'COMPACT_SOURCE_ID_DUPLICATE'),ledgerIds=uniqueIds(ledger,0,3,'COMPACT_LEDGER_ID_DUPLICATE');for(const entry of sourceIds.values())need(/^LKCASE_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.id),'COMPACT_SOURCE_ID_INVALID');
-  const selected=sourceIds.get(caseId.toLowerCase());need(selected&&selected.id===caseId,'COMPACT_SELECTED_SOURCE_NOT_FOUND');const selectedLedger=ledgerIds.get(caseId.toLowerCase());need(!selectedLedger||selectedLedger.id===caseId,'COMPACT_SELECTED_LEDGER_CASE_SPELLING');
+  const selected=sourceIds.get(caseId.toLowerCase());need((allowSourceAbsent&&!selected)||selected&&selected.id===caseId,'COMPACT_SELECTED_SOURCE_NOT_FOUND');const selectedLedger=ledgerIds.get(caseId.toLowerCase());need(!selectedLedger||selectedLedger.id===caseId,'COMPACT_SELECTED_LEDGER_CASE_SPELLING');
   const destinations=[],globalIds=new Set();for(const m of b.months){const s=states.get(m.sheetId),columns=[0,1,9,10,11,12,13,14,m.columnCount-1];requireColumns(s,0,[...Array(m.columnCount).keys()]);const h=s.rows[0].map(text);need(HEADERS.slice(1,55).every((v,i)=>h[i]===v)&&h[m.columnCount-1]==='連絡_固定案件ID'&&(m.columnCount!==56||h[54]===''),'COMPACT_MONTH_HEADERS');for(let r=1;r<m.rowCount;r++){requireColumns(s,r,columns);const id=text(s.rows[r][m.columnCount-1]);if(text(s.rows[r][9]))need(id,'COMPACT_MONTH_BUSINESS_ID_MISSING');if(!id)continue;need(!globalIds.has(id.toLowerCase()),'COMPACT_MONTH_ID_DUPLICATE');globalIds.add(id.toLowerCase());if(id.toLowerCase()===caseId.toLowerCase()){need(id===caseId,'COMPACT_DESTINATION_CASE_SPELLING');destinations.push({...m,row:r});}}}
-  return {metadata,b,states,caseId,sourceRow:selected.row,ledgerRow:selectedLedger?.row??null,destinations};
+  return {metadata,b,states,caseId,sourceRow:selected?.row??null,ledgerRow:selectedLedger?.row??null,destinations};
 }
 function inspectCompactIndex(input){const p=prepare(input.metadata,input.indexReads,input.caseId);return {schema:'LK_MONTHLY_COMPACT_INDEX_V1',sourceRow:p.sourceRow+1,ledgerRow:p.ledgerRow===null?null:p.ledgerRow+1,destinations:p.destinations.map(d=>({sheetId:d.sheetId,title:d.title,row:d.row+1,columnCount:d.columnCount})),fullRanges:[a1(p.b.source,p.sourceRow,p.sourceRow+1,0,65),...p.destinations.map(d=>a1(d,d.row,d.row+1,0,d.columnCount))],ledgerRange:p.ledgerRow===null?null:a1(p.b.ledger,p.ledgerRow,p.ledgerRow+1,0,25)};}
 function identity(name,resolveStaff){if(!name||/^[（(][0-9０-９]+人[）)]$/.test(name.normalize('NFKC')))return {};const p=resolveStaff(name);return p&&typeof p.staffId==='string'&&p.staffId&&p.identityVerified===true?{staffId:p.staffId,staffIdentityVerified:true}:{staffIdentityVerified:false};}
@@ -95,4 +95,39 @@ function createCompactSnapshot(input){const p=prepare(input.metadata,input.index
 function createIndexRanges(metadataInput){const metadata=book(metadataInput),b=bindings(metadata);return indexRectangles(b).map(r=>a1(r,r.r0,r.r1,r.c0,r.c1));}
 function createDependencyRanges(metadataInput){const metadata=book(metadataInput);return dependencyBindings(metadata).map(d=>a1(d,0,d.rowCount,0,d.columnCount));}
 function createDependencyPlans(metadataInput){const metadata=book(metadataInput);return dependencyBindings(metadata).map(d=>({title:d.title,range:a1(d,0,d.rowCount,0,d.columnCount)}));}
-module.exports={createDependencyPlans,createDependencyEvidence,UNKNOWN,VALUE_FIELDS,FULL_FIELDS,SOURCE_COLUMNS,LEDGER_HEADERS,DEPENDENCIES,canonical,createIndexRanges,createDependencyRanges,inspectCompactIndex,createCompactSnapshot};
+
+function inspectArchivedCompactIndex(input){
+ const p=prepare(input.metadata,input.indexReads,input.caseId,true);
+ need(p.sourceRow===null,'ARCHIVED_SOURCE_REAPPEARED');
+ need(p.ledgerRow!==null,'ARCHIVED_LEDGER_REQUIRED');
+ need(p.destinations.length===1,'ARCHIVED_MONTH_ID_NOT_UNIQUE');
+ return {fullRanges:[a1(p.b.ledger,p.ledgerRow,p.ledgerRow+1,0,25),...p.destinations.map(d=>a1(d,d.row,d.row+1,0,d.columnCount))]};
+}
+function createArchivedCompactSnapshot(input){
+ const p=prepare(input.metadata,input.indexReads,input.caseId,true),{metadata,b,states}=p;
+ need(p.sourceRow===null,'ARCHIVED_SOURCE_REAPPEARED');need(p.ledgerRow!==null,'ARCHIVED_LEDGER_REQUIRED');
+ need(p.destinations.length===1,'ARCHIVED_MONTH_ID_NOT_UNIQUE');
+ const allowed=[{...b.ledger,r0:p.ledgerRow,r1:p.ledgerRow+1,c0:0,c1:25},
+ ...p.destinations.map(d=>({...d,r0:d.row,r1:d.row+1,c0:0,c1:d.columnCount}))];
+ need(Array.isArray(input.fullReads)&&input.fullReads.length,'ARCHIVED_FULL_READ_REQUIRED');
+ for(const read of input.fullReads)applyRead(metadata,read,allowed,states,true);
+ const source=states.get(b.source.sheetId),ledger=states.get(b.ledger.sheetId);
+ need(ledger.full.has(p.ledgerRow),'ARCHIVED_LEDGER_FULL_REQUIRED');
+ const months=b.months.map(m=>{
+  const current=states.get(m.sheetId);for(const d of p.destinations.filter(d=>d.sheetId===m.sheetId))need(current.full.has(d.row),'ARCHIVED_MONTH_FULL_REQUIRED');
+  return {...m,width:m.columnCount,headers:current.rows[0].map(text),
+   idIndex:current.rows.map(row=>text(row[m.columnCount-1])),
+   rows:current.rows.slice(1).map((cells,i)=>({row:i+2,fixedId:text(cells[m.columnCount-1]),cells,
+    knownColumns:[...current.known[i+1]].sort((a,b)=>a-b),fullWritable:current.full.has(i+1)}))};
+ });
+ const ledgerIds=ledger.rows.slice(3).map(row=>text(row[0]));
+ need(ledgerIds.filter(id=>id.toLowerCase()===p.caseId.toLowerCase()).length===1,'ARCHIVED_LEDGER_NOT_UNIQUE');
+ return {spreadsheetId:metadata.spreadsheetId,caseId:p.caseId,
+  sourceIndex:{startRow:2,rowCount:b.source.rowCount,cells:source.rows.slice(1).map(row=>text(row[60]))},
+  sourceIds:source.rows.slice(1).map(row=>text(row[60])).filter(Boolean),
+  ledgerIndex:{startRow:4,rowCount:b.ledger.rowCount,cells:ledgerIds},
+  ledgerRows:[ledger.rows[p.ledgerRow].map(scalar)],ledgerCells:ledger.rows[p.ledgerRow],ledgerRow:p.ledgerRow+1,
+  monthInventory:months.map(({sheetId,title,width,rowCount})=>({sheetId,title,width,rowCount})),months};
+}
+
+module.exports={inspectArchivedCompactIndex,createArchivedCompactSnapshot,createDependencyPlans,createDependencyEvidence,UNKNOWN,VALUE_FIELDS,FULL_FIELDS,SOURCE_COLUMNS,LEDGER_HEADERS,DEPENDENCIES,canonical,createIndexRanges,createDependencyRanges,inspectCompactIndex,createCompactSnapshot};

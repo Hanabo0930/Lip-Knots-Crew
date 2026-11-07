@@ -111,7 +111,7 @@ function validNetPrintTarget(items:unknown,item:unknown):boolean{
 function preContactReadinessMessage(job:Job):string|null{
   if(caseMailPreparationHeld(job))return "受信内容・勤務条件の変更を確認中です。事前連絡はまだ送信できません。管理者の確認後に「シフトを更新」で状態を確認してください。";
   if(job.sourceMissing===true)return "取込元の案件を確認できません。事前連絡はまだ送信できません。「シフトを更新」で確認し、変わらない場合は管理者に確認してください。";
-  if(job.applicationUnconfirmed===true)return "応募は受付済みです。シフト表の担当確認が済むまで、事前連絡は送信できません。「シフトを更新」で状態を確認してください。";
+  if(job.applicationUnconfirmed===true)return "シフト表の担当確認が済むまで、事前連絡は送信できません。「シフトを更新」で状態を確認してください。";
   if(job.assignmentUnresolved===true)return "担当者の照合待ちです。事前連絡はまだ送信できません。「シフトを更新」で確認し、変わらない場合は管理者に確認してください。";
   return null;
 }
@@ -119,7 +119,7 @@ function caseMailPreparationHeld(job:Job):boolean{
   return job.mailIntakeReviewRequired===true||Boolean(job.mailIntake&&(job.pendingSourceWrite===true||job.adminEditSheetWrite?.pending===true));
 }
 function submissionReadinessMessage(job:Job):string|null{
-  const reason=caseMailPreparationHeld(job)?"受信内容・勤務条件の変更を確認中です。":job.sourceMissing===true?"取込元の案件を確認できません。":job.applicationUnconfirmed===true?"応募は受付済みです。シフト表の担当確認を待っています。":job.assignmentUnresolved===true?"担当者の照合を待っています。":null;
+  const reason=caseMailPreparationHeld(job)?"受信内容・勤務条件の変更を確認中です。":job.sourceMissing===true?"取込元の案件を確認できません。":job.applicationUnconfirmed===true?"シフト表の担当確認を待っています。":job.assignmentUnresolved===true?"担当者の照合を待っています。":null;
   return reason?reason+"確認後に送信できます。選択した写真・PDFは保持しています。「シフトを更新」で状態を確認してください。":null;
 }
 function bootstrapRefreshToken(value:unknown):boolean{
@@ -166,7 +166,7 @@ function mapsSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=
 function transitRouteUrl(job:Job){return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(mapDestination(job))}&travelmode=transit`;}
 function stationSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(shiftTextLabel(job.storeNearestStation,""))}`;}
 function submissionSummary(job:Job){const sales=job.submissionStatus?.salesFloor;const salesCompleted=sales?.completed===true||sales?.clientSubmitted===true||sales?.lipKnotsSubmitted===true?true:sales?.completed;const label=(value:unknown)=>value===true?"完了":value===false?"未完了":"未確認";return `売場画像：${label(salesCompleted)} / 報告書：${label(job.submissionStatus?.report?.completed)}`;}
-function prepSummary(job:Job){if(caseMailPreparationHeld(job))return"受信内容・勤務条件を確認中";if(job.preContactNeedsReview===true)return"事前連絡の再確認が必要";if(job.sourceMissing===true)return"取込元の案件を確認中";if(job.applicationUnconfirmed===true)return"応募受付済み・シフト表の担当確認待ち";if(job.assignmentUnresolved===true)return"担当者の照合待ち";const items=job.netPrint?.items??[];if(!Array.isArray(items))return"印刷情報を確認できません";const printed=items.filter(item=>validNetPrintTarget(items,item)&&item.printed===true).length;if(typeof job.materialStatus==="string"&&job.materialStatus.trim())return items.length?`${job.materialStatus} / 印刷済み ${printed}/${items.length}件`:job.materialStatus;if(!items.length)return"資料番号待ち";return printed===items.length?`準備完了（${printed}/${items.length}件）`:`準備中（${printed}/${items.length}件印刷済み）`;}
+function prepSummary(job:Job){if(caseMailPreparationHeld(job))return"受信内容・勤務条件を確認中";if(job.preContactNeedsReview===true)return"事前連絡の再確認が必要";if(job.sourceMissing===true)return"取込元の案件を確認中";if(job.applicationUnconfirmed===true)return"シフト表の担当確認待ち";if(job.assignmentUnresolved===true)return"担当者の照合待ち";const items=job.netPrint?.items??[];if(!Array.isArray(items))return"印刷情報を確認できません";const printed=items.filter(item=>validNetPrintTarget(items,item)&&item.printed===true).length;if(typeof job.materialStatus==="string"&&job.materialStatus.trim())return items.length?`${job.materialStatus} / 印刷済み ${printed}/${items.length}件`:job.materialStatus;if(!items.length)return"資料番号待ち";return printed===items.length?`準備完了（${printed}/${items.length}件）`:`準備中（${printed}/${items.length}件印刷済み）`;}
 function messageTone(value:string){if(/自動で再確認|前回の業務データ|一時的に混み合|一時停止/u.test(value))return"warning";if(/できません|読み込めません|失敗|エラー|拒否|見つかりません|必要です/u.test(value))return"error";if(/受付済み|未確認/u.test(value))return"warning";if(/処理中|確認しています|読み込|送信中|転送中|待って/u.test(value))return"working";return"success";}
 function messageClassName(value:string){return `message ${messageTone(value)}`;}
 function submissionFileContentType(file:File){return file.type.startsWith("image/")||file.type==="application/pdf"?file.type:file.name.toLowerCase().endsWith(".pdf")?"application/pdf":file.type||"application/octet-stream";}

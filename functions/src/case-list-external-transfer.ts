@@ -13,7 +13,7 @@ type Data = FirebaseFirestore.DocumentData;
 type Ref = FirebaseFirestore.DocumentReference;
 type Tx = FirebaseFirestore.Transaction;
 const core = require("../src/case-list-external-core.cjs") as {
-  createConnection(services: Data): { select(...args: any[]): Promise<Data>; reconcile(...args: any[]): Promise<Data>; resolvePrivateRef(records: Data): Data };
+  createConnection(services: Data): { select(...args: any[]): Promise<Data>; reconcile(...args: any[]): Promise<Data>; readSelectionBinding(...args: any[]): Promise<Data>; resolvePrivateRef(records: Data): Data };
 };
 const ID = /^[A-Za-z0-9_-]{1,200}$/;
 const LEASE_MS = 120_000;
@@ -187,6 +187,28 @@ export function selectExternalCaseListMonthlyTransfer(queueRef: Ref, uid: string
 }
 export function reconcileExternalCaseListMonthlyTransfer(queueRef: Ref, uid: string, token: Data) {
   return runExternal(queueRef, uid, token, false);
+}
+/** Internal protected-data view; callers still need the existing verified callable.
+ * It does not attest Gmail identity, verify current Sheets or authorize a GAS write.
+ * No HTTP entry, stored receipt, lease or new identity is created here.
+ */
+export async function readExternalCaseListSelectionBinding(queueRef: Ref, uid: string, token: Data): Promise<Data> {
+  assertOwner(uid, token, String(token.companyId ?? ""));
+  need(ID.test(token.companyId ?? "") && ID.test(queueRef.id), "EXTERNAL_BINDING_IDENTITY_INVALID");
+  return db.runTransaction(async tx => {
+    const initial = (await tx.get(queueRef)).data();
+    need(initial && initial.companyId === token.companyId && initial.operation === "case_list.assign", "EXTERNAL_BINDING_QUEUE_REQUIRED");
+    const r = await recordsFor(queueRef, tx);
+    r.leaseActive = r.lease?.activeUntil instanceof Timestamp && r.lease.activeUntil.toMillis() > Date.now();
+    const connection = core.createConnection({
+      authorize: (actor: string, auth: Data) => assertOwner(actor, auth, initial!.companyId),
+      assertAuthority: authority, now: () => Date.now(), gasDigest: hashCaseList,
+      readProtected: async () => r,
+      readSheets: async () => { throw Error("BINDING_SHEETS_READ_FORBIDDEN"); },
+      transaction: async () => { throw Error("BINDING_WRITE_FORBIDDEN"); },
+    });
+    return connection.readSelectionBinding(queueRef.id, uid, token);
+  }, { readOnly: true });
 }
 export async function resolveExternalCaseListSheetRef(companyId: string, jobId: string, job: Data, tx?: Tx): Promise<any> {
   need(job.companyId === companyId && ID.test(jobId) && ID.test(job.assignmentSheetWrite?.queueId ?? ""), "EXTERNAL_PRIVATE_IDENTITY_INVALID");

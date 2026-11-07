@@ -66,6 +66,16 @@ function originalIdentity(r) {
   requestHash:hash(r.originalRequest),staffHash:hash(r.staff),dayHash:hash(r.dayLock),
   approvalHash:hash(r.approval),configHash:hash(r.config),sourceRecordHash:hash(r.originalSourceRecord)};
 }
+function pendingSelection(r,queueId,uid) {
+ const origin=assertOriginal(r,queueId),selection=r.externalSelection,body={...selection};delete body.selectionHash;
+ need(selection?.schema===SCHEMA && selection.selectionHash===hash(body) &&
+  selection.selectedBy===uid && selection.companyId===r.job.companyId &&
+  selection.queueId===queueId && selection.jobId===r.jobId && selection.caseId===r.job.caseId &&
+  selection.origin===origin && selection.clientNameUpConfirmed===true &&
+  hash(selection.original)===hash(originalIdentity(r)),'PROTECTED_SELECTION_MISMATCH');
+ need(selection.gasPreview?.producerSchema==='LK_NAMEUP_TRANSFER_V1','LEGACY_EXTERNAL_SELECTION_REQUIRES_REVIEW');
+ return {origin,selection};
+}
 function receiptFrom(row,caseId) {
  let meta;try {meta=JSON.parse(row[19]);}catch {throw Error('LEDGER_METADATA_REQUIRED');}
  need(meta && (['LK_CASE_RESULT_LEDGER_V1','LK_HISTORY_CORE_SNAPSHOT_V1'].includes(meta.schema)&&meta.caseId===caseId ||
@@ -86,6 +96,23 @@ function createConnection(s) {
   const r=await s.readProtected(queueId);
   need(r && token.companyId===r.job.companyId,'AUTH_COMPANY_MISMATCH');
   return r;
+ }
+ async function readSelectionBinding(queueId,uid,token) {
+  const r=await authorized(queueId,uid,token);
+  need(!r.externalAcceptance,'EXTERNAL_BINDING_PENDING_ONLY');
+  const {origin,selection}=pendingSelection(r,queueId,uid),a=r.queue.caseListAssignment,p=selection.gasPreview;
+  s.assertAuthority(queueId,r);
+  need(r.queue.status==='blocked' && r.queue.errorType==='external_transfer_selected','EXTERNAL_SELECTION_NOT_PENDING');
+  need(Number.isSafeInteger(selection.selectedAt) && selection.selectedAt<=s.now() &&
+   /^[a-f0-9]{64}$/.test(p.nameUpExpected??'') && Number.isInteger(p.sheetId) && p.book===r.config.spreadsheetId,
+   'EXTERNAL_BINDING_SELECTION_INVALID');
+  // A view of already stored facts. It is not a SENT receipt, a fresh Sheets
+  // readback, or permission to dispatch a transfer in another security context.
+  return clone({queueId,companyId:r.job.companyId,jobId:r.jobId,caseId:r.job.caseId,origin,
+   staffId:a.staffId,dateKey:a.dateKey,expectedJobRevision:a.expectedJobRevision,
+   assignedJobRevision:a.assignedJobRevision,sourceRevision:a.sourceRevision,
+   selectedBy:selection.selectedBy,selectedAt:selection.selectedAt,selectionHash:selection.selectionHash,
+   gas:{book:p.book,sheetId:p.sheetId,nameUpExpected:p.nameUpExpected}});
  }
  async function select(queueId,uid,token,input) {
   need(input?.clientNameUpConfirmed===true,'EXPLICIT_NAME_UP_CONFIRMATION_REQUIRED');
@@ -148,14 +175,7 @@ function createConnection(s) {
    need(before.externalSelection.selectedBy===uid,'COMPLETED_SELECTION_OWNER_CHANGED');
    return {kind:'ALREADY_ACCEPTED',acceptance:before.externalAcceptance};
   }
-  const origin=assertOriginal(before,queueId);
-  const selection=before.externalSelection,body={...selection};delete body.selectionHash;
-  need(selection?.schema===SCHEMA && selection.selectionHash===hash(body) &&
-   selection.selectedBy===uid && selection.companyId===before.job.companyId &&
-   selection.queueId===queueId && selection.jobId===before.jobId && selection.caseId===before.job.caseId &&
-   selection.origin===origin && selection.clientNameUpConfirmed===true &&
-   hash(selection.original)===hash(originalIdentity(before)),'PROTECTED_SELECTION_MISMATCH');
-  need(selection.gasPreview?.producerSchema==='LK_NAMEUP_TRANSFER_V1','LEGACY_EXTERNAL_SELECTION_REQUIRES_REVIEW');
+  const {origin,selection}=pendingSelection(before,queueId,uid);
   const snap=await s.readSheets(queueId,'archive'),p=selection.gasPreview;
   need(snap.readStartedAt<=snap.observedAt && snap.observedAt<=s.now() &&
    s.now()-snap.readStartedAt<=60_000,'READBACK_NOT_CURRENT');
@@ -300,7 +320,7 @@ function createConnection(s) {
   for(const i of [0,1,9,10,11,12,13,14])need(canonical(writable(cells[i]))===canonical(records.externalSelection.expectedMapped.business[i]),'EXTERNAL_ACCEPTED_BUSINESS_CHANGED');
   return {externalAcceptanceHash:a.acceptanceHash,sourceReadStartedAtMs:snap.readStartedAt,observedAt:snap.observedAt};
  }
- return Object.freeze({select,reconcile,resolvePrivateRef,validateAcceptedSnapshot});
+ return Object.freeze({select,reconcile,readSelectionBinding,resolvePrivateRef,validateAcceptedSnapshot});
 }
 function assertNameUpSelection(selection,receipt,snapshot,now) {
  const part=receipt.selection,context=part.nameUp,p=selection.gasPreview;

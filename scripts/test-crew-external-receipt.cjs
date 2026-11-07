@@ -19,10 +19,17 @@ let beforeTransaction=null,archiveReadHook=null,gasReadHook=null;
 let googleReadHandler=null;let operational=true,nativeCalls=0,documents=new Map(),writes=0,readerProvider=null,nativeHandler=null,txTail=Promise.resolve(),afterCommit=null,generated=0;
 const documentReads=[],documentWrites=[];
 class Doc{constructor(p){this.path=p;this.id=p.split('/').pop();}async get(){documentReads.push(this.path);const data=documents.get(this.path);return {exists:data!==undefined,ref:this,id:this.id,data:()=>copy(data)};}collection(n){return new Query(this.path+'/'+n);}}
-class Query{constructor(p,filters=[],max=Infinity,after=null){this.path=p;this.filters=filters;this.max=max;this.after=after;}doc(id){return new Doc(this.path+'/'+(id??('generated_fixture_'+(++generated))));}where(k,op,v){assert(['==','in'].includes(op));return new Query(this.path,[...this.filters,[k,v,op]],this.max,this.after);}limit(n){return new Query(this.path,this.filters,n,this.after);}orderBy(field){assert(['__name__','updatedAt'].includes(field));return this;}startAfter(id){return new Query(this.path,this.filters,this.max,id);}async get(){documentReads.push(this.path+'/*');const found=[...documents].filter(([p,v])=>p.startsWith(this.path+'/')&&!p.slice(this.path.length+1).includes('/')&&this.filters.every(([k,w,op])=>op==='in'?w.includes(v[k]):v[k]===w)&&(!this.after||p.split('/').pop()>this.after)).sort(([a],[b])=>a<b?-1:a>b?1:0).slice(0,this.max);const docs=found.map(([p,data])=>({id:p.split('/').pop(),ref:new Doc(p),data:()=>copy(data)}));return {docs,size:docs.length};}}
+class Query{constructor(p,filters=[],max=Infinity,after=null){this.path=p;this.filters=filters;this.max=max;this.after=after;}doc(id){return new Doc(this.path+'/'+(id??('generated_fixture_'+(++generated))));}where(k,op,v){assert(['==','in','>=','<='].includes(op));return new Query(this.path,[...this.filters,[k,v,op]],this.max,this.after);}limit(n){return new Query(this.path,this.filters,n,this.after);}orderBy(field){assert(['__name__','updatedAt'].includes(field));return this;}startAfter(id){return new Query(this.path,this.filters,this.max,id);}async get(){documentReads.push(this.path+'/*');const found=[...documents].filter(([p,v])=>p.startsWith(this.path+'/')&&!p.slice(this.path.length+1).includes('/')&&this.filters.every(([k,w,op])=>op==='in'?w.includes(v[k]):op==='>='?v[k]>=w:op==='<='?v[k]<=w:v[k]===w)&&(!this.after||p.split('/').pop()>this.after)).sort(([a],[b])=>a<b?-1:a>b?1:0).slice(0,this.max);const docs=found.map(([p,data])=>({id:p.split('/').pop(),ref:new Doc(p),data:()=>copy(data)}));return {docs,size:docs.length};}}
 
 const db={collection:n=>new Query(n),runTransaction:async fn=>{const previous=txTail;let release;txTail=new Promise(r=>release=r);await previous;try{const pending=[];const tx={get:r=>r.get(),set:(r,v,o)=>pending.push(['set',r,v,o]),update:(r,v)=>pending.push(['set',r,v,{merge:true}]),create:(r,v)=>{assert(!documents.has(r.path));pending.push(['set',r,v,{}]);},delete:r=>pending.push(['delete',r])};if(beforeTransaction){const f=beforeTransaction;beforeTransaction=null;f();}const out=await fn(tx);for(const [kind,r,v,o]of pending){writes++;documentWrites.push(r.path);if(kind==='delete'){documents.delete(r.path);continue;}const data=o?.merge?copy(documents.get(r.path)||{}):{};for(const [k,val]of Object.entries(v)){if(val===DELETE)delete data[k];else if(val?.__increment!==undefined)data[k]=Number(data[k]??0)+val.__increment;else data[k]=copy(val);}documents.set(r.path,data);}if(afterCommit)afterCommit();return out;}finally{release();}}};
 db.getAll=async(...refs)=>Promise.all(refs.map(ref=>ref.get()));
+let bindingReadTransactions=0;
+const runTransaction=db.runTransaction;
+db.runTransaction=(fn,options)=>options?.readOnly===true?runTransaction(tx=>{
+ bindingReadTransactions++;
+ const forbidden=()=>assert.fail('Read-only binding attempted a document mutation');
+ return fn({...tx,set:forbidden,update:forbidden,create:forbidden,delete:forbidden});
+}):runTransaction(fn);
 const cache=new Map();
 const runtimeEnvironment={APP_ENVIRONMENT:'staging',EXECUTIVE_APPROVER_EMAILS:'owner@example.invalid',LKC_CASE_LIST_EXTERNAL_MODE:'enabled'};
 function load(name){const file=path.join(src,name+'.ts');if(cache.has(file))return cache.get(file);const source=fs.readFileSync(file,'utf8');const exports=[...source.matchAll(/^export\s+(?:async\s+)?(?:function|const|class)\s+(\w+)/gm)].map(m=>m[1]);let js=stripTypeScriptTypes(source,{mode:'transform'});js=js.replace(/^import\s+\{([^}]+)\}\s+from\s+"([^"]+)";?$/gm,(_,names,module)=>'const {'+names+'} = require('+JSON.stringify(module)+');').replace(/^export\s+/gm,'');js+='\nmodule.exports={'+exports.join(',')+'};';const context={Buffer,process:{env:runtimeEnvironment},Error,Date:Clock,fetch:()=>{throw Error('EXTERNAL_NETWORK_FORBIDDEN');},module:{exports:{}},console,require:specifier=>{
@@ -30,6 +37,8 @@ function load(name){const file=path.join(src,name+'.ts');if(cache.has(file))retu
   if(specifier==='firebase-functions/v2/https')return {onCall:(...args)=>args.at(-1),HttpsError:class extends Error{constructor(code,message,details){super(message);this.code=code;this.details=details;}}};
   if(specifier==='firebase-functions/v2/firestore')return {onDocumentWritten:(...args)=>args.at(-1),onDocumentCreated:(...args)=>args.at(-1)};
   if(specifier==='firebase-functions/v2/scheduler')return {onSchedule:(...args)=>args.at(-1)};
+  if(specifier==='firebase-functions/v2/storage')return {onObjectFinalized:(...args)=>args.at(-1)};
+  if(specifier==='node:path')return require(specifier);
   if(specifier==='firebase-admin/firestore')return {Timestamp:Stamp,FieldValue,FieldPath:{documentId:()=>"__name__"}};
   if(specifier==='googleapis')return {google:{auth:{GoogleAuth:class{}},sheets:()=>({spreadsheets:{get:async request=>{if(!googleReadHandler)throw Error('GOOGLE_READ_NOT_BOUND');return {data:await googleReadHandler(request)};},batchUpdate:async(body,options)=>{nativeCalls++;if(!nativeHandler)throw Error('GOOGLE_WRITE_FORBIDDEN');return nativeHandler(body,options);}}})}};
   if(specifier==='./firebase')return {db};
@@ -40,6 +49,11 @@ function load(name){const file=path.join(src,name+'.ts');if(cache.has(file))retu
   if(specifier==='./case-list-source')return load('case-list-source');
   if(specifier==='./system-safety')return {getProductionOperationalState:async()=>({operational}),assertProductionOperational:async()=>{if(!operational)throw Object.assign(new Error('stopped'),{code:'failed-precondition'});}};
   if(specifier==='./case-list-monthly-reader')return load('case-list-monthly-reader');
+  // These downstream I/O ports must remain unreachable in backend refusal tests.
+  if(specifier==='./google-drive-client')return {getWritableDriveClient:()=>assert.fail('Drive transport forbidden')};
+  if(specifier==='./drive-transfer')return Object.fromEntries(['assertTransferCheckpoint','assertTransferSource','transferSource','transferWithStableId'].map(k=>[k,()=>assert.fail('Transfer boundary forbidden: '+k)]));
+  if(specifier==='./drive-folder-cache')return {readCachedFolderId:()=>assert.fail('Folder read forbidden'),writeCachedFolderId:()=>assert.fail('Folder write forbidden')};
+  if(specifier==='./resubmissions')return {markResubmissionReplacementFile:()=>assert.fail('Replacement write forbidden'),markResubmissionSubmitted:()=>assert.fail('Resubmission write forbidden')};
   if(specifier.endsWith('.cjs'))return require(path.resolve(path.dirname(file),specifier));
   if(specifier.startsWith('./'))return load(specifier.slice(2));
   throw Error('Unexpected import '+specifier);
@@ -179,7 +193,8 @@ function archiveFixture(f,{formula=true}={}){
  sheetsData.set(2026101601,new Map([[1,Projection.HEADERS.map(literal)]]));
  return {receipt,mapped};
 }
-const results=[];async function test(name,fn){lastPreview=null;try{await fn();results.push({name,passed:true});}catch(e){results.push({name,passed:false,error:e.stack,code:e.code,previewStatus:lastPreview?.status,previewReason:lastPreview?.reason});}}
+const results=[];const testPrefix=process.argv.find(arg=>arg.startsWith('--test-name-prefix='))?.slice('--test-name-prefix='.length);
+async function test(name,fn){if(testPrefix&&!name.startsWith(testPrefix))return;lastPreview=null;try{await fn();results.push({name,passed:true});}catch(e){results.push({name,passed:false,error:e.stack,code:e.code,previewStatus:lastPreview?.status,previewReason:lastPreview?.reason});}}
 const reconcile=f=>admin.acknowledgeSheetWriteIssue({...owner,data:{action:'reconcile-case-list',queueId:f.queueId}});
 function changeReceipt(fn){const row=sheetsData.get(2026102605).get(4),m=JSON.parse(cellValue(row[19])),r=m.monthlyTransfer.selectionAndReadback;fn(r);const b={...r};delete b.receiptHash;r.receiptHash=shaValue(b);row[19]=literal(JSON.stringify(m));}
 function ui(relative,cache=new Map()){
@@ -202,7 +217,82 @@ async function submissionPreflight(job,selectedId=jobId){
  const out=await context.invoke();assert.equal(context.files,files);assert.equal(files.length,1);assert.equal(files[0].name,'synthetic.pdf');
  return {out,messages};
 }
+const binding=async f=>{const out=await admin.acknowledgeSheetWriteIssue({...owner,data:{queueId:f.queueId,action:'read-case-list-gas-binding'}});assert.equal(out.status,'EXTERNAL_BINDING_READ');assert.equal(out.sourceWrites,0);assert.equal(out.monthlyWrites,0);return out.binding;};
+const assignmentQueueCount=()=>[...documents].filter(([p,v])=>p.startsWith('sheetSyncQueue/')&&v.operation==='case_list.assign').length;
+function protectedState(){return helpers.canonical([...documents]);}
+async function bindingHasNoSideEffects(fn){const before=protectedState(),w=writes,n=requests.length,priorNative=nativeCalls;const out=await fn();assert.equal(protectedState(),before);assert.equal(writes,w);assert.equal(requests.length,n);assert.equal(nativeCalls,priorNative);return out;}
+async function pendingSubmissionBackend(cancelled=false){
+ const job=documents.get('jobs/'+jobId),w=writes,n=requests.length;
+ const denied=e=>e.code==='failed-precondition'&&(cancelled?/キャンセル/.test(e.message):e.details?.reason==='assignment_sheet_confirmation_pending');
+ await assert.rejects(()=>load('precontact').submitPreContact({...staffAuth,data:{jobId,dateKey:job.dateKey,expectedRevision:job.revision,temperature:36.5,arrivalTime:'09:00'}}),denied);
+ await assert.rejects(()=>load('uploads').createUploadSession({...staffAuth,data:{jobId,type:'report',files:[{originalName:'synthetic.pdf',contentType:'application/pdf',size:10}]}}),denied);
+ assert.equal(writes,w);assert.equal(requests.length,n);assert(![...documents.keys()].some(p=>p.startsWith('submissions/')));
+ const tasks=await load('staff-tasks').getMyTasks(staffAuth);assert(!tasks.tasks.some(t=>t.jobId===jobId));
+}
 (async()=>{
+ for(const manual of [false,true])await test('binding / '+(manual?'manual':'application')+' reads only protected facts with no service mutation',async()=>{
+  const f=await start(manual,true),op=documents.get('caseListMonthlyOperations/'+sha(COMPANY+'|'+f.queueId)),j=documents.get('jobs/'+jobId),q=documents.get('sheetSyncQueue/'+f.queueId);
+  runtimeEnvironment.LKC_CASE_LIST_EXTERNAL_MODE='read-only';const count=bindingReadTransactions;
+  const out=await bindingHasNoSideEffects(()=>binding(f));
+  assert.deepEqual(Object.keys(out).sort(),['queueId','companyId','jobId','caseId','origin','staffId','dateKey','expectedJobRevision','assignedJobRevision','sourceRevision','selectedBy','selectedAt','selectionHash','gas'].sort());
+  for(const [k,v]of Object.entries({queueId:f.queueId,caseId:CASE,staffId:STAFF,dateKey:DATE,jobId,companyId:COMPANY,expectedJobRevision:q.caseListAssignment.expectedJobRevision,assignedJobRevision:j.revision,sourceRevision:q.caseListAssignment.sourceRevision,selectionHash:op.externalSelection.selectionHash,selectedAt:op.externalSelection.selectedAt,selectedBy:OWNER,origin:manual?'SOURCE_MANUAL':'CREW_APPLICATION'}))assert.equal(out[k],v,k);
+  assert.deepEqual(Object.keys(out.gas).sort(),['book','sheetId','nameUpExpected'].sort());assert.equal(out.gas.nameUpExpected,op.externalSelection.gasPreview.nameUpExpected);
+  const repeated=await bindingHasNoSideEffects(()=>binding(f));assert.deepEqual(repeated,out);out.gas.nameUpExpected='caller mutation';assert.equal((await binding(f)).gas.nameUpExpected,repeated.gas.nameUpExpected);
+  assert.equal(bindingReadTransactions,count+3);assert.equal(assignmentQueueCount(),1);assert.equal(j.applicationUnconfirmed,true);
+ });
+ await test('binding / absent original queue cannot create selection or owner evidence',async()=>{
+  resetFixture(true,true);await bindingHasNoSideEffects(async()=>assert.rejects(()=>binding({queueId:'missing_original'}),/EXTERNAL_BINDING_QUEUE_REQUIRED/));assert.equal(assignmentQueueCount(),0);
+ });
+ await test('binding / manual A1 committed without A2 remains held at actual submission handlers',async()=>{
+  await assert.rejects(()=>start(true,true,()=>{afterCommit=()=>{const op=[...documents.values()].find(v=>v.externalManualRequested===true);if(op&&!op.externalSelection){afterCommit=null;throw Error('BINDING_A1_RESPONSE_LOST');}};}),/BINDING_A1_RESPONSE_LOST/);
+  const f={queueId:documents.get('jobs/'+jobId).assignmentSheetWrite.queueId};await bindingHasNoSideEffects(async()=>assert.rejects(()=>binding(f),/PROTECTED_SELECTION_MISMATCH/));await pendingSubmissionBackend();assert.equal(assignmentQueueCount(),1);
+ });
+ for(const manual of [false,true])await test('binding / '+(manual?'manual':'application')+' A2 response loss preserves one original binding without replay',async()=>{
+  await assert.rejects(()=>start(manual,true,()=>{afterCommit=()=>{const op=[...documents.values()].find(v=>v.externalSelection);if(op){afterCommit=null;throw Error('BINDING_A2_RESPONSE_LOST');}};}),/BINDING_A2_RESPONSE_LOST/);
+  const f={queueId:documents.get('jobs/'+jobId).assignmentSheetWrite.queueId},first=await bindingHasNoSideEffects(()=>binding(f)),second=await bindingHasNoSideEffects(()=>binding(f));assert.deepEqual(first,second);assert.equal(assignmentQueueCount(),1);await pendingSubmissionBackend();
+ });
+ for(const [name,change]of [
+  ['fixed ID',f=>{documents.get('jobs/'+jobId).caseId=OTHER;}],
+  ['source revision',f=>{documents.get('jobs/'+jobId).caseListSource.sourceRevision='f'.repeat(64);}],
+  ['job revision',f=>{documents.get('jobs/'+jobId).revision++;}],
+  ['selection hash',f=>{documents.get('caseListMonthlyOperations/'+sha(COMPANY+'|'+f.queueId)).externalSelection.selectionHash='0'.repeat(64);}],
+  ['inactive staff',f=>{documents.get('staffProfiles/'+STAFF).active=false;}],
+  ['day ownership',f=>{documents.get('staffDayLocks/'+COMPANY+'_'+STAFF+'_'+DATE).active=false;}],
+  ['revoked original identity',f=>{const q=documents.get('sheetSyncQueue/'+f.queueId);documents.set('authIdentities/'+q.actorUid,{companyId:COMPANY,staffId:STAFF,active:false});}],
+ ])await test('binding / changed '+name+' refuses without reading Source or writing metadata',async()=>{
+  const f=await start(false,true);change(f);await bindingHasNoSideEffects(async()=>assert.rejects(()=>binding(f)));assert.equal(documents.get('jobs/'+jobId).applicationUnconfirmed,true);assert.equal(assignmentQueueCount(),1);await pendingSubmissionBackend();
+ });
+ for(const [name,token,uid]of [
+  ['staff role',{...owner.auth.token,role:'staff'},OWNER],
+  ['different company',{...owner.auth.token,companyId:'foreign_company'},OWNER],
+  ['UID mismatch',{...owner.auth.token,uid:'different_owner'},OWNER],
+  ['unverified email',{...owner.auth.token,email_verified:false},OWNER],
+ ])await test('binding / '+name+' cannot read a protected selection',async()=>{
+  const f=await start(false,true);await bindingHasNoSideEffects(async()=>assert.rejects(()=>admin.acknowledgeSheetWriteIssue({auth:{uid,token},data:{queueId:f.queueId,action:'read-case-list-gas-binding'}})));
+ });
+ await test('binding / active company lease is observed without takeover',async()=>{
+  const f=await start(false,true);documents.set('caseListSyncLocks/'+COMPANY,{companyId:COMPANY,tokenId:'other_operation',activeUntil:Stamp.fromMillis(Clock.now()+60_000)});await bindingHasNoSideEffects(async()=>assert.rejects(()=>binding(f),/OTHER_TRANSFER_IN_PROGRESS/));
+ });
+ for(const manual of [false,true])await test('binding / '+(manual?'manual':'application')+' archived Source stays pending until original reconciliation',async()=>{
+  const f=await start(manual,true),original=await binding(f);archiveFixture(f);const out=await bindingHasNoSideEffects(()=>binding(f));assert.deepEqual(out,original);assert.equal(documents.get('jobs/'+jobId).applicationUnconfirmed,true);await pendingSubmissionBackend();
+  documents.set('resubmissionRequests/binding_request',{companyId:COMPANY,staffId:STAFF,jobId,status:'open',type:'report',reasons:['synthetic'],createdAt:Stamp.now()});
+  assert.equal((await load('staff-tasks').getMyTasks(staffAuth)).tasks.length,0);await reconcile(f);assert.equal(documents.get('jobs/'+jobId).applicationUnconfirmed,false);
+  assert((await load('staff-tasks').getMyTasks(staffAuth)).tasks.some(t=>t.jobId===jobId),'positive control: accepted same-ID task is visible');
+  await bindingHasNoSideEffects(async()=>assert.rejects(()=>binding(f),/EXTERNAL_BINDING_PENDING_ONLY/));assert.equal((await reconcile(f)).status,'EXTERNAL_ALREADY_ACCEPTED');assert.equal(assignmentQueueCount(),1);
+ });
+ for(const manual of [false,true])await test('binding / '+(manual?'manual':'application')+' actual owner cancellation blocks binding and submissions',async()=>{
+  const f=await start(manual,true),j=documents.get('jobs/'+jobId);await jobs.adminCancelJob({...owner,data:{jobId,expectedRevision:j.revision,reason:'SYNTHETIC_BINDING_CANCEL'}});await bindingHasNoSideEffects(async()=>assert.rejects(()=>binding(f)));await pendingSubmissionBackend(true);assert.equal(assignmentQueueCount(),1);assert.equal(documents.get('jobs/'+jobId).cancelled,true);
+ });
+ for(const manual of [false,true])await test('binding / '+(manual?'manual':'application')+' readback cannot refresh expired name-up preparation',async()=>{
+  const f=await start(manual,true),original=await binding(f);archiveFixture(f);
+  changeReceipt(r=>{r.selection.nameUp.preparedAt=new Date(Date.parse(r.selection.nameUp.authorizedAt)-180000).toISOString();});
+  assert.deepEqual(await bindingHasNoSideEffects(()=>binding(f)),original);await assert.rejects(()=>reconcile(f),/NAMEUP_PREPARATION_NOT_CURRENT/);await pendingSubmissionBackend();assert.equal(assignmentQueueCount(),1);
+ });
+ for(const manual of [false,true])await test('binding / '+(manual?'manual':'application')+' original authenticated identity revocation stays held',async()=>{
+  const f=await start(manual,true),q=documents.get('sheetSyncQueue/'+f.queueId);documents.set('authIdentities/'+q.actorUid,{companyId:COMPANY,staffId:STAFF,active:false});
+  await bindingHasNoSideEffects(async()=>assert.rejects(()=>binding(f),/EXTERNAL_ACTOR_IDENTITY_REVOKED/));await pendingSubmissionBackend();assert.equal(assignmentQueueCount(),1);
+ });
+
  await test('external mode unset or invalid fails closed; existing native manual selection remains available',async()=>{
   const mode=load('case-list-external-mode');
   for(const value of [undefined,'','ENABLED','invalid','read-only']){if(value===undefined)delete runtimeEnvironment.LKC_CASE_LIST_EXTERNAL_MODE;else runtimeEnvironment.LKC_CASE_LIST_EXTERNAL_MODE=value;

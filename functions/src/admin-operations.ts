@@ -30,7 +30,7 @@ const QueueActionSchema = z.object({
 });
 
 const AcknowledgeQueueSchema = QueueActionSchema.extend({
-  action: z.enum(["note", "reconcile-case-list", "select-case-list-monthly", "select-case-list-gas-monthly"]).default("note"),
+  action: z.enum(["note", "reconcile-case-list", "select-case-list-monthly", "select-case-list-gas-monthly", "read-case-list-gas-binding"]).default("note"),
   reviewKey: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   clientNameUpConfirmed: z.literal(true).optional(),
 });
@@ -215,6 +215,11 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
   }
   const input = AcknowledgeQueueSchema.parse(request.data ?? {});
   const ref = db.collection("sheetSyncQueue").doc(input.queueId);
+  if (input.action === "read-case-list-gas-binding") {
+    const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
+    const binding = await external.readExternalCaseListSelectionBinding(ref, session.uid, session.token);
+    return { status: "EXTERNAL_BINDING_READ", queueId: ref.id, binding, sourceWrites: 0, monthlyWrites: 0 };
+  }
   if (input.action === "select-case-list-gas-monthly") {
     if (!input.reviewKey || input.clientNameUpConfirmed !== true) throw new HttpsError("invalid-argument", "ネームアップ済みの確認と対象の選択が必要です。");
     await assertProductionOperational(companyId);

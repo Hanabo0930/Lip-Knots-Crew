@@ -23,13 +23,19 @@ export default function AdminSheetIssuePanel({sheetIssues,issuesBusy,operationKe
   const reviewed=issue.status==="acknowledged",busy=issuesBusy||operationKeys.includes("issue:"+issue.id);
   const manualSource=issue.operation==="case_list.manual",caseList=issue.operation==="case_list.assign"||manualSource;
   const sourceCancellation=issue.sourceCancellation===true;
+  const externalSelectionRequired=caseList&&issue.errorType==="external_transfer_selection_required";
+  const externalSelected=caseList&&issue.errorType==="external_transfer_selected";
+  const reconciliationHeld=caseList&&!issue.manualTransferPending&&(issue.canReconcile===false||externalSelected&&issue.canReconcile!==true);
   const retry=!caseList&&issue.canRetry&&!issue.writeVerificationRequired&&!reviewed&&["blocked","dead_letter","retry_wait"].includes(issue.status);
   return <article key={issue.id} className={"sheet-review-card "+(issue.errorType==="conflict"?"conflict-issue":"")+(manualSource?" manual-source-transfer-card":"")}>
    <div className="sheet-review-summary">
     <strong>{issue.job?issue.job.workDate+" "+issue.job.storeName+" "+issue.job.assignedStaffName:"案件 "+issue.jobId}</strong>
-    <p className="sheet-review-state">{issue.manualTransferPending?"新規手配・ネームアップ後の移行選択待ち":reviewed?"確認メモあり・反映未確認":"反映結果の確認が必要"}</p>
+    <p className="sheet-review-state">{externalSelectionRequired?"保護受付の確認待ち":reconciliationHeld?(externalSelected?"外部反映の照合は保留中":"保存結果の照合は保留中"):externalSelected?"ネームアップ・月別反映の確認待ち":issue.manualTransferPending?"新規手配・ネームアップ後の移行選択待ち":reviewed?"確認メモあり・反映未確認":"反映結果の確認が必要"}</p>
     <p>{issue.errorMessage||"依頼の状態とシフト表を確認してください。"}</p>
-    {caseList&&!issue.manualTransferPending&&<p className="sheet-review-help">原本を読み取って保存結果を照合します。再書込は行いません。月別への保存が未完了の場合は保留を続けます。</p>}
+    {externalSelectionRequired&&<p className="sheet-review-help">担当・日程の受付は保存されていますが、転記前の照合は未完了です。同じ依頼番号のまま保留しています。保存結果の再照合だけで確定には進みません。</p>}
+    {!externalSelectionRequired&&reconciliationHeld&&<p className="sheet-review-help">現在は照合を開始できない状態です。元の依頼と証拠を保持して保留しています。</p>}
+    {!reconciliationHeld&&externalSelected&&<p className="sheet-review-help">同じ案件IDでネームアップと月別反映の保存結果を確認します。再送・再転記は行いません。</p>}
+    {caseList&&!issue.manualTransferPending&&!externalSelectionRequired&&!externalSelected&&!reconciliationHeld&&<p className="sheet-review-help">原本を読み取って保存結果を照合します。再書込は行いません。月別への保存が未完了の場合は保留を続けます。</p>}
     {sourceCancellation&&issue.canReconcile&&<p className="sheet-review-help">案件リストの取消結果を読み取り、氏名消去と取消状態を照合します。再書込は行いません。</p>}
     {issue.manualTransferPending&&<p className="sheet-review-help">担当名の入力だけではシフト表へ移行しません。クライアントへのネームアップ後、日付・店舗・担当者を確認し、移行する案件だけ個別に選択してください。</p>}
     {issue.writeVerificationRequired&&!caseList&&<p className="sheet-review-help">手動での再試行はできません。原本と依頼の照合が必要です。</p>}
@@ -41,7 +47,7 @@ export default function AdminSheetIssuePanel({sheetIssues,issuesBusy,operationKe
    </div>
    <div className="row-actions">{retry&&<button className="ghost compact" disabled={busy} onClick={()=>void retrySheetIssue(issue)}>再試行</button>}
     {!manualSource&&issue.manualTransferPending&&issue.canSelectMonthlyTransfer&&<button className="compact" disabled={busy} onClick={()=>void selectMonthlyTransfer(issue)}>この案件を選択してシフト表へ移行</button>}
-    {!manualSource&&!issue.manualTransferPending&&(!sourceCancellation||issue.canReconcile)&&<button className="ghost compact" disabled={busy||reviewed&&!caseList&&!sourceCancellation} onClick={()=>void acknowledgeSheetIssue(issue)}>{caseList||sourceCancellation?"保存結果を再照合":reviewed?"メモ記録済み":"確認メモを記録"}</button>}
+    {!manualSource&&!issue.manualTransferPending&&!externalSelectionRequired&&(!caseList||issue.canReconcile!==false)&&(!externalSelected||issue.canReconcile===true)&&(!sourceCancellation||issue.canReconcile)&&<button className="ghost compact" disabled={busy||reviewed&&!caseList&&!sourceCancellation} onClick={()=>void acknowledgeSheetIssue(issue)}>{caseList||sourceCancellation?"保存結果を再照合":reviewed?"メモ記録済み":"確認メモを記録"}</button>}
    </div>
    {manualSource&&<ManualSourceTransferReview key={[issue.id,issue.manualObservationHash,issue.manualExpectedJobRevision,issue.manualExpectedSourceRevision].join(":")} issue={issue} busy={busy} onSelect={confirmation=>void selectMonthlyTransfer(issue,confirmation)}/>}
   </article>;

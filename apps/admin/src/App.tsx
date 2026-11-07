@@ -3041,9 +3041,12 @@ async function previewRowCreation() {
 
   async function acknowledgeSheetIssue(issue:SheetWriteIssue) {
     if(issue.operation==="case_list.manual"){setMessage("手入力案件は条件と日給を確認し、ネームアップ後に個別に選択してください。");return;}
+    if(issue.operation==="case_list.assign"&&(issue.canReconcile===false||issue.errorType==="external_transfer_selection_required"||issue.errorType==="external_transfer_selected"&&issue.canReconcile!==true)){setMessage("保護受付または照合の準備が完了していません。同じ依頼番号のまま保留しています。");return;}
     if(issue.operation==="case_list.assign"||issue.sourceCancellation===true&&issue.canReconcile===true) {
       await runAdminOperation("issue:"+issue.id,"acknowledgeSheetWriteIssue",{queueId:issue.id,action:"reconcile-case-list"},data=>{
         const status=(data as {status?:string})?.status;
+        if(status==="EXTERNAL_READBACK_VERIFIED")return "同じ案件IDでネームアップと月別反映の保存結果を照合しました。";
+        if(status==="EXTERNAL_ALREADY_ACCEPTED")return "同じ依頼の照合済み受付記録を確認しました。今回、原本の再読取は行っていません。";
         if(status==="SOURCE_CANCELLATION_READBACK_VERIFIED")return "案件リストの氏名消去と取消状態を照合し、取消の反映を確認しました。募集は停止したままです。";
         if(status==="MONTHLY_READBACK_VERIFIED"||status==="NO_OP_ALREADY_ACCEPTED")return "保存済みの原本を照合し、応募の反映を確認しました。";
         if(status==="OWNER_RESUME_REQUIRED")return "案件リストの担当者反映まで確認できました。月別への保存は未完了のため保留しています。";

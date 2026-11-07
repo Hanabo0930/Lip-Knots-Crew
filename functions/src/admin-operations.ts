@@ -114,6 +114,10 @@ export const getSheetWriteIssues = onCall(async (request) => {
       const data = doc.data();
       const job = jobs.get(String(data.jobId ?? ""));
       const manualTransferPending = data.operation === "case_list.assign" && data.status === "blocked" && data.errorType === "owner_transfer_required" && data.caseListPhase?.phase === "MONTHLY_PREPARE";
+      const externalSelectionRequired = data.operation === "case_list.assign" && data.errorType === "external_transfer_selection_required";
+      const externalSelected = data.operation === "case_list.assign" && data.errorType === "external_transfer_selected";
+      const externalReadbackAvailable = !externalSelected || executive &&
+        (require("./case-list-external-mode") as typeof import("./case-list-external-mode")).externalTransferMode() !== "read-only";
       return {
         id: doc.id,
         companyId: data.companyId,
@@ -132,7 +136,7 @@ export const getSheetWriteIssues = onCall(async (request) => {
         acknowledgedAt: serializeTimestamp(data.acknowledgedAt),
         acknowledgedNote: typeof data.acknowledgedNote === "string" ? data.acknowledgedNote : "",
         sourceCancellation: ["job.cancel", "job.cancel.v2"].includes(data.operation) && ["LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1", "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V2"].includes(data.caseListCancellation?.schema),
-        canReconcile: data.operation === "case_list.assign" && !manualTransferPending || ["job.cancel", "job.cancel.v2"].includes(data.operation) && ["LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1", "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V2"].includes(data.caseListCancellation?.schema) && data.writeVerificationRequired === true,
+        canReconcile: data.operation === "case_list.assign" && !manualTransferPending && !externalSelectionRequired && externalReadbackAvailable || ["job.cancel", "job.cancel.v2"].includes(data.operation) && ["LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V1", "LK_CASE_LIST_SOURCE_CANCEL_CAPTURE_V2"].includes(data.caseListCancellation?.schema) && data.writeVerificationRequired === true,
         manualTransferPending,
         canSelectMonthlyTransfer: executive && manualTransferPending,
         manualTransferReviewKey: manualTransferPending && /^[a-f0-9]{64}$/.test(data.caseListPhase?.continuationHash ?? "") ? data.caseListPhase.continuationHash : null,

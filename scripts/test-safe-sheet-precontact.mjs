@@ -260,8 +260,11 @@ await test("actual admin panel hides retry for unknown write",async()=>{
  const html=render(issues);
  assert.ok(html.includes("自動再書込は行いません"));assert.ok(!html.includes(">再試行</button>"));assert.ok(html.includes(">確認メモを記録</button>"));
  assert.ok(html.includes("日時がない旧依頼も確認"),"actual read-only history entry is retained");
- const caseList=render([{...issues[0],operation:"case_list.assign",manualTransferPending:false,canRetry:true}]);
+ // Case-list capability comes from its own API projection, not the unrelated precontact issue.
+ const caseList=render([{...issues[0],operation:"case_list.assign",manualTransferPending:false,canRetry:true,canReconcile:true}]);
  assert.ok(!caseList.includes(">再試行</button>"));assert.ok(caseList.includes(">保存結果を再照合</button>"));assert.ok(!caseList.includes(">確認メモを記録</button>"));
+ const heldCaseList=render([{...issues[0],operation:"case_list.assign",manualTransferPending:false,canRetry:true,canReconcile:false}]);
+ assert.ok(!heldCaseList.includes(">再試行</button>"));assert.ok(!heldCaseList.includes(">保存結果を再照合</button>"));assert.ok(!heldCaseList.includes(">確認メモを記録</button>"));
  const manual=render([{...issues[0],operation:"case_list.manual",manualSourcePending:true,manualTransferPending:true,canSelectMonthlyTransfer:false,canRetry:true}]);
  assert.ok(manual.includes("シート手入力案件の移行確認"));assert.ok(manual.includes("照合が終わるまで保留"));assert.ok(!manual.includes(">再試行</button>"));assert.ok(!manual.includes(">確認メモを記録</button>"));assert.ok(!manual.includes(">保存結果を再照合</button>"));
  for(const name of ["./ManualSourceTransferReview","./manual-source-transfer","./SheetWriteReviewEntry","./sheet-write-review"])assert.ok(cache.has(name),"actual admin module loaded: "+name);

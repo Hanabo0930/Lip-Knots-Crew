@@ -8,6 +8,7 @@ import { configuredCaseListSource, publicCaseListSource, assertExecutive, hashCa
 import { readCaseListMonthlySnapshot } from "./case-list-monthly-reader";
 import { manualOwnerReviewCanProceed } from "./case-list-manual-origin-core";
 import { getProductionOperationalState } from "./system-safety";
+import { assertExternalIntakeEnabled } from "./case-list-external-mode";
 
 type Data = FirebaseFirestore.DocumentData;
 type Ref = FirebaseFirestore.DocumentReference;
@@ -681,9 +682,10 @@ export async function selectCaseListMonthlyTransfer(queueRef: Ref, actorUid: str
 /** Explicit executive selection for a Source C name already entered by the
  * owner. This only registers trusted metadata; Google writes stay in the
  * existing MONTHLY_* worker/adapter and Source C is never written here. */
-export async function selectCaseListManualMonthlyTransfer(companyId: string, actorUid: string, token: Data, input: Data): Promise<Data> {
+export async function selectCaseListManualMonthlyTransfer(companyId: string, actorUid: string, token: Data, input: Data, externalReceiptMode = false): Promise<Data> {
   assertExecutive(token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");
   need(ID.test(companyId) && ID.test(actorUid) && token.companyId === companyId && (token.uid ?? token.sub) === actorUid, "MANUAL_OWNER_IDENTITY_INVALID");
+  if (externalReceiptMode) assertExternalIntakeEnabled();
   need(ID.test(input.jobId ?? "") && HASH.test(input.observationHash ?? "") && HASH.test(input.expectedSourceRevision ?? "") && Number.isSafeInteger(input.expectedJobRevision) && input.expectedJobRevision >= 1 && input.clientNameUpConfirmed === true, "MANUAL_SELECTION_INPUT_INVALID");
   const confirmation = object(input.manualConfirmation), confirmedFields = object(confirmation.confirmedFields), payOffer = object(confirmation.payOffer) as PayOffer;
   need(canonical(confirmedFields) === canonical({ arrival: true, execution: true, headcount: true, dateMode: true, payOffer: true }) &&
@@ -696,6 +698,7 @@ export async function selectCaseListManualMonthlyTransfer(companyId: string, act
   const [initialJob, initialObservation, initialOperation, initialQueue] = await Promise.all([jobRef.get(), observationRef.get(), operationRef.get(), queueRef.get()]);
   if (initialQueue.exists || initialOperation.exists) {
     need(initialQueue.data()?.companyId === companyId && initialQueue.data()?.jobId === input.jobId && initialOperation.data()?.manualSelectionRequestHash === requestHash && initialOperation.data()?.ownerTransferSelection?.selectedBy === actorUid, "MANUAL_SELECTION_ALREADY_REGISTERED");
+    need((initialOperation.data()?.externalManualRequested === true) === externalReceiptMode, "MANUAL_SELECTION_DESTINATION_CHANGED");
     return { status: "OWNER_TRANSFER_ALREADY_SELECTED", selected: true, queueId, nativeBatches: 0 };
   }
   const job = initialJob.data(), observed = initialObservation.data();
@@ -728,13 +731,14 @@ export async function selectCaseListManualMonthlyTransfer(companyId: string, act
   manualEvent.observationProofHash = hashCaseList({ ...manualEvent, createdAt: 0 });
   const now = Timestamp.now(), nonce = randomUUID(), proofHash = hashCaseList(manualEvent), queue: Data = { companyId, jobId: input.jobId, operation: "case_list.assign", actorUid, actorStaffId: a.staffId, dateKey,
     updates: { staffName: a.staffName }, expected: { staffName: { mode: "equals", value: a.staffName } }, styles: {}, idempotencyKey: `case_list.assign:${input.jobId}:${queueId}`, caseListAssignment: a,
-    status: "pending", attempts: 0, retryAt: null, writeVerificationRequired: false, createdAt: now, updatedAt: now };
+    status: externalReceiptMode ? "blocked" : "pending", ...(externalReceiptMode ? { errorType: "external_transfer_selection_required" } : {}), attempts: 0, retryAt: null, writeVerificationRequired: false, createdAt: now, updatedAt: now };
   const continuationHash = phaseHash(queueId, queue, "MONTHLY_PREPARE", nonce, "SOURCE_MANUAL_OBSERVED", proofHash), phaseData = { schema: PHASE_SCHEMA, phase: "MONTHLY_PREPARE", nonce, proofStage: "SOURCE_MANUAL_OBSERVED", proofHash, continuationHash };
   queue.caseListPhase = phaseData;
   const selection = { schema: "LK_OWNER_MONTHLY_TRANSFER_V1", companyId, jobId: input.jobId, operationId: queueId, caseId: a.sourceCaseId, selected: true, clientNameUpConfirmed: true, sourceControlHeader: "キャンセル",
     selectedBy: actorUid, selectedAt: conditionsBody.selectedAt, reviewKey: continuationHash, queueFingerprint: fingerprint(queue), assignmentHash: hashCaseList(native), sourceContentHash: a.preMonthlyContentHash, sourceRevision: a.sourceRevision };
   const operation: Data = { schema: "LK_CASE_LIST_MONTHLY_OPERATION_V1", companyId, jobId: input.jobId, queueId, caseId: a.sourceCaseId, status: "awaiting_continuation", phaseState: "ready", phase: "MONTHLY_PREPARE", phaseNonce: nonce,
-    proofStage: "SOURCE_MANUAL_OBSERVED", proofHash, continuationHash, queueFingerprint: fingerprint(queue), publicPayOfferHash: hashCaseList(payOffer), manualConditions, manualSelectionRequestHash: requestHash, ownerTransferSelection: selection, createdAt: now, updatedAt: now };
+    proofStage: "SOURCE_MANUAL_OBSERVED", proofHash, continuationHash, queueFingerprint: fingerprint(queue), publicPayOfferHash: hashCaseList(payOffer), manualConditions, manualSelectionRequestHash: requestHash, ownerTransferSelection: selection,
+    ...(externalReceiptMode ? { externalManualRequested: true } : {}), createdAt: now, updatedAt: now };
   const records = { SOURCE_MANUAL_OBSERVED: { companyId, queueId, payload: manualEvent, payloadHash: proofHash } };
   assertKnownCaseListContinuation(queueId, queue, operation, records, spreadsheetId);
   // Preview invokes only the same controller's validations; no mutation
@@ -746,10 +750,12 @@ export async function selectCaseListManualMonthlyTransfer(companyId: string, act
   need((await getProductionOperationalState(companyId)).operational, "GLOBAL_OPERATION_STOPPED");
   const dayRef = db.collection("staffDayLocks").doc(`${companyId}_${a.staffId}_${dateKey}`), auditRef = db.collection("auditLogs").doc();
   return db.runTransaction(async tx => {
+    if (externalReceiptMode) assertExternalIntakeEnabled();
     const [jobSnap, observationSnap, configSnap, profileSnap, daySnap, queueSnap, operationSnap, leaseSnap] = await Promise.all([tx.get(jobRef), tx.get(observationRef), tx.get(configRef), tx.get(profileRef), tx.get(dayRef), tx.get(queueRef), tx.get(operationRef), tx.get(syncRef)]);
     const currentJob = jobSnap.data(), currentObservation = observationSnap.data(), config = configSnap.data(), currentStaff = profileSnap.data(), day = daySnap.data();
     if (queueSnap.exists || operationSnap.exists) {
       need(queueSnap.data()?.companyId === companyId && queueSnap.data()?.jobId === input.jobId && operationSnap.data()?.manualSelectionRequestHash === requestHash, "MANUAL_SELECTION_ALREADY_REGISTERED");
+      need((operationSnap.data()?.externalManualRequested === true) === externalReceiptMode, "MANUAL_SELECTION_DESTINATION_CHANGED");
       return { status: "OWNER_TRANSFER_ALREADY_SELECTED", selected: true, queueId, nativeBatches: 0 };
     }
     need(currentJob && currentObservation && currentStaff && config && canonical(currentJob) === canonical(job) && canonical(currentObservation) === canonical(observed) && canonical(currentStaff) === canonical(staff), "MANUAL_SELECTION_CHANGED");
@@ -762,6 +768,7 @@ export async function selectCaseListManualMonthlyTransfer(companyId: string, act
     nextJob.assignmentSheetWrite = { operation: "case_list.assign", queueId, sourceRevision: a.sourceRevision, assignedJobRevision: assignedRevision, identity: cancellationSheetWriteIdentity(nextJob), pending: true };
     const dayLock = { companyId, staffId: a.staffId, jobId: input.jobId, dateKey, active: true, updatedAt: now };
     assertCaseListMonthlyAuthority(queueId, queue, nextJob, currentStaff, dayLock, config, manualConditions);
+    if (externalReceiptMode) assertExternalIntakeEnabled();
     tx.update(jobRef, nextJob);
     tx.set(dayRef, dayLock);
     tx.create(queueRef, queue);
@@ -783,6 +790,14 @@ export async function processCaseListMonthlyAssignment(queueRef: Ref): Promise<b
 /** Original-sheet read-only reconciliation. Exact after-images may finalize
  * immutable proof/ACK metadata; no prepare/apply or Google writer is reachable. */
 export async function reconcileCaseListMonthlyAssignment(queueRef: Ref, actorUid: string, token: Data): Promise<Data> {
+  const queue = (await queueRef.get()).data();
+  if (queue?.operation === "case_list.assign" && ID.test(queue.companyId ?? "")) {
+    const operation = (await db.collection("caseListMonthlyOperations").doc(sha256(queue.companyId + "|" + queueRef.id)).get()).data();
+    if (operation?.externalManualRequested === true || Object.hasOwn(operation ?? {}, "externalSelection") || Object.hasOwn(operation ?? {}, "externalAcceptance")) {
+      const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
+      return external.reconcileExternalCaseListMonthlyTransfer(queueRef, actorUid, token);
+    }
+  }
   return runCaseListMonthlyAssignment(queueRef, { actorUid, token });
 }
 

@@ -46,6 +46,8 @@ jobs:
         run: |
           npm run test:staff-company-scope
           npm run test:staff-ux-performance
+          node scripts/test-staff-pending-origin.mjs
+          node scripts/test-crew-external-components.cjs
           node scripts/test-staff-submission-recovery.mjs
           node scripts/test-staff-shift-cards.mjs
           node scripts/test-staff-application-confirmation.mjs
@@ -112,6 +114,8 @@ jobs:
       - name: Build and test Functions
         run: |
           npm run build -w @lkc/functions
+          node scripts/test-crew-external-receipt.cjs
+          node scripts/test-crew-external-compatibility.cjs
           node scripts/test-cancellation-lock-ownership.mjs
           node scripts/test-cancellation-privacy.mjs
           node scripts/test-staging-cancellation-privacy-audit.mjs

@@ -15,6 +15,19 @@ function need(ok,code){if(!ok)fail(code);}
 function canonical(x){if(x===null||typeof x==='string'||typeof x==='boolean')return JSON.stringify(x);if(typeof x==='number'&&Number.isFinite(x))return JSON.stringify(x);if(Array.isArray(x))return '['+x.map(canonical).join(',')+']';if(x&&typeof x==='object')return '{'+Object.keys(x).sort().map(k=>JSON.stringify(k)+':'+canonical(x[k])).join(',')+'}';fail('COMPACT_NON_CANONICAL');}
 const hash=x=>createHash('sha256').update(canonical(x),'utf8').digest('hex');
 const valueProjection=c=>({userEnteredValue:c.userEnteredValue||{},effectiveValue:c.effectiveValue||{}});
+// The value-only row hash has the exact canonical bytes of cells.map(valueProjection).
+// Feed each cell directly to SHA-256 instead of allocating another projection
+// array and its complete serialized row beside the native Google response.
+function hashValueCells(cells){
+  const digest=createHash('sha256');digest.update('[');
+  for(let i=0;i<cells.length;i++){
+    const c=cells[i];
+    digest.update(i?',{"effectiveValue":':'{"effectiveValue":');
+    digest.update(canonical(c.effectiveValue||{}));
+    digest.update(',"userEnteredValue":');digest.update(canonical(c.userEnteredValue||{}));digest.update('}');
+  }
+  return digest.update(']').digest('hex');
+}
 function scalar(c){need(c&&!c.$unknown,'COMPACT_UNKNOWN_VALUE');const u=c.userEnteredValue||{},v=Object.hasOwn(u,'formulaValue')?c.effectiveValue||{}:u;need(!v.errorValue,'COMPACT_CELL_ERROR');return Object.values(v)[0]??'';}
 const text=c=>{const v=scalar(c);return typeof v==='string'?v.trim():'';};
 const unwrap=x=>x?.structuredContent?.spreadsheetId?x.structuredContent:x?.data?.spreadsheetId?x.data:x;
@@ -25,7 +38,10 @@ function column(n){let s='';for(;n>0;n=Math.floor((n-1)/26))s=String.fromCharCod
 function columnNumber(s){return [...s].reduce((a,c)=>a*26+c.charCodeAt(0)-64,0)-1;}
 const a1=(b,r0,r1,c0,c1)=>"'"+b.title.replace(/'/g,"''")+"'!"+column(c0+1)+(r0+1)+':'+column(c1)+(r1);
 function rectangle(metadata,a){const match=/^'((?:[^']|'')+)'!([A-Z]+)([1-9]\d*):([A-Z]+)([1-9]\d*)$/.exec(a);need(match,'COMPACT_A1_BOUNDS_REQUIRED');const b=bound(metadata,match[1].replace(/''/g,"'")),r0=Number(match[3])-1,r1=Number(match[5]),c0=columnNumber(match[2]),c1=columnNumber(match[4])+1;need(r0>=0&&r1>r0&&r1<=b.rowCount&&c0>=0&&c1>c0&&c1<=b.columnCount,'COMPACT_RANGE_OUTSIDE_BOUNDS');return {...b,r0,r1,c0,c1};}
-function state(b){return {bound:b,rows:Array.from({length:b.rowCount},()=>Array(b.columnCount).fill(UNKNOWN)),known:Array.from({length:b.rowCount},()=>new Set()),full:new Set()};}
+// Coverage is an internal bitmap. UNKNOWN cells and public knownColumns stay exact.
+function state(b){return {bound:b,rows:Array.from({length:b.rowCount},()=>Array(b.columnCount).fill(UNKNOWN)),known:new Uint8Array(b.rowCount*b.columnCount),full:new Set()};}
+function knows(s,row,column){return Number.isInteger(row)&&row>=0&&row<s.bound.rowCount&&Number.isInteger(column)&&column>=0&&column<s.bound.columnCount&&s.known[row*s.bound.columnCount+column]===1;}
+function knownColumns(s,row){const out=[];for(let c=0;c<s.bound.columnCount;c++)if(knows(s,row,c))out.push(c);return out;}
 const sameRect=(a,b)=>a.sheetId===b.sheetId&&a.r0===b.r0&&a.r1===b.r1&&a.c0===b.c0&&a.c1===b.c1;
 const inside=(a,r,c)=>r>=a.r0&&r<a.r1&&c>=a.c0&&c<a.c1;
 function indexRectangles(b){const out=[];function add(s,r0,r1,c0,c1){if(r1>r0)out.push({...s,r0,r1,c0,c1});}add(b.source,0,1,0,65);add(b.source,1,b.source.rowCount,1,3);for(const c of [10,60,63])add(b.source,1,b.source.rowCount,c,c+1);add(b.ledger,2,3,0,25);add(b.ledger,3,b.ledger.rowCount,0,1);for(const m of b.months){add(m,0,1,0,m.columnCount);add(m,1,m.rowCount,0,2);add(m,1,m.rowCount,9,15);add(m,1,m.rowCount,m.columnCount-1,m.columnCount);}need(out.reduce((n,r)=>n+(r.r1-r.r0)*(r.c1-r.c0),0)<=50000,'COMPACT_INDEX_CELL_BUDGET_EXCEEDED');return out;}
@@ -46,23 +62,23 @@ function applyRead(metadata,read,allowed,states,full){
   // a second Map of every indexed/dependency cell beside the native response.
   const overlaps=new Map();
   for(const r of rectangles){const state=states.get(r.sheetId);need(state,'COMPACT_STATE_MISSING');for(let i=r.r0;i<r.r1;i++)for(let j=r.c0;j<r.c1;j++){
-    const key=r.sheetId+':'+i+':'+j;if(state.known[i].has(j)){if(!overlaps.has(key))overlaps.set(key,{before:state.rows[i][j],after:EMPTY});}else{state.rows[i][j]=EMPTY;state.known[i].add(j);}
+    if(knows(state,i,j)){const key=r.sheetId+':'+i+':'+j;if(!overlaps.has(key))overlaps.set(key,{before:state.rows[i][j],after:EMPTY});}else{state.rows[i][j]=EMPTY;state.known[i*state.bound.columnCount+j]=1;}
   }}
   for(const sheet of response.sheets||[])for(const grid of sheet.data||[]){const row0=grid.startRow??0,col0=grid.startColumn??0;need(Number.isInteger(row0)&&row0>=0&&Number.isInteger(col0)&&col0>=0,'COMPACT_GRID_OFFSET');for(const [ri,row]of(grid.rowData||[]).entries())for(const [ci,cell]of(row.values||[]).entries()){
-    const r=row0+ri,c=col0+ci;need(rectangles.some(a=>a.sheetId===sheet.properties?.sheetId&&inside(a,r,c)),'COMPACT_RETURNED_CELL_OUTSIDE_REQUEST');need(cell&&typeof cell==='object'&&!Array.isArray(cell),'COMPACT_CELL_SHAPE');const overlap=overlaps.get(sheet.properties.sheetId+':'+r+':'+c);if(overlap)overlap.after=cell;states.get(sheet.properties.sheetId).rows[r][c]=cell;
+    const r=row0+ri,c=col0+ci;need(rectangles.some(a=>a.sheetId===sheet.properties?.sheetId&&inside(a,r,c)),'COMPACT_RETURNED_CELL_OUTSIDE_REQUEST');need(cell&&typeof cell==='object'&&!Array.isArray(cell),'COMPACT_CELL_SHAPE');const overlap=overlaps.size?overlaps.get(sheet.properties.sheetId+':'+r+':'+c):undefined;if(overlap)overlap.after=cell;states.get(sheet.properties.sheetId).rows[r][c]=cell;
   }}
   for(const overlap of overlaps.values())need(canonical(valueProjection(overlap.before))===canonical(valueProjection(overlap.after)),'COMPACT_INDEX_FULL_VALUE_CHANGED');
   if(full)for(const r of rectangles){need(r.r1===r.r0+1&&r.c0===0&&r.c1===r.columnCount,'COMPACT_FULL_ROW_REQUIRED');states.get(r.sheetId).full.add(r.r0);}
 }
-function requireColumns(s,row,columns){need(columns.every(c=>s.known[row]?.has(c)),'COMPACT_COVERAGE_INCOMPLETE');}
+function requireColumns(s,row,columns){need(columns.every(c=>knows(s,row,c)),'COMPACT_COVERAGE_INCOMPLETE');}
 function uniqueIds(s,column,start,code){const map=new Map();for(let r=start;r<s.bound.rowCount;r++){requireColumns(s,r,[column]);const id=text(s.rows[r][column]);if(!id)continue;need(!map.has(id.toLowerCase()),code);map.set(id.toLowerCase(),{id,row:r});}return map;}
-function prepare(metadataInput,indexReads,caseId){const metadata=book(metadataInput),b=bindings(metadata);need(/^LKCASE_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(caseId),'COMPACT_CASE_ID_REQUIRED');const states=new Map([b.source,b.ledger,...b.months].map(x=>[x.sheetId,state(x)])),allowed=indexRectangles(b);need(Array.isArray(indexReads)&&indexReads.length,'COMPACT_INDEX_READ_REQUIRED');for(const read of indexReads)applyRead(metadata,read,allowed,states,false);
+function prepare(metadataInput,indexReads,caseId,allowSourceAbsent=false){const metadata=book(metadataInput),b=bindings(metadata);need(/^LKCASE_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(caseId),'COMPACT_CASE_ID_REQUIRED');const states=new Map([b.source,b.ledger,...b.months].map(x=>[x.sheetId,state(x)])),allowed=indexRectangles(b);need(Array.isArray(indexReads)&&indexReads.length,'COMPACT_INDEX_READ_REQUIRED');for(const read of indexReads)applyRead(metadata,read,allowed,states,false);
   const source=states.get(b.source.sheetId),ledger=states.get(b.ledger.sheetId);requireColumns(source,0,[...Array(65).keys()]);requireColumns(ledger,2,[...Array(25).keys()]);const header=source.rows[0].map(text);need(header.every((h,i)=>h===HEADERS[i]||(i===0&&['キャンセル','月別転記'].includes(h))),'COMPACT_SOURCE_HEADERS');need(canonical(ledger.rows[2].map(text))===canonical(LEDGER_HEADERS),'COMPACT_LEDGER_HEADERS');
   for(let r=1;r<b.source.rowCount;r++){requireColumns(source,r,SOURCE_COLUMNS);if(!text(source.rows[r][60]))need(![1,2,10].some(c=>{const u=source.rows[r][c].userEnteredValue||{};return !Object.hasOwn(u,'formulaValue')&&(Object.values(u)[0]??'')!=='';}),'COMPACT_SOURCE_ID_MISSING');}
   const sourceIds=uniqueIds(source,60,1,'COMPACT_SOURCE_ID_DUPLICATE'),ledgerIds=uniqueIds(ledger,0,3,'COMPACT_LEDGER_ID_DUPLICATE');for(const entry of sourceIds.values())need(/^LKCASE_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.id),'COMPACT_SOURCE_ID_INVALID');
-  const selected=sourceIds.get(caseId.toLowerCase());need(selected&&selected.id===caseId,'COMPACT_SELECTED_SOURCE_NOT_FOUND');const selectedLedger=ledgerIds.get(caseId.toLowerCase());need(!selectedLedger||selectedLedger.id===caseId,'COMPACT_SELECTED_LEDGER_CASE_SPELLING');
+  const selected=sourceIds.get(caseId.toLowerCase());need((allowSourceAbsent&&!selected)||selected&&selected.id===caseId,'COMPACT_SELECTED_SOURCE_NOT_FOUND');const selectedLedger=ledgerIds.get(caseId.toLowerCase());need(!selectedLedger||selectedLedger.id===caseId,'COMPACT_SELECTED_LEDGER_CASE_SPELLING');
   const destinations=[],globalIds=new Set();for(const m of b.months){const s=states.get(m.sheetId),columns=[0,1,9,10,11,12,13,14,m.columnCount-1];requireColumns(s,0,[...Array(m.columnCount).keys()]);const h=s.rows[0].map(text);need(HEADERS.slice(1,55).every((v,i)=>h[i]===v)&&h[m.columnCount-1]==='連絡_固定案件ID'&&(m.columnCount!==56||h[54]===''),'COMPACT_MONTH_HEADERS');for(let r=1;r<m.rowCount;r++){requireColumns(s,r,columns);const id=text(s.rows[r][m.columnCount-1]);if(text(s.rows[r][9]))need(id,'COMPACT_MONTH_BUSINESS_ID_MISSING');if(!id)continue;need(!globalIds.has(id.toLowerCase()),'COMPACT_MONTH_ID_DUPLICATE');globalIds.add(id.toLowerCase());if(id.toLowerCase()===caseId.toLowerCase()){need(id===caseId,'COMPACT_DESTINATION_CASE_SPELLING');destinations.push({...m,row:r});}}}
-  return {metadata,b,states,caseId,sourceRow:selected.row,ledgerRow:selectedLedger?.row??null,destinations};
+  return {metadata,b,states,caseId,sourceRow:selected?.row??null,ledgerRow:selectedLedger?.row??null,destinations};
 }
 function inspectCompactIndex(input){const p=prepare(input.metadata,input.indexReads,input.caseId);return {schema:'LK_MONTHLY_COMPACT_INDEX_V1',sourceRow:p.sourceRow+1,ledgerRow:p.ledgerRow===null?null:p.ledgerRow+1,destinations:p.destinations.map(d=>({sheetId:d.sheetId,title:d.title,row:d.row+1,columnCount:d.columnCount})),fullRanges:[a1(p.b.source,p.sourceRow,p.sourceRow+1,0,65),...p.destinations.map(d=>a1(d,d.row,d.row+1,0,d.columnCount))],ledgerRange:p.ledgerRow===null?null:a1(p.b.ledger,p.ledgerRow,p.ledgerRow+1,0,25)};}
 function identity(name,resolveStaff){if(!name||/^[（(][0-9０-９]+人[）)]$/.test(name.normalize('NFKC')))return {};const p=resolveStaff(name);return p&&typeof p.staffId==='string'&&p.staffId&&p.identityVerified===true?{staffId:p.staffId,staffIdentityVerified:true}:{staffIdentityVerified:false};}
@@ -73,7 +89,7 @@ function createDependencyEvidence(input){
     // Keep references to native rows, then hash one row at a time. Do not make
     // a second full dependency matrix or per-cell coverage Set beside JSON.
     for(const sheet of response.sheets||[])for(const grid of sheet.data||[]){const r0=grid.startRow??0,c0=grid.startColumn??0;need(sheet.properties?.sheetId===d.sheetId&&Number.isInteger(r0)&&r0>=0&&Number.isInteger(c0)&&c0>=0,'COMPACT_DEPENDENCY_GRID_SCOPE');for(const [ri,row]of(grid.rowData||[]).entries()){need(r0+ri<d.rowCount,'COMPACT_DEPENDENCY_GRID_SCOPE');const values=row.values||[];need(c0+values.length<=d.columnCount,'COMPACT_DEPENDENCY_GRID_SCOPE');segments[r0+ri].push({column:c0,values});}}
-    const current=segments.map(parts=>{const cells=Array(d.columnCount).fill(EMPTY),seen=new Set();for(const part of parts)for(const [c,cell]of part.values.entries()){need(cell&&typeof cell==='object'&&!Array.isArray(cell),'COMPACT_CELL_SHAPE');const column=part.column+c;if(seen.has(column))need(canonical(valueProjection(cells[column]))===canonical(valueProjection(cell)),'COMPACT_DEPENDENCY_OVERLAP_CHANGED');cells[column]=cell;seen.add(column);}return hash(cells.map(valueProjection));});
+    const current=segments.map(parts=>{const cells=Array(d.columnCount).fill(EMPTY),seen=new Set();for(const part of parts)for(const [c,cell]of part.values.entries()){need(cell&&typeof cell==='object'&&!Array.isArray(cell),'COMPACT_CELL_SHAPE');const column=part.column+c;if(seen.has(column))need(canonical(valueProjection(cells[column]))===canonical(valueProjection(cell)),'COMPACT_DEPENDENCY_OVERLAP_CHANGED');cells[column]=cell;seen.add(column);}return hashValueCells(cells);});
     if(rowHashes)need(canonical(rowHashes)===canonical(current),'COMPACT_DEPENDENCY_READ_CHANGED');else rowHashes=current;
   }
   return {schema:'LK_MONTHLY_DEPENDENCY_EVIDENCE_V1',spreadsheetId:metadata.spreadsheetId,...d,fields:VALUE_FIELDS,rowHashes,requestHash:hash(input.reads.map(read=>read.request))};
@@ -84,15 +100,50 @@ function createCompactSnapshot(input){const p=prepare(input.metadata,input.index
   const selectedSource=states.get(b.source.sheetId);need(selectedSource.full.has(p.sourceRow),'COMPACT_SELECTED_SOURCE_FULL_REQUIRED');const selectedLedger=states.get(b.ledger.sheetId);if(p.ledgerRow!==null)requireColumns(selectedLedger,p.ledgerRow,[...Array(25).keys()]);for(const d of p.destinations)need(states.get(d.sheetId).full.has(d.row),'COMPACT_SELECTED_DESTINATION_FULL_REQUIRED');
   const sourceCells=selectedSource.rows[p.sourceRow],ledgerCells=p.ledgerRow===null?null:selectedLedger.rows[p.ledgerRow];const rowRevision=hash({schema:'LK_CASE_CONTENT_REVISION_V1',jobId:p.caseId,cells:sourceCells.map(valueProjection)}),ledgerRevision=hash(ledgerCells?ledgerCells.map(valueProjection):null),sourceRevision=hash({schema:'LK_CASE_LIST_AUTHORITY_REVISION_V1',caseId:p.caseId,rowRevision,ledgerRevision});const catalog={version:1,spreadsheetId:metadata.spreadsheetId,sheetId:b.source.sheetId,caseId:p.caseId,sourceRevision,rowRevision,ledgerRevision};
   const resolveStaff=typeof input.resolveStaff==='function'?input.resolveStaff:()=>null;
-  function rows(s,idColumn,nameColumn){return s.rows.slice(1).map((cells,i)=>({row:i+2,cells,knownColumns:[...s.known[i+1]].sort((a,b)=>a-b),fullWritable:s.full.has(i+1),...(idColumn===60?{caseId:text(cells[idColumn])}:{fixedId:text(cells[idColumn])}),...identity(text(cells[nameColumn]),resolveStaff)}));}
+  function rows(s,idColumn,nameColumn){return s.rows.slice(1).map((cells,i)=>({row:i+2,cells,knownColumns:knownColumns(s,i+1),fullWritable:s.full.has(i+1),...(idColumn===60?{caseId:text(cells[idColumn])}:{fixedId:text(cells[idColumn])}),...identity(text(cells[nameColumn]),resolveStaff)}));}
   const months=b.months.map(m=>{const s=states.get(m.sheetId);return {...m,headers:s.rows[0].map(text),rows:rows(s,m.columnCount-1,1),isolated:false};});
   const evidence=input.dependencyEvidence||[];need(dependencyBounds.length===evidence.length,'COMPACT_DEPENDENCY_EVIDENCE_INCOMPLETE');
   const dependencyHash=dependencyBounds.length?hash({schema:'LK_MONTHLY_DEPENDENCY_VALUES_V1',sheets:dependencyBounds.map(d=>{const found=evidence.filter(e=>e.title===d.title);need(found.length===1,'COMPACT_DEPENDENCY_EVIDENCE_DUPLICATE');const e=found[0];need(e.schema==='LK_MONTHLY_DEPENDENCY_EVIDENCE_V1'&&e.spreadsheetId===metadata.spreadsheetId&&e.sheetId===d.sheetId&&e.rowCount===d.rowCount&&e.columnCount===d.columnCount&&canonical(e.fields)===canonical(VALUE_FIELDS)&&Array.isArray(e.rowHashes)&&e.rowHashes.length===d.rowCount&&e.rowHashes.every(h=>/^[a-f0-9]{64}$/.test(h))&&/^[a-f0-9]{64}$/.test(e.requestHash),'COMPACT_DEPENDENCY_EVIDENCE_INVALID');return {...d,rowHashes:e.rowHashes};})}):hash(null);
   return {spreadsheetId:metadata.spreadsheetId,isolated:false,source:{...b.source,headers:selectedSource.rows[0].map(text),rows:rows(selectedSource,60,2)},months,dependencyHash,catalog,
     coverage:{schema:'LK_MONTHLY_COMPACT_COVERAGE_V1',unknownCell:'$unknown:true',source:{...b.source,headersComplete:true,indexReadComplete:true,structuralColumns:SOURCE_COLUMNS,selectedCaseId:p.caseId},ledger:{...b.ledger,headerRow:3,headersComplete:true,indexReadComplete:true,structuralColumns:[0],selectedCaseId:p.caseId,selectedRow:p.ledgerRow===null?null:p.ledgerRow+1,selectedRecordPresent:p.ledgerRow!==null,selectedRowReadComplete:p.ledgerRow!==null,absenceProven:p.ledgerRow===null},months:b.months.map(m=>({...m,headersComplete:true,indexReadComplete:true,structuralColumns:[0,1,9,10,11,12,13,14,m.columnCount-1]}))},
-    ledger:{...b.ledger,headerRow:3,headers:selectedLedger.rows[2].map(text),rows:selectedLedger.rows.slice(3).map((cells,i)=>({row:i+4,caseId:text(cells[0]),cells,knownColumns:[...selectedLedger.known[i+3]].sort((a,b)=>a-b),fullValues:i+3===p.ledgerRow}))},rawRows:[selectedSource.rows[0],sourceCells],rawLedgerRows:[[],[],selectedLedger.rows[2],...(ledgerCells?[ledgerCells]:[])],selectedRows:{source:p.sourceRow+1,ledger:p.ledgerRow===null?null:p.ledgerRow+1,destinations:p.destinations.map(d=>({sheetId:d.sheetId,row:d.row+1}))}};
+    ledger:{...b.ledger,headerRow:3,headers:selectedLedger.rows[2].map(text),rows:selectedLedger.rows.slice(3).map((cells,i)=>({row:i+4,caseId:text(cells[0]),cells,knownColumns:knownColumns(selectedLedger,i+3),fullValues:i+3===p.ledgerRow}))},rawRows:[selectedSource.rows[0],sourceCells],rawLedgerRows:[[],[],selectedLedger.rows[2],...(ledgerCells?[ledgerCells]:[])],selectedRows:{source:p.sourceRow+1,ledger:p.ledgerRow===null?null:p.ledgerRow+1,destinations:p.destinations.map(d=>({sheetId:d.sheetId,row:d.row+1}))}};
 }
 function createIndexRanges(metadataInput){const metadata=book(metadataInput),b=bindings(metadata);return indexRectangles(b).map(r=>a1(r,r.r0,r.r1,r.c0,r.c1));}
 function createDependencyRanges(metadataInput){const metadata=book(metadataInput);return dependencyBindings(metadata).map(d=>a1(d,0,d.rowCount,0,d.columnCount));}
 function createDependencyPlans(metadataInput){const metadata=book(metadataInput);return dependencyBindings(metadata).map(d=>({title:d.title,range:a1(d,0,d.rowCount,0,d.columnCount)}));}
-module.exports={createDependencyPlans,createDependencyEvidence,UNKNOWN,VALUE_FIELDS,FULL_FIELDS,SOURCE_COLUMNS,LEDGER_HEADERS,DEPENDENCIES,canonical,createIndexRanges,createDependencyRanges,inspectCompactIndex,createCompactSnapshot};
+
+function inspectArchivedCompactIndex(input){
+ const p=prepare(input.metadata,input.indexReads,input.caseId,true);
+ need(p.sourceRow===null,'ARCHIVED_SOURCE_REAPPEARED');
+ need(p.ledgerRow!==null,'ARCHIVED_LEDGER_REQUIRED');
+ need(p.destinations.length===1,'ARCHIVED_MONTH_ID_NOT_UNIQUE');
+ return {fullRanges:[a1(p.b.ledger,p.ledgerRow,p.ledgerRow+1,0,25),...p.destinations.map(d=>a1(d,d.row,d.row+1,0,d.columnCount))]};
+}
+function createArchivedCompactSnapshot(input){
+ const p=prepare(input.metadata,input.indexReads,input.caseId,true),{metadata,b,states}=p;
+ need(p.sourceRow===null,'ARCHIVED_SOURCE_REAPPEARED');need(p.ledgerRow!==null,'ARCHIVED_LEDGER_REQUIRED');
+ need(p.destinations.length===1,'ARCHIVED_MONTH_ID_NOT_UNIQUE');
+ const allowed=[{...b.ledger,r0:p.ledgerRow,r1:p.ledgerRow+1,c0:0,c1:25},
+ ...p.destinations.map(d=>({...d,r0:d.row,r1:d.row+1,c0:0,c1:d.columnCount}))];
+ need(Array.isArray(input.fullReads)&&input.fullReads.length,'ARCHIVED_FULL_READ_REQUIRED');
+ for(const read of input.fullReads)applyRead(metadata,read,allowed,states,true);
+ const source=states.get(b.source.sheetId),ledger=states.get(b.ledger.sheetId);
+ need(ledger.full.has(p.ledgerRow),'ARCHIVED_LEDGER_FULL_REQUIRED');
+ const months=b.months.map(m=>{
+  const current=states.get(m.sheetId);for(const d of p.destinations.filter(d=>d.sheetId===m.sheetId))need(current.full.has(d.row),'ARCHIVED_MONTH_FULL_REQUIRED');
+  return {...m,width:m.columnCount,headers:current.rows[0].map(text),
+   idIndex:current.rows.map(row=>text(row[m.columnCount-1])),
+   rows:current.rows.slice(1).map((cells,i)=>({row:i+2,fixedId:text(cells[m.columnCount-1]),cells,
+    knownColumns:knownColumns(current,i+1),fullWritable:current.full.has(i+1)}))};
+ });
+ const ledgerIds=ledger.rows.slice(3).map(row=>text(row[0]));
+ need(ledgerIds.filter(id=>id.toLowerCase()===p.caseId.toLowerCase()).length===1,'ARCHIVED_LEDGER_NOT_UNIQUE');
+ return {spreadsheetId:metadata.spreadsheetId,caseId:p.caseId,
+  sourceIndex:{startRow:2,rowCount:b.source.rowCount,cells:source.rows.slice(1).map(row=>text(row[60]))},
+  sourceIds:source.rows.slice(1).map(row=>text(row[60])).filter(Boolean),
+  ledgerIndex:{startRow:4,rowCount:b.ledger.rowCount,cells:ledgerIds},
+  ledgerRows:[ledger.rows[p.ledgerRow].map(scalar)],ledgerCells:ledger.rows[p.ledgerRow],ledgerRow:p.ledgerRow+1,
+  monthInventory:months.map(({sheetId,title,width,rowCount})=>({sheetId,title,width,rowCount})),months};
+}
+
+module.exports={inspectArchivedCompactIndex,createArchivedCompactSnapshot,createDependencyPlans,createDependencyEvidence,UNKNOWN,VALUE_FIELDS,FULL_FIELDS,SOURCE_COLUMNS,LEDGER_HEADERS,DEPENDENCIES,canonical,createIndexRanges,createDependencyRanges,inspectCompactIndex,createCompactSnapshot};

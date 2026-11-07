@@ -60,6 +60,32 @@ async function main(){
  await test('selected destination without full proof rejected',()=>{const e=fixtureEnvironment(),row=Array.from({length:56},()=>({}));row[55]=str(caseId);e.tables[3].special.set(1,row);const ev=e.evidence();ev.fullReads[0].request.ranges.pop();ev.fullReads[0].response.sheets.pop();assert.throws(()=>Compact.createCompactSnapshot(ev),/COMPACT_SELECTED_DESTINATION_FULL_REQUIRED/);});
  await test('actual reader uses four bounded calls and index reads never request formats',async()=>{const e=fixtureEnvironment(),s=await e.reader.readCaseListMonthlySnapshot(company,caseId);assert.equal(e.calls.length,4);assert.equal(s.catalog.caseId,caseId);assert.equal(e.calls[1].fields.includes('userEnteredFormat'),false);assert.equal(e.calls[2].ranges.length,1);assert.equal(e.calls[2].ranges[0],"'案件リスト'!A2:BM2");assert.equal(e.calls[3].fields.includes('userEnteredFormat'),false);assert.equal(e.db.writes.length,0);});
  await test('dependencies are values only and invalidate hash on change',async()=>{const e=fixtureEnvironment(),a=await e.reader.readCaseListMonthlySnapshot(company,caseId,{includeDependencies:true});e.tables[4].special.set(1,[{userEnteredValue:{numberValue:2},effectiveValue:{numberValue:2}}]);const b=await e.reader.readCaseListMonthlySnapshot(company,caseId,{includeDependencies:true});assert.notEqual(a.dependencyHash,b.dependencyHash);assert.equal(e.calls[3].ranges.length,1);assert.equal(e.calls[4].ranges.length,1);assert.equal(e.calls.length,16);assert.equal(e.calls[3].fields.includes('userEnteredFormat'),false);});
+ await test('value-only dependency row hashes retain canonical bytes for mixed and nested values',()=>{
+  const e=fixtureEnvironment(),t=e.tables[4];t.width=6;
+  const cells=[{userEnteredValue:{stringValue:'quote " slash \\ 日本語\n'},effectiveValue:{stringValue:'quote " slash \\ 日本語\n'}},{userEnteredValue:{boolValue:false},effectiveValue:{boolValue:false}},{userEnteredValue:{numberValue:-0},effectiveValue:{numberValue:1.25}},{userEnteredValue:{formulaValue:'=1+1'},effectiveValue:{numberValue:2}}, {effectiveValue:{errorValue:{message:'synthetic',type:'TEST'}}},{}];
+  t.special.set(1,cells);const p=Compact.createDependencyPlans(e.metadata())[0],read=e.recorded([p.range],Compact.VALUE_FIELDS),out=Compact.createDependencyEvidence({metadata:e.metadata(),title:p.title,reads:[read]});
+  const canonical=Compact.canonical(cells.map(c=>({userEnteredValue:c.userEnteredValue||{},effectiveValue:c.effectiveValue||{}})));
+  assert.equal(out.rowHashes[1],require('node:crypto').createHash('sha256').update(canonical,'utf8').digest('hex'));
+ });
+ await test('omitted dependency cells hash as proven empty across the exact requested width',()=>{
+  const e=fixtureEnvironment(),t=e.tables[4];t.width=65;t.special.clear();const p=Compact.createDependencyPlans(e.metadata())[0],out=Compact.createDependencyEvidence({metadata:e.metadata(),title:p.title,reads:[e.recorded([p.range],Compact.VALUE_FIELDS)]});
+  const expected=Array.from({length:65},()=>({userEnteredValue:{},effectiveValue:{}}));assert.equal(out.rowHashes[1],require('node:crypto').createHash('sha256').update(Compact.canonical(expected),'utf8').digest('hex'));
+ });
+ await test('identical overlapping dependency segments preserve the exact row hash',()=>{
+  const e=fixtureEnvironment(),p=Compact.createDependencyPlans(e.metadata())[0],read=e.recorded([p.range],Compact.VALUE_FIELDS),before=Compact.createDependencyEvidence({metadata:e.metadata(),title:p.title,reads:[read]});read.response.sheets[0].data.push(clone(read.response.sheets[0].data[0]));const after=Compact.createDependencyEvidence({metadata:e.metadata(),title:p.title,reads:[read]});assert.deepEqual(after.rowHashes,before.rowHashes);
+ });
+ await test('changed overlapping dependency segment still stops before evidence acceptance',()=>{
+  const e=fixtureEnvironment(),p=Compact.createDependencyPlans(e.metadata())[0],read=e.recorded([p.range],Compact.VALUE_FIELDS),other=clone(read.response.sheets[0].data[0]);other.rowData[0].values[0]=str('changed synthetic');read.response.sheets[0].data.push(other);assert.throws(()=>Compact.createDependencyEvidence({metadata:e.metadata(),title:p.title,reads:[read]}),/COMPACT_DEPENDENCY_OVERLAP_CHANGED/);
+ });
+ await test('changed repeated dependency read retains its original rejection',()=>{
+  const e=fixtureEnvironment(),p=Compact.createDependencyPlans(e.metadata())[0],first=e.recorded([p.range],Compact.VALUE_FIELDS),second=clone(first);second.response.sheets[0].data[0].rowData[0].values[0]=str('changed synthetic');assert.throws(()=>Compact.createDependencyEvidence({metadata:e.metadata(),title:p.title,reads:[first,second]}),/COMPACT_DEPENDENCY_READ_CHANGED/);
+ });
+ await test('full Source65 coverage never marks adjacent unknown row cells as read',()=>{
+  const e=fixtureEnvironment(),s=Compact.createCompactSnapshot(e.evidence());assert.deepEqual(s.source.rows[0].knownColumns,Array.from({length:65},(_,i)=>i));assert.equal(s.source.rows[1].cells[0].$unknown,true);assert.equal(s.source.rows[1].cells[64].$unknown,true);assert.equal(s.source.rows[1].knownColumns.includes(0),false);assert.equal(s.source.rows[1].knownColumns.includes(64),false);
+ });
+ await test('noncanonical dependency number still rejects with the same error',()=>{
+  const e=fixtureEnvironment(),t=e.tables[4];t.special.set(1,[{userEnteredValue:{numberValue:Infinity},effectiveValue:{numberValue:Infinity}}]);const p=Compact.createDependencyPlans(e.metadata())[0];assert.throws(()=>Compact.createDependencyEvidence({metadata:e.metadata(),title:p.title,reads:[e.recorded([p.range],Compact.VALUE_FIELDS)]}),/COMPACT_NON_CANONICAL/);
+ });
  const report={status:results.every(r=>r.passed)?'PASS':'FAIL',tests:results.length,passed:results.filter(r=>r.passed).length,scope:'ACTUAL_COMPACT_READER_AND_PURE_CONSTRUCTOR_WITH_SYNTHETIC_GOOGLE_ONLY',externalWrites:0,nativeAcceptance:false,results};console.log(JSON.stringify(report,null,2));if(report.status!=='PASS')process.exitCode=1;
 }
 module.exports={fixtureEnvironment,Compact,core,bookId,company,caseId};

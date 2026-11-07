@@ -4,7 +4,7 @@ import {runInNewContext} from 'node:vm';
 const read=p=>fs.readFileSync(new URL('../../'+p,import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^import .*;\n/gm,'');
 const modules={previewStaffImport:'staff-import',syncStaffDirectoryReadOnly:'staff-import',previewShiftImport:'shift-import',syncShiftSheetsReadOnly:'shift-import',retrySheetWriteIssue:'admin-operations',acknowledgeSheetWriteIssue:'admin-operations'};
-const sources=Object.fromEntries([...new Set([...Object.values(modules),'sheet-reader','case-list-source','case-list-source-core','case-list-monthly-worker'])].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
+const sources=Object.fromEntries([...new Set([...Object.values(modules),'sheet-reader','case-list-source','case-list-source-core','case-list-monthly-worker','case-list-external-transfer'])].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
 sources['functions/src/case-list-monthly-controller.cjs']=read('functions/src/case-list-monthly-controller.cjs');
 let cases=0;
 function run(name,change){
@@ -196,7 +196,36 @@ for(const [before,after]of [
  ['old.assignmentSheetWrite?.queueId !== priorManual.queueId','false'],
  ['manualPendingAssignmentFields(manualObservation)','manualPendingAssignmentFields(request.data)'],
 ])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-source'});
+// Every added external route must retain the same trusted identity and strict
+// manual schema. These mutations leave the native route intact on purpose.
+for(const [before,after]of [
+ ['const input = externalManualSchema.parse(request.data);','const input = request.data;'],
+ ['selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, input, true)','selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, input, false)'],
+ ['selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, input, true)','selectCaseListManualMonthlyTransfer(request.data.companyId, session.uid, session.token, input, true)'],
+ ['selectExternalCaseListMonthlyTransfer(queueRef, session.uid, session.token,','selectExternalCaseListMonthlyTransfer(queueRef, request.data.uid, session.token,'],
+ ['selectExternalCaseListMonthlyTransfer(queueRef, session.uid, session.token,','selectExternalCaseListMonthlyTransfer(queueRef, session.uid, request.data.token,'],
+ ['{ reviewKey: queue?.caseListPhase?.continuationHash, clientNameUpConfirmed: true }','{ reviewKey: "unreviewed", clientNameUpConfirmed: true }'],
+ ['snap.data()?.companyId !== companyId || snap.data()?.operation !== "case_list.assign"','false'],
+ ['selectExternalCaseListMonthlyTransfer(ref, session.uid, session.token, input)','selectExternalCaseListMonthlyTransfer(ref, request.data.uid, session.token, input)'],
+ ['selectExternalCaseListMonthlyTransfer(ref, session.uid, session.token, input)','selectExternalCaseListMonthlyTransfer(ref, session.uid, request.data.token, input)'],
+])reject('acknowledgeSheetWriteIssue',before,after);
+for(const [before,after]of [
+ ['assertExecutive(token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");',''],
+ ['token.companyId === companyId','true'],
+ ['(token.uid ?? token.sub) === uid','true'],
+ ['assertOwner(uid, token, initial!.companyId);',''],
+ ['(await getProductionOperationalState(initial!.companyId)).operational','true'],
+ ['if (select) assertExternalIntakeEnabled();',''],
+ ['if (plan.kind === "SELECT_EXTERNAL") {\n          assertExternalIntakeEnabled();','if (plan.kind === "SELECT_EXTERNAL") {'],
+ ['return runExternal(queueRef, uid, token, true, input);','return runExternal(queueRef, uid, token, false);'],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-external-transfer'});
+for(const [before,after]of [
+ ['if (externalReceiptMode) assertExternalIntakeEnabled();',''],
+ ['return db.runTransaction(async tx => {\n    if (externalReceiptMode) assertExternalIntakeEnabled();','return db.runTransaction(async tx => {'],
+ ['assertCaseListMonthlyAuthority(queueId, queue, nextJob, currentStaff, dayLock, config, manualConditions);\n    if (externalReceiptMode) assertExternalIntakeEnabled();','assertCaseListMonthlyAuthority(queueId, queue, nextJob, currentStaff, dayLock, config, manualConditions);'],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-monthly-worker'});
 reject('retrySheetWriteIssue','data.operation === "case_list.assign" || !canManuallyRetrySheetWrite({','!canManuallyRetrySheetWrite({');
 const allowed=JSON.parse(read('config/automation/staging-safety.json')).allowedFunctions;
 assert.ok(Object.keys(modules).every(n=>allowed.includes(n)));assert.ok(!allowed.includes('syncStaffDirectoryScheduled')&&!allowed.includes('syncShiftSheetsScheduled'));cases++;
 console.log(JSON.stringify({importIssuesAuthGuardTests:cases,functions:Object.keys(modules),cloudOperations:false}));
+

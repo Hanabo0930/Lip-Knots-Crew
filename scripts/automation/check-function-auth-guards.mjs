@@ -498,11 +498,12 @@ function checkCaseListManualSelection(block, whole) {
 }
 
 function checkCaseListOwnerSelection(block, whole) {
-  if (!checkCaseListManualSelection(block, whole)) return false;
+  if (!checkCaseListManualSelection(block, whole) || !checkCaseListExternalSelection(block, whole)) return false;
   // Historical sources have no selection action. Keep their exact legacy
   // schema/read-only checks; a new selection route must pass every new guard.
   if (whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list"]).default("note"),});') && !whole.includes('"select-case-list-monthly"')) return true;
-  if (!whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list","select-case-list-monthly"]).default("note"),reviewKey:z.string().regex(/^[a-f0-9]{64}$/).optional(),clientNameUpConfirmed:z.literal(true).optional(),});')) return false;
+  const actions = whole.includes('"select-case-list-gas-monthly"') ? '["note","reconcile-case-list","select-case-list-monthly","select-case-list-gas-monthly"]' : '["note","reconcile-case-list","select-case-list-monthly"]';
+  if (!whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(' + actions + ').default("note"),reviewKey:z.string().regex(/^[a-f0-9]{64}$/).optional(),clientNameUpConfirmed:z.literal(true).optional(),});')) return false;
   const start = block.indexOf('if(input.action==="select-case-list-monthly"){'), end = block.indexOf('if(input.action==="reconcile-case-list"){');
   if (start < 0 || end <= start) return false;
   const route = block.slice(start, end);
@@ -547,6 +548,50 @@ function checkCaseListOwnerSelection(block, whole) {
     'selection.sourceContentHash===contentHash(services,row.cells)&&selection.sourceRevision===(snapshot.catalog?.sourceRevision||null)',
     'constc=awaitmonthlyContext(request),intent=one(c.events,\'INTENT\');',
   ].every(part => controller.includes(part));
+}
+
+function checkCaseListExternalSelection(block, whole) {
+  const action = '"select-case-list-gas-monthly"', manualAction = '"select-case-list-manual-gas-monthly"';
+  if (!whole.includes(action) && !whole.includes(manualAction)) return true;
+  const manualStart = block.indexOf('if(request.data?.action===' + manualAction + '){');
+  const manualEnd = block.indexOf('if(request.data?.action==="select-case-list-manual-monthly"){');
+  const start = block.indexOf('if(input.action===' + action + '){');
+  const end = block.indexOf('if(input.action==="select-case-list-monthly"){');
+  if (manualStart < 0 || manualEnd <= manualStart || start < 0 || end <= start) return false;
+  const manual = block.slice(manualStart, manualEnd), route = block.slice(start, end);
+  if (![
+    'ManualSelectionSchema.extend({action:z.literal("select-case-list-manual-gas-monthly")})',
+    'constinput=externalManualSchema.parse(request.data);', 'awaitassertProductionOperational(companyId);',
+    'awaitmonthly.selectCaseListManualMonthlyTransfer(companyId,session.uid,session.token,input,true);',
+    'returnexternal.selectExternalCaseListMonthlyTransfer(queueRef,session.uid,session.token,',
+    '{reviewKey:queue?.caseListPhase?.continuationHash,clientNameUpConfirmed:true});',
+  ].every(part => manual.includes(part)) || ![
+    'if(!input.reviewKey||input.clientNameUpConfirmed!==true)', 'awaitassertProductionOperational(companyId);',
+    '!snap.exists||snap.data()?.companyId!==companyId||snap.data()?.operation!=="case_list.assign"',
+    'returnexternal.selectExternalCaseListMonthlyTransfer(ref,session.uid,session.token,input);',
+  ].every(part => route.includes(part)) || /\.(?:add|create|set|update|delete|commit)\(/.test(manual + route)) return false;
+  const worker = sourceFile('functions/src/case-list-monthly-worker.ts').replace(/\s+/g, '');
+  const registration = worker.slice(worker.indexOf('exportasyncfunctionselectCaseListManualMonthlyTransfer('), worker.indexOf('exportasyncfunctionprocessCaseListMonthlyAssignment('));
+  if (![
+    '"MANUAL_OWNER_IDENTITY_INVALID");if(externalReceiptMode)assertExternalIntakeEnabled();',
+    'returndb.runTransaction(asynctx=>{if(externalReceiptMode)assertExternalIntakeEnabled();',
+    'assertCaseListMonthlyAuthority(queueId,queue,nextJob,currentStaff,dayLock,config,manualConditions);if(externalReceiptMode)assertExternalIntakeEnabled();tx.update(jobRef,nextJob);',
+  ].every(part => registration.includes(part))) return false;
+  const external = sourceFile('functions/src/case-list-external-transfer.ts').replace(/\s+/g, '');
+  const owner = external.slice(external.indexOf('functionassertOwner('), external.indexOf('constsourceHash='));
+  const run = external.slice(external.indexOf('asyncfunctionrunExternal('));
+  const preLease = run.slice(0, run.indexOf('awaitdb.runTransaction('));
+  return [
+    'assertExecutive(token,process.env.EXECUTIVE_APPROVER_EMAILS??"");',
+    'ID.test(uid)&&token.companyId===companyId&&(token.uid??token.sub)===uid',
+  ].every(part => owner.includes(part)) && [
+    'initial&&initial.operation==="case_list.assign"', 'assertOwner(uid,token,initial!.companyId);',
+    '(awaitgetProductionOperationalState(initial!.companyId)).operational',
+    'if(select)assertExternalIntakeEnabled();',
+  ].every(part => preLease.includes(part)) && [
+    'if(plan.kind==="SELECT_EXTERNAL"){assertExternalIntakeEnabled();tx.set(operationRef,',
+    'returnrunExternal(queueRef,uid,token,true,input);',
+  ].every(part => external.includes(part));
 }
 
 function checkImportIssues(name) {
@@ -1908,4 +1953,5 @@ if (requestedFunctions.includes("retrySafeSheetWrites")) console.log("SCHEDULED_
 console.log(`SOURCE_GUARD_STATUS=${allPass ? "PASS" : "FAIL"}`);
 
 if (requirePass && !allPass) process.exitCode = 1;
+
 

@@ -53,7 +53,13 @@ export default defineConfig({
       srcDir: "src",
       filename: "sw.ts",
       registerType: "autoUpdate",
-      includeAssets: ["logo.png"],
+      includeAssets: [
+        "logo.png",
+        "icon-a2-v1-192.png",
+        "icon-a2-v1-512.png",
+        "apple-touch-icon-a2-v1.png",
+        "favicon-a2-v1-32.png",
+      ],
       injectManifest: { globPatterns: ["**/*.{html,js,css,png,svg,ico}"] },
       manifest: {
         name: "Lip Knots Crew",
@@ -64,7 +70,9 @@ export default defineConfig({
         display: "standalone",
         start_url: "/",
         icons: [
-          { src: "/logo.png", sizes: "512x512", type: "image/png", purpose: "any maskable" }
+          { src: "/icon-a2-v1-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+          { src: "/icon-a2-v1-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+          { src: "/icon-a2-v1-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
         ]
       }
     })

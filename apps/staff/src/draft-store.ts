@@ -1,3 +1,13 @@
+import {submissionDraftDatabase} from "./submission-namespace";
+import { submittedDrafts, receiptKey, isSubmittedDraft } from "./submitted-marker-store";
+export { getSubmittedDraftReceipt, markDraftSubmitted } from "./submitted-marker-store";
+import type { SubmissionAttempt } from "./submission-attempt-store";
+
+const loadSubmittedBindings = () => import("./submitted-binding-store");
+const hasSubmittedBindings = async (key: string) => (await loadSubmittedBindings()).hasSubmittedBindings(key);
+const canClearBoundDraft = async (key: string, attempt?: Pick<SubmissionAttempt, "clientRequestId" | "storageKey">) =>
+  (await loadSubmittedBindings()).canClearBoundDraft(key, attempt);
+
 export type DraftFile = {
   id: string;
   name: string;
@@ -7,27 +17,9 @@ export type DraftFile = {
   blob: Blob;
 };
 
-const DB_NAME = "lkc-submission-drafts";
+const DB_NAME = submissionDraftDatabase;
 const STORE = "drafts";
 const draftMutations = new Map<string, Promise<void>>();
-const submittedDrafts = new Map<string, number>();
-const receiptKey = (key: string) => `lkc-submitted-draft:${key}`;
-
-export function getSubmittedDraftReceipt(key: string): { durable: boolean } | null {
-  try { if (localStorage.getItem(receiptKey(key)) === "1") return { durable: true }; } catch { /* メモリの記録を確認する。 */ }
-  return submittedDrafts.has(key) ? { durable: false } : null;
-}
-
-function isSubmittedDraft(key: string): boolean {
-  return getSubmittedDraftReceipt(key) !== null;
-}
-
-// IndexedDBの後片付けが失敗しても、送信済みの下書きを自動復元しない。
-export function markDraftSubmitted(key: string): boolean {
-  submittedDrafts.set(key, (submittedDrafts.get(key) ?? 0) + 1);
-  try { localStorage.setItem(receiptKey(key), "1"); return true; } catch { return false; }
-}
-
 function enqueueDraftMutation(key: string, mutation: () => Promise<void>): Promise<void> {
   const previous = draftMutations.get(key) ?? Promise.resolve();
   const current = previous.catch(() => undefined).then(mutation);
@@ -53,16 +45,18 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-export function saveDraft(key: string, files: File[]): Promise<void> {
+export function saveDraft(key: string, files: File[], isCurrent: () => boolean = () => true): Promise<void> {
+  if (!isCurrent()) return Promise.reject(new Error("ログイン状態が変わりました。"));
   if (isSubmittedDraft(key)) return Promise.reject(new Error("送信済み下書きの後片付けを先に再試行してください。"));
   const records: DraftFile[] = files.map((file) => ({
     id: crypto.randomUUID(), name: file.name, type: file.type,
     size: file.size, lastModified: file.lastModified, blob: file,
   }));
   return enqueueDraftMutation(key, async () => {
-    if (isSubmittedDraft(key)) throw new Error("送信済み下書きは保存し直しません。" );
+    if (isSubmittedDraft(key) || await hasSubmittedBindings(key)) throw new Error("送信済み下書きは保存し直しません。" );
     const db = await openDb();
     try {
+      if (isSubmittedDraft(key) || await hasSubmittedBindings(key) || !isCurrent()) throw new Error("送信済み下書きは保存し直しません。");
       await tx(db, "readwrite", (store) => store.put(records, key));
     } finally {
       db.close();
@@ -73,10 +67,26 @@ export function saveDraft(key: string, files: File[]): Promise<void> {
 export async function loadDraft(key: string): Promise<File[]> {
   if (isSubmittedDraft(key)) return [];
   await waitForDraftMutation(key);
-  if (isSubmittedDraft(key)) return [];
+  if (isSubmittedDraft(key) || await hasSubmittedBindings(key)) return [];
   const records = await readDraftRecords(key);
-  if (isSubmittedDraft(key)) return [];
+  if (isSubmittedDraft(key) || await hasSubmittedBindings(key)) return [];
   return draftFiles(records);
+}
+
+// Read the actual IndexedDB records; loadDraft deliberately hides submitted drafts.
+export async function hasStoredDraft(key: string): Promise<boolean> {
+  await waitForDraftMutation(key);
+  const records = await readDraftRecords(key);
+  if (!Array.isArray(records)) throw new Error("下書きの保存状態を確認できません。");
+  return records.length > 0;
+}
+
+export async function confirmDraftCleanupComplete(key: string, isCurrent: () => boolean): Promise<boolean> {
+  const version = submittedDrafts.get(key);
+  if (!isCurrent() || localStorage.getItem(receiptKey(key)) !== null || await hasStoredDraft(key) || await hasSubmittedBindings(key)) return false;
+  if (!isCurrent() || submittedDrafts.get(key) !== version || localStorage.getItem(receiptKey(key)) !== null) return false;
+  submittedDrafts.delete(key);
+  return true;
 }
 
 async function readDraftRecords(key: string): Promise<DraftFile[]> {
@@ -98,19 +108,30 @@ async function readDraftRecords(key: string): Promise<DraftFile[]> {
   return records;
 }
 
+// Only the local cooperative adapter uses this; never infer an operation ID from files.
+export async function readStoredDraftFiles(key: string): Promise<File[]> {
+  await waitForDraftMutation(key);
+  const records = await readDraftRecords(key);
+  if (!Array.isArray(records)) throw new Error("下書きの保存状態を確認できません。");
+  return draftFiles(records);
+}
+
 function draftFiles(records: DraftFile[]): File[] {
   return records.map((record) => new File([record.blob], record.name, {
     type: record.type, lastModified: record.lastModified,
   }));
 }
 
-export function clearDraft(key: string): Promise<void> {
+export function clearDraft(key: string, knownAttempt?: Pick<SubmissionAttempt, "clientRequestId" | "storageKey">, isCurrent: () => boolean = () => true): Promise<void> {
   const receiptVersion = submittedDrafts.get(key);
   return enqueueDraftMutation(key, async () => {
+    if (!isCurrent() || !await canClearBoundDraft(key, knownAttempt)) throw new Error("提出記録を照合できないため下書きを保持しています。");
     const retained = isSubmittedDraft(key) ? await readDraftRecords(key) : [];
     const db = await openDb();
     try {
+      if (!isCurrent() || !await canClearBoundDraft(key, knownAttempt) || !isCurrent()) throw new Error("提出記録を照合できないため下書きを保持しています。");
       await tx(db, "readwrite", (store) => store.delete(key));
+      if (!isCurrent()) throw new Error("ログイン状態が変わったため後片付けを中止しました。");
       if (submittedDrafts.get(key) === receiptVersion && isSubmittedDraft(key)) {
         // 消去できた後にだけ送信済み印を外す。失敗時は再試行できる状態を保つ。
         try {
@@ -119,7 +140,7 @@ export function clearDraft(key: string): Promise<void> {
         }
         catch (error) {
           // Preserve the saved draft if removing its durable marker fails.
-          if (retained.length && localStorage.getItem(receiptKey(key)) === "1") {
+          if (isCurrent() && retained.length && localStorage.getItem(receiptKey(key)) === "1") {
             await tx(db, "readwrite", (store) => store.put(retained, key));
           }
           throw error;

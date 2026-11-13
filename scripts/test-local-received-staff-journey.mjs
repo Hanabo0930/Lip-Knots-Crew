@@ -164,7 +164,7 @@ try{
   const completedWrites=sheetWrites;await writes.processSafeSheetWrite.run(preEvent);assert.equal(sheetWrites,completedWrites);
   const uploads=load('uploads'),requests=load('resubmissions'),views=load('submission-files');
   await db.doc('companies/'+h.companyId+'/settings/drive').set({rootFolderId:'synthetic-root'});process.env.LKC_SUBMISSION_TRANSFER_MODE='active';
-  const start=async patch=>uploads.createUploadSession.run({auth:h.staff[0],data:{jobId:h.job.id,type:'report',expectedRevision:(await h.job.get()).data().revision,files:[{originalName:'synthetic.png',contentType:'image/png',size:100,contentSha256:'a'.repeat(64)}],...patch}});
+  const start=async patch=>uploads.createUploadSession.run({auth:h.staff[0],data:{jobId:h.job.id,type:'report',expectedRevision:(await h.job.get()).data().revision,expectedDateKey:(await h.job.get()).data().dateKey,files:[{originalName:'synthetic.png',contentType:'image/png',size:100,contentSha256:'a'.repeat(64)}],...patch}});
   const finish=file=>{storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:'a'.repeat(64)}});return uploads.finalizeStagedUpload.run({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:'1',md5Hash:'AAAAAAAAAAAAAAAAAAAAAA=='}});};
   if(!kind)await assert.rejects(()=>start({expectedRevision:0}),e=>e.code==='failed-precondition');
   const copiesBefore=driveCopies;const clientRequestId=crypto.randomUUID();const sessions=await Promise.all([start({clientRequestId}),start({clientRequestId})]);assert.equal(sessions[0].submissionId,sessions[1].submissionId);const first=sessions[0];await finish(first.files[0]);await finish(first.files[0]);assert.equal(driveCopies-copiesBefore,1);

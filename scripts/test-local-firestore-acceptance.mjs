@@ -178,7 +178,7 @@ try {
     await db.doc('companies/'+h.companyId+'/settings/drive').set({rootFolderId:'synthetic-root'});
     process.env.LKC_SUBMISSION_TRANSFER_MODE='active';
     const initialCopies=driveCopies,initialSize=driveFiles.size;
-    const start=(count,patch={})=>call(uploads.createUploadSession,h.staff[0],{jobId:h.jobId,type:'report',
+    const start=async(count,patch={})=>call(uploads.createUploadSession,h.staff[0],{jobId:h.jobId,type:'report',expectedDateKey:(await h.job()).dateKey,expectedRevision:(await h.job()).revision??0,
       files:Array.from({length:count},(_,i)=>({originalName:'synthetic-'+i+'.png',contentType:'image/png',size:100,contentSha256:'a'.repeat(64)})),...patch});
     const finish=file=>{
       storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:'a'.repeat(64)}});

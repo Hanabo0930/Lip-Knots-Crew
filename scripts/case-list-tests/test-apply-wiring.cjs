@@ -11,10 +11,12 @@ function setup(caseList=true){
  const db={collection:c=>({doc:id=>ref(c,id)}),runTransaction:async callback=>{
   for(let attempt=0;attempt<8;attempt++){
    const reads=new Map(),writes=[];
-   const tx={get:async r=>{assert.equal(writes.length,0,'read after write');reads.set(r.path,JSON.stringify(records.get(r.path)));return snap(r);},set:(r,data,options)=>writes.push({r,data:clone(data),merge:options?.merge}),update:(r,data)=>writes.push({r,data:clone(data),merge:true})};
+   const tx={get:async r=>{assert.equal(writes.length,0,'read after write');reads.set(r.path,JSON.stringify(records.get(r.path)));return snap(r);},set:(r,data,options)=>writes.push({r,data:clone(data),merge:options?.merge}),update:(r,data)=>writes.push({r,data:clone(data),merge:true}),create:(r,data)=>writes.push({r,data:clone(data),create:true})};
    const result=await callback(tx);
    if([...reads].some(([key,old])=>JSON.stringify(records.get(key))!==old))continue;
-   for(const w of writes)records.set(w.r.path,w.merge?{...records.get(w.r.path),...w.data}:w.data);
+   const committed=new Map(records);
+   for(const w of writes){if(w.create)assert.ok(!committed.has(w.r.path),'create requires a missing document');committed.set(w.r.path,w.merge?{...committed.get(w.r.path),...w.data}:w.data);}
+   for(const [key,value] of committed)records.set(key,value);
    commits.push(writes);return result;
   }throw Error('contention');
  }};
@@ -24,7 +26,6 @@ function setup(caseList=true){
   'firebase-functions/v2/https':{onCall:(...a)=>a.at(-1),HttpsError},'firebase-admin/firestore':{Timestamp,FieldValue:{}},zod:{z:chain},'./firebase':{db},
   './utils':{requireAuth:r=>{if(!r.auth)throw new HttpsError('unauthenticated','auth');return r.auth;},companyFromClaims:t=>t.companyId,staffFromClaims:t=>t.staffId,dateKeyFromIso:x=>x},
   './notification-core':{queueDocumentData:x=>x},'./notification-time':{tokyoParts:()=>({dateKey:'2026-10-27'})},'./sheet-write-core':{cancellationSheetWriteIdentity:j=>j.caseId+':'+j.assignedStaffId},
-  './assignment-preparation-core':{nextAssignmentRevision:j=>j.revision+1,assignmentPreparationPatch:()=>({}),applicationConfirmationIdentity:()=>'',mailPreparationContext:()=>''},
   './system-safety':{assertProductionOperational:async()=>{}},'./automation-intake':{readMailApplicationForAssignment:async()=>null},'./case-mail-publication':{readMailPublication:async()=>{throw Error('wrong source path');}},
   './cancellation-history-retention-core':{assertAcknowledgedCancellationCanChange:()=>{}},
   './case-list-source':{readCaseListPublication:async(tx,company,id,job,revision,hash)=>{sourceReads++;if(sourceChanged||revision!==job.revision||hash!==source.sourceRevision)throw new HttpsError('failed-precondition','source changed');return {source,preMonthlyContentHash:'d'.repeat(64),candidate:{},approval:{}};}},
@@ -58,6 +59,7 @@ const results=[];async function test(name,fn){await fn();results.push({name,pass
 (async()=>{
 await test('actual callable creates typed CaseList queue and keeps unconfirmed until native ACK',async()=>{const h=setup();await h.apply();const q=h.queues()[0];assert.equal(q.operation,'case_list.assign');assert.equal(q.caseListAssignment.sourceRevision,h.source.sourceRevision);assert.equal(q.caseListAssignment.sourceRowRevision,h.source.rowRevision);assert.equal(q.caseListAssignment.sourceLedgerRevision,h.source.ledgerRevision);assert.equal(q.caseListAssignment.assignedJobRevision,4);assert.equal(q.caseListAssignment.sourceCaseId,h.source.caseId);assert.equal(q.caseListAssignment.staffId,h.staffId);assert.equal(h.job().applicationUnconfirmed,true);assert.equal(h.job().assignmentSheetWrite.operation,'case_list.assign');});
 await test('same request replays saved result before liveSource GET after manualedit',async()=>{const h=setup(),a=await h.apply();h.changeSource();const reads=h.sourceReads(),b=await h.apply();assert.deepEqual(a,b);assert.equal(h.sourceReads(),reads);assert.equal(h.queues().length,1);});
+await test('existing queue receipt replays the same request after the separate receipt expires',async()=>{const h=setup(),a=await h.apply();assert.equal(h.records.delete(`idempotencyKeys/${h.auth.uid}_${h.command.requestId}`),true);h.changeSource();const reads=h.sourceReads(),b=await h.apply();assert.deepEqual(a,b);assert.equal(h.sourceReads(),reads);assert.equal(h.queues().length,1);});
 await test('request reused with changedSourceHash rejects before another queue',async()=>{const h=setup();await h.apply();await assert.rejects(()=>h.apply({...h.command,expectedSourceRevision:'d'.repeat(64)}));assert.equal(h.queues().length,1);});
 await test('new application rejects stale live source with zero assignment writes',async()=>{const h=setup();h.changeSource();await assert.rejects(()=>h.apply());assert.equal(h.queues().length,0);assert.equal(h.job().status,'open');});
 await test('known precommit source rejection has exact safe retry identity',async()=>{const h=setup();h.changeSource();await assert.rejects(()=>h.apply(),e=>e.details?.accepted===false&&e.details.reason==='case_list_job_changed'&&e.details.jobId===h.jobId&&e.details.requestId===h.command.requestId&&e.details.expectedSourceRevision===h.source.sourceRevision);assert.equal(h.queues().length,0);});

@@ -1095,6 +1095,7 @@ try {
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   }
   console.log('Open jobs manual refresh: populated demo list, keyboard and 320/390/1280px passed.');
+  const applicationAccepted=page.getByText('デモ：応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。',{exact:true});
   const offer=page.getByRole('article',{name:/デモ募集店舗の募集案件/});
   for(const width of [320,390,1280]){
     await page.setViewportSize({width,height:844});const toggle=offer.getByRole('button',{name:'詳細を見る',exact:true});
@@ -1109,12 +1110,12 @@ try {
     await offer.getByRole('button',{name:'詳細を閉じる',exact:true}).focus();await page.keyboard.press('Enter');
     await offer.getByRole('button',{name:'詳細を見る',exact:true}).waitFor();assert.equal(await offer.locator('dl').count(),0);
     assert.equal(await offer.getByRole('button',{name:'詳細を見る',exact:true}).evaluate(button=>button===document.activeElement),true);
-    assert.equal(await page.locator('.open-job').count(),1);assert.equal(await page.getByText('デモ：応募を受け付けました。シフトで担当の確認状況を確認してください。',{exact:true}).count(),0);
+    assert.equal(await page.locator('.open-job').count(),1);assert.equal(await applicationAccepted.count(),0);
   }
   console.log('Open job detail: named offer, keyboard expand/collapse and focus retained, controlled panel matches, long conditions fit 3 widths, no application from toggling.');
 
   await page.getByRole('button',{name:'この案件に応募する',exact:true}).click();
-  await page.getByText('デモ：応募を受け付けました。シフトで担当の確認状況を確認してください。',{exact:true}).waitFor();
+  await applicationAccepted.waitFor();
   await page.getByRole('button',{name:'応募したシフトを確認',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'応募したシフトを確認',exact:true}).evaluate(node=>document.activeElement===node),true);
 
@@ -1139,11 +1140,12 @@ try {
   assert.equal(await page.getByRole('button',{name:/デモ募集店舗 .*のシフトを確認/}).getAttribute('aria-pressed'),'true');
   await page.getByRole('region',{name:'選択したシフトの詳細',exact:true}).getByRole('heading',{name:'デモ募集店舗',exact:true}).waitFor();
   console.log('Demo application passed: listing removed, refresh preserves acceptance, pending remains separate through refresh; synthetic readback ACK exposes the second confirmed shift and detail.');
+  const routeAddress=page.locator('.route-panel > p').filter({has:page.locator('br')});
   for(const width of [320,390,1280])for(const fail of [false,true]){
     await page.setViewportSize({width,height:844});
     await page.getByRole('button',{name:/デモ募集店舗 .*のシフトを確認/}).click();
     if(await page.locator('.message-dismiss').count())await page.locator('.message-dismiss').click();
-    const originalAddress=await page.locator('.shift-detail-heading p').innerText();
+    const originalAddress=(await routeAddress.innerText()).split('\n').at(-1);
     await page.evaluate(fail=>{window.previousShiftClipboard=navigator.clipboard;window.shiftAddressCopies=[];Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:value=>{window.shiftAddressCopies.push(value);return new Promise((resolve,reject)=>window.finishShiftAddressCopy=()=>fail?reject(Error('synthetic clipboard denial')):resolve());}}});},fail);
     await page.getByRole('button',{name:'住所をコピー',exact:true}).click();
     assert.equal(await page.getByRole('button',{name:'住所をコピー',exact:true}).isDisabled(),true);
@@ -1176,12 +1178,16 @@ try {
     await refresh.waitFor();
 
     await page.evaluate(()=>{window.addressCopies=[];Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>window.addressCopies.push(value)}});});
-    const addressText=await page.locator('.shift-detail-heading p').innerText();
+    const addressText=(await routeAddress.innerText()).split('\n').at(-1);
     await page.getByRole('button',{name:'住所をコピー',exact:true}).focus();await page.keyboard.press('Enter');
     await page.getByText('店舗住所をコピーしました。',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>window.addressCopies.at(-1)),addressText);
-    const originals=await page.locator('.shift-detail-heading').evaluate(heading=>{const nodes=[heading.querySelector('h2'),heading.querySelector('p')];const values=nodes.map(node=>node.textContent);nodes[0].textContent='店舗名'+('LongStoreName'.repeat(30));nodes[1].textContent='合成住所 '+('LongBuildingName'.repeat(40));return values;});
+    const storeName=page.locator('.shift-detail-heading h2');
+    const originalStore=await storeName.innerText();
+    await storeName.evaluate(node=>node.textContent='店舗名'+('LongStoreName'.repeat(30)));
+    await routeAddress.evaluate(node=>node.lastChild.textContent='合成住所 '+('LongBuildingName'.repeat(40)));
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
-    await page.locator('.shift-detail-heading').evaluate((heading,values)=>{heading.querySelector('h2').textContent=values[0];heading.querySelector('p').textContent=values[1];},originals);
+    await storeName.evaluate((node,text)=>node.textContent=text,originalStore);
+    await routeAddress.evaluate((node,text)=>node.lastChild.textContent=text,addressText);
     console.log('Shift address: actual copy handler and keyboard match displayed address; synthetic long name/address stay within 3 viewport widths.');
 
     const card=page.locator('.shift-card-button').first();

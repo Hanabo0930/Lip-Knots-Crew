@@ -264,11 +264,47 @@ function generatedRunAnnotationKeys(record) {
       && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value))) return undefined;
   return keys;
 }
-function serviceSettings(record) {
+const RUN_BUILD_IMAGE_URI = 'run.googleapis.com/build-image-uri';
+const stagingRunArtifactPrefix = `${S.region}-docker.pkg.dev/${S.project}/gcf-artifacts/`;
+// Run 88's preserved finalizer revision used a legacy image name in the same
+// repository. Recognize only that observed name and immutable revision.
+const legacyFinalizerArtifact = '15c92a6f7d2725210c1c67a78c973eca59eb6718869dcfab46d7125196c83ec6';
+
+function boundStagingRunArtifact(record, name) {
+  const {fn, service} = record;
+  const repository = fn.buildConfig.dockerRepository;
+  if (![`${PREFIX}/repositories/gcf-artifacts`,
+    `projects/${S.projectNumber}/locations/${S.region}/repositories/gcf-artifacts`].includes(repository)
+    || service.metadata.labels?.['goog-drz-cloudfunctions-id'] !== name.toLowerCase()) return undefined;
+  const parse = value => {
+    if (!text(value) || !value.startsWith(stagingRunArtifactPrefix)) return undefined;
+    return /^([a-z0-9][a-z0-9_-]{0,127})(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[0-9a-f]{64})$/
+      .exec(value.slice(stagingRunArtifactPrefix.length))?.[1];
+  };
+  const artifact = parse(service.metadata.annotations[RUN_BUILD_IMAGE_URI]);
+  const container = parse(service.spec.template.spec.containers[0].image);
+  return artifact && artifact === container ? artifact : undefined;
+}
+
+function knownRunBuildImageChange(before, after, name) {
+  if (before.fn.serviceConfig.revision === after.fn.serviceConfig.revision) return false;
+  const canonicalName = `${S.project.replaceAll('-', '--')}__${S.region.replaceAll('-', '--')}__${name.replace(/[A-Z]/g, letter => '_' + letter.toLowerCase())}`;
+  const oldArtifact = boundStagingRunArtifact(before, name);
+  if (!oldArtifact || boundStagingRunArtifact(after, name) !== canonicalName) return false;
+  const generated = generatedRunAnnotationKeys(after);
+  if (!generated?.includes('run.googleapis.com/build-name')
+    || !generated.includes('run.googleapis.com/build-source-location')) return false;
+  return oldArtifact === canonicalName || (name === 'finalizeStagedUpload'
+    && before.fn.serviceConfig.revision === 'finalizestagedupload-00011-wub'
+    && createHash('sha256').update(oldArtifact).digest('hex') === legacyFinalizerArtifact);
+}
+
+function serviceSettings(record, ignoreBuildImageUri) {
   const service = record.service;
   const value = omit(service, ['status']);
   value.metadata = omit(service.metadata, ['creationTimestamp', 'resourceVersion', 'generation', 'selfLink', 'uid']);
   value.metadata.annotations = omit(service.metadata.annotations, generatedRunAnnotationKeys(record));
+  if (ignoreBuildImageUri) delete value.metadata.annotations[RUN_BUILD_IMAGE_URI];
   value.spec = clone(service.spec);
   value.spec.template.metadata = omit(value.spec.template.metadata, ['name', 'creationTimestamp']);
   value.spec.template.spec.containers = value.spec.template.spec.containers.map(container => omit(container, ['image']));
@@ -281,9 +317,10 @@ function triggerSettings(record) {
   return trigger === undefined || trigger === null ? trigger : omit(trigger, ['createTime', 'updateTime', 'etag', 'conditions']);
 }
 function assertSameSettings(before, after, name) {
+  const ignoreBuildImageUri = knownRunBuildImageChange(before, after, name);
   const summary = {function: name,
     functionChanged: !isDeepStrictEqual(functionSettings(before.fn), functionSettings(after.fn)),
-    runServiceChanged: !isDeepStrictEqual(serviceSettings(before), serviceSettings(after)),
+    runServiceChanged: !isDeepStrictEqual(serviceSettings(before, ignoreBuildImageUri), serviceSettings(after, ignoreBuildImageUri)),
     runPolicyChanged: !isDeepStrictEqual(omit(before.policy, ['etag']), omit(after.policy, ['etag'])),
     functionPolicyChanged: !isDeepStrictEqual(omit(before.functionPolicy, ['etag']), omit(after.functionPolicy, ['etag'])),
     eventarcTriggerChanged: triggerSettings(before) === undefined || triggerSettings(after) === undefined

@@ -12,7 +12,7 @@ const start=source.indexOf('async function '+acquire+'('),end=source.indexOf(las
 assert.ok(start>=0&&end>start);
 const code=ts.transpileModule(source.slice(start,end)+'\nexports.acquire='+acquire+'; exports.release='+release+';',{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
 class HttpsError extends Error{constructor(code,message){super(message);this.code=code;}}
-function setup(existing, retry=false){
+function setup(existing, retry=false, maintenancePaused=false){
  let now=1000, record=existing, writes=0, retried=false;
  class Timestamp{constructor(value){this.value=value;}toMillis(){return this.value;}static now(){return new Timestamp(now);}static fromMillis(value){return new Timestamp(value);}}
  if(record?.expiry!==undefined)record={...record,leaseUntil:new Timestamp(record.expiry)};
@@ -22,13 +22,31 @@ function setup(existing, retry=false){
    if(pending){record=pending==='delete'?undefined:pending;writes++;}return;
   }
  }};
- const exports={};runInNewContext(code,{exports,Timestamp,HttpsError,db},{timeout:3000});
+ const readImportAdmission=async (_tx,company,token)=>{
+  assert.equal(company,"company");assert.equal(token,"new-token");
+  if(maintenancePaused)throw new HttpsError("failed-precondition","NG_MAINTENANCE_IMPORT_ADMISSION_PAUSED");
+  return null;
+ };
+ const registerImport=(_tx,admission)=>assert.equal(admission,null);
+ const finishImport=async (_tx,company,token,successful)=>{
+  assert.equal(company,"company");assert.equal(token,"new-token");assert.equal(successful,true);
+ };
+ const exports={};runInNewContext(code,{exports,Timestamp,HttpsError,db,readImportAdmission,registerImport,finishImport},{timeout:3000});
  return {exports,record:()=>record,writes:()=>writes,now:()=>now};
 }
 const maxRuntime=Math.max(...[...source.matchAll(/timeoutSeconds:\s*(\d+)/g)].map(match=>Number(match[1])))*1000;
 for(const retry of [false,true]){const h=setup(undefined,retry);await h.exports.acquire('company');assert.ok(h.record().leaseUntil.toMillis()-h.now()>=maxRuntime+60000);assert.equal(h.record().acquiredAt.toMillis(),h.now());assert.equal(h.writes(),1);passed++;}
 {const h=setup({token:'other',expiry:1001});await assert.rejects(h.exports.acquire('company'),{code:'already-exists'});assert.equal(h.writes(),0);passed++;}
 {const h=setup({token:'other',expiry:1000});await h.exports.acquire('company');assert.equal(h.record().token,'new-token');passed++;}
-for(const token of ['new-token','other']){const h=setup({token,expiry:9999});await h.exports.release({ref:{path:'syncLocks/company_shift_import'},token:'new-token'});assert.equal(h.writes(),token==='new-token'?1:0);passed++;}
+for(const token of ["new-token","other"]){
+ const h=setup({token,expiry:9999});
+ await h.exports.release({ref:{path:"syncLocks/company_shift_import"},token:"new-token"},"company",true);
+ assert.equal(h.writes(),token==="new-token"?1:0);passed++;
+}
+if(module==="staff-import"){
+ const h=setup(undefined,false,true);
+ await assert.rejects(h.exports.acquire("company"),/NG_MAINTENANCE_IMPORT_ADMISSION_PAUSED/);
+ assert.equal(h.writes(),0);passed++;
+}
 }
 console.log(`Import lease lifecycle: ${passed} cases passed.`);

@@ -1296,7 +1296,7 @@ function checkBusinessRecovery(name) {
   const file = name === "markNetPrintPrinted" ? "netprint" : name === "adminCancelJob" ? "jobs" : name === "duplicateAdminJob" ? "job-management" : "admin-operations";
   const source = sourceFile('functions/src/' + file + '.ts');
   const compact = text => text.replace(/\s+/g, '');
-  let block = compact(functionBlock(source, name));
+  let block = compact(functionBlock(source, name).split(/\nexport (?:async )?function /)[0]);
   if (name === "completeExpenseReview" && source.includes("export async function handleCompleteExpenseReview(")) {
     const start = source.indexOf("export async function handleCompleteExpenseReview(");
     const end = source.indexOf("export const completeExpenseReview", start);
@@ -1311,7 +1311,7 @@ function checkBusinessRecovery(name) {
   const readOnly = ["getExpenseReview", "getJobSheetLink"].includes(name);
   const requiredAuth = staff ? 'requireAuth' : 'requireAdmin';
   if (!new RegExp('import \\{[^}]*\\b' + requiredAuth + '\\b[^}]*\\} from "\\./utils";').test(source)
-      || !has([requiredAuth + '(request)', 'companyFromClaims(session.token)'])
+      || !has(['constsession=' + requiredAuth + '(request);', 'constcompanyId=companyFromClaims(session.token);'])
       || /(?:input|request\.data)\.(?:companyId|uid|actorUid|staffId)/.test(block)) return false;
   if (readOnly && /\.(?:add|create|delete|set|update|commit)\(/.test(block)) return false;
   if (!readOnly && (!has(['awaitassertProductionOperational(companyId);'])

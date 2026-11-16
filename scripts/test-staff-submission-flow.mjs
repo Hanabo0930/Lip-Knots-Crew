@@ -392,14 +392,16 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
 const loginFixture=`<!doctype html><html><body><div id="root"></div><script type="module">${loginFixtureCode}</script></body></html>`;
 
 const businessFallback=section(app,'  const businessDataFallback=','  const openJobsFallback=');
-const emptyTaskStart=app.indexOf('<div className="task-clear"'),emptyTaskEnd=app.indexOf('</div></div>',emptyTaskStart)+12;
+const emptyTaskStart=app.indexOf('<div className="task-clear"'),emptyTaskStop=app.indexOf('</div>)}',emptyTaskStart);
+assert.ok(emptyTaskStart>=0&&emptyTaskStop>emptyTaskStart);
+const emptyTaskEnd=emptyTaskStop+6;
 const taskListStart=app.indexOf('<div className="task-list" id="home-task-list">');
-const taskListEnd=app.indexOf('</div></>:<div className="task-clear"',taskListStart)+6;
+const taskListEnd=app.indexOf('</>:<div className="task-clear"',taskListStart);
 assert.ok(taskListStart>=0&&taskListEnd>taskListStart);
 const taskListJsx=app.slice(taskListStart,taskListEnd);
 const taskFixtureCode=ts.transpileModule(`
 import React from 'react';import {createRoot} from 'react-dom/client';import '/src/styles.css';
-function Fixture(){const [showAllTasks,setShowAllTasks]=React.useState(false);const tasks=Array.from({length:7},(_,index)=>({id:String(index),title:'対応事項'+(index+1),body:'確認用の内容',priority:index===0?'overdue':index===1?'urgent':'normal'}));const visibleTasks=showAllTasks?tasks:tasks.slice(0,5);const submissionEditPending=false,isPending=()=>false,openTask=task=>{window.openedTask=task.id};return (<main>${taskListJsx}</main>);}
+function Fixture(){const [showAllTasks,setShowAllTasks]=React.useState(false);const tasks=Array.from({length:7},(_,index)=>({id:String(index),title:'対応事項'+(index+1),body:'確認用の内容',priority:index===0?'overdue':index===1?'urgent':'normal'}));const visibleTasks=showAllTasks?tasks:tasks.slice(0,5);const submissionEditPending=false,taskDataSource='live',taskRefreshPending=false,isPending=()=>false,openTask=task=>{window.openedTask=task.id};return (<main>${taskListJsx}</main>);}
 createRoot(document.getElementById('root')).render(<Fixture/>);
 `,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext,jsx:ts.JsxEmit.React}}).outputText;
 const taskFixture=`<!doctype html><html><body><div id="root"></div><script type="module">${taskFixtureCode}</script></body></html>`;
@@ -433,7 +435,7 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
 const diagnosticFixture=`<!doctype html><html><body><div id="root"></div><script type="module">${diagnosticFixtureCode}</script></body></html>`;
 const businessFixtureCode=ts.transpileModule(`
 import React from 'react';import {createRoot} from 'react-dom/client';import '/src/styles.css';
-function Fixture(){const [state,setState]=React.useState({status:'loading',source:'none'});window.businessFixture={setState};const businessDataStatus=state.status,businessDataSource=state.source;
+function Fixture(){const [state,setState]=React.useState({status:'loading',source:'none'});window.businessFixture={setState};const businessDataStatus=state.status,taskDataSource=state.source;
 ${businessFallback}
 return <main><section className="panel">{businessDataFallback??(${app.slice(emptyTaskStart,emptyTaskEnd)})}</section></main>;}
 createRoot(document.getElementById('root')).render(<Fixture/>);

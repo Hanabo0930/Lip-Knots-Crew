@@ -199,6 +199,7 @@ hr { border:0; border-top:1px solid #eee; margin:24px 0; }
 .shift-detail-heading p,.prep-heading p { margin:0 0 14px; color:#806f68; }
 .route-panel { margin:8px 0 20px; padding:15px; border-radius:17px; background:#f5f8ff; border:1px solid #dce7f5; }
 .route-panel>strong { display:block; margin-bottom:10px; }
+.route-panel>p { overflow-wrap:anywhere; }
 .route-actions { display:flex; flex-wrap:wrap; gap:8px; }
 .route-actions a { display:inline-flex; align-items:center; min-height:42px; padding:10px 13px; border-radius:12px; background:white; color:#35658c; border:1px solid #cbdcec; font-weight:900; text-decoration:none; }
 .empty.compact { padding:10px 0; }

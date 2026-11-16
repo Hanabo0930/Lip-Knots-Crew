@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { DocumentData } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import { netPrintAssignmentPatch } from "./netprint-state-core";
 import { cancellationSheetWriteIdentity } from "./sheet-write-core";
@@ -9,7 +10,7 @@ export function staffApplicationQueueKey(uid: string, requestId: string): string
   return "apply_" + createHash("sha256").update(JSON.stringify([uid, requestId])).digest("hex");
 }
 
-export function readStaffApplicationQueueReceipt(queue: FirebaseFirestore.DocumentData | undefined, requestId: string) {
+export function readStaffApplicationQueueReceipt(queue: DocumentData | undefined, requestId: string) {
   const receipt = queue?.staffApplicationReceipt;
   if (!queue || (queue.operation !== "job.assign" && queue.operation !== "case_list.assign") ||
       receipt?.schema !== STAFF_APPLICATION_RECEIPT_SCHEMA || receipt.requestId !== requestId ||

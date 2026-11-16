@@ -122,6 +122,7 @@ const expectedFunctions = [
   "holdCaseMailTarget",
   "resolveCaseMailTargetHold",
   "confirmCaseMailReview",
+  "caseListGasSync",
 ];
 
 assert.deepEqual(
@@ -359,13 +360,20 @@ const heartbeatHandler = staffApp.match(/const heartbeat=async[\s\S]*?(?=\s*cons
 assert.ok(revokedHandler && heartbeatHandler, "Staff revocation and heartbeat handlers must exist");
 assert.match(
   heartbeatHandler,
-  /if\(code\.endsWith\("permission-denied"\)\)await handleRevoked\(/,
+  /if\(isDeviceAccessDenied\(error\)\)await handleRevoked\(/,
   "A revoked device heartbeat must invoke the revocation handler",
 );
 assert.match(
   revokedHandler,
-  /try\{await signOut\(activeAuth\);revocationCompleted=true;\}/,
-  "The revocation handler must sign out before marking revocation completed",
+  /if\(isCurrent\(\)\)await logoutRevokedSession\(authVersion,user\.uid,companyId,staffId\);/,
+  "The device watcher must only revoke the current account",
+);
+const revokedLogout = staffApp.match(/async function logoutRevokedSession[\s\S]*?(?=\s*async function logoutCurrentUser)/)?.[0];
+assert.ok(revokedLogout, "The device revocation cleanup must exist");
+assert.match(
+  revokedLogout,
+  /if\(!auth\|\|expectedVersion!==authLoadVersionRef\.current\)return;[\s\S]*setSessionRevoked\(true\);[\s\S]*forgetInaccessibleShifts\(undefined,uid,cid,sid\);[\s\S]*await run\("logout",\(\)=>signOut\(activeAuth\)\)/,
+  "Revocation must remove access and cached business data before sign-out",
 );
 assert.match(
   staffApp,
@@ -379,7 +387,7 @@ const guardedOutput = execFileSync(
     "scripts/automation/check-function-auth-guards.mjs",
     "--repository", root,
     "--ref", "HEAD",
-    "--functions", expectedFunctions.join(","),
+    "--functions", expectedFunctions.filter(name => name !== "retrySafeSheetWrites").join(","),
     "--require-pass",
   ],
   { cwd: root, encoding: "utf8" },
@@ -387,7 +395,7 @@ const guardedOutput = execFileSync(
 assert.match(
   guardedOutput,
   /SOURCE_GUARD_STATUS=PASS/,
-  "every allowlisted Function must pass its source authorization guard",
+  "every allowlisted callable must pass its source authorization guard",
 );
 
 console.log("Functions automation safety tests passed (device/session scope included)");

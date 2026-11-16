@@ -6,6 +6,8 @@ const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^
 const source={
  'functions/src/uploads.ts':read('functions/src/uploads.ts'),
  'functions/src/submission-transfer-control.ts':read('functions/src/submission-transfer-control.ts'),
+ 'functions/src/submission-files.ts':read('functions/src/submission-files.ts'),
+ 'functions/src/staff-session.ts':read('functions/src/staff-session.ts'),
 };
 function run(change,name='finalizeStagedUpload'){
  const files={...source};change?.(files);const lines=[];
@@ -97,4 +99,23 @@ for(const [before,after] of [
  assert.deepEqual(run(files=>{files[uploadsPath]=files[uploadsPath].replace(before,after);},'createUploadSession'),{passed:false,exitCode:1},before);passed++;
 }
 
+assert.deepEqual(run(undefined,'getSubmissionTimeline'),{passed:true,exitCode:0});passed++;
+const timelinePath='functions/src/submission-files.ts';
+const timelineStart=source[timelinePath].indexOf('export const getSubmissionTimeline');
+const timelineEnd=source[timelinePath].indexOf('export const getSubmissionProcessingStatus',timelineStart);
+const timeline=source[timelinePath].slice(timelineStart,timelineEnd);
+for(const [before,after] of [
+ ['data.companyId === companyId && data.jobId === input.jobId','data.jobId === input.jobId'],
+ ['data.jobId === input.jobId && data.type === input.type','data.type === input.type'],
+ ['data.type === input.type &&','true &&'],
+ ['data.staffId === actor.staffId','true'],
+ ['if (!matchesScope(data)) return { submissions: [] };',''],
+ ['!matchesScope(data) || data.createdAt === undefined','data.createdAt === undefined'],
+ ['scoped.orderBy("createdAt", "desc")','query.orderBy("createdAt", "desc")'],
+]){
+ assert.ok(timeline.includes(before),before);
+ assert.deepEqual(run(files=>{
+  files[timelinePath]=files[timelinePath].slice(0,timelineStart)+timeline.replace(before,after)+files[timelinePath].slice(timelineEnd);
+ },'getSubmissionTimeline'),{passed:false,exitCode:1},before);passed++;
+}
 console.log(JSON.stringify({transferAuthGuardTests:passed}));

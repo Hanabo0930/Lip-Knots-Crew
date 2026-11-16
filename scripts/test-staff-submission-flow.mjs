@@ -654,7 +654,10 @@ try {
   for(const state of [{status:'error',source:'none'},{status:'ready',source:'cached'},{status:'ready',source:'stale'},{status:'ready',source:'live'}]){
     await page.evaluate(state=>window.businessFixture.setState(state),state);
     if(state.status==='error'){await page.getByRole('group',{name:'業務データの読込エラー'}).waitFor();assert.match(await page.locator('main').innerText(),/管理者にスタッフ登録・所属/);}
-    else await page.waitForFunction(source=>document.querySelector('strong')?.textContent?.includes(source==='live'?'今日の対応':'前回確認時点'),state.source);
+    else {
+      const expected={live:"今日の対応はすべて完了しています",cached:"前回確認時点では対応事項はありません",stale:"現在の対応事項を確認できません"};
+      await page.getByText(expected[state.source],{exact:true}).waitFor();
+    }
     for(const width of [320,390,1280]){await page.setViewportSize({width,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);}
   }
   await page.evaluate(()=>window.businessFixture.setState({status:'error',source:'none'}));

@@ -1606,15 +1606,24 @@ function checkSubmissionActor(source) {
 
 function checkSubmissionTimeline() {
   const source = sourceFile("functions/src/submission-files.ts");
-  const block = functionBlock(source, "getSubmissionTimeline");
-  return checkSubmissionActor(source) && [
-    /requireAuth\s*\(\s*request\s*\)/,
-    /companyFromClaims\s*\(\s*session\.token\s*\)/,
-    /assertJobAccess\s*\(\s*input\.jobId\s*,\s*companyId/,
-    /await readSubmissionActor\(session, companyId\)/,
-    /data\.staffId !== actor\.staffId/,
-    /query\.where\("staffId", "==", actor\.staffId\)/,
-  ].every((pattern) => pattern.test(block));
+  const block = reviewedCompact(functionBlock(source, "getSubmissionTimeline"));
+  const authorized = 'awaitassertJobAccess(input.jobId,companyId,actor.role,actor.role==="staff"?actor.staffId:"");';
+  if (!checkSubmissionActor(source) || ![
+    "constsession=requireAuth(request);", "constcompanyId=companyFromClaims(session.token);",
+    "constactor=awaitreadSubmissionActor(session,companyId);", authorized,
+    '.where("companyId","==",companyId).where("jobId","==",input.jobId).where("type","==",input.type)',
+    'constscoped=actor.role==="staff"?query.where("staffId","==",actor.staffId):query;',
+  ].every(part => block.includes(part)) || block.indexOf(authorized) >= block.indexOf('db.collection("submissions")')) return false;
+  if (!block.includes("input.page")) return block.includes('actor.role==="staff"&&data.staffId!==actor.staffId');
+  return [
+    '!!data&&data.companyId===companyId&&data.jobId===input.jobId&&data.type===input.type&&(actor.role==="admin"||data.staffId===actor.staffId);',
+    "constsubmission=awaitcollection.doc(submissionId).get();constdata=submission.data();if(!matchesScope(data))return{submissions:[]};",
+    "assertSubmissionFileIdentity(data,fileData,submissionId);",
+    'constordered=scoped.orderBy("createdAt","desc");letpageQuery=ordered;',
+    'constcursor=awaitcollection.doc(input.page.afterSubmissionId).get();constdata=cursor.data();if(!matchesScope(data)||data.createdAt===undefined){thrownewHttpsError("failed-precondition",',
+    "pageQuery=ordered.startAfter(cursor);",
+    "awaitpageQuery.limit(input.page?HISTORY_PAGE_SIZE+1:100).get();",
+  ].every(part => block.includes(part));
 }
 
 function checkSubmissionProcessingStatus() {

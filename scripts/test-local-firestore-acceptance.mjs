@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {Readable} from 'node:stream';
+import {createSyntheticSubmissionDrive} from './local-submission-drive-fixture.mjs';
 import {createRequire} from 'node:module';
 import {localAcceptanceEnvironment,blockNonEmulatorConnections,seedLocalApplicationAccess} from './local-firestore-acceptance-safety.mjs';
 const environment=localAcceptanceEnvironment(process.env);
@@ -32,23 +33,11 @@ google.sheets=()=>({spreadsheets:{
 }});
 const load=name=>require('../functions/lib/'+name+'.js');
 const {db,storage}=load('firebase');
-const driveFiles=new Map(),storageObjects=new Map();let allocated=0,driveCopies=0;
+const storageObjects=new Map();
 const uploadedBytes=Buffer.alloc(100,0x61);
 const uploadSha256=crypto.createHash('sha256').update(uploadedBytes).digest('hex');
 const uploadMd5=crypto.createHash('md5').update(uploadedBytes).digest();
-const drive={files:{
-  generateIds:async()=>({data:{ids:['synthetic-drive-'+(++allocated)]}}),
-  list:async()=>({data:{files:[{id:'synthetic-folder'}]}}),
-  get:async({fileId})=>{if(!driveFiles.has(fileId))throw {code:404};return {data:structuredClone(driveFiles.get(fileId))};},
-  create:async input=>{
-    assert.ok(input.media,'only synthetic file transfers are allowed');
-    const id=input.requestBody.id;if(driveFiles.has(id))throw {code:409};
-    const chunks=[];for await(const chunk of input.media.body)chunks.push(chunk);
-    assert.deepEqual(Buffer.concat(chunks),uploadedBytes);
-    const file={...input.requestBody,id,size:'100',md5Checksum:uploadMd5.toString('hex'),createdTime:new Date().toISOString()};
-    driveFiles.set(id,file);driveCopies++;return {data:structuredClone(file)};
-  }
-}};
+const {drive,files:driveFiles,rootId,copies:driveCopies}=createSyntheticSubmissionDrive(uploadedBytes);
 load('google-drive-client').getWritableDriveClient=()=>drive;
 storage.bucket=(name='synthetic-bucket')=>{
   assert.equal(name,'synthetic-bucket');
@@ -183,9 +172,9 @@ try {
   for(const scope of ['file','submission'])await test('提出・再提出の実SDK一往復: '+scope,async()=>{
     const h=await fixture();await h.apply();await confirmSource(h);
     await call(admin.confirmApplication,h.manager,{jobId:h.jobId,expectedRevision:(await h.job()).revision});
-    await db.doc('companies/'+h.companyId+'/settings/drive').set({rootFolderId:'synthetic-root'});
+    await db.doc('companies/'+h.companyId+'/settings/drive').set({rootFolderId:rootId});
     process.env.LKC_SUBMISSION_TRANSFER_MODE='active';
-    const initialCopies=driveCopies,initialSize=driveFiles.size;
+    const initialCopies=driveCopies(),initialSize=driveFiles.size;
     const start=(count,patch={})=>call(uploads.createUploadSession,h.staff[0],{jobId:h.jobId,type:'report',
       files:Array.from({length:count},(_,i)=>({originalName:'synthetic-'+i+'.png',contentType:'image/png',size:100,contentSha256:uploadSha256})),...patch});
     const finish=file=>{
@@ -205,7 +194,7 @@ try {
     assert.equal((await db.doc('submissions/'+first.submissionId).get()).data().completedFiles,2);
     await finish(first.files[0]);
     assert.equal((await db.doc('submissions/'+first.submissionId).get()).data().completedFiles,2);
-    assert.equal(driveCopies-initialCopies,2);
+    assert.equal(driveCopies()-initialCopies,2);
     const reports=(await h.list('sheetSyncQueue')).filter(x=>x.data().operation==='submission.report');assert.equal(reports.length,1);
     await h.run(reports[0]);assert.equal((await reports[0].ref.get()).data().status,'completed');
     assert.equal((await h.job()).submissionStatus.report.sheetWrite.pending,false);
@@ -234,7 +223,7 @@ try {
   const stats=network.stats();network.restore();
   const failed=results.filter(x=>!x.passed).length;
   const result={project:environment.project,firestore:'real SDK / local emulator',passed:results.length-failed,failed,network:stats,
-    sheets:'synthetic boundary',storageAndDrive:'synthetic boundaries',syntheticDriveCopies:driveCopies,sheetReads,syntheticSheetWrites:sheetWrites,realSheetWrites:0,actualMessagesSent:0,
+    sheets:'synthetic boundary',storageAndDrive:'synthetic boundaries',syntheticDriveCopies:driveCopies(),sheetReads,syntheticSheetWrites:sheetWrites,realSheetWrites:0,actualMessagesSent:0,
     authentication:'synthetic callable context; token verification, Auth emulator and Security Rules are not certified',
     sourceModules:['jobs','admin-operations','precontact','netprint','safe-sheet-writes','shift-import','staff-tasks','uploads','drive-transfer','resubmissions','submission-status','submission-files'].map(name=>({name,sha256:crypto.createHash('sha256').update(fs.readFileSync(path.resolve('functions/lib/'+name+'.js'))).digest('hex')})),results};
   if(stats.blocked)result.failed++;

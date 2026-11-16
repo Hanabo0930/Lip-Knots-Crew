@@ -2,6 +2,7 @@ import ts from 'typescript';import {runInNewContext} from 'node:vm';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 const source=readFileSync('apps/staff/src/App.tsx','utf8');
+const readError=source.split('\n').find(line=>line.trimStart().startsWith('const applicationAttemptsReadError='));assert.ok(readError);
 const start=source.includes('  async function readAcceptedApplicationReceipts(')?source.indexOf('  async function readAcceptedApplicationReceipts('):source.indexOf('  async function apply(job:Job){');
 const end=source.indexOf('  async function submitPreContact()',start);
 assert.ok(start>=0&&end>start);
@@ -191,7 +192,7 @@ console.log('Application storage safety: company/staff/user separation, conditio
 
 {
  const effect=source.split(String.fromCharCode(10)).find(line=>line.includes('useEffect(()=>{applicationAttemptsRef.current.clear();'));assert.ok(effect);
- for(const mode of ['restored','different-owner','missing-owner','broken']){const h=harness();const owner=h.store.applicationAttemptOwner('company','staff','user');h.store.saveApplicationAttempt(owner,'saved-job',{requestId:'saved-id',startedAt:100});if(mode==='broken')h.savedStorage.set('lkc.applicationAttempts.v1:'+owner,'broken');const ctx={...h.store,firebaseConfigured:true,companyId:mode==='different-owner'?'other':'company',staffId:'staff',user:mode==='missing-owner'?null:{uid:'user'},applicationAttemptsRef:{current:new Map([['old-owner',{}]])},refreshApplicationAttempts:()=>{},setMessage:()=>{},useEffect:fn=>fn()};runInNewContext(effect,ctx);assert.equal(ctx.applicationAttemptsRef.current.has('old-owner'),false);assert.equal(ctx.applicationAttemptsRef.current.has('saved-job'),mode==='restored');}
+ for(const mode of ['restored','different-owner','missing-owner','broken']){const h=harness();const owner=h.store.applicationAttemptOwner('company','staff','user');h.store.saveApplicationAttempt(owner,'saved-job',{requestId:'saved-id',startedAt:100});if(mode==='broken')h.savedStorage.set('lkc.applicationAttempts.v1:'+owner,'broken');const messages=[];const ctx={...h.store,firebaseConfigured:true,companyId:mode==='different-owner'?'other':'company',staffId:'staff',user:mode==='missing-owner'?null:{uid:'user'},applicationAttemptsRef:{current:new Map([['old-owner',{}]])},refreshApplicationAttempts:()=>{},setMessage:value=>messages.push(value),useEffect:fn=>fn()};runInNewContext(readError+'\n'+effect,ctx);assert.equal(ctx.applicationAttemptsRef.current.has('old-owner'),false);assert.equal(ctx.applicationAttemptsRef.current.has('saved-job'),mode==='restored');if(mode==='broken')assert.match(messages[0],/保存済みの応募確認記録を読み込めません/);else assert.deepEqual(messages,[]);}
 }
 console.log('Application hydration: restored owner records populate the retry map; different/missing owners and corrupt storage do not retain prior owner records.');
 
@@ -232,7 +233,7 @@ console.log('Application storage observer: matching owner/local storage and focu
  for(const missing of [false,true]){
   let receive,errors,cleanup,stopped=false,rendered=0;const h=harness();
   const ctx={firebaseConfigured:true,companyId:'company',staffId:'staff',user:missing?null:{uid:'user'},applicationAttemptOwner:h.store.applicationAttemptOwner,observeApplicationAttempts:(owner,onChange,onError)=>{assert.equal(owner,h.store.applicationAttemptOwner('company','staff','user'));receive=onChange;errors=onError;return()=>{stopped=true;};},applicationAttemptsRef:{current:new Map([['uncertain',{requestId:'keep',startedAt:1}]])},refreshApplicationAttempts:()=>rendered++,setMessage:message=>assert.match(message,/シフトでの確定状況/),useEffect:fn=>{cleanup=fn();}};
-  runInNewContext(effect,ctx);
+  runInNewContext(readError+'\n'+effect,ctx);
   if(missing){assert.equal(receive,undefined);continue;}
   receive(new Map([['other-tab',{requestId:'new',startedAt:2}]]));assert.equal(ctx.applicationAttemptsRef.current.get('uncertain').requestId,'keep');assert.equal(ctx.applicationAttemptsRef.current.get('other-tab').requestId,'new');receive(new Map());assert.equal(ctx.applicationAttemptsRef.current.size,2);assert.equal(rendered,2);errors();cleanup();assert.equal(stopped,true);
  }

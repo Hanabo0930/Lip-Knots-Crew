@@ -10,6 +10,6 @@ export default function PdfFilePreview({url,name,onRefresh,busy=false,onDemand=f
  return <div className="pdf-file-preview" role="group" aria-label={'PDFの内容確認: '+name} aria-busy={pending||busy}>
   <strong>PDF</strong>
   {href&&!pending?<a className="pdf-open-link" href={href} target="_blank" rel="noopener noreferrer" aria-label={name+'を別タブで開く'}>PDFを開く（別タブ）</a>:(pending||!waitingForSelection)&&<span role="status">{pending?'PDFを確認しています…':failed?'PDFを再取得できませんでした。もう一度お試しください。':'PDFを開くための情報を確認できません。'}</span>}
-  {onRefresh?<><button type="button" className="secondary ghost" aria-disabled={pending||busy} onClick={()=>void refresh()}>{pending?'取得中…':waitingForSelection?'PDFを表示する準備':'PDFを再取得'}</button>{!waitingForSelection&&<small>開けない・期限切れの場合は再取得してから、もう一度開いてください。</small>}</>:<small>開けない場合は、この比較を閉じて開き直してください。</small>}
+  {onRefresh?<><button type="button" className="secondary ghost" aria-disabled={pending||busy} onClick={()=>void refresh()}>{pending?(onDemand?'取得中…':'再取得中…'):waitingForSelection?'PDFを表示する準備':'PDFを再取得'}</button>{!waitingForSelection&&<small>開けない・期限切れの場合は再取得してから、もう一度開いてください。</small>}</>:<small>開けない場合は、この比較を閉じて開き直してください。</small>}
  </div>;
 }

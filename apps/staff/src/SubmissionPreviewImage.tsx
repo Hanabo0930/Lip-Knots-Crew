@@ -87,7 +87,7 @@ function SubmissionPreviewContent({ file, onRefreshPreview, className = "history
       <div ref={previewContainerRef} tabIndex={-1} role="group" aria-label={previewLabel} className={`${className} preview-placeholder`} aria-busy={refreshing}>
         {loadState !== "idle" && <span role="status">{refreshing ? "画像を確認しています…" : "プレビューを取得できません"}</span>}
         <button type="button" className="secondary" disabled={refreshing} onClick={() => void retryPreview()}>
-          {refreshing ? "取得中…" : loadState === "idle" ? "画像を表示" : "画像を再読み込み"}
+          {refreshing ? (onDemand ? "取得中…" : "再取得中…") : loadState === "idle" ? "画像を表示" : "画像を再読み込み"}
         </button>
       </div>
     );

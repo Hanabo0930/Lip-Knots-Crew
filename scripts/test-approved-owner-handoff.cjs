@@ -3,6 +3,8 @@
 // are synthetic. No browser, Google/Firebase API, credential or network access.
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict'),ts=require('typescript');
 const root=path.resolve(__dirname,'..'),src=path.join(root,'functions/src');
+const evidenceDir=process.env.LKC_TEST_SYNTHETIC_EVIDENCE_DIR||path.join(root,'release-evidence');
+fs.mkdirSync(evidenceDir,{recursive:true});
 const Owner=require(path.join(src,'case-list-owner-authorization.cjs')),Core=require(path.join(src,'case-list-gas-handoff-core.cjs'));
 const {createFormalTicketService}=require(path.join(src,'case-list-gas-formal-ticket.cjs')),{createReviewStorePort}=require(path.join(src,'case-list-manual-review-store.cjs'));
 const clone=x=>structuredClone(x),project='lip-knots-crew-staging',company='synthetic-company',uid='synthetic-owner',email='owner@example.invalid',subject='123456789012345678901';
@@ -62,5 +64,5 @@ async function test(name,fn){reset();await fn();assert.equal(network,0);results.
  await test('policy read wait consumes freshness rather than renewing it',async()=>{const a=await approve();journal(a);permit();const actor=await gasActor({action:'SENT_RETURNED',operationKey:key,payload:{}});readDelay=30000;await held(()=>Access.createApprovedSentAccess({db:database,now:()=>clock,operational:async()=>true}).assertMessageAccess(mailConfig(),actor,messageScope()),'OWNER_AUTHORITY_STALE');});
  const Channel=load('../../apps/admin/src/owner-nameup-channel.ts',{}); // loader resolves relative path under functions/src
  await test('popup channel binds exact opener, nonce and Google-hosted origin',async()=>{const opener={},nonce='a'.repeat(64),good={source:opener,origin:'https://synthetic-script.googleusercontent.com',data:{protocol:Channel.OWNER_CHANNEL,type:'PREVIEW',nonce,gasPreview:{selection:[]}}};assert.equal(Channel.acceptOwnerPreview(good,opener,nonce),true);for(const bad of [{...good,source:{}},{...good,origin:'https://evil.example.invalid'},{...good,origin:'null'},{...good,data:{...good.data,nonce:'b'.repeat(64)}},{...good,origin:'https://synthetic-script.googleusercontent.com.evil.invalid'}])assert.equal(Channel.acceptOwnerPreview(bad,opener,nonce),false);assert.deepEqual(clone(Channel.ownerNameUpEntry('https://synthetic-admin.web.app/?entry=case-list-nameup#nonce='+nonce)),{nonce});});
- fs.mkdirSync(path.join(root,'../evidence'),{recursive:true});fs.writeFileSync(path.join(root,'../evidence/approved-owner-handoff-results.json'),JSON.stringify({passed:results.length,total:results.length,networkRequests:network,results},null,2));console.log('APPROVED_OWNER_HANDOFF '+results.length+'/'+results.length);
+ fs.writeFileSync(path.join(evidenceDir,'approved-owner-handoff-results.json'),JSON.stringify({passed:results.length,total:results.length,networkRequests:network,results},null,2));console.log('APPROVED_OWNER_HANDOFF '+results.length+'/'+results.length);
 }finally{globalThis.fetch=prior;}})().catch(e=>{console.error(e.stack);process.exitCode=1;});

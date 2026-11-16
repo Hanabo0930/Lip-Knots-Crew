@@ -765,7 +765,7 @@ function checkCaseListExternalSelection(block, whole) {
   const preWrite = registration.slice(authorityAt + authorityAndPause.length, writeAt);
   const hasHandoff = registration.includes('handoff?:{prepareOnly:boolean;beforeCommit:(context:Data)=>Promise<void>}');
   if (hasHandoff) {
-    const reviewedPreparation = "if(handoff)awaithandoff.beforeCommit({companyId,actorUid,jobId:input.jobId,queueId,observed,job,staff,snapshot,sourceSnapshot,confirmedFields,payOffer,requestHash,prospectiveJobRevision:assignedRevision});if(handoff?.prepareOnly)return{status:\"MANUAL_PREPARED_ONLY\",schema:\"LK_CREW_MANUAL_PREPARE_PROPOSAL_V1\",clientNameUpConfirmed:false,companyId,actorUid,jobId:input.jobId,prospectiveQueueId:queueId,caseId:a.sourceCaseId,staffId:a.staffId,staffName:a.staffName,canonicalStaffName:staff.displayName,dateKey,expectedJobRevision:input.expectedJobRevision,expectedSourceRevision:input.expectedSourceRevision,observationHash:input.observationHash,observedValuesHash:observed.observedValuesHash,sourceWritableHash:hashCaseList(sourceSnapshot),sourceCatalog:snapshot.catalog,dependencyHash:snapshot.dependencyHash,confirmedFields,payOffer,currentJobHash:hashCaseList(currentJob),currentObservationHash:hashCaseList(currentObservation),sourceWrites:0,monthlyWrites:0,businessRecordsCreated:0};";
+    const reviewedPreparation = "if(handoff)awaithandoff.beforeCommit({companyId,actorUid,jobId:input.jobId,queueId,observed,job,staff,snapshot,sourceSnapshot,confirmedFields,payOffer,requestHash,prospectiveJobRevision:assignedRevision});if(externalReceiptMode)assertExternalIntakeEnabled();need((awaitgetProductionOperationalState(companyId,tx)).operational,\"GLOBAL_OPERATION_STOPPED_BEFORE_MANUAL_COMMIT\");if(handoff?.prepareOnly)return{status:\"MANUAL_PREPARED_ONLY\",schema:\"LK_CREW_MANUAL_PREPARE_PROPOSAL_V1\",clientNameUpConfirmed:false,companyId,actorUid,jobId:input.jobId,prospectiveQueueId:queueId,caseId:a.sourceCaseId,staffId:a.staffId,staffName:a.staffName,canonicalStaffName:staff.displayName,dateKey,expectedJobRevision:input.expectedJobRevision,expectedSourceRevision:input.expectedSourceRevision,observationHash:input.observationHash,observedValuesHash:observed.observedValuesHash,sourceWritableHash:hashCaseList(sourceSnapshot),sourceCatalog:snapshot.catalog,dependencyHash:snapshot.dependencyHash,confirmedFields,payOffer,currentJobHash:hashCaseList(currentJob),currentObservationHash:hashCaseList(currentObservation),sourceWrites:0,monthlyWrites:0,businessRecordsCreated:0};";
     if (preWrite !== reviewedPreparation || !registration.includes('},handoff?.prepareOnly?{readOnly:true}:undefined);') ||
         (registration.match(/handoff\.beforeCommit\(/g) ?? []).length !== 1) return false;
   } else if (preWrite || /\bhandoff\b/.test(registration)) return false;
@@ -776,7 +776,7 @@ function checkCaseListExternalSelection(block, whole) {
   if (![
     'need(typeofcommitGuard==="function","HANDOFF_COMMIT_GUARD_REQUIRED");returnrunExternal(queueRef,uid,token,true,input,commitGuard);',
     'need(typeofcommitGuard==="function","HANDOFF_COMMIT_GUARD_REQUIRED");returnrunExternal(queueRef,uid,token,false,undefined,commitGuard);',
-    'if(commitGuard)awaitcommitGuard(plan.kind,uid,token,r);ownLease(r);',
+    'if(commitGuard)awaitcommitGuard(plan.kind,uid,token,r);need((awaitgetProductionOperationalState(initial!.companyId,tx)).operational,"GLOBAL_OPERATION_STOPPED_BEFORE_EXTERNAL_COMMIT");ownLease(r);',
     'writeAt-window.readStartedAt<=60_000',
   ].every(part=>reviewedCompact(sourceFile('functions/src/case-list-external-transfer.ts')).includes(part))) return false;
   return [
@@ -826,17 +826,28 @@ function checkImportIssues(name) {
     const reader = compact(sourceFile("functions/src/sheet-reader.ts"));
     if (!reader.includes('scopes:["https://www.googleapis.com/auth/spreadsheets.readonly"]')
       || /sheets\.spreadsheets\.(?:batchUpdate|values\.(?:update|append|clear|batchUpdate|batchClear))\(/.test(whole + reader)) return false;
+    const usesMaintenance = staff && whole.includes('from"./staff-ng-maintenance";');
+    const staffImportChecks = usesMaintenance ? [
+      'awaitdb.runTransaction(async(tx)=>{constadmission=awaitreadImportAdmission(tx,companyId,token);constnow=Timestamp.now();constleaseUntil=Timestamp.fromMillis(now.toMillis()+10*60*1000);',
+      'registerImport(tx,admission);',
+      'constmaintenanceFence=awaitreadImportWriteFence(tx,this.companyId,this.lock.token);assertStaffImportLease((awaittx.get(this.lock.ref)).data(),this.companyId,this.lock.token);',
+      'recordImportMutation(tx,maintenanceFence,count);',
+      'assertStaffImportLease((awaitlock.ref.get()).data(),companyId,lock.token);constrevocationRunRef=db.collection("staffImportRuns").doc(runId);constrevocationKey=awaitbeforeSessionRevocation(companyId,lock.token,revocationRunRef,item.uid);try{awaitauth.revokeRefreshTokens(item.uid);}',
+      'catch(error){awaitrecordSessionRevocation(companyId,lock.token,revocationRunRef,revocationKey,false);throwerror;}awaitrecordSessionRevocation(companyId,lock.token,revocationRunRef,revocationKey,true);',
+    ] : [
+      'assertStaffImportLease((awaitlock.ref.get()).data(),companyId,lock.token);awaitauth.revokeRefreshTokens(item.uid);',
+      'awaitdb.runTransaction(async(tx)=>{constnow=Timestamp.now();constleaseUntil=Timestamp.fromMillis(now.toMillis()+10*60*1000);',
+    ];
     const requirements = staff ? [
       'if(mode==="commit"&&(!completeSelection||!completeRows))', 'if(failedSheets>0)',
       'newBatchWriter(companyId,lock)', 'if(!lock)thrownewHttpsError("aborted",',
       'lease.companyId!==companyId', 'lease.token!==token', '!(lease.leaseUntilinstanceofTimestamp)',
       'lease.leaseUntil.toMillis()<=Timestamp.now().toMillis()',
       'assertStaffImportLease((awaittx.get(this.lock.ref)).data(),this.companyId,this.lock.token);',
-      'assertStaffImportLease((awaitlock.ref.get()).data(),companyId,lock.token);awaitauth.revokeRefreshTokens(item.uid);',
       'assertStaffImportLease((awaittx.get(lock.ref)).data(),companyId,lock.token);',
       'constcommitted=awaitdb.runTransaction(asynctx=>{',
       'current?.companyId===item.data.companyId&&current?.staffId===item.data.staffId',
-      'awaitdb.runTransaction(async(tx)=>{constnow=Timestamp.now();constleaseUntil=Timestamp.fromMillis(now.toMillis()+10*60*1000);',
+      ...staffImportChecks,
     ] : [
       'constsourceReadStartedAtMs=Timestamp.now().toMillis();',
       'awaitwriteJobsAndLocks(allJobs,staffIndex.byName,runRef?.id??"",lock,sourceReadStartedAtMs)',

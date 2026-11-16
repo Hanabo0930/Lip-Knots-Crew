@@ -91,6 +91,10 @@ for(const [before,after]of [
  ['assertStaffImportLease((await lock.ref.get()).data(), companyId, lock.token);',''],
  ['assertStaffImportLease((await tx.get(lock.ref)).data(), companyId, lock.token);',''],
  ['10 * 60 * 1000','8 * 60 * 1000'],
+ ['const admission=await readImportAdmission(tx,companyId,token);','const admission=null;'],
+ ['registerImport(tx,admission);',''],
+ ['const revocationKey=await beforeSessionRevocation(companyId,lock.token,revocationRunRef,item.uid);','const revocationKey=null;'],
+ ['await recordSessionRevocation(companyId,lock.token,revocationRunRef,revocationKey,true);',''],
  ['current?.companyId === item.data.companyId','true'],
  ['if (mode === "commit" && (!completeSelection || !completeRows))','if (false)'],
  ['if (failedSheets > 0)','if (false)'],
@@ -300,6 +304,7 @@ assert.ok(Object.keys(modules).every(n=>allowed.includes(n)));assert.ok(!allowed
 for (const [before,after] of [
  ['if (handoff) await handoff.beforeCommit(', 'if (false) await handoff.beforeCommit('],
  ['handoff?.prepareOnly ? {readOnly: true} : undefined', 'undefined'],
+ ['need((await getProductionOperationalState(companyId, tx)).operational, "GLOBAL_OPERATION_STOPPED_BEFORE_MANUAL_COMMIT");',''],
  ['clientNameUpConfirmed: false,', 'clientNameUpConfirmed: true,'],
  ['sourceWrites: 0, monthlyWrites: 0, businessRecordsCreated: 0', 'sourceWrites: 0, monthlyWrites: 0, businessRecordsCreated: 1'],
  ['tx.update(jobRef, nextJob);', 'tx.update(jobRef, nextJob); if (handoff) await handoff.beforeCommit({});'],
@@ -324,6 +329,7 @@ for(const [before,after]of [
 ])rejectIn('acknowledgeSheetWriteIssue','case-list-monthly-worker','export async function reconcileCaseListMonthlyAssignment(','export async function retryCaseListMonthlyAssignments(',before,after);
 for(const [before,after]of [
  ['if (commitGuard) await commitGuard(plan.kind, uid, token, r);',''],
+ ['need((await getProductionOperationalState(initial!.companyId, tx)).operational, "GLOBAL_OPERATION_STOPPED_BEFORE_EXTERNAL_COMMIT");',''],
  ['writeAt - window.readStartedAt <= 60_000','true'],
  ['return runExternal(queueRef, uid, token, false, undefined, commitGuard);','return runExternal(queueRef, uid, token, false);'],
 ])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-external-transfer'});

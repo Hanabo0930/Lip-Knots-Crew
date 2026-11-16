@@ -205,11 +205,11 @@ function firebaseExternalOwner<T>(request: any, session: any, operation: (actor:
 
 export const acknowledgeSheetWriteIssue = onCall(async (request) => {
   const session = requireAdmin(request);
+  const companyId = companyFromClaims(session.token);
   if (typeof request.data?.action === "string" && request.data.action.startsWith("staff-ng-")) {
     const {handleStaffNgManagement}=require("./staff-ng-management") as typeof import("./staff-ng-management");
     return handleStaffNgManagement(request,session);
   }
-  const companyId = companyFromClaims(session.token);
   if (["preview-case-list-gas-send", "confirm-case-list-gas-send", "observe-case-list-gas-send"].includes(request.data?.action)) {
     const { handleOwnerNameUpReview } = require("./case-list-owner-review-callable") as typeof import("./case-list-owner-review-callable");
     return handleOwnerNameUpReview(request, session);

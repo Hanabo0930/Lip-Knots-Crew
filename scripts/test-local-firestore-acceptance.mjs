@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {Readable} from 'node:stream';
 import {createRequire} from 'node:module';
 import {localAcceptanceEnvironment,blockNonEmulatorConnections,seedLocalApplicationAccess} from './local-firestore-acceptance-safety.mjs';
 const environment=localAcceptanceEnvironment(process.env);
@@ -32,6 +33,9 @@ google.sheets=()=>({spreadsheets:{
 const load=name=>require('../functions/lib/'+name+'.js');
 const {db,storage}=load('firebase');
 const driveFiles=new Map(),storageObjects=new Map();let allocated=0,driveCopies=0;
+const uploadedBytes=Buffer.alloc(100,0x61);
+const uploadSha256=crypto.createHash('sha256').update(uploadedBytes).digest('hex');
+const uploadMd5=crypto.createHash('md5').update(uploadedBytes).digest();
 const drive={files:{
   generateIds:async()=>({data:{ids:['synthetic-drive-'+(++allocated)]}}),
   list:async()=>({data:{files:[{id:'synthetic-folder'}]}}),
@@ -39,7 +43,9 @@ const drive={files:{
   create:async input=>{
     assert.ok(input.media,'only synthetic file transfers are allowed');
     const id=input.requestBody.id;if(driveFiles.has(id))throw {code:409};
-    const file={...input.requestBody,id,size:'100',md5Checksum:'00000000000000000000000000000000',createdTime:new Date().toISOString()};
+    const chunks=[];for await(const chunk of input.media.body)chunks.push(chunk);
+    assert.deepEqual(Buffer.concat(chunks),uploadedBytes);
+    const file={...input.requestBody,id,size:'100',md5Checksum:uploadMd5.toString('hex'),createdTime:new Date().toISOString()};
     driveFiles.set(id,file);driveCopies++;return {data:structuredClone(file)};
   }
 }};
@@ -48,7 +54,7 @@ storage.bucket=(name='synthetic-bucket')=>{
   assert.equal(name,'synthetic-bucket');
   return {file:(key,options)=>({
     getMetadata:async()=>{if(!storageObjects.has(key))throw {code:404};return [structuredClone(storageObjects.get(key))];},
-    createReadStream:()=>{assert.equal(options?.generation,'1');assert.ok(storageObjects.has(key));return {syntheticPath:key};},
+    createReadStream:()=>{assert.equal(options?.generation,'1');assert.ok(storageObjects.has(key));return Readable.from([uploadedBytes]);},
     delete:async()=>{storageObjects.delete(key);}
   })};
 };
@@ -181,10 +187,10 @@ try {
     process.env.LKC_SUBMISSION_TRANSFER_MODE='active';
     const initialCopies=driveCopies,initialSize=driveFiles.size;
     const start=(count,patch={})=>call(uploads.createUploadSession,h.staff[0],{jobId:h.jobId,type:'report',
-      files:Array.from({length:count},(_,i)=>({originalName:'synthetic-'+i+'.png',contentType:'image/png',size:100,contentSha256:'a'.repeat(64)})),...patch});
+      files:Array.from({length:count},(_,i)=>({originalName:'synthetic-'+i+'.png',contentType:'image/png',size:100,contentSha256:uploadSha256})),...patch});
     const finish=file=>{
-      storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:'a'.repeat(64)}});
-      return uploads.finalizeStagedUpload.run({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:'1',md5Hash:'AAAAAAAAAAAAAAAAAAAAAA=='}});
+      storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:uploadSha256}});
+      return uploads.finalizeStagedUpload.run({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:'1',md5Hash:uploadMd5.toString('base64')}});
     };
     const clientRequestId=crypto.randomUUID();
     const sessions=await Promise.all([start(2,{clientRequestId}),start(2,{clientRequestId})]);
@@ -192,7 +198,9 @@ try {
     const first=sessions[0];
     assert.equal((await h.list('submissions')).length,1);
     assert.equal((await db.doc('submissions/'+first.submissionId).collection('files').get()).size,2);
-    await Promise.all(first.files.map(finish));
+    const initialTransfers=await Promise.allSettled(first.files.map(finish));
+    const transferErrors=initialTransfers.filter(result=>result.status==='rejected').map(result=>result.reason);
+    if(transferErrors.length)throw new AggregateError(transferErrors,'Initial synthetic uploads failed: '+transferErrors.map(error=>error.message).join('; '));
     const originalIds=await Promise.all(first.files.map(async file=>(await db.doc('submissions/'+first.submissionId+'/files/'+file.fileId).get()).data().driveFileId));
     assert.equal((await db.doc('submissions/'+first.submissionId).get()).data().completedFiles,2);
     await finish(first.files[0]);

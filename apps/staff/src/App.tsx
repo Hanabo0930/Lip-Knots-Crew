@@ -392,15 +392,16 @@ export default function App(){
   const businessRefreshInFlightRef=useRef(false);
   const applicationAttemptsRef=useRef(new Map<string,ApplicationAttempt>());
   const [,refreshApplicationAttempts]=useState(0);
+  const applicationAttemptsReadError="保存済みの応募確認記録を読み込めません。ブラウザーの保存設定とシフトでの確定状況を確認してください。";
   useEffect(()=>{
     if(!firebaseConfigured||!companyId||!staffId||!user?.uid)return;
     return observeApplicationAttempts(applicationAttemptOwner(companyId,staffId,user.uid),attempts=>{
       // 別画面の保存記録を取り込み、手元の未確認記録はシフトの確定確認まで保持する。
       for(const [jobId,attempt] of attempts)applicationAttemptsRef.current.set(jobId,attempt);
       refreshApplicationAttempts(value=>value+1);
-    },()=>setMessage("保存済みの応募確認記録を読み込めません。ブラウザーの保存設定とシフトでの確定状況を確認してください。"));
+    },()=>setMessage(applicationAttemptsReadError));
   },[companyId,staffId,user?.uid]);
-  useEffect(()=>{applicationAttemptsRef.current.clear();if(!firebaseConfigured||!companyId||!staffId||!user?.uid)return;try{applicationAttemptsRef.current=loadSavedApplicationAttempts(applicationAttemptOwner(companyId,staffId,user.uid));refreshApplicationAttempts(value=>value+1);}catch{setMessage("保存済みの応募確認記録を読み込めません。ブラウザーの保存設定とシフトでの確定状況を確認してください。");}},[companyId,staffId,user?.uid]);
+  useEffect(()=>{applicationAttemptsRef.current.clear();if(!firebaseConfigured||!companyId||!staffId||!user?.uid)return;try{applicationAttemptsRef.current=loadSavedApplicationAttempts(applicationAttemptOwner(companyId,staffId,user.uid));refreshApplicationAttempts(value=>value+1);}catch{setMessage(applicationAttemptsReadError);}},[companyId,staffId,user?.uid]);
   const openJobsLoadVersionRef=useRef(0);
   const openJobsCursorRef=useRef<QueryDocumentSnapshot|null>(null);
   const openJobsDateRef=useRef("");
@@ -2197,6 +2198,7 @@ export default function App(){
 
   async function refreshSubmissionInformation(){
     if(!selectedAssignedJob||isSubmissionActionPending())return;
+    const incomplete="提出情報の一部を確認できませんでした。通信状態を確認して「提出情報を再読み込み」を押してください。";
     const jobId=selectedAssignedJob.id;
     const type=submissionType;
     const req=requestId;
@@ -2214,8 +2216,8 @@ export default function App(){
         ]);
         const failed=results.find(result=>result.status==="rejected");
         if(failed?.status==="rejected")throw failed.reason;
-        if(isCurrent())showSubmissionMessage(results.every(result=>result.status==="fulfilled"&&Boolean(result.value))?"提出情報を更新しました。":"提出情報の一部を確認できませんでした。通信状態を確認して「提出情報を再読み込み」を押してください。");
-      },{setMessage:()=>{if(isCurrent())showSubmissionMessage("提出情報の一部を確認できませんでした。通信状態を確認して「提出情報を再読み込み」を押してください。");}});
+        if(isCurrent())showSubmissionMessage(results.every(result=>result.status==="fulfilled"&&Boolean(result.value))?"提出情報を更新しました。":incomplete);
+      },{setMessage:()=>{if(isCurrent())showSubmissionMessage(incomplete);}});
     }catch{ /* 再読込ボタンを残し、通信復旧後に再試行できるようにする。 */ }
   }
 

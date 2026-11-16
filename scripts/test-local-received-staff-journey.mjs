@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import {Readable} from 'node:stream';
 import {createRequire} from 'node:module';
 import {localAcceptanceEnvironment,blockNonEmulatorConnections,seedLocalApplicationAccess} from './local-firestore-acceptance-safety.mjs';
 const environment=localAcceptanceEnvironment(process.env),network=blockNonEmulatorConnections(environment.port);
@@ -11,6 +12,9 @@ const originalSheets=google.sheets,originalState=safety.getProductionOperational
 process.env.LKC_SHEET_WRITE_MODE='active';safety.getProductionOperationalState=async()=>({operational:true});
 const load=name=>require('../functions/lib/'+name+'.js');
 const driveFiles=new Map(),storageObjects=new Map();let allocated=0,driveCopies=0;
+const uploadedBytes=Buffer.alloc(100,0x61);
+const uploadSha256=crypto.createHash('sha256').update(uploadedBytes).digest('hex');
+const uploadMd5=crypto.createHash('md5').update(uploadedBytes).digest();
 const drive={files:{
   generateIds:async()=>({data:{ids:['synthetic-drive-'+(++allocated)]}}),
   list:async()=>({data:{files:[{id:'synthetic-folder'}]}}),
@@ -18,7 +22,9 @@ const drive={files:{
   create:async input=>{
     assert.ok(input.media,'only synthetic file transfers are allowed');
     const id=input.requestBody.id;if(driveFiles.has(id))throw {code:409};
-    const file={...input.requestBody,id,size:'100',md5Checksum:'00000000000000000000000000000000',createdTime:new Date().toISOString()};
+    const chunks=[];for await(const chunk of input.media.body)chunks.push(chunk);
+    assert.deepEqual(Buffer.concat(chunks),uploadedBytes);
+    const file={...input.requestBody,id,size:'100',md5Checksum:uploadMd5.toString('hex'),createdTime:new Date().toISOString()};
     driveFiles.set(id,file);driveCopies++;return {data:structuredClone(file)};
   }
 }};
@@ -27,7 +33,7 @@ storage.bucket=(name='synthetic-bucket')=>{
   assert.equal(name,'synthetic-bucket');
   return {file:(key,options)=>({
     getMetadata:async()=>{if(!storageObjects.has(key))throw {code:404};return [structuredClone(storageObjects.get(key))];},
-    createReadStream:()=>{assert.equal(options?.generation,'1');assert.ok(storageObjects.has(key));return {syntheticPath:key};},
+    createReadStream:()=>{assert.equal(options?.generation,'1');assert.ok(storageObjects.has(key));return Readable.from([uploadedBytes]);},
     delete:async()=>{storageObjects.delete(key);}
   })};
 };
@@ -166,8 +172,8 @@ try{
   const completedWrites=sheetWrites;await writes.processSafeSheetWrite.run(preEvent);assert.equal(sheetWrites,completedWrites);
   const uploads=load('uploads'),requests=load('resubmissions'),views=load('submission-files');
   await db.doc('companies/'+h.companyId+'/settings/drive').set({rootFolderId:'synthetic-root'});process.env.LKC_SUBMISSION_TRANSFER_MODE='active';
-  const start=async patch=>uploads.createUploadSession.run({auth:h.staff[0],data:{jobId:h.job.id,type:'report',expectedRevision:(await h.job.get()).data().revision,files:[{originalName:'synthetic.png',contentType:'image/png',size:100,contentSha256:'a'.repeat(64)}],...patch}});
-  const finish=file=>{storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:'a'.repeat(64)}});return uploads.finalizeStagedUpload.run({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:'1',md5Hash:'AAAAAAAAAAAAAAAAAAAAAA=='}});};
+  const start=async patch=>uploads.createUploadSession.run({auth:h.staff[0],data:{jobId:h.job.id,type:'report',expectedRevision:(await h.job.get()).data().revision,files:[{originalName:'synthetic.png',contentType:'image/png',size:100,contentSha256:uploadSha256}],...patch}});
+  const finish=file=>{storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:uploadSha256}});return uploads.finalizeStagedUpload.run({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:'1',md5Hash:uploadMd5.toString('base64')}});};
   if(!kind)await assert.rejects(()=>start({expectedRevision:0}),e=>e.code==='failed-precondition');
   const copiesBefore=driveCopies;const clientRequestId=crypto.randomUUID();const sessions=await Promise.all([start({clientRequestId}),start({clientRequestId})]);assert.equal(sessions[0].submissionId,sessions[1].submissionId);const first=sessions[0];await finish(first.files[0]);await finish(first.files[0]);assert.equal(driveCopies-copiesBefore,1);
   const original=(await db.doc('submissions/'+first.submissionId+'/files/'+first.files[0].fileId).get()).data().driveFileId;assert.ok(original);assert.equal((await db.doc('submissions/'+first.submissionId).get()).data().completedFiles,1);

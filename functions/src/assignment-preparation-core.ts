@@ -1,6 +1,27 @@
+import { createHash } from "node:crypto";
+import type { DocumentData } from "firebase-admin/firestore";
 import { HttpsError } from "firebase-functions/v2/https";
 import { netPrintAssignmentPatch } from "./netprint-state-core";
 import { cancellationSheetWriteIdentity } from "./sheet-write-core";
+
+export const STAFF_APPLICATION_RECEIPT_SCHEMA = "LK_STAFF_APPLICATION_RECEIPT_V1";
+
+export function staffApplicationQueueKey(uid: string, requestId: string): string {
+  return "apply_" + createHash("sha256").update(JSON.stringify([uid, requestId])).digest("hex");
+}
+
+export function readStaffApplicationQueueReceipt(queue: DocumentData | undefined, requestId: string) {
+  const receipt = queue?.staffApplicationReceipt;
+  if (!queue || (queue.operation !== "job.assign" && queue.operation !== "case_list.assign") ||
+      receipt?.schema !== STAFF_APPLICATION_RECEIPT_SCHEMA || receipt.requestId !== requestId ||
+      typeof receipt.assignedAt !== "string" || !Number.isFinite(Date.parse(receipt.assignedAt))) return undefined;
+  return {
+    uid: queue.actorUid, companyId: queue.companyId, staffId: queue.actorStaffId,
+    expectedJobRevision: receipt.expectedJobRevision, expectedSourceRevision: receipt.expectedSourceRevision,
+    mailApplicationId: receipt.mailApplicationId, mailApplicationRevision: receipt.mailApplicationRevision,
+    result: { ok: true, jobId: queue.jobId, assignedAt: receipt.assignedAt },
+  };
+}
 
 function contactIdentity(job: Record<string, unknown>): string {
   const source = job.sheetRef as Record<string, unknown> | undefined;

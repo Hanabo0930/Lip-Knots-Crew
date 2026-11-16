@@ -4,6 +4,7 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 
 const app = readFileSync("apps/staff/src/App.tsx", "utf8");
+const attemptStore = readFileSync("apps/staff/src/submission-attempt-store.ts", "utf8");
 const diagnostics = readFileSync("apps/staff/src/diagnostics.ts", "utf8");
 const auth = readFileSync("functions/src/auth.ts", "utf8");
 const push = readFileSync("apps/staff/src/push.ts", "utf8");
@@ -11,6 +12,7 @@ const asyncAction = readFileSync("apps/staff/src/useAsyncAction.ts", "utf8");
 const businessCache = readFileSync("apps/staff/src/business-cache.ts", "utf8");
 const concurrency = readFileSync("apps/staff/src/concurrency.ts", "utf8");
 const draftStore = readFileSync("apps/staff/src/draft-store.ts", "utf8");
+const updatePrompt = readFileSync("apps/staff/src/pwa-update-prompt.ts", "utf8");
 const jobList = readFileSync("apps/staff/src/job-list.ts", "utf8");
 const styles = readFileSync("apps/staff/src/styles.css", "utf8");
 
@@ -87,12 +89,17 @@ assert.deepEqual(
 
 assert.match(
   app,
-  /await loadPrimaryBusinessData\(sid,cid,current\.uid\);[\s\S]*setBusinessDataStatus\("ready"\);[\s\S]*void registerCurrentDevice\(authLoadVersion\)/u,
-  "The home screen must become ready before optional device registration.",
+  /setCompanyId\(cid\); setStaffId\(sid\);[\s\S]*await loadPrimaryBusinessData\(sid,cid,current\.uid\);[\s\S]*setBusinessDataStatus\("ready"\)/u,
+  "Device registration must not delay the startup business read or display.",
 );
 assert.match(
   app,
-  /void registerCurrentDevice\(authLoadVersion\)\.catch\(\(\)=>\{if\(isCurrentAuthLoad\(\)\)setMessage\("端末情報を登録できませんでした。再読み込みしてください。"\);\}\);[\s\S]*async function registerCurrentDevice\(authLoadVersion=authLoadVersionRef\.current\)[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return"";[\s\S]*const id=\(r\.data as \{sessionId\?:unknown\}\|null\)\?\.sessionId;[\s\S]*if\(typeof id!=="string"[\s\S]*setDeviceSessionId\(id\)/u,
+  /if\(!user\|\|!companyId\|\|!staffId\|\|!functions\|\|!db\|\|!auth\|\|sessionRevoked\)return;[\s\S]*await registerCurrentDevice\(authVersion\)[\s\S]*if\(await heartbeat\(\)&&isCurrent\(\)\)/u,
+  "Start device checking at verified scope and recheck it before refreshing foreground data.",
+);
+assert.match(
+  app,
+  /async function registerCurrentDevice\(authLoadVersion=authLoadVersionRef\.current\)[\s\S]*if\(authLoadVersion!==authLoadVersionRef\.current\)return"";[\s\S]*const id=\(r\.data as \{sessionId\?:unknown\}\|null\)\?\.sessionId;[\s\S]*if\(typeof id!=="string"[\s\S]*setDeviceSessionId\(id\)/u,
   "A delayed device registration must not attach an older account session to the current Staff screen.",
 );
 assert.match(
@@ -127,13 +134,13 @@ assert.match(
 );
 assert.match(
   app,
-  /if\(!user\)return;[\s\S]*let active=true;[\s\S]*listenForForegroundPush\(payload=>\{if\(active\)setMessage[\s\S]*then\(value=>\{[\s\S]*if\(!active\)\{value\?\.\(\);return;\}[\s\S]*unsub=value;[\s\S]*catch\(\(\)=>undefined\);[\s\S]*return\(\)=>\{active=false;unsub\?\.\(\);\};/u,
+  /if\(!user\|\|!companyId\|\|!staffId\|\|sessionRevoked\)return;[\s\S]*const isCurrent=\(\)=>active&&authVersion===authLoadVersionRef\.current;[\s\S]*listenForForegroundPush\(payload=>\{[\s\S]*staffForegroundNotice\(payload\.data,scope\)[\s\S]*if\(notice===null\)return false;[\s\S]*\},isCurrent\)\.then\(value=>\{[\s\S]*if\(!isCurrent\(\)\)\{value\?\.\(\);return;\}[\s\S]*unsub=value;[\s\S]*catch\(\(\)=>undefined\);[\s\S]*return\(\)=>\{active=false;unsub\?\.\(\);\};/u,
   "A foreground push listener that finishes after logout must unsubscribe immediately without leaking an unhandled rejection.",
 );
 assert.match(
   app,
-  /const handleRevoked=async\(message:string\)=>\{[\s\S]*if\(stopped\|\|authVersion!==authLoadVersionRef\.current\|\|revocationPending\|\|revocationCompleted\)return;[\s\S]*clearBusinessSnapshot\(user\.uid,companyId,staffId\);[\s\S]*await signOut\(activeAuth\);revocationCompleted=true;[\s\S]*const stopWatching=watchDeviceSession\(deviceSessionId,\(\)=>handleRevoked\([\s\S]*void onRevoked\(\)\.catch\(\(\)=>undefined\)/u,
-  "A revoked device listener must not sign out a newer session after its owning effect has stopped.",
+  /const handleRevoked=async\(\)=>\{[\s\S]*if\(isCurrent\(\)\)await logoutRevokedSession\(authVersion,user\.uid,companyId,staffId\);[\s\S]*watchDeviceSession\(deviceSessionId,handleRevoked\)/u,
+  "The watched device must use the account-bound revocation path.",
 );
 assert.match(
   asyncAction,
@@ -157,7 +164,7 @@ assert.match(
 );
 assert.match(
   app,
-  /const hydratedDraftKeyRef=useRef\(""\);[\s\S]*const draftHydratingRef=useRef\(false\);[\s\S]*const skipNextDraftSaveRef=useRef\(false\);[\s\S]*hydratedDraftKeyRef\.current="";[\s\S]*draftHydratingRef\.current=Boolean\(draftKey\);[\s\S]*let active=true;[\s\S]*loadDraft\(draftKey\)\.then\(draftFiles=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(draftFiles\);[\s\S]*hydratedDraftKeyRef\.current=draftKey;[\s\S]*draftHydratingRef\.current=false;[\s\S]*catch\(\(\)=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(\[\]\);[\s\S]*draftHydratingRef\.current=false;[\s\S]*return\(\)=>\{active=false;\};[\s\S]*if\(!draftKey\|\|draftHydrating\|\|hydratedDraftKeyRef\.current!==draftKey\|\|draftSavePaused\)return;[\s\S]*if\(skipNextDraftSaveRef\.current\)\{skipNextDraftSaveRef\.current=false;return;\}/u,
+  /const hydratedDraftKeyRef=useRef\(""\);[\s\S]*const draftHydratingRef=useRef\(false\);[\s\S]*const skipNextDraftSaveRef=useRef\(false\);[\s\S]*hydratedDraftKeyRef\.current="";[\s\S]*draftHydratingRef\.current=Boolean\(draftKey\);[\s\S]*let active=true;[\s\S]*loadDraftState\(draftKey\)\.then\(\(\{files:draftFiles,legacySubmitted\}\)=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(draftFiles\);[\s\S]*hydratedDraftKeyRef\.current=draftKey;[\s\S]*draftHydratingRef\.current=false;[\s\S]*catch\(\(\)=>\{[\s\S]*if\(!active\)return;[\s\S]*setFiles\(\[\]\);[\s\S]*draftHydratingRef\.current=false;[\s\S]*return\(\)=>\{active=false;\};[\s\S]*if\(!draftKey\|\|draftHydrating\|\|hydratedDraftKeyRef\.current!==draftKey\|\|draftSavePaused\)return;[\s\S]*if\(skipNextDraftSaveRef\.current\)\{skipNextDraftSaveRef\.current=false;return;\}/u,
   "Submission drafts must ignore stale loads, clear stale files on failure, and never save before hydration.",
 );
 assert.match(
@@ -167,7 +174,7 @@ assert.match(
 );
 assert.match(
   draftStore,
-  /const draftMutations = new Map<string, Promise<void>>\(\);[\s\S]*function enqueueDraftMutation[\s\S]*previous\.catch\(\(\) => undefined\)\.then\(mutation\)[\s\S]*function waitForDraftMutation[\s\S]*await draftMutations\.get\(key\)[\s\S]*export function saveDraft[\s\S]*return enqueueDraftMutation\(key[\s\S]*export async function loadDraft[\s\S]*await waitForDraftMutation\(key\)[\s\S]*export function clearDraft[\s\S]*return enqueueDraftMutation\(key/u,
+  /const draftMutations = new Map<string, Promise<void>>\(\);[\s\S]*function enqueueDraftMutation[\s\S]*previous\.catch\(\(\) => undefined\)\.then\(mutation\)[\s\S]*function waitForDraftMutation[\s\S]*await draftMutations\.get\(key\)[\s\S]*export function saveDraft[\s\S]*return enqueueDraftMutation\(key[\s\S]*export async function loadDraftState[\s\S]*await waitForDraftMutation\(key\)[\s\S]*export function clearDraft[\s\S]*return enqueueDraftMutation\(key/u,
   "Draft saves, reads, and clears for one submission must remain ordered so a stale save cannot restore cleared files.",
 );
 assert.match(
@@ -182,18 +189,18 @@ assert.match(
 );
 assert.match(
   app,
-  /const bootstrapPromise=bootstrap\(\);[\s\S]*getIdTokenResult\(current\)[\s\S]*restoreCachedBusinessData\(initialCid,initialSid\)[\s\S]*await bootstrapPromise/u,
-  "Trusted cached business data must render while session revalidation continues in parallel.",
+  /const bootstrapPromise=bootstrap\(\);[\s\S]*const initialToken=await getIdTokenResult\(current\)[\s\S]*const result=await bootstrapPromise;[\s\S]*sessionVerified=true;[\s\S]*restoreCachedBusinessData\(cid,sid\)/u,
+  "Startup runs the token lookup alongside server revalidation, and can show cached shifts only after scope verification.",
 );
 assert.match(
   app,
-  /const knownScope=loadLastBusinessScope\(current\.uid\);[\s\S]*restoreCachedBusinessData\(knownScope\.companyId,knownScope\.staffId\)[\s\S]*getIdTokenResult\(current\)/u,
-  "A returning signed-in user must see the last verified business snapshot before token lookup finishes.",
+  /setDeviceSessionId\(""\);\s*setSessionRevoked\(false\);\s*setUser\(current\)/u,
+  "Changing the current user must drop the previous device session before revalidation.",
 );
 assert.match(
   businessCache,
   /saveLastBusinessScope\(uid, companyId, staffId\)[\s\S]*export function clearBusinessSnapshot/u,
-  "A verified live snapshot must persist a bounded per-user scope hint for instant startup.",
+  "A verified live snapshot must persist a per-user scope hint for revocation cleanup.",
 );
 assert.match(
   app,
@@ -215,9 +222,26 @@ assert.match(
   /runWithConcurrency\(uploads,UPLOAD_CONCURRENCY/u,
   "Multiple submission files must upload with bounded concurrency.",
 );
+const uploadStart = app.indexOf("  async function uploadSubmission(){");
+const uploadEnd = app.indexOf("  async function retryDraftCleanup(){", uploadStart);
+assert.ok(uploadStart >= 0 && uploadEnd > uploadStart, "The upload handler must remain inspectable.");
+const uploadHandler = app.slice(uploadStart, uploadEnd);
+const receiptBeforeTransfer = /^\s*const data=await readSubmissionUploadReceipt\(r\.data,request,matchesDisplayed,files\.length,\{companyId,staffId,uid:user\?\.uid\}\);\s*if\(!isCurrentUpload\(\)\)return;\s*const uploads=data\.files\.flatMap\([^\n]*\);[\s\S]*await runWithConcurrency\(uploads,UPLOAD_CONCURRENCY,/mu;
+assert.match(uploadHandler, receiptBeforeTransfer, "Await the staff-scoped receipt and recheck the active session before constructing upload targets.");
+const receiptBoundaryMutants = [
+  ["const data=await readSubmissionUploadReceipt", "const data=readSubmissionUploadReceipt"],
+  [",uid:user?.uid", ""],
+  ["if(!isCurrentUpload())return;\n        const uploads=data.files", "const uploads=data.files"],
+  ["const uploads=data.files.flatMap", "const uploads=other.files.flatMap"],
+];
+for (const [trusted, weakened] of receiptBoundaryMutants) {
+  assert.ok(uploadHandler.includes(trusted), trusted);
+  assert.doesNotMatch(uploadHandler.replace(trusted, weakened), receiptBeforeTransfer, weakened);
+}
+console.log("Upload receipt guard: awaiting, identity binding, session recheck and verified targets.");
 assert.match(
-  app,
-  /data\.files\.length!==files\.length/u,
+  attemptStore,
+  /receipt\.files\.length\s*!==\s*fileCount/u,
   "Uploads must stop if the server does not return one destination per selected file.",
 );
 assert.doesNotMatch(
@@ -242,7 +266,7 @@ assert.match(
 );
 assert.match(
   app,
-  /restoredScope&&\(restoredScope\.companyId!==cid\|\|restoredScope\.staffId!==sid\)[\s\S]*clearBusinessSnapshot\(current\.uid,restoredScope\.companyId,restoredScope\.staffId\)/u,
+  /rememberedScope&&\(rememberedScope\.companyId!==cid\|\|rememberedScope\.staffId!==sid\)[\s\S]*clearBusinessSnapshot\(current\.uid,rememberedScope\.companyId,rememberedScope\.staffId\)/u,
   "A changed authoritative staff scope must remove and hide the stale cached scope.",
 );
 assert.match(
@@ -267,8 +291,8 @@ assert.match(
 );
 assert.match(
   auth,
-  /const batch = db\.batch\(\)[\s\S]*batch\.commit\(\)/u,
-  "Staff login metadata writes must share one Firestore round trip.",
+  /const claims = await db\.runTransaction\(async \(tx\) => \{[\s\S]*await tx\.get\(db\.collection\("emailIndex"\)\.doc\(normalizedEmailHash\)\)[\s\S]*Promise\.all\(\[tx\.get\(profileRef\), tx\.get\(identityRef\)\]\)[\s\S]*tx\.set\(profileRef,[\s\S]*tx\.set\(identityRef,[\s\S]*\}\);\s*const refreshToken/u,
+  "Staff login profile and identity writes must be committed together after the live checks.",
 );
 assert.match(
   concurrency,
@@ -482,7 +506,7 @@ assert.match(
 );
 assert.match(
   app,
-  /tasks\.length\?<><p>\{taskSummary\}<\/p>[\s\S]*className="task-clear" role="status"[\s\S]*新しい対応が届くと、ここに表示されます/u,
+  /tasks\.length\?<>\s*<p>\{taskSummary\}<\/p>[\s\S]*className="task-clear" role="status"[\s\S]*新しい対応が届くと、ここに表示されます/u,
   "A completed day must use one compact, non-duplicated status instead of two empty messages.",
 );
 assert.match(
@@ -512,7 +536,7 @@ assert.match(
 );
 assert.match(
   app,
-  /const nextShift=nextShiftJob\(myJobs,businessDate\);[\s\S]*<h2>次回シフト<\/h2>[\s\S]*nextShift\?<article[\s\S]*openShiftJob\(nextShift\)/u,
+  /const nextShift=nextShiftJob\(myJobs,businessDate\);[\s\S]*<h2>次回シフト<\/h2>[\s\S]*nextShift\?<article[\s\S]*openShiftJob\(nextShift(?:\)|,)/u,
   "The next-shift card must not follow an older shift selected elsewhere in the app.",
 );
 assert.match(
@@ -660,7 +684,7 @@ assert.match(
 
 assert.match(
   app,
-  /async function uploadSubmission\(\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const isCurrentUpload=\(\)=>authLoadVersion===authLoadVersionRef\.current;[\s\S]*createUploadSession[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*state_changed[\s\S]*if\(isCurrentUpload\(\)\)setUploadState[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*await clearDraft\(draftKey\);[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*setMessage:value=>\{if\(isCurrentUpload\(\)\)showSubmissionMessage\(value\);\}[\s\S]*catch\{return;\}/u,
+  /async function uploadSubmission\(\)[\s\S]*const authLoadVersion=authLoadVersionRef\.current;[\s\S]*const isCurrentUpload=\(\)=>authLoadVersion===authLoadVersionRef\.current&&\s*submissionConfirmationContextRef\.current===submissionConfirmationContext;[\s\S]*createUploadSession[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*state_changed[\s\S]*if\(isCurrentUpload\(\)\)setUploadState[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*await finishSubmittedDraft\([^\n]+?,isCurrentUpload,clearSubmissionAttempt\);[\s\S]*if\(!isCurrentUpload\(\)\)return;[\s\S]*setMessage:value=>\{if\(isCurrentUpload\(\)\)showSubmissionMessage\(value\);\}[\s\S]*catch\{return;\}/u,
   "Submission preparation, progress, completion, and errors must remain pinned to the account that started the upload.",
 );
 
@@ -684,9 +708,11 @@ assert.match(
 
 assert.equal(
   app.match(/setView\(/gu)?.length,
-  1,
-  "All Staff view changes must use the shared navigation helper instead of bypassing scroll reset.",
+  2,
+  "Only the account reset and normal navigation may change Staff views.",
 );
+assert.match(app, /onAuthStateChanged\(auth,async current=>\{[\s\S]*if\(firebaseConfigured\)\{\s*setView\("home"\);\s*window\.scrollTo\(\{top:0,left:0,behavior:"auto"\}\);/u,
+  "Account reset must go back to the top of Home while preserving the incoming notification route for the newly verified account.");
 
 assert.match(
   app,
@@ -706,7 +732,7 @@ for(const switchAt of ["none","list","revoke","refresh","failure"]){
     setPendingDeviceId:value=>events.push(`pending:${value}`),
     setMessage:()=>events.push("message"),setShowAccountMenu:()=>{},
     setShowDiagnostics:()=>{},closeDiagnostics:()=>{},setShowDevices:()=>{},
-    logoutCurrentUser:async()=>events.push("logout"),
+    user:{uid:"synthetic"},companyId:"company",staffId:"staff",logoutRevokedSession:async()=>events.push("logout"),
     run:async(_key,action,options)=>{try{await action();}catch(error){options.setMessage(error.message);throw error;}},
     httpsCallable:(_functions,name)=>async()=>{
       if((name==="listMyDevices"&&(switchAt==="list"||switchAt==="refresh"))||
@@ -725,4 +751,10 @@ for(const switchAt of ["none","list","revoke","refresh","failure"]){
       `Device revocation must isolate the originating session (${switchAt}).`);
   }
 }
-console.log("Staff UX and performance checks passed (127 existing assertions + 5 device-session scenarios).");
+assert.match(app, /isSubmissionActionPending\(\)\|\|draftReloadBlocked\(draftKey,submissionFilesRef\.current\)[\s\S]*addEventListener\("lkc-pwa-reload",preventUnsafeReload\)/u,
+  "App updates must protect the current draft context and in-progress submission.");
+assert.match(draftStore, /await tx\(db, "readwrite", store => store\.put\(records, storageKey\)\);\s*bindDraftSelection\(files, key, storageKey, records\);/u,
+  "Only a committed draft write can make a changed selection reloadable.");
+assert.match(updatePrompt, /if\(updateBlocked\(\)\)return;[\s\S]*postMessage\(\{type:"SKIP_WAITING"\}\)[\s\S]*if\(updateBlocked\(\)\)return;[\s\S]*window\.location\.reload\(\)/u,
+  "The update prompt must check work before activation and once more immediately before reload.");
+console.log("Staff UX, performance and update-protection checks passed.");

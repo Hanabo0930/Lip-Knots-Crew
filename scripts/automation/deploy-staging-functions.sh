@@ -50,6 +50,11 @@ npx --yes --package=firebase-tools@15.24.0 -- node "$lkc_trusted_runner"
 for function_name in "${function_names[@]}"; do
   service_name=""
   case "$function_name" in
+    caseListGasSync)
+      # Same guarded deployment route; never use the generic public-invoker update.
+      node "$(dirname "$lkc_trusted_runner")/staging-gas-sync-readiness.mjs" --verify-after
+      service_name=""
+      ;;
     loginGateway) service_name="logingateway" ;;
     bootstrapSession) service_name="bootstrapsession" ;;
     requestStaffLoginLink) service_name="requeststaffloginlink" ;;

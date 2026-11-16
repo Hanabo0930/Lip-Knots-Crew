@@ -1,17 +1,20 @@
 import { expenseReadinessMessage } from "./expense-readiness";
+import AdminExpenseOperation, { type ExpenseOperation } from "./AdminExpenseOperation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 type ExpenseValues = { transportation:string;purchase8:string;purchase10:string;netPrintCost:string;postageCost:string };
-type ExpenseJob = { id:string;workDate:string;storeName:string;assignedStaffName?:string|null } & NonNullable<Parameters<typeof expenseReadinessMessage>[0]>;
+type ExpenseJob = { id:string;workDate:string;storeName:string;assignedStaffName?:string|null;caseListSource?:unknown } & NonNullable<Parameters<typeof expenseReadinessMessage>[0]>;
 type Props = {
   expenseHoldReason?:string;
+  expenseCompletionHoldReason?:string;
+  lookupExpenseOperation?:(jobId:string,operationId?:string)=>Promise<ExpenseOperation|null>;
   focusRequest?:number;active?:boolean;openReport?:(jobId:string)=>void;
   jobs:ExpenseJob[];expenseJobId:string;expenseValues:ExpenseValues;expenseNote:string;expenseStatus:string;expenseBusy:boolean;expenseReady:boolean;
   loadExpenseReview:(jobId:string)=>Promise<void>;saveExpenseDraft:()=>Promise<void>;completeExpense:()=>Promise<void>;openSheet:()=>void;
   setExpenseValues:Dispatch<SetStateAction<ExpenseValues>>;setExpenseNote:Dispatch<SetStateAction<string>>;
 };
-export default function AdminExpensePanel({expenseHoldReason,focusRequest=0,active=true,openReport,jobs,expenseJobId,expenseValues,expenseNote,expenseStatus,expenseBusy,expenseReady,loadExpenseReview,saveExpenseDraft,completeExpense,openSheet,setExpenseValues,setExpenseNote}:Props){
-  const statusLabels:Record<string,string>={draft:"一時保存",queued:"反映待ち",completed:"反映完了",error:"反映要確認"};
+export default function AdminExpensePanel({expenseHoldReason,expenseCompletionHoldReason,lookupExpenseOperation,focusRequest=0,active=true,openReport,jobs,expenseJobId,expenseValues,expenseNote,expenseStatus,expenseBusy,expenseReady,loadExpenseReview,saveExpenseDraft,completeExpense,openSheet,setExpenseValues,setExpenseNote}:Props){
+  const statusLabels:Record<string,string>={draft:"一時保存",queued:"反映待ち",confirmation_pending:"反映結果を照合中",completed:"反映完了",error:"反映要確認"};
   const localStatuses=["未読込","読込中","デモ読込済み","未処理","一時保存","書込待ち","結果を再確認してください","読込できませんでした"];
   const statusLabel=Object.hasOwn(statusLabels,expenseStatus)?statusLabels[expenseStatus]:localStatuses.includes(expenseStatus)?expenseStatus:"状態を確認してください";
   const headingRef=useRef<HTMLHeadingElement>(null),handledFocus=useRef(0);
@@ -24,6 +27,7 @@ export default function AdminExpensePanel({expenseHoldReason,focusRequest=0,acti
   },[focusRequest,active]);
   const [jobQuery,setJobQuery]=useState(""),[jobPage,setJobPage]=useState(0);
   const selectedJob=useMemo(()=>jobs.find(job=>job.id===expenseJobId),[jobs,expenseJobId]);
+  const caseListJob=Boolean(selectedJob?.caseListSource);
   const selectedInList=!!selectedJob;
   const holdReason=expenseHoldReason??expenseReadinessMessage(selectedJob);
   const matchingJobs=useMemo(()=>{
@@ -38,11 +42,12 @@ export default function AdminExpensePanel({expenseHoldReason,focusRequest=0,acti
         <div className="section-heading">
           <div>
             <h2 ref={headingRef} tabIndex={-1}>報告書確認・経費入力</h2>
-            <p>報告書を確認して経費を入力し、確認完了でスプレッドシートへの反映を受け付けます。</p>
+            <p>{caseListJob?"案件リスト連携の経費は「読込」で原本を照合します。原本への反映が保留中でも、確認済みなら下書きを一時保存できます。":"報告書を確認して経費を入力し、確認完了でスプレッドシートへの反映を受け付けます。"}</p>
           </div>
           <span className="mini-tag" role="status" aria-label="経費確認の状態">{statusLabel}</span>
         </div>
         {holdReason&&<p className="expense-sync-note" id="expense-hold-reason" role="status">{holdReason}</p>}
+        {!holdReason&&expenseCompletionHoldReason&&<p className="expense-sync-note" id="expense-completion-hold-reason" role="status">{expenseCompletionHoldReason} 下書きは一時保存できます。</p>}
         {(expenseStatus==="queued"||expenseStatus==="書込待ち")&&<p className="expense-sync-note" role="status">スプレッドシートへの反映はまだ確認できていません。時間をおいて「読込」で確認してください。</p>}
         {expenseStatus==="error"&&<p className="expense-sync-note" role="status">反映状況の確認が必要です。原本への書込み後に確認が止まっている場合もあります。再送する前に「スプシ該当行」で原本と入力内容を照合し、「読込」で最新状態を確認してください。書込エラー・競合は「概要」の「スプシ書込エラー・競合」で確認できます。</p>}
         {(jobs.length>100||jobQuery)&&<label className="expense-job-search">経費対象を検索
@@ -62,6 +67,8 @@ export default function AdminExpensePanel({expenseHoldReason,focusRequest=0,acti
           </select>
           <button className="ghost" onClick={()=>loadExpenseReview(expenseJobId)} disabled={expenseBusy||!expenseJobId}>読込</button>
         </div>
+        {active&&expenseJobId&&lookupExpenseOperation&&
+          <AdminExpenseOperation key={expenseJobId} lookup={operationId=>lookupExpenseOperation(expenseJobId,operationId)}/>}
         {openReport&&<button className="ghost" disabled={!selectedInList} onClick={()=>openReport(expenseJobId)}>この案件の報告書を確認</button>}
         <div className="expense-grid">
           {[
@@ -87,7 +94,7 @@ export default function AdminExpensePanel({expenseHoldReason,focusRequest=0,acti
         </label>
         <div className="sync-actions">
           <button className="ghost" onClick={saveExpenseDraft} disabled={expenseBusy||!expenseReady||Boolean(holdReason)} aria-describedby={holdReason?"expense-hold-reason":undefined}>一時保存</button>
-          <button onClick={completeExpense} disabled={expenseBusy||!expenseReady||Boolean(holdReason)} aria-describedby={holdReason?"expense-hold-reason":undefined}>確認完了・書込待ちへ</button>
+          <button onClick={completeExpense} disabled={expenseBusy||!expenseReady||Boolean(holdReason||expenseCompletionHoldReason)} aria-describedby={holdReason?"expense-hold-reason":expenseCompletionHoldReason?"expense-completion-hold-reason":undefined}>{caseListJob&&(holdReason||expenseCompletionHoldReason)?"経費確定は保留中":"確認完了・書込待ちへ"}</button>
           <button className="ghost" onClick={openSheet} disabled={!selectedInList}>スプシ該当行</button>
         </div>
       </section>);

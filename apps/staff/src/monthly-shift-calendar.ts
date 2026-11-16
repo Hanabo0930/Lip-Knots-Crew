@@ -1,5 +1,6 @@
 import { activeAssignedJobs, hasValidDateKey } from './job-list';
-export type CalendarShift = {
+import {staffShiftVisible,type ReservationJob} from './job-list';
+export type CalendarShift = ReservationJob & {
   id:string; dateKey:string; status:string; cancelled?:boolean; applicationUnconfirmed?:boolean;
   storeName:string; makerName:string; menuName:string; workTime:string;
   entryTime?:string; storeAddress?:string; clientName?:string;
@@ -26,7 +27,7 @@ export function monthCalendar<T extends CalendarShift>(jobs:T[],month:string):{d
     ids.add(job.id);
   }
   for(const job of activeAssignedJobs(jobs)){
-    if(job.applicationUnconfirmed===true||!hasValidDateKey(job)||!job.dateKey.startsWith(month+'-'))continue;
+    if(!staffShiftVisible(job)||!hasValidDateKey(job)||!job.dateKey.startsWith(month+'-'))continue;
     const day=result.get(job.dateKey)??[];day.push(job);result.set(job.dateKey,day);
   }
   return {days,jobs:result};

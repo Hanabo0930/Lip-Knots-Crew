@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "releaseId": "v5.6.0",
   "projectId": "lip-knots-production",
-  "planFingerprint": "7b886ba65d215e09f74cd5c62ad2973c2e1306bfadac9333c47bacbcd9805c3e",
+  "planFingerprint": "02c01bae8e73b1686deff413a0e3abc110d28bd1adb110aed64e142516cdfb6a",
   "deployScope": [
     "firestore",
     "storage",

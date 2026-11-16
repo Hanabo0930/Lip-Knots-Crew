@@ -18,7 +18,7 @@ const {assertCancelledHistoricalAssignmentCanEdit}=loadState('./cancellation-his
 const {cancellationSourceAckPending}=loadState('./sheet-write-core');
 const {prepareAdminEditIntent,adminEditValueMatches,currentAdminEditValues}=loadState('./admin-edit-state-core');
 const source = fs.readFileSync(new URL('../functions/src/job-management.ts', import.meta.url), 'utf8');
-const schemaStart = source.indexOf('const EditSchema =');
+const schemaStart = source.indexOf('const locationFields =');
 const schemaEnd = source.indexOf('export const createAdminJobGroup', schemaStart);
 const handlerStart = source.indexOf('export const adminEditJobInputs');
 const handlerEnd = source.indexOf('export const generateJobExport', handlerStart);

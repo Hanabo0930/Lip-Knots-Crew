@@ -9,7 +9,7 @@ assert.ok(start>=0&&end>start);
 const code=ts.transpileModule(source.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
 function setup(){
  const state={pending:new Set(),timers:new Map(),next:0,saves:[],messages:[],cleanup:null};
- const ctx={authLoadVersionRef:{current:1},previewContextRef:{current:'owned-key'},getSubmittedDraftReceipt:()=>null,setMessage:value=>state.messages.push(value),draftKey:'owned-key',draftHydrating:false,hydratedDraftKeyRef:{current:'owned-key'},skipNextDraftSaveRef:{current:false},files:['old-file'],isPending:key=>state.pending.has(key),useEffect:fn=>{state.cleanup=fn()},setTimeout:(fn,ms)=>{assert.equal(ms,300);const id=++state.next;state.timers.set(id,fn);return id},clearTimeout:id=>state.timers.delete(id),saveDraft:(key,files)=>{state.saves.push({key,files});return Promise.resolve()},showSubmissionMessage:value=>state.messages.push(value)};
+ const ctx={authLoadVersionRef:{current:1},previewContextRef:{current:'owned-key'},setMessage:value=>state.messages.push(value),draftKey:'owned-key',draftHydrating:false,hydratedDraftKeyRef:{current:'owned-key'},skipNextDraftSaveRef:{current:false},files:['old-file'],isPending:key=>state.pending.has(key),useEffect:fn=>{state.cleanup=fn()},setTimeout:(fn,ms)=>{assert.equal(ms,300);const id=++state.next;state.timers.set(id,fn);return id},clearTimeout:id=>state.timers.delete(id),saveDraft:(key,files)=>{state.saves.push({key,files});return Promise.resolve()},showSubmissionMessage:value=>state.messages.push(value)};
  const render=()=>{state.cleanup?.();runInNewContext('{'+code+'}',ctx)};
  const fire=()=>{const timers=[...state.timers.values()];state.timers.clear();for(const fn of timers)fn()};
  return {state,ctx,render,fire};
@@ -38,23 +38,23 @@ console.log('Draft delayed save passed: '+count+' cases; pending cleanup blocks 
 {
  const start=source.lastIndexOf('  useEffect(()=>{',source.indexOf('    hydratedDraftKeyRef.current="";')),end=source.indexOf('  const draftSavePaused=',start);assert.ok(start>0&&end>start);const code=ts.transpileModule(source.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const mode of ['missing','restored','failed','stale-restored','stale-failed']){
-  const state={confirmed:true,files:['old'],messages:[]};let resolve,reject,cleanup;const ctx={draftKey:mode==='missing'?'':'new-key',setSubmissionConfirmed:v=>state.confirmed=v,hydratedDraftKeyRef:{current:'old-key'},draftHydratingRef:{current:false},skipNextDraftSaveRef:{current:false},setDraftHydrating:()=>{},getSubmittedDraftReceipt:()=>null,setDraftCleanup:()=>{},loadDraft:()=>new Promise((yes,no)=>{resolve=yes;reject=no;}),setFiles:v=>state.files=v,showSubmissionMessage:m=>state.messages.push(m),useEffect:fn=>{cleanup=fn();}};
+  const state={confirmed:true,files:['old'],messages:[]};let resolve,reject,cleanup;const ctx={draftKey:mode==='missing'?'':'new-key',setSubmissionConfirmed:v=>state.confirmed=v,hydratedDraftKeyRef:{current:'old-key'},draftHydratingRef:{current:false},skipNextDraftSaveRef:{current:false},setDraftHydrating:()=>{},setDraftCleanup:()=>{},loadDraftState:()=>new Promise((yes,no)=>{resolve=yes;reject=no;}),setFiles:v=>state.files=v,showSubmissionMessage:m=>state.messages.push(m),useEffect:fn=>{cleanup=fn();}};
   runInNewContext(code,ctx);assert.equal(state.confirmed,false);assert.deepEqual(state.files,['old']);
   if(mode==='missing'){assert.equal(ctx.draftHydratingRef.current,false);continue;}
   if(mode.startsWith('stale')){cleanup();state.confirmed=true;state.files=['current'];}
-  if(mode.endsWith('failed'))reject(Error('synthetic read failure'));else resolve(['restored']);for(let i=0;i<8;i++)await Promise.resolve();
+  if(mode.endsWith('failed'))reject(Error('synthetic read failure'));else resolve({files:['restored'],legacySubmitted:false});for(let i=0;i<8;i++)await Promise.resolve();
   if(mode.startsWith('stale')){assert.equal(state.confirmed,true);assert.deepEqual(state.files,['current']);assert.deepEqual(state.messages,[]);}else{assert.equal(state.confirmed,false);assert.equal(state.files.length,mode==='restored'?1:0);assert.equal(ctx.draftHydratingRef.current,false);}
  }
  console.log('Draft hydration confirmation: 5 missing/restored/failed/stale cases reset old confirmation and preserve new-context state.');
 }
 
-for(const mode of ['lost','other-key','auth-change','submitted','clearing','already-saved']){
+for(const mode of ['lost','other-key','auth-change','clearing','already-saved']){
  const h=setup();h.render();if(mode==='already-saved')h.fire();
  h.ctx.previewContextRef.current=mode==='other-key'?'new-key':'';h.ctx.draftKey='';h.ctx.hydratedDraftKeyRef.current='';
- if(mode==='auth-change')h.ctx.authLoadVersionRef.current++;if(mode==='submitted')h.ctx.getSubmittedDraftReceipt=()=>({durable:true});if(mode==='clearing')h.state.pending.add('submission-context');h.render();
+ if(mode==='auth-change')h.ctx.authLoadVersionRef.current++;if(mode==='clearing')h.state.pending.add('submission-context');h.render();
  assert.equal(h.state.saves.length,mode==='lost'||mode==='already-saved'?1:0);if(mode==='lost'){assert.equal(h.state.saves[0].key,'owned-key');assert.deepEqual(h.state.saves[0].files,['old-file']);}h.fire();assert.equal(h.state.saves.length,mode==='lost'||mode==='already-saved'?1:0);
 }
-console.log('Draft target-loss flush: 6 conditions preserve pending selection under original key without cross-account, submitted, cleared or duplicate saves.');
+console.log('Draft target-loss flush: 5 conditions preserve pending selection under original key without cross-account, cleared or duplicate saves.');
 
 for(const mode of ['current','other-key','auth-change']){
  const h=setup();let reject;h.ctx.saveDraft=()=>new Promise((_,no)=>{reject=no;});h.render();h.ctx.previewContextRef.current='';h.ctx.draftKey='';h.ctx.hydratedDraftKeyRef.current='';h.render();

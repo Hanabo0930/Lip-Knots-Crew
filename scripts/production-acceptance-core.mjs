@@ -1,4 +1,4 @@
-import { projectListIncludesProject, sanitizeCommandResult, sha256, stableJson } from "./production-deploy-core.mjs";
+import { failedDeploymentResultKeys, projectListIncludesProject, sanitizeCommandResult, sha256, stableJson } from "./production-deploy-core.mjs";
 
 export const productionAcceptanceReleaseId = "v5.6.0";
 const projectPattern = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u;
@@ -78,9 +78,7 @@ export function validateDeploymentEvidence(evidence, plan, { now = new Date() } 
   if (evidence?.releaseId !== plan.releaseId) errors.push("releaseId");
   if (evidence?.projectId !== plan.projectId) errors.push("projectId");
   if (!shaPattern.test(String(evidence?.planFingerprint ?? ""))) errors.push("planFingerprint");
-  const requiredKeys = ["project_access", "rules_and_storage", "functions", "hosting", "functions_inventory", "hosting_inventory", "staff_https", "admin_https"];
-  const results = new Map((evidence?.results ?? []).map((item) => [item?.key, item]));
-  for (const key of requiredKeys) if (Number(results.get(key)?.code) !== 0) errors.push(`deploymentResult.${key}`);
+  for (const key of failedDeploymentResultKeys(evidence)) errors.push(`deploymentResult.${key}`);
   const completedAt = Date.parse(String(evidence?.completedAt ?? ""));
   const ageMinutes = (new Date(now).getTime() - completedAt) / 60_000;
   if (!Number.isFinite(completedAt)) errors.push("completedAt");

@@ -55,10 +55,16 @@ function section(source, start, end) {
 }
 
 {
- const from=app.indexOf('<div className="task-clear"'),to=app.indexOf('</div></div>',from)+12;assert.ok(from>=0&&to>from);
- const jsx=app.slice(from,to),compiled=ts.transpileModule('const node='+jsx+';', {compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}}).outputText;
- for(const source of ['live','cached','stale']){const ctx={React:{createElement},businessDataSource:source};runInNewContext(compiled+'globalThis.node=node;',ctx);const html=renderToStaticMarkup(ctx.node);assert.equal(html.includes('今日の対応はすべて完了'),source==='live');assert.equal(html.includes('前回確認時点'),source!=='live');if(source!=='live')assert.ok(html.includes('シフト画面で更新'));}
- console.log('Home empty tasks: real JSX distinguishes latest completion from cached/stale emptiness and points to refresh.');
+ const from=app.indexOf('<div className="task-clear"'),end=app.indexOf("</div>)}",from);assert.ok(from>=0&&end>from);
+ const jsx=app.slice(from,end+"</div>".length),compiled=ts.transpileModule("const node="+jsx+";", {compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}}).outputText;
+ for(const source of ["live","cached","stale"]){
+  const ctx={React:{createElement},taskDataSource:source};runInNewContext(compiled+"globalThis.node=node;",ctx);
+  const html=renderToStaticMarkup(ctx.node);
+  assert.equal(html.includes("今日の対応はすべて完了"),source==="live");
+  assert.equal(html.includes("前回確認時点では対応事項はありません"),source==="cached");
+  assert.equal(html.includes("現在の対応事項を確認できません"),source==="stale");
+ }
+ console.log("Home empty tasks: real JSX distinguishes verified, cached and unconfirmed states.");
 }
 
 {
@@ -103,7 +109,7 @@ const scope = {
   myJobs: [{ id: "assigned" }], authLoadVersionRef:{current:0}, navigationVersionRef:{current:0}, isSubmissionActionPending:()=>false, isPending:()=>false, loadTaskJob:async()=>null,
   setMessage: () => events.push("error"), navigate: value => events.push(value),
   setSelectedJob: () => events.push("selected"),
-  openShiftJob: () => events.push("selected"),
+  openShiftJob: (_job,onOpened) => {events.push("selected");onOpened?.();return true;},
   startSubmission: async (type, job, request) => events.push([type, job.id, request]),
 };
 runInNewContext(ts.transpileModule(handler, {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, scope);
@@ -129,6 +135,12 @@ for (const kind of ["precontact", "netprint"]) {
   await scope.openTask({jobId:"assigned",kind});
   assert.deepEqual(events,["selected","shifts"]);
 }
+{
+ const acceptedOpen=scope.openShiftJob;scope.openShiftJob=()=>false;
+ for(const kind of ["precontact","netprint"]){events.length=0;await scope.openTask({jobId:"assigned",kind});assert.deepEqual(events,[],"Declined shift changes must not navigate");}
+ scope.openShiftJob=acceptedOpen;
+}
+
 
 
 {
@@ -136,8 +148,8 @@ for (const kind of ["precontact", "netprint"]) {
  for(const change of ['none','navigation','account'])for(const outcome of ['success','missing','failure']){
   const events=[];let finish;
   const ctx={mailOpen:true,mailPanelVersion:{current:0},setShowMailApplications:value=>ctx.mailOpen=value,myJobs:[],authLoadVersionRef:{current:1},navigationVersionRef:{current:0},isSubmissionActionPending:()=>false,isPending:()=>false,
-   loadTaskJob:()=>new Promise((resolve,reject)=>{finish={resolve,reject};}),setMessage:value=>events.push(['message',value]),openShiftJob:job=>events.push(['selected',job.id]),startSubmission:async()=>{},
-   shiftNotification:{cancel:()=>{}},resubmissionNotification:{cancel:()=>{}},setShowAccountMenu:()=>{},setShowDevices:()=>{},closeDiagnostics:()=>{},setView:value=>events.push(['view',value]),window:{scrollTo:()=>{}},openJobsStatus:'ready'};
+   loadTaskJob:()=>new Promise((resolve,reject)=>{finish={resolve,reject};}),setMessage:value=>events.push(['message',value]),openShiftJob:(job,onOpened)=>{events.push(['selected',job.id]);onOpened?.();return true;},startSubmission:async()=>{},
+   shiftNotification:{cancel:()=>{}},resubmissionNotification:{cancel:()=>{}},submissionNotification:{cancel:()=>{}},setShowAccountMenu:()=>{},setShowDevices:()=>{},closeDiagnostics:()=>{},setView:value=>events.push(['view',value]),window:{scrollTo:()=>{}},openJobsStatus:'ready'};
   runInNewContext(ts.transpileModule(navigation+handler,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);
   const pending=ctx.openTask({jobId:'target',kind:'netprint'});
   if(change==='navigation'){ctx.navigate('contact');assert.equal(ctx.navigationVersionRef.current,1);assert.equal(ctx.mailPanelVersion.current,1);assert.equal(ctx.mailOpen,false);events.length=0;}if(change==='account')ctx.authLoadVersionRef.current++;
@@ -213,8 +225,12 @@ runInNewContext(ts.transpileModule(readFileSync('apps/staff/src/SubmissionHistor
 for(const [status,label] of [['waiting_upload','アップロード待ち'],['processing','Drive転送中'],['paused_global','転送一時停止'],['error','転送エラー'],['security_error','状態の確認が必要です'],['unknown','状態の確認が必要です'],['completed','Drive保存済み']]){
  const output=renderToStaticMarkup(createElement(historyModule.exports.default,{files:[{...previewFile,originalName:'synthetic.png',driveName:'',contentType:'image/png',previewUrl:null,status,purpose:'replacement'}],onRefreshPreview:async()=>null}));
  assert.ok(output.includes(label));assert.ok(output.includes('再送・'));assert.ok(!output.includes('提出済み'));
- assert.equal(output.includes('画像を再読み込み'),status==='completed');assert.equal(output.includes('管理者へ連絡'),status!=='completed');
+ assert.equal(output.includes('画像を表示'),status==='completed');assert.doesNotMatch(output,/プレビューを取得できません/);assert.equal(output.includes('管理者へ連絡'),status!=='completed');
 }
+const demandPdf=renderToStaticMarkup(createElement(historyModule.exports.default,{files:[{...previewFile,contentType:"application/pdf",previewUrl:null,status:"completed",purpose:"initial"}],onRefreshPreview:async()=>{throw Error("Preview must be explicitly requested");}}));
+assert.match(demandPdf,/PDFを表示する準備/);
+assert.doesNotMatch(demandPdf,/情報を確認できません|<a[^>]+href=/);
+
 for(const [driveName,originalName,expected] of [['same.pdf','original.pdf','same.pdf'],['  ','original.pdf','original.pdf'],['','','ファイル名を確認できません']]){
  const files=[1,2].map(id=>({...previewFile,id:String(id),driveName,originalName,contentType:'application/pdf',previewUrl:null,status:'completed',purpose:'initial'}));
  const output=renderToStaticMarkup(createElement(historyModule.exports.default,{files,onRefreshPreview:async()=>null}));
@@ -246,7 +262,7 @@ for(const [driveName,originalName,expected] of [['same.pdf','original.pdf','same
  const start=app.indexOf('<SubmissionHistoryFiles files='),end=app.indexOf('/>',start)+2;assert.ok(start>=0&&end>start);
  const jsx=app.slice(start,end);
  for(const submissionHistory of [[],[{files:[]}],[{files:[{...previewFile,driveName:'history.pdf',originalName:'original.pdf',contentType:'application/pdf',previewUrl:null,status:'completed',purpose:'initial'}]},{files:[]}],[{files:[{...previewFile,driveName:'history.pdf',originalName:'original.pdf',contentType:'application/pdf',previewUrl:null,status:'completed',purpose:'initial'}]}]]){
-  const ctx={exports:{},require:createRequire(import.meta.url),SubmissionHistoryFiles:historyModule.exports.default,submissionHistory,refreshFilePreview:async()=>null};
+  const ctx={exports:{},require:createRequire(import.meta.url),SubmissionHistoryFiles:historyModule.exports.default,submissionHistory,refreshFilePreview:async()=>null,nextSubmissionHistoryCursor:null,isPending:()=>false,submissionEditPending:false,submissionHistoryPageError:"",loadEarlierSubmissionHistory:()=>assert.fail("Rendering must not fetch an earlier page")};
   runInNewContext(ts.transpileModule('export default function History(){return ('+jsx+');}',{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,ctx);
   const html=renderToStaticMarkup(createElement(ctx.exports.default));assert.equal(html.includes('提出履歴はありません。'),submissionHistory.length===0);assert.equal(html.includes('一部のファイル情報を確認できません'),submissionHistory.some(group=>group.files.length===0));assert.equal((html.match(/<article/g)||[]).length,submissionHistory.flatMap(group=>group.files).length);
  }
@@ -296,6 +312,13 @@ for(const [driveName,originalName,expected] of [['same.pdf','original.pdf','same
   runInNewContext(ts.transpileModule('export default function ClientStatus(){return ('+jsx+');}',{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,ctx);const html=renderToStaticMarkup(createElement(ctx.exports.default));if(submissionType==='report')assert.equal(html,'');else{assert.ok(html.includes('直接提出した場合'));assert.ok(html.includes('提出済みを記録'));assert.ok(html.includes('id="client-submission-help"'));assert.ok(html.includes('aria-describedby="client-submission-help"'));}
  }
  console.log('Client submission explanation: sales-floor action describes recording direct submission; report view excludes the unrelated action.');
+}
+for(const [hasEarlier,pending,error] of [[true,false,""],[true,true,""],[false,false,""],[false,false,"fixture error"]]){
+ const markup=renderToStaticMarkup(createElement(historyModule.exports.default,{files:[],onRefreshPreview:async()=>null,pagination:{hasEarlier,pending,error,disabled:false,onLoadEarlier:()=>assert.fail("Rendering must not fetch an earlier page")}}));
+ assert.equal(markup.includes("以前の提出を表示"),hasEarlier&&!pending);
+ assert.equal(markup.includes("以前の提出を読み込み中…"),pending);
+ assert.equal(markup.includes('aria-busy="true"'),pending);
+ assert.equal(markup.includes('role="alert"'),Boolean(error));
 }
 const emptyHistory=renderToStaticMarkup(createElement(historyModule.exports.default,{files:[],onRefreshPreview:async()=>null}));assert.ok(emptyHistory.includes('提出履歴はありません。'));
 console.log('History state rendering passed: 7 transfer states, no preview retry before completion, replacement label and empty history.');
@@ -350,8 +373,8 @@ const loginHandlers=app.slice(app.indexOf('  async function requestLogin()'),app
 const loginFixtureCode=ts.transpileModule(`
 import React from 'react';import {createRoot} from 'react-dom/client';import {useAsyncAction} from '/src/useAsyncAction.ts';import '/src/styles.css';
 window.loginFixture={calls:[],pending:[],signIns:0};
-const firebaseConfigured=true,functions={},auth={},authPersistenceReady=Promise.resolve();
-const httpsCallable=()=>input=>new Promise((resolve,reject)=>{window.loginFixture.calls.push(input);window.loginFixture.pending.push({resolve,reject});});
+const firebaseConfigured=true,functions={},auth={},authPersistenceReady=Promise.resolve(),currentDeviceId='synthetic-login-device';
+const httpsCallable=(_functions,name)=>input=>new Promise((resolve,reject)=>{window.loginFixture.calls.push({name,input});window.loginFixture.pending.push({resolve,reject});});
 const isSignInWithEmailLink=()=>true,signInWithEmailLink=async()=>{window.loginFixture.signIns++;};
 ${section(app,'function messageTone(','function submissionFileContentType(')}
 function Fixture(){
@@ -369,14 +392,16 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
 const loginFixture=`<!doctype html><html><body><div id="root"></div><script type="module">${loginFixtureCode}</script></body></html>`;
 
 const businessFallback=section(app,'  const businessDataFallback=','  const openJobsFallback=');
-const emptyTaskStart=app.indexOf('<div className="task-clear"'),emptyTaskEnd=app.indexOf('</div></div>',emptyTaskStart)+12;
+const emptyTaskStart=app.indexOf('<div className="task-clear"'),emptyTaskStop=app.indexOf('</div>)}',emptyTaskStart);
+assert.ok(emptyTaskStart>=0&&emptyTaskStop>emptyTaskStart);
+const emptyTaskEnd=emptyTaskStop+6;
 const taskListStart=app.indexOf('<div className="task-list" id="home-task-list">');
-const taskListEnd=app.indexOf('</div></>:<div className="task-clear"',taskListStart)+6;
+const taskListEnd=app.indexOf('</>:<div className="task-clear"',taskListStart);
 assert.ok(taskListStart>=0&&taskListEnd>taskListStart);
 const taskListJsx=app.slice(taskListStart,taskListEnd);
 const taskFixtureCode=ts.transpileModule(`
 import React from 'react';import {createRoot} from 'react-dom/client';import '/src/styles.css';
-function Fixture(){const [showAllTasks,setShowAllTasks]=React.useState(false);const tasks=Array.from({length:7},(_,index)=>({id:String(index),title:'対応事項'+(index+1),body:'確認用の内容',priority:index===0?'overdue':index===1?'urgent':'normal'}));const visibleTasks=showAllTasks?tasks:tasks.slice(0,5);const submissionEditPending=false,isPending=()=>false,openTask=task=>{window.openedTask=task.id};return (<main>${taskListJsx}</main>);}
+function Fixture(){const [showAllTasks,setShowAllTasks]=React.useState(false);const tasks=Array.from({length:7},(_,index)=>({id:String(index),title:'対応事項'+(index+1),body:'確認用の内容',priority:index===0?'overdue':index===1?'urgent':'normal'}));const visibleTasks=showAllTasks?tasks:tasks.slice(0,5);const submissionEditPending=false,taskDataSource='live',taskRefreshPending=false,isPending=()=>false,openTask=task=>{window.openedTask=task.id};return (<main>${taskListJsx}</main>);}
 createRoot(document.getElementById('root')).render(<Fixture/>);
 `,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext,jsx:ts.JsxEmit.React}}).outputText;
 const taskFixture=`<!doctype html><html><body><div id="root"></div><script type="module">${taskFixtureCode}</script></body></html>`;
@@ -410,7 +435,7 @@ createRoot(document.getElementById('root')).render(<Fixture/>);
 const diagnosticFixture=`<!doctype html><html><body><div id="root"></div><script type="module">${diagnosticFixtureCode}</script></body></html>`;
 const businessFixtureCode=ts.transpileModule(`
 import React from 'react';import {createRoot} from 'react-dom/client';import '/src/styles.css';
-function Fixture(){const [state,setState]=React.useState({status:'loading',source:'none'});window.businessFixture={setState};const businessDataStatus=state.status,businessDataSource=state.source;
+function Fixture(){const [state,setState]=React.useState({status:'loading',source:'none'});window.businessFixture={setState};const businessDataStatus=state.status,taskDataSource=state.source;
 ${businessFallback}
 return <main><section className="panel">{businessDataFallback??(${app.slice(emptyTaskStart,emptyTaskEnd)})}</section></main>;}
 createRoot(document.getElementById('root')).render(<Fixture/>);
@@ -629,7 +654,10 @@ try {
   for(const state of [{status:'error',source:'none'},{status:'ready',source:'cached'},{status:'ready',source:'stale'},{status:'ready',source:'live'}]){
     await page.evaluate(state=>window.businessFixture.setState(state),state);
     if(state.status==='error'){await page.getByRole('group',{name:'業務データの読込エラー'}).waitFor();assert.match(await page.locator('main').innerText(),/管理者にスタッフ登録・所属/);}
-    else await page.waitForFunction(source=>document.querySelector('strong')?.textContent?.includes(source==='live'?'今日の対応':'前回確認時点'),state.source);
+    else {
+      const expected={live:"今日の対応はすべて完了しています",cached:"前回確認時点では対応事項はありません",stale:"現在の対応事項を確認できません"};
+      await page.getByText(expected[state.source],{exact:true}).waitFor();
+    }
     for(const width of [320,390,1280]){await page.setViewportSize({width,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);}
   }
   await page.evaluate(()=>window.businessFixture.setState({status:'error',source:'none'}));
@@ -658,15 +686,22 @@ try {
     const button=page.getByRole('button',{name:action==='resend'?'ログインメールを送る':'確認コードでログイン',exact:true});
     const before=await page.evaluate(()=>window.loginFixture.calls.length);
     await button.evaluate(button=>{button.click();button.click();});
-    await page.waitForFunction(count=>window.loginFixture.calls.length===count,before+1);
+    await page.waitForFunction(count=>window.loginFixture.calls.length>=count,before+1);
+    const expectedCall={name:'requestStaffLoginLink',input:action==='resend'
+      ?{email:'synthetic@example.test',continueUrl:new URL(page.url()).origin}
+      :{email:'synthetic@example.test',code:'123456',deviceId:'synthetic-login-device'}};
+    assert.deepEqual(await page.evaluate(start=>window.loginFixture.calls.slice(start),before),[expectedCall]);
     assert.equal(await emailInput.isDisabled(),true);assert.equal(await codeInput.isDisabled(),true);
     assert.equal(await page.locator('button:disabled').count(),2);assert.equal(await codeInput.inputValue(),'123456');
     await page.evaluate(()=>window.loginFixture.pending.shift().reject(Error('合成処理に失敗しました。')));
     await page.getByRole('alert').waitFor();await page.waitForFunction(()=>!document.querySelector('input').disabled);
     assert.equal(await codeInput.inputValue(),'123456');assert.equal(await button.isEnabled(),true);
-    await button.click();await page.waitForFunction(count=>window.loginFixture.calls.length===count,before+2);
+    await button.click();await page.waitForFunction(count=>window.loginFixture.calls.length>=count,before+2);
+    assert.deepEqual(await page.evaluate(start=>window.loginFixture.calls.slice(start),before),[expectedCall,expectedCall]);
     assert.equal(await page.getByRole('alert').count(),0,'Previous error must disappear while retry is pending');
-    await page.evaluate(()=>window.loginFixture.pending.shift().resolve({data:{accepted:true,message:'送信しました。',emailActionLink:'https://example.test/synthetic'}}));
+    await page.evaluate(action=>window.loginFixture.pending.shift().resolve({data:action==='resend'
+      ?{accepted:true,message:'送信しました。'}
+      :{emailActionLink:'https://example.test/synthetic'}}),action);
     await page.waitForFunction(()=>!document.querySelector('input').disabled);assert.equal(await codeInput.inputValue(),'');
   }
   assert.equal(await page.evaluate(()=>window.loginFixture.signIns),1);
@@ -769,16 +804,20 @@ try {
     const file=new File(['retained'],'retained.pdf',{type:'application/pdf',lastModified:1234});
     await saveDraft(key,[file]);
     const outcomes=[];
-    for(const [method,operation] of [
-      ['put',()=>saveDraft(key,[new File(['replacement'],'replacement.pdf')])],
-      ['delete',()=>clearDraft(key)],
-      ['get',()=>loadDraft(key)],
+    for(const [name,method,operation] of [
+      ['save','put',()=>saveDraft(key,[new File(['replacement'],'replacement.pdf')])],
+      ['clear','put',()=>clearDraft(key)],
+      ['load','get',()=>loadDraft(key)],
     ]){
       const original=IDBObjectStore.prototype[method];
-      let timer;
+      let timer, abortRequested=false;
       IDBObjectStore.prototype[method]=function(...args){
         const request=original.apply(this,args);
-        request.addEventListener('success',()=>request.transaction.abort(),{once:true});
+        request.addEventListener('success',()=>{
+          if(abortRequested)return;
+          abortRequested=true;
+          request.transaction.abort();
+        },{once:true});
         return request;
       };
       try{
@@ -786,7 +825,7 @@ try {
           operation().then(()=>'unexpected-success',error=>error?.name),
           new Promise(resolve=>{timer=setTimeout(()=>resolve('timeout'),2000);}),
         ]);
-        if(outcome!=='AbortError')throw new Error(`${method}: expected AbortError, got ${outcome}`);
+        if(outcome!=='AbortError')throw new Error(`${name}: expected AbortError, got ${outcome}`);
         outcomes.push(outcome);
       }finally{
         clearTimeout(timer);
@@ -805,31 +844,34 @@ try {
   const submittedDraft=await page.evaluate(async()=>{
     const store=await import('/src/draft-store.ts');
     const key='browser-submitted-cleanup';
-    await store.saveDraft(key,[new File(['sent'],'sent.pdf')]);
-    const durable=store.markDraftSubmitted(key);
-    const original=IDBObjectStore.prototype.delete;
-    IDBObjectStore.prototype.delete=function(...args){
+    const sent=[new File(['sent'],'sent.pdf')];
+    await store.saveDraft(key,sent);
+    const original=IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put=function(...args){
       const request=original.apply(this,args);
       request.addEventListener('success',()=>request.transaction.abort(),{once:true});
       return request;
     };
-    let failed=false;
-    try{await store.clearDraft(key);}catch{failed=true;}finally{IDBObjectStore.prototype.delete=original;}
-    const current=(await store.loadDraft(key)).length;
-    // 新しいモジュールはメモリ状態を共有せず、永続した送信済み印だけで復元を抑止する。
+    let failure;
+    try{await store.clearSubmittedDraft(key,sent,()=>true);}catch(error){failure=error.name;}finally{IDBObjectStore.prototype.put=original;}
     const fresh=await import('/src/draft-store.ts?submitted-reload');
-    const restored=(await fresh.loadDraft(key)).length;
-    const recoverable=fresh.getSubmittedDraftReceipt(key)?.durable===true;
-    let staleSaveRejected=false;
-    try{await store.saveDraft(key,[new File(['sent'],'sent.pdf')]);}catch{staleSaveRejected=true;}
-    await store.clearDraft(key);
-    await store.saveDraft(key,[new File(['new'],'new.pdf')]);
-    const [next]=await store.loadDraft(key);
+    const [retained]=await fresh.loadDraft(key);
+    const retainedBody=await retained.text();
+    const retry=await store.clearSubmittedDraft(key,sent,()=>true);
+    await store.saveDraft(key,sent);
+    const afterRetry=(await fresh.loadDraft(key)).length;
+
+    const older=[new File(['older'],'older.pdf')];
+    await store.saveDraft(key,older);
+    await fresh.saveDraft(key,[new File(['new'],'new.pdf')]);
+    const competing=await store.clearSubmittedDraft(key,older,()=>true);
+    await store.saveDraft(key,older);
+    const [next]=await fresh.loadDraft(key);
     const nextBody=await next.text();
     await store.clearDraft(key);
-    return {durable,failed,current,restored,recoverable,staleSaveRejected,nextBody};
+    return {failure,retainedBody,retry,afterRetry,competing,nextBody};
   });
-  assert.deepEqual(submittedDraft,{durable:true,failed:true,current:0,restored:0,recoverable:true,staleSaveRejected:true,nextBody:'new'});
+  assert.deepEqual(submittedDraft,{failure:'AbortError',retainedBody:'sent',retry:'cleared',afterRetry:0,competing:'preserved',nextBody:'new'});
   const largeDraft=await page.evaluate(async()=>{
     const {saveDraft,loadDraft,clearDraft}=await import('/src/draft-store.ts');
     const key='browser-50mb-draft';
@@ -868,7 +910,7 @@ try {
     await page.getByRole("button",{name:"🖼️ 売場画像を提出",exact:true}).click();
     await page.getByRole("heading",{name:"売場画像を提出",exact:true}).waitFor();
     assert.equal(await page.getByRole('region',{name:'提出画面',exact:true}).evaluate(node=>document.activeElement===node),true,'Selected shift submission focuses its panel.');
-    await page.getByRole("button",{name:"画像を再読み込み",exact:true}).waitFor();
+    await page.getByRole("article",{name:/^提出履歴 1件目:/}).getByRole("button",{name:"画像を表示",exact:true}).waitFor();
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,`Submission overflows at ${width}px`);
     if(output)await page.screenshot({path:resolve(output,`staff-submission-${width}.png`),fullPage:true});
     await page.locator(".bottom-nav").getByRole("button",{name:"ホーム"}).click();
@@ -886,9 +928,15 @@ try {
   await page.addStyleTag({content:':root { font-size:32px; }'});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,'Enlarged submission text must not overflow at 320px');
   await page.emulateMedia({reducedMotion:'reduce'});
-  const reloadButton=page.getByRole('button',{name:'画像を再読み込み',exact:true});
+  const demoHistoryCard=page.getByRole('article',{name:/^提出履歴 1件目:/});
+  const showImage=demoHistoryCard.getByRole('button',{name:'画像を表示',exact:true});
+  const reloadButton=demoHistoryCard.getByRole('button',{name:'画像を再読み込み',exact:true});
+  await showImage.focus();
+  assert.equal(await showImage.evaluate(element=>element===document.activeElement),true);
+  await page.keyboard.press('Enter');
+  await reloadButton.waitFor();
+  assert.match(await demoHistoryCard.getByRole('status').innerText(),/プレビューを取得できません/);
   await reloadButton.focus();
-  assert.equal(await reloadButton.evaluate(element=>element===document.activeElement),true);
   await page.keyboard.press('Enter');
   await reloadButton.waitFor();
   assert.equal(await reloadButton.isEnabled(),true);
@@ -1047,6 +1095,7 @@ try {
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   }
   console.log('Open jobs manual refresh: populated demo list, keyboard and 320/390/1280px passed.');
+  const applicationAccepted=page.getByText('デモ：応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。',{exact:true});
   const offer=page.getByRole('article',{name:/デモ募集店舗の募集案件/});
   for(const width of [320,390,1280]){
     await page.setViewportSize({width,height:844});const toggle=offer.getByRole('button',{name:'詳細を見る',exact:true});
@@ -1061,12 +1110,12 @@ try {
     await offer.getByRole('button',{name:'詳細を閉じる',exact:true}).focus();await page.keyboard.press('Enter');
     await offer.getByRole('button',{name:'詳細を見る',exact:true}).waitFor();assert.equal(await offer.locator('dl').count(),0);
     assert.equal(await offer.getByRole('button',{name:'詳細を見る',exact:true}).evaluate(button=>button===document.activeElement),true);
-    assert.equal(await page.locator('.open-job').count(),1);assert.equal(await page.getByText('デモ：応募を受け付けました。シフトで担当の確認状況を確認してください。',{exact:true}).count(),0);
+    assert.equal(await page.locator('.open-job').count(),1);assert.equal(await applicationAccepted.count(),0);
   }
   console.log('Open job detail: named offer, keyboard expand/collapse and focus retained, controlled panel matches, long conditions fit 3 widths, no application from toggling.');
 
   await page.getByRole('button',{name:'この案件に応募する',exact:true}).click();
-  await page.getByText('デモ：応募を受け付けました。シフトで担当の確認状況を確認してください。',{exact:true}).waitFor();
+  await applicationAccepted.waitFor();
   await page.getByRole('button',{name:'応募したシフトを確認',exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'応募したシフトを確認',exact:true}).evaluate(node=>document.activeElement===node),true);
 
@@ -1091,11 +1140,12 @@ try {
   assert.equal(await page.getByRole('button',{name:/デモ募集店舗 .*のシフトを確認/}).getAttribute('aria-pressed'),'true');
   await page.getByRole('region',{name:'選択したシフトの詳細',exact:true}).getByRole('heading',{name:'デモ募集店舗',exact:true}).waitFor();
   console.log('Demo application passed: listing removed, refresh preserves acceptance, pending remains separate through refresh; synthetic readback ACK exposes the second confirmed shift and detail.');
+  const routeAddress=page.locator('.route-panel > p').filter({has:page.locator('br')});
   for(const width of [320,390,1280])for(const fail of [false,true]){
     await page.setViewportSize({width,height:844});
     await page.getByRole('button',{name:/デモ募集店舗 .*のシフトを確認/}).click();
     if(await page.locator('.message-dismiss').count())await page.locator('.message-dismiss').click();
-    const originalAddress=await page.locator('.shift-detail-heading p').innerText();
+    const originalAddress=(await routeAddress.innerText()).split('\n').at(-1);
     await page.evaluate(fail=>{window.previousShiftClipboard=navigator.clipboard;window.shiftAddressCopies=[];Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:value=>{window.shiftAddressCopies.push(value);return new Promise((resolve,reject)=>window.finishShiftAddressCopy=()=>fail?reject(Error('synthetic clipboard denial')):resolve());}}});},fail);
     await page.getByRole('button',{name:'住所をコピー',exact:true}).click();
     assert.equal(await page.getByRole('button',{name:'住所をコピー',exact:true}).isDisabled(),true);
@@ -1128,12 +1178,16 @@ try {
     await refresh.waitFor();
 
     await page.evaluate(()=>{window.addressCopies=[];Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>window.addressCopies.push(value)}});});
-    const addressText=await page.locator('.shift-detail-heading p').innerText();
+    const addressText=(await routeAddress.innerText()).split('\n').at(-1);
     await page.getByRole('button',{name:'住所をコピー',exact:true}).focus();await page.keyboard.press('Enter');
     await page.getByText('店舗住所をコピーしました。',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>window.addressCopies.at(-1)),addressText);
-    const originals=await page.locator('.shift-detail-heading').evaluate(heading=>{const nodes=[heading.querySelector('h2'),heading.querySelector('p')];const values=nodes.map(node=>node.textContent);nodes[0].textContent='店舗名'+('LongStoreName'.repeat(30));nodes[1].textContent='合成住所 '+('LongBuildingName'.repeat(40));return values;});
+    const storeName=page.locator('.shift-detail-heading h2');
+    const originalStore=await storeName.innerText();
+    await storeName.evaluate(node=>node.textContent='店舗名'+('LongStoreName'.repeat(30)));
+    await routeAddress.evaluate(node=>node.lastChild.textContent='合成住所 '+('LongBuildingName'.repeat(40)));
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
-    await page.locator('.shift-detail-heading').evaluate((heading,values)=>{heading.querySelector('h2').textContent=values[0];heading.querySelector('p').textContent=values[1];},originals);
+    await storeName.evaluate((node,text)=>node.textContent=text,originalStore);
+    await routeAddress.evaluate((node,text)=>node.lastChild.textContent=text,addressText);
     console.log('Shift address: actual copy handler and keyboard match displayed address; synthetic long name/address stay within 3 viewport widths.');
 
     const card=page.locator('.shift-card-button').first();

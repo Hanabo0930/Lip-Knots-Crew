@@ -63,6 +63,7 @@ async function setup(options={}){
   records.set('jobs/'+jobId,{...entry.fields,companyId:f.companyId,caseId:f.a.sourceCaseId,caseListSource:core.publicCaseListSource(entry.source),revision:4,status:'draft',publishable:false,sourceReady:false,recruitmentStopped:true,assignedStaffId:null,assignedStaffName:'',applicationUnconfirmed:false,basePay:10000});
   records.set('sheetImportConfigs/'+f.companyId,{companyId:f.companyId,spreadsheetId:f.book,caseListEnabled:true,caseListAssignmentsEnabled:true});
   records.set(`companies/${f.companyId}/sheetMappings/shift`,{enabled:true,spreadsheetId:f.book});
+  records.set('staffNgMaintenance/'+f.companyId,{schema:'LK_STAFF_NG_MAINTENANCE_V1',companyId:f.companyId,state:'OPEN',generation:0});
   records.set('staffProfiles/synthetic-staff',{companyId:f.companyId,active:true,displayName:'合成担当'});
   const requireAdmin=request=>{if(!request.auth||request.auth.token?.role!=='admin')throw new HttpsError('permission-denied','admin required');return request.auth;};
   const system={assertProductionOperational:async()=>{if(globalStopped)throw new HttpsError('failed-precondition','global stop');},getProductionOperationalState:async()=>({operational:!globalStopped})};
@@ -71,7 +72,7 @@ async function setup(options={}){
     if(cache.has(name))return cache.get(name);
     const file=path.join(ROOT,name+'.ts'), module={exports:{}};
     const code=compile(file);
-    const context={module,exports:module.exports,Date:Clock,Buffer,console,process:{env:{EXECUTIVE_APPROVER_EMAILS:'owner@example.invalid'}},require:specifier=>{
+    const context={module,exports:module.exports,Date:Clock,Buffer,console,process:{env:{EXECUTIVE_APPROVER_EMAILS:'owner@example.invalid',DEFAULT_COMPANY_ID:f.companyId}},require:specifier=>{
       if(specifier==='node:crypto')return require(specifier);
       if(specifier==='zod')return require('zod');
       if(specifier==='firebase-admin/firestore')return {Timestamp:Stamp,FieldValue};

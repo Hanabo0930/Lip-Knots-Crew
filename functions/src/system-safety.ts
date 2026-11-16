@@ -10,7 +10,9 @@ export type ProductionOperationalState = {
   reason: string;
 };
 
-export async function getProductionOperationalState(companyId: string): Promise<ProductionOperationalState> {
+export async function getProductionOperationalState(
+  companyId: string, reader?: Pick<FirebaseFirestore.Transaction, "get">,
+): Promise<ProductionOperationalState> {
   if ((process.env.APP_ENVIRONMENT ?? "development") !== "production") {
     return {
       enforced: false,
@@ -21,7 +23,8 @@ export async function getProductionOperationalState(companyId: string): Promise<
       reason: "non_production",
     };
   }
-  const control = await db.collection("productionControls").doc(companyId).get();
+  const controlRef = db.collection("productionControls").doc(companyId);
+  const control = reader ? await reader.get(controlRef) : await controlRef.get();
   const data = control.data() ?? {};
   const productionEnabled = data.productionEnabled === true;
   const emergencyLock = data.emergencyLock === true;

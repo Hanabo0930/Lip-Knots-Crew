@@ -3,21 +3,39 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { runInNewContext } from 'node:vm';
 import { assertRetryWorkerSource, assertSheetWorkerRecovery, retryWorkerSourcePins } from './validate-staging-sheet-worker.mjs';
 import { safetyConfig, validatePlan } from './validate-staging-scope.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const sources = Object.fromEntries(Object.keys(retryWorkerSourcePins).map(file => [file, fs.readFileSync(path.join(root, file), 'utf8')]));
+const files = Object.keys(retryWorkerSourcePins);
+const checkoutSources = Object.fromEntries(files.map(file => [file, fs.readFileSync(path.join(root, file), 'utf8')]));
+const reviewedRef = 'ef3fa14cfd46cec7a94e00c1d9c2e611d4e5e4be';
+const gitOptions = {cwd: root, encoding: 'utf8', env: {...process.env, GIT_TERMINAL_PROMPT: '0'}};
+const hasReviewedCommit = () => spawnSync('git', ['cat-file', '-e', reviewedRef + '^{commit}'], gitOptions).status === 0;
+let sources = checkoutSources;
+try {
+  assertRetryWorkerSource(file => checkoutSources[file]);
+} catch (error) {
+  assert.equal(error.message, 'RETRY_WORKER_SOURCE_NOT_REVIEWED');
+  // GitHub's shallow PR checkout omits the reviewed revision. Only the public
+  // repository can supply this fixed fixture, and the production pins validate its contents.
+  if (!hasReviewedCommit() && process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_REPOSITORY === 'Hanabo0930/Lip-Knots-Crew') {
+    execFileSync('git', ['fetch', '--no-tags', '--no-recurse-submodules', '--depth=1',
+      'https://github.com/Hanabo0930/Lip-Knots-Crew.git', reviewedRef], gitOptions);
+  }
+  assert.ok(hasReviewedCommit(), 'The reviewed retry worker test fixture must be available in Git');
+  sources = Object.fromEntries(files.map(file => [file, execFileSync('git', ['show', reviewedRef + ':' + file], gitOptions)]));
+}
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'lkc-sheet-worker-'));
 const plan = {project: 'lip-knots-crew-staging', region: 'asia-northeast1', functions: ['retrySafeSheetWrites']};
 const dotenv = path.join(temp, 'functions/.env.' + plan.project);
 const base = 'APP_ENVIRONMENT=staging\nEXPECTED_FIREBASE_PROJECT_ID=' + plan.project + '\nLKC_SHEET_WRITE_MODE=paused\nLKC_NOTIFICATION_DELIVERY_MODE=paused\nDUMMY_SECRET=synthetic-never-print\n';
 let cases = 0;
 function check(fn) { fn(); cases++; }
-function populate() {
-  for (const [file, source] of Object.entries(sources)) {
+function populate(contents = sources) {
+  for (const [file, source] of Object.entries(contents)) {
     fs.mkdirSync(path.dirname(path.join(temp, file)), {recursive: true});
     fs.writeFileSync(path.join(temp, file), source);
   }
@@ -78,6 +96,11 @@ try {
   }
   check(() => assert.deepEqual(runGuard(sources), {passed: true, exitCode: 0}));
   check(() => assert.deepEqual(runGuard({...sources, [control]: sources[control].replace('!== "active"', '=== "paused"')}), {passed: false, exitCode: 1}));
+  if (sources !== checkoutSources) {
+    check(() => assert.deepEqual(runGuard(checkoutSources), {passed: false, exitCode: 1}));
+    populate(checkoutSources);
+    check(() => assert.throws(() => assertSheetWorkerRecovery(plan, temp), /^Error: RETRY_WORKER_SOURCE_NOT_REVIEWED$/));
+  }
   populate();
   for (const text of [base, base.replace(/\n/g, '\r\n')]) {
     fs.writeFileSync(dotenv, text);
@@ -135,7 +158,8 @@ try {
     const result = spawnSync(process.execPath, [path.join(root, 'scripts/automation/run-staging-firebase-deploy.cjs')], {encoding: 'utf8', env: {PATH: '', SystemRoot: process.env.SystemRoot ?? '', LKC_PROJECT_ID: plan.project, LKC_REGION: plan.region, LKC_SOURCE_REF: 'main', LKC_FUNCTIONS: 'retrySafeSheetWrites', LKC_CONFIRMATION: safetyConfig.confirmations.retryWorkerRecovery, LKC_SOURCE_DIRECTORY: temp}});
     check(() => { assert.equal(result.status, 1); assert.match(result.stderr, /SHEET_WORKER_PAUSE_CONFIG_INVALID/); assert.doesNotMatch(result.stdout + result.stderr, /synthetic-never-print|PINNED_FIREBASE_CLI_NOT_FOUND/); });
   }
-  console.log(JSON.stringify({sheetWorkerRecoveryTests: cases, cloudOperations: false, retryOnlyAllowlisted: true}));
+  console.log(JSON.stringify({sheetWorkerRecoveryTests: cases, cloudOperations: false, retryOnlyAllowlisted: true,
+    checkoutRecoverySource: sources === checkoutSources ? 'reviewed' : 'RETRY_WORKER_SOURCE_NOT_REVIEWED'}));
 } finally {
   if (path.dirname(path.resolve(temp)) !== path.resolve(os.tmpdir()) || !path.basename(temp).startsWith('lkc-sheet-worker-')) throw Error('Unexpected temp location');
   fs.rmSync(temp, {recursive: true, force: true});

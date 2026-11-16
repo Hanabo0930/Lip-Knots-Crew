@@ -9,15 +9,69 @@ service firebase.storage {
              request.resource.contentType == 'application/pdf';
     }
     function validSize() {
-      return request.resource.size <= 50 * 1024 * 1024;
+      return request.resource.size > 0 && request.resource.size <= 50 * 1024 * 1024;
+    }
+    function requiresDeviceCredential(profile) {
+      return ('deviceBoundAuthRequired' in profile && profile.deviceBoundAuthRequired == true) ||
+        'crewDeviceSession' in request.auth.token || 'crewDeviceGeneration' in request.auth.token;
+    }
+    function currentDeviceCredential(identity) {
+      return 'crewDeviceSession' in request.auth.token && 'crewDeviceGeneration' in request.auth.token &&
+        request.auth.token.crewDeviceSession is string &&
+        request.auth.token.crewDeviceSession.matches('device_[0-9a-f]{28}') &&
+        request.auth.token.crewDeviceGeneration is string &&
+        request.auth.token.crewDeviceGeneration.matches('[0-9a-f]{48}') &&
+        'deviceCredentials' in identity && identity.deviceCredentials is map &&
+        request.auth.token.crewDeviceSession in identity.deviceCredentials &&
+        identity.deviceCredentials[request.auth.token.crewDeviceSession] == request.auth.token.crewDeviceGeneration;
+    }
+
+    function currentDeviceUploadPath(identity, fileName) {
+      return currentDeviceCredential(identity) &&
+        fileName.matches(request.auth.token.crewDeviceSession + '-' + request.auth.token.crewDeviceGeneration +
+          '-[0-9a-f]{32}-[^/]+');
+    }
+    function unboundUploadPath(fileName) {
+      return !fileName.matches('device_[0-9a-f]{28}-[0-9a-f]{48}-[0-9a-f]{32}-[^/]+');
+    }
+    function matchesUploadGrant(grant, objectPath) {
+      return grant is map && grant.storagePath == objectPath &&
+        grant.expiresAt is timestamp && request.time < grant.expiresAt &&
+        grant.contentType == request.resource.contentType && grant.size == request.resource.size &&
+        (grant.contentSha256 == null ||
+          ('lkcContentSha256' in request.resource.metadata && request.resource.metadata.lkcContentSha256 == grant.contentSha256));
+    }
+    function authorizedUpload(identity, fileId, objectPath) {
+      return 'submissionUploadGrants' in identity && identity.submissionUploadGrants is map &&
+        fileId in identity.submissionUploadGrants &&
+        matchesUploadGrant(identity.submissionUploadGrants[fileId], objectPath);
+    }
+    function activeSubmissionStaff(companyId, uid, staffId, fileName, fileId, objectPath) {
+      let identity = firestore.get(/databases/(default)/documents/authIdentities/$(uid)).data;
+      let profile = firestore.get(/databases/(default)/documents/staffProfiles/$(staffId)).data;
+      return identity.active == true && identity.companyId == companyId && identity.staffId == staffId &&
+        profile.active == true && profile.companyId == companyId &&
+        currentSubmissionAuthentication(identity) &&
+        authorizedUpload(identity, fileId, objectPath) &&
+        (requiresDeviceCredential(profile) ? currentDeviceUploadPath(identity, fileName) : unboundUploadPath(fileName));
+    }
+    function currentSubmissionAuthentication(identity) {
+      return !('revokedAt' in identity) || identity.revokedAt == null ||
+        (identity.revokedAt is timestamp && 'auth_time' in request.auth.token &&
+          request.auth.token.auth_time is int && request.auth.token.auth_time >= 0 &&
+          request.auth.token.auth_time <= 253402300799 &&
+          timestamp.value(request.auth.token.auth_time * 1000) >= identity.revokedAt);
     }
 
     match /staging/{companyId}/{uid}/{submissionId}/{fileId}/{fileName} {
       allow create: if signedIn() &&
         request.auth.uid == uid &&
         request.auth.token.companyId == companyId &&
-        validType() &&
-        validSize();
+        request.auth.token.role == 'staff' &&
+        request.auth.token.staffId is string && request.auth.token.staffId.matches('[^/]+') &&
+        validType() && validSize() &&
+        activeSubmissionStaff(companyId, uid, request.auth.token.staffId, fileName, fileId,
+          "staging/" + companyId + "/" + uid + "/" + submissionId + "/" + fileId + "/" + fileName);
       allow read, update, delete: if false;
     }
 

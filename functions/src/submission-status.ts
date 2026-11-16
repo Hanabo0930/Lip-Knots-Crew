@@ -7,6 +7,7 @@ import { companyFromClaims, requireAuth, staffFromClaims } from "./utils";
 import { submissionSheetWriteIdentity } from "./sheet-write-core";
 import { readSubmissionDeadlinePolicy } from "./submission-deadline-policy";
 import { assertProductionOperational } from "./system-safety";
+import { readActiveStaffProfile } from "./staff-session";
 
 const ClientSubmittedSchema = z.object({
   jobId: z.string().min(1),
@@ -16,6 +17,7 @@ const ClientSubmittedSchema = z.object({
 
 export const setSalesFloorClientSubmitted = onCall(async (request) => {
   const session = requireAuth(request);
+  if (session.token.role !== "staff") throw new HttpsError("permission-denied", "スタッフ権限が必要です。");
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
   const staffId = staffFromClaims(session.token);
@@ -24,6 +26,7 @@ export const setSalesFloorClientSubmitted = onCall(async (request) => {
   const queueRef = db.collection("sheetSyncQueue").doc();
 
   await db.runTransaction(async (tx) => {
+    await readActiveStaffProfile(tx, companyId, staffId, session.uid, session.token.auth_time, { requireIdentity: true, deviceClaims: session.token });
     const snap = await tx.get(jobRef);
     if (!snap.exists) throw new HttpsError("not-found", "案件が見つかりません。");
     const job = snap.data() as Record<string, unknown>;

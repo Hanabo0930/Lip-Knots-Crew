@@ -1,3 +1,4 @@
+import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -5,7 +6,7 @@ import {createRequire} from 'node:module';
 const require=createRequire(path.join(process.env.LKC_TEST_DEPENDENCY_ROOT||process.cwd(),'package.json'));const ts=require('typescript');
 const source=fs.readFileSync('apps/staff/src/App.tsx','utf8');const start=source.indexOf('  async function requestLogin()'),end=source.indexOf('  async function registerCurrentDevice(',start);const code=ts.transpileModule(source.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return {promise,resolve,reject};}
-function setup(loginCode="123456",storageFails=false,overrides={}){const state={messages:[],signIns:0,codes:[],calls:0,clears:0},api=deferred(),persistence=deferred(),signIn=deferred();const deps={loginEmailRef:{current:null},authLoadVersionRef:{current:1},email:' Synthetic@Example.test ',loginCode,isLoginActionPending:()=>false,setMessage:m=>{if(m)state.messages.push(m);else state.clears++;},setEmail:()=>{},setLoginCode:v=>state.codes.push(v),localStorage:{setItem:()=>{if(storageFails)throw Error("storage denied");}},firebaseConfigured:true,functions:{},auth:{},window:{location:{origin:'https://example.test'}},httpsCallable:()=>async input=>{state.input=input;state.calls++;return api.promise;},isSignInWithEmailLink:()=>{state.validated=true;return true;},authPersistenceReady:persistence.promise,signInWithEmailLink:async()=>{state.signIns++;return signIn.promise;},run:async(_key,fn,options)=>{try{await fn()}catch(error){options.setMessage(error.message);throw error;}}};Object.assign(deps,overrides);const handlers=Function(...Object.keys(deps),code+';return {requestLogin,verifyLoginCode};')(...Object.values(deps));return {state,deps,handlers,api,persistence,signIn};}
+function setup(loginCode="123456",storageFails=false,overrides={}){const state={messages:[],signIns:0,codes:[],calls:0,clears:0},api=deferred(),persistence=deferred(),signIn=deferred();const deps={loginEmailRef:{current:null},authLoadVersionRef:{current:1},email:' Synthetic@Example.test ',loginCode,isLoginActionPending:()=>false,setMessage:m=>{if(m)state.messages.push(m);else state.clears++;},setEmail:()=>{},setLoginCode:v=>state.codes.push(v),localStorage:{setItem:()=>{if(storageFails)throw Error("storage denied");}},firebaseConfigured:true,functions:{},auth:{},window:{location:{origin:'https://example.test'}},httpsCallable:()=>async input=>{state.input=input;state.calls++;return api.promise;},isSignInWithEmailLink:()=>{state.validated=true;return true;},currentDeviceId:'synthetic-existing-device',authPersistenceReady:persistence.promise,signInWithCustomToken:async(_auth,token)=>{assert.equal(token,'synthetic.grant.signature');state.customSignIns=(state.customSignIns??0)+1;return signIn.promise;},signInWithEmailLink:async()=>{state.signIns++;return signIn.promise;},run:async(_key,fn,options)=>{try{await fn()}catch(error){options.setMessage(error.message);throw error;}}};Object.assign(deps,overrides);const handlers=Function(...Object.keys(deps),code+';return {requestLogin,verifyLoginCode};')(...Object.values(deps));return {state,deps,handlers,api,persistence,signIn};}
 const flush=async()=>{for(let tick=0;tick<20;tick++)await Promise.resolve();};
 const response={data:{accepted:true,message:'sent',emailActionLink:'https://example.test/synthetic'}};
 for(const name of ['requestLogin','verifyLoginCode'])for(const reject of [false,true]){const test=setup();const pending=test.handlers[name]();if(name==='verifyLoginCode'){test.persistence.resolve();await flush();assert.equal(test.state.calls,1);}test.deps.authLoadVersionRef.current++;reject?test.api.reject(Error('old error')):test.api.resolve(response);await pending;assert.equal(test.state.signIns,0);assert.deepEqual(test.state.messages,[]);}
@@ -13,6 +14,20 @@ for(const name of ['requestLogin','verifyLoginCode'])for(const reject of [false,
 for(const staleAfterSignIn of [false,true]){const test=setup();const pending=test.handlers.verifyLoginCode();test.api.resolve(response);test.persistence.resolve();await flush();assert.equal(test.state.signIns,1);if(staleAfterSignIn)test.deps.authLoadVersionRef.current++;test.signIn.resolve();await pending;assert.equal(test.state.signIns,1);assert.deepEqual(test.state.messages,staleAfterSignIn?[]:['ログインしました。']);assert.deepEqual(test.state.codes,staleAfterSignIn?[]:['']);}
 {const test=setup();const pending=test.handlers.requestLogin();test.api.resolve(response);await pending;assert.deepEqual(test.state.messages,['ログインメールの送信依頼は受付済みです。メールが届いたら確認コードを入力してください。']);}
 {const test=setup();const pending=test.handlers.verifyLoginCode();test.persistence.resolve();await flush();test.api.reject(Error('current error'));await pending;assert.deepEqual(test.state.messages,['current error']);}
+
+for(const mode of ['bound','malformed-grant','ambiguous','stale']){
+ const h=setup();const pending=h.handlers.verifyLoginCode();h.persistence.resolve();await flush();
+ assert.equal(h.state.input.deviceId,'synthetic-existing-device');
+ if(mode==='stale')h.deps.authLoadVersionRef.current++;
+ h.api.resolve({data:{customToken:mode==='malformed-grant'?'invalid':'synthetic.grant.signature',
+  ...(mode==='ambiguous'?{emailActionLink:'https://synthetic.invalid/action'}:{})}});
+ h.signIn.resolve();await pending;
+ assert.equal(h.state.customSignIns??0,mode==='bound'?1:0);
+ assert.equal(h.state.signIns,0);
+ if(['malformed-grant','ambiguous'].includes(mode))assert.match(h.state.messages.at(-1),/ログイン情報を確認できません/);
+}
+console.log('Device-code client: 4 cases passed; a stale or ambiguous response cannot sign in.');
+
 console.log('Staff login races: 9 cases passed; stale API/persistence/sign-in results discarded, current results preserved; no real email or authentication.');
 
 {
@@ -36,11 +51,28 @@ console.log('Persistence failure never redeems a login code or signs in; entered
 
 
 {
- const {execFileSync}=await import('node:child_process');const firebase=fs.readFileSync('apps/staff/src/firebase.ts','utf8');const from=firebase.indexOf('export const authPersistenceReady'),to=firebase.indexOf('if (app && useFirebaseEmulators)',from);assert.ok(from>=0&&to>from);
- const initial=ts.transpileModule(firebase.slice(from,to).replace('export const','const'),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
- const check='const auth={},browserLocalPersistence={};const setPersistence=()=>Promise.reject(Error("denied"));'+initial+';setImmediate(async()=>{try{await authPersistenceReady;process.exitCode=1;}catch(error){if(!error.message.includes("保存準備"))process.exitCode=1;}});';
- execFileSync(process.execPath,['--unhandled-rejections=strict','-e',check],{stdio:'pipe'});
+  const firebase = fs.readFileSync('apps/staff/src/firebase.ts', 'utf8');
+  const from = firebase.indexOf('export const authPersistenceReady');
+  const to = firebase.indexOf('if (app && useFirebaseEmulators)', from);
+  assert.ok(from >= 0 && to > from);
+  const code = ts.transpileModule(
+    firebase.slice(from, to).replace('export const', 'const') + '\nglobalThis.ready = authPersistenceReady;',
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const context = { auth: {}, browserLocalPersistence: {}, setPersistence: () => Promise.reject(Error('denied')) };
+  const unhandled = [];
+  const record = error => unhandled.push(error);
+  process.on('unhandledRejection', record);
+  try {
+    vm.runInNewContext(code, context);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+    await assert.rejects(context.ready, /保存準備/u);
+  } finally {
+    process.off('unhandledRejection', record);
+  }
 }
+
 console.log('Persistence startup rejects safely before a delayed consumer; its later await still receives the recovery error.');
 
 for(const result of ["success","failure","stale"]){const test=setup();const pending=test.handlers.requestLogin();assert.deepEqual(test.state.codes,[],"Keep code while pending");if(result==="stale")test.deps.authLoadVersionRef.current++;if(result==="failure")test.api.reject(Error("再送に失敗しました。"));else test.api.resolve(response);await pending;assert.deepEqual(test.state.codes,result==="success"?[""]:[]);}

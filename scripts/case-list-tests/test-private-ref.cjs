@@ -6,8 +6,7 @@ const {createRequire}=require('node:module');
 const authorFile=path.join(__dirname,'test-worker-binding.cjs');
 class HttpsError extends Error{constructor(code,message,details){super(message);this.code=code;this.details=details;}}
 let native;
-const chain=new Proxy(function(){},{get:(_,key)=>key==='parse'?v=>v:()=>chain});
-const testStubs={privateCalls:0,denyPrivate:false,https:{HttpsError,onCall:fn=>fn},sheets:()=>native,z:chain,adminCore:{createSpreadsheetRowUrl:({spreadsheetId,sheetId,row,endColumn})=>`https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=${sheetId}&range=A${row}:${endColumn}${row}`}};
+const testStubs={privateCalls:0,denyPrivate:false,https:{HttpsError,onCall:fn=>fn},sheets:()=>native,z:require("zod").z,adminCore:{createSpreadsheetRowUrl:({spreadsheetId,sheetId,row,endColumn})=>`https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=${sheetId}&range=A${row}:${endColumn}${row}`}};
 let source=fs.readFileSync(authorFile,'utf8');source=source.slice(0,source.indexOf('async function main(){'));
 source=source.replace("if(specifier==='node:crypto')",`if(specifier==='firebase-functions/v2/https')return testStubs.https;
  if(specifier==='firebase-functions/v2/firestore')return {onDocumentWritten:()=>()=>{}};
@@ -16,6 +15,7 @@ source=source.replace("if(specifier==='node:crypto')",`if(specifier==='firebase-
  if(specifier==='./sheet-reader')return {createReadOnlySheetsClient:async()=>testStubs.sheets()};
  if(specifier==='./admin-operations-core')return testStubs.adminCore;
  if(specifier==='./assignment-preparation-core')return {};
+ if(specifier==='./case-list-external-expense-completion')return {'completeExternalExpense':()=>assert.fail('Unrelated fixture reached external expense confirmation'),'traceExternalExpense':()=>assert.fail('Unrelated fixture reached external expense tracing')};
  if(specifier==='node:crypto')`);
 source=source.replace("getProductionOperationalState:async()=>({operational})","getProductionOperationalState:async()=>({operational}),assertProductionOperational:async()=>{}");
 const box={require:createRequire(authorFile),module:{exports:{}},console,process,Buffer,Date,__dirname:path.dirname(authorFile),testStubs};

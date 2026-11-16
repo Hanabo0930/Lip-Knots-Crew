@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import process from "node:process";
 import { assertRetryWorkerSource } from "./validate-staging-sheet-worker.mjs";
+import { assertSyncSource } from "./staging-gas-sync-readiness.mjs";
 
 function valueAfter(flag, fallback = "") {
   const index = process.argv.indexOf(flag);
@@ -22,6 +23,7 @@ const requestedFunctions = parseCsv(
 );
 const supportedFunctions = new Set([
   "retrySafeSheetWrites",
+  "caseListGasSync",
   "receiveCaseMailMessage",
   "receiveCaseMailMessages",
   "listCaseMailReceipts",
@@ -78,6 +80,7 @@ const supportedFunctions = new Set([
   "createAdminJobGroup",
   "updateJobPublication",
   "adminEditJobInputs",
+  "adminEditCaseListLocation",
   "generateJobExport",
   "updateNetPrintNumbers",
   "adminSetJobCancellation",
@@ -427,23 +430,129 @@ function checkCaseListApplyRoute(block) {
     'sourceRowRevision:caseListChecked.source.rowRevision,sourceLedgerRevision:caseListChecked.source.ledgerRevision,sourceRevision:caseListChecked.source.sourceRevision,',
     'preMonthlyContentHash:caseListChecked.preMonthlyContentHash,',
     'expectedJobRevision:input.expectedJobRevision,assignedJobRevision:nextAssignmentRevision(job),staffId,staffName:displayName,dateKey:workDate',
-    'tx.set(idempotencyRef,{expectedJobRevision:input.expectedJobRevision??null,expectedSourceRevision:input.expectedSourceRevision??null,mailApplicationRevision:input.mailApplicationRevision??null,mailApplicationId:input.mailApplicationId??null,uid:session.uid,companyId,staffId,result:response,',
+    'constreceiptBinding={expectedJobRevision:input.expectedJobRevision??null,expectedSourceRevision:input.expectedSourceRevision??null,mailApplicationRevision:input.mailApplicationRevision??null,mailApplicationId:input.mailApplicationId??null,};',
+    'tx.set(idempotencyRef,{...receiptBinding,uid:session.uid,companyId,staffId,result:response,',
+    'constqueueRef=db.collection("sheetSyncQueue").doc(staffApplicationQueueKey(session.uid,input.requestId));',
+    'if(!idempotencySnap.exists){constexistingQueue=awaittx.get(queueRef);if(existingQueue.exists){previous=readStaffApplicationQueueReceipt(existingQueue.data(),input.requestId);if(!previous)throw',
+    'if(idempotencySnap.exists||previous){',
+    'tx.create(queueRef,{companyId,jobId:input.jobId,operation:caseListChecked?"case_list.assign":"job.assign",staffApplicationCheck,staffApplicationReceipt:{schema:STAFF_APPLICATION_RECEIPT_SCHEMA,requestId:input.requestId,assignedAt:response.assignedAt,...receiptBinding},',
   ].every(part => block.includes(part))) return false;
-  if (block.indexOf('if(idempotencySnap.exists){') > block.indexOf('caseListSourceModule().readCaseListPublication(') ||
+  if (block.indexOf('if(idempotencySnap.exists||previous){') > block.indexOf('caseListSourceModule().readCaseListPublication(') ||
       block.indexOf('caseListSourceModule().readCaseListPublication(') > block.indexOf('tx.update(jobRef,')) return false;
   return checkCaseListSourceGuards(true);
 }
 
+// Bounded lexical pass for reviewed source shapes. A commented-out check must
+// not satisfy a required executable boundary. Quoted URLs remain literals.
+function reviewedCompact(source) {
+  let out='', quote='', line=false, block=false;
+  for(let i=0;i<source.length;i++) {
+    const c=source[i], next=source[i+1];
+    if(line){if(c==='\n'){line=false;out+='\n';}continue;}
+    if(block){if(c==='*'&&next==='/'){block=false;i++;out+=' ';}continue;}
+    if(quote){out+=c;if(c==='\\')out+=source[++i]??'';else if(c===quote)quote='';continue;}
+    if(c==='/'&&next==='/'){line=true;i++;out+=' ';continue;}
+    if(c==='/'&&next==='*'){block=true;i++;out+=' ';continue;}
+    if(c==='"'||c==="'"||c.charCodeAt(0)===96)quote=c;
+    out+=c;
+  }
+  return quote||block?'':out.replace(/\s+/g,'');
+}
+
+// Current external routes must enter the real Firebase verifier and retain its
+// fresh precommit callback. A Google claim or a callable snapshot is not enough.
+function checkCaseListFirebaseOwner(whole) {
+  if (![
+    'require("./case-list-firebase-owner")',
+    'returnwithFirebaseOwnerCallable(request,session,operation);',
+  ].every(part => whole.includes(part))) return false;
+  const owner = reviewedCompact(sourceFile('functions/src/case-list-firebase-owner.ts'));
+  return [
+    'need(!process.env.FIREBASE_AUTH_EMULATOR_HOST,"FIREBASE_OWNER_EMULATOR_UNSUPPORTED");',
+    'verifyFirebaseIdentity:(token,checkRevoked)=>auth.verifyIdToken(token,checkRevoked)',
+    'claims=awaitports.verifyFirebaseIdentity(authorization.slice(7),true);',
+    'policy.projectId===PROJECT&&policy.actualProjectId===PROJECT',
+    'session?.uid===policy.ownerUid&&session.token?.role==="admin"&&session.token.companyId===policy.companyId',
+    'claims.aud===PROJECT&&claims.iss==="https://securetoken.google.com/"+PROJECT&&claims.uid===session.uid&&claims.sub===session.uid',
+    'seconds(claims.auth_time)&&claims.auth_time<=claims.iat',
+    'firebase.sign_in_provider==="google.com"&&!Object.hasOwn(firebase,"tenant")&&!Object.hasOwn(firebase,"sign_in_second_factor")',
+    'claims.role==="admin"&&claims.companyId===policy.companyId&&claims.email_verified===true',
+    'user=awaitports.readFirebaseUserByGoogleSubject(subjects[0]);',
+    'user.uid===session.uid&&user.disabled===false&&user.emailVerified===true',
+    'user.tenantId===null',
+    'links.length===1&&links[0].uid===subjects[0]',
+    'user.customClaims?.role==="admin"&&user.customClaims.companyId===policy.companyId',
+    'user.mfaState==="NONE"',
+    'user.observedAt<=now&&now-user.observedAt<30000',
+    'claims.auth_time*1000>=user.validSinceMs',
+    'claims.exp>Math.floor(now/1000)',
+    'constowner=awaitcurrent();',
+    'constbeforeCommit=async()=>{constnext=awaitcurrent();',
+    'constresult=awaitoperation(owner,beforeCommit);awaitbeforeCommit();returnresult;',
+  ].every(part => owner.includes(part));
+}
+
+function checkOwnerPopupRoute(block) {
+  if (!['["preview-case-list-gas-send","confirm-case-list-gas-send","observe-case-list-gas-send"].includes(request.data?.action)',
+    'returnhandleOwnerNameUpReview(request,session);'].every(part => block.includes(part))) return false;
+  const requirements = {
+    'case-list-owner-review-callable.ts': [
+      "observing?['business','read-only'].includes(env.LKC_GAS_SYNC_MODE):env.LKC_GAS_SYNC_MODE==='business'",
+      'createFirebaseOwnerAuthContext(request,session,config,ports.identityOverrides)',
+      'returnwithFreshPrincipal(auth,authorization,async(actor:Data)=>{',
+      'await(ports.sentAccess??createApprovedSentAccess({db:database,now,operational:ports.operational})).assertReaderReady(reader,actor);',
+      'constresult=awaitformal.confirm(authorization,data.payload);',
+    ],
+    'case-list-owner-context.ts': [
+      'returnwithFirebaseOwnerCallable(request,sessionasany,asyncactor=>actor,overrides.policy,overrides.identity);',
+      'constactor=awaitCore.readVerifiedGoogleAccount(baseAuth,authorization);',
+      "value?.state==='RESULT_OBSERVED'", "value.result?.status==='OWNER_APPROVED_FOR_GAS'",
+      'Owner.validateOwnerAuthorization(value.result.ownerAuthorization,actor,now(),',
+      'Owner.freshActor(actor,now());',
+    ],
+    'case-list-owner-authorization.cjs': [
+      "firebaseActors.has(actor),'FIREBASE_OWNER_EVIDENCE_REQUIRED'", 'record.principalStateHash===actor.principalStateHash',
+      'now<record.validUntil', 'expected.deadlineAt-expected.firstPreparedAt===180000',
+    ],
+    'case-list-approved-sent-access.ts': [
+      "p?.purpose==='NAMEUP_KNOWN_SENT_VERIFICATION_V1'", "policy.mode==='active'", 'policy.allowedUids.includes(actor.uid)',
+      'journal.lease?.epoch===policy.epoch&&journal.lease.expiresAt>now()',
+      'Owner.validateOwnerAuthorization(grant,actor,now(),', 'receipt?.messageId===scope.messageId&&receipt.digest===scope.digest',
+    ],
+    'case-list-gas-sync-runtime.ts': [
+      "need(!['FORMAL_PREVIEW','FORMAL_CONFIRM'].includes(req.body?.action),'FIREBASE_OWNER_REVIEW_REQUIRED');",
+      'createGasOwnerAuthContext(baseAuth,req.body,{db:database,now})',
+      'assertMailAccess:async(config,actor,scope)=>access.assertMessageAccess(config,awaitcurrentMailActor(actor),scope)',
+      'requireOwnerAuthorization:true',
+    ],
+  };
+  return Object.entries(requirements).every(([file, parts]) => {
+    const source=reviewedCompact(sourceFile('functions/src/'+file));
+    return parts.every(part=>source.includes(part));
+  });
+}
+
 function checkCaseListOwnerReconciliation(block, whole) {
+  if (!checkCaseListFirebaseOwner(whole)) return false;
   const route = block.slice(block.indexOf('if(input.action==="reconcile-case-list"){'), block.indexOf('constauditRef='));
   if (![
     'if(input.action==="reconcile-case-list"){constsnapshot=awaitref.get();',
     '!snapshot.exists||snapshot.data()?.companyId!==companyId',
     'snapshot.data()?.operation!=="case_list.assign"',
     'require("./case-list-monthly-worker")',
-    'returnworker.reconcileCaseListMonthlyAssignment(ref,session.uid,session.token);',
+    'constreconcileExternal=()=>firebaseExternalOwner(request,session,(owner,beforeCommit)=>{',
+    'returnexternal.reconcileExternalCaseListMonthlyTransferForHandoff(ref,owner.uid,owner,beforeCommit);',
+    'if(data.errorType==="external_transfer_selected"||typeofdata.caseListExternalAcceptanceHash==="string"){returnreconcileExternal();}',
+    'returnworker.reconcileCaseListMonthlyAssignment(ref,session.uid,session.token,reconcileExternal);',
   ].every(part => route.includes(part)) || /\.(?:add|create|set|update|delete|commit)\(/.test(route)) return false;
-  const worker = sourceFile('functions/src/case-list-monthly-worker.ts').replace(/\s+/g, '');
+  const worker = reviewedCompact(sourceFile('functions/src/case-list-monthly-worker.ts'));
+  const externalBranch = worker.slice(worker.indexOf('exportasyncfunctionreconcileCaseListMonthlyAssignment('), worker.indexOf('exportasyncfunctionretryCaseListMonthlyAssignments('));
+  if (![
+    'constqueue=(awaitqueueRef.get()).data();',
+    'constoperation=(awaitdb.collection("caseListMonthlyOperations").doc(sha256(queue.companyId+"|"+queueRef.id)).get()).data();',
+    'queue.errorType==="external_transfer_selected"||typeofqueue.caseListExternalAcceptanceHash==="string"||operation?.externalManualRequested===true||Object.hasOwn(operation??{},"externalSelection")||Object.hasOwn(operation??{},"externalAcceptance")',
+    'need(typeofreconcileExternal==="function","EXTERNAL_RECONCILE_AUTHORITY_REQUIRED");returnreconcileExternal();',
+  ].every(part => externalBranch.includes(part)) || /reconcileExternalCaseListMonthlyTransfer\(/.test(worker)) return false;
   if (![
     'assertExecutive(owner.token,process.env.EXECUTIVE_APPROVER_EMAILS??"");',
     'owner.token.companyId===initial.companyId&&(owner.token.uid??owner.token.sub)===owner.actorUid',
@@ -497,12 +606,79 @@ function checkCaseListManualSelection(block, whole) {
   return ['manualPendingAssignmentFields(manualObservation)','currentStaff.active!==true','currentStaff.displayName!==manualObservation.canonicalStaffName','old.assignmentSheetWrite?.queueId!==priorManual.queueId'].every(part=>source.includes(part));
 }
 
+// A bounded scanner for this reviewed TS function. Unsupported template/regexp
+// syntax fails closed rather than borrowing checks from the following function.
+function bindingReaderFunction(source) {
+  const marker='export async function readExternalCaseListSelectionBinding(';
+  const start=source.indexOf(marker);
+  if(start<0||source.indexOf(marker,start+marker.length)>=0)return null;
+  const open=source.indexOf('{',start+marker.length);
+  if(open<0)return null;
+  let depth=0,quote='',line=false,block=false,out=source.slice(start,open);
+  for(let i=open;i<source.length;i++){
+    const c=source[i],next=source[i+1];
+    if(line){out+=c==='\n'?'\n':' ';if(c==='\n')line=false;continue;}
+    if(block){out+=c==='\n'?'\n':' ';if(c==='*'&&next==='/'){out+=' ';block=false;i++;}continue;}
+    if(quote){out+=c;if(c==='\\'){out+=source[++i]??'';continue;}if(c===quote)quote='';continue;}
+    if(c==='/'&&next==='/'){out+='  ';line=true;i++;continue;}
+    if(c==='/'&&next==='*'){out+='  ';block=true;i++;continue;}
+    if(c==='/'||c.charCodeAt(0)===96)return null;
+    out+=c;
+    if(c==='"'||c==="'"){quote=c;continue;}
+    if(c==='{')depth++;
+    else if(c==='}'&&--depth===0)return out;
+  }
+  return null;
+}
+
+function checkCaseListBindingRead(block, whole) {
+  if (!whole.includes('"read-case-list-gas-binding"')) return true;
+  const start=block.indexOf('if(input.action==="read-case-list-gas-binding"){');
+  const end=block.indexOf('if(input.action==="select-case-list-gas-monthly"){',start);
+  if(start<0||end<=start)return false;
+  const route=block.slice(start,end);
+  if(!['require("./case-list-external-transfer")','returnfirebaseExternalOwner(request,session,async(owner)=>{',
+    'constbinding=awaitexternal.readExternalCaseListSelectionBinding(ref,owner.uid,owner);',
+    'return{status:"EXTERNAL_BINDING_READ",queueId:ref.id,binding,sourceWrites:0,monthlyWrites:0};'].every(part=>route.includes(part))||
+    /\.(?:add|create|set|update|delete|commit)\(/.test(route)||route.includes('request.data.'))return false;
+  // Inspect this function only: a neighboring reader must not mask a removed guard.
+  const external=sourceFile('functions/src/case-list-external-transfer.ts');
+  const readerSource=bindingReaderFunction(external);
+  if(!readerSource)return false;
+  const reader=readerSource.replace(/\s+/g,'');
+  if(!['assertOwner(uid,token,String(token.companyId??""));','ID.test(token.companyId??"")&&ID.test(queueRef.id)',
+    'returndb.runTransaction(asynctx=>{','constinitial=(awaittx.get(queueRef)).data();',
+    'initial&&initial.companyId===token.companyId&&initial.operation==="case_list.assign"',
+    'constr=awaitrecordsFor(queueRef,tx);','r.leaseActive=r.lease?.activeUntilinstanceofTimestamp&&r.lease.activeUntil.toMillis()>Date.now();',
+    'authorize:(actor:string,auth:Data)=>assertOwner(actor,auth,initial!.companyId)',
+    'assertAuthority:authority','readProtected:async()=>r',
+    'readSheets:async()=>{throwError("BINDING_SHEETS_READ_FORBIDDEN");}',
+    'transaction:async()=>{throwError("BINDING_WRITE_FORBIDDEN");}',
+    'returnconnection.readSelectionBinding(queueRef.id,uid,token);','},{readOnly:true});'].every(part=>reader.includes(part))||
+    /\.(?:add|create|set|update|delete|commit)\(/.test(reader))return false;
+  const core=sourceFile('functions/src/case-list-external-core.cjs').replace(/\s+/g,'');
+  const pending=core.slice(core.indexOf('functionpendingSelection('),core.indexOf('functionreceiptFrom('));
+  const read=core.slice(core.indexOf('asyncfunctionreadSelectionBinding('),core.indexOf('asyncfunctionselect('));
+  return ['origin=assertOriginal(r,queueId)','selection?.schema===SCHEMA&&selection.selectionHash===hash(body)',
+    'selection.selectedBy===uid&&selection.companyId===r.job.companyId','selection.queueId===queueId&&selection.jobId===r.jobId&&selection.caseId===r.job.caseId',
+    'selection.origin===origin&&selection.clientNameUpConfirmed===true','hash(selection.original)===hash(originalIdentity(r))',
+    'selection.gasPreview?.producerSchema===\'LK_NAMEUP_TRANSFER_V1\''].every(part=>pending.includes(part))&&
+    ['constr=awaitauthorized(queueId,uid,token);','need(!r.externalAcceptance,\'EXTERNAL_BINDING_PENDING_ONLY\');',
+    'pendingSelection(r,queueId,uid)','s.assertAuthority(queueId,r);',
+    'r.queue.status===\'blocked\'&&r.queue.errorType===\'external_transfer_selected\'',
+    'Number.isSafeInteger(selection.selectedAt)&&selection.selectedAt<=s.now()',
+    '/^[a-f0-9]{64}$/.test(p.nameUpExpected??\'\')&&Number.isInteger(p.sheetId)&&p.book===r.config.spreadsheetId',
+    'returnclone({queueId,companyId:r.job.companyId,jobId:r.jobId,caseId:r.job.caseId,origin,staffId:a.staffId,dateKey:a.dateKey,expectedJobRevision:a.expectedJobRevision,assignedJobRevision:a.assignedJobRevision,sourceRevision:a.sourceRevision,selectedBy:selection.selectedBy,selectedAt:selection.selectedAt,selectionHash:selection.selectionHash,gas:{book:p.book,sheetId:p.sheetId,nameUpExpected:p.nameUpExpected}});'].every(part=>read.includes(part))&&
+    !/s\.(?:transaction|readSheets)\(/.test(read);
+}
+
 function checkCaseListOwnerSelection(block, whole) {
-  if (!checkCaseListManualSelection(block, whole)) return false;
+  if (!checkCaseListManualSelection(block, whole) || !checkCaseListExternalSelection(block, whole) || !checkCaseListBindingRead(block, whole)) return false;
   // Historical sources have no selection action. Keep their exact legacy
   // schema/read-only checks; a new selection route must pass every new guard.
   if (whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list"]).default("note"),});') && !whole.includes('"select-case-list-monthly"')) return true;
-  if (!whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(["note","reconcile-case-list","select-case-list-monthly"]).default("note"),reviewKey:z.string().regex(/^[a-f0-9]{64}$/).optional(),clientNameUpConfirmed:z.literal(true).optional(),});')) return false;
+  const actions = whole.includes('"read-case-list-gas-binding"') ? '["note","reconcile-case-list","select-case-list-monthly","select-case-list-gas-monthly","read-case-list-gas-binding"]' : whole.includes('"select-case-list-gas-monthly"') ? '["note","reconcile-case-list","select-case-list-monthly","select-case-list-gas-monthly"]' : '["note","reconcile-case-list","select-case-list-monthly"]';
+  if (!whole.includes('constAcknowledgeQueueSchema=QueueActionSchema.extend({action:z.enum(' + actions + ').default("note"),reviewKey:z.string().regex(/^[a-f0-9]{64}$/).optional(),clientNameUpConfirmed:z.literal(true).optional(),});')) return false;
   const start = block.indexOf('if(input.action==="select-case-list-monthly"){'), end = block.indexOf('if(input.action==="reconcile-case-list"){');
   if (start < 0 || end <= start) return false;
   const route = block.slice(start, end);
@@ -549,6 +725,73 @@ function checkCaseListOwnerSelection(block, whole) {
   ].every(part => controller.includes(part));
 }
 
+function checkCaseListExternalSelection(block, whole) {
+  const action = '"select-case-list-gas-monthly"', manualAction = '"select-case-list-manual-gas-monthly"';
+  if (!whole.includes(action) && !whole.includes(manualAction)) return true;
+  if (!checkCaseListFirebaseOwner(whole)) return false;
+  const manualStart = block.indexOf('if(request.data?.action===' + manualAction + '){');
+  const manualEnd = block.indexOf('if(request.data?.action==="select-case-list-manual-monthly"){');
+  const start = block.indexOf('if(input.action===' + action + '){');
+  const end = block.indexOf('if(input.action==="select-case-list-monthly"){');
+  if (manualStart < 0 || manualEnd <= manualStart || start < 0 || end <= start) return false;
+  const manual = block.slice(manualStart, manualEnd), route = block.slice(start, end);
+  if (![
+    'ManualSelectionSchema.extend({action:z.literal("select-case-list-manual-gas-monthly")})',
+    'constinput=externalManualSchema.parse(request.data);', 'awaitassertProductionOperational(companyId);',
+    'returnfirebaseExternalOwner(request,session,async(owner,beforeCommit)=>{',
+    'awaitmonthly.registerCaseListManualForHandoff(companyId,owner.uid,owner,input,beforeCommit);',
+    'returnexternal.selectExternalCaseListMonthlyTransferForHandoff(queueRef,owner.uid,owner,',
+    '{reviewKey:queue?.caseListPhase?.continuationHash,clientNameUpConfirmed:true},beforeCommit);',
+  ].every(part => manual.includes(part)) || ![
+    'if(!input.reviewKey||input.clientNameUpConfirmed!==true)', 'awaitassertProductionOperational(companyId);',
+    '!snap.exists||snap.data()?.companyId!==companyId||snap.data()?.operation!=="case_list.assign"',
+    'returnfirebaseExternalOwner(request,session,async(owner,beforeCommit)=>{',
+    'returnexternal.selectExternalCaseListMonthlyTransferForHandoff(ref,owner.uid,owner,input,beforeCommit);',
+  ].every(part => route.includes(part)) || /\.(?:add|create|set|update|delete|commit)\(/.test(manual + route)) return false;
+  const worker = sourceFile('functions/src/case-list-monthly-worker.ts').replace(/\s+/g, '');
+  const registration = worker.slice(worker.indexOf('exportasyncfunctionselectCaseListManualMonthlyTransfer('), worker.indexOf('exportasyncfunctionprocessCaseListMonthlyAssignment('));
+  if (![
+    '"MANUAL_OWNER_IDENTITY_INVALID");if(externalReceiptMode)assertExternalIntakeEnabled();',
+    'returndb.runTransaction(asynctx=>{if(externalReceiptMode)assertExternalIntakeEnabled();',
+    'assertCaseListMonthlyAuthority(queueId,queue,nextJob,currentStaff,dayLock,config,manualConditions);if(externalReceiptMode)assertExternalIntakeEnabled();',
+  ].every(part => registration.includes(part))) return false;
+  // The optional private handoff performs fresh principal checks and a read-only
+  // preparation return before any business write. Accept only this reviewed
+  // pre-write block; public callable routes above still pass no handoff argument.
+  const authorityAndPause = "assertCaseListMonthlyAuthority(queueId,queue,nextJob,currentStaff,dayLock,config,manualConditions);if(externalReceiptMode)assertExternalIntakeEnabled();";
+  const authorityAt = registration.indexOf(authorityAndPause);
+  const writeAt = registration.indexOf('tx.update(jobRef,nextJob);', authorityAt + authorityAndPause.length);
+  if (authorityAt < 0 || writeAt < 0) return false;
+  const preWrite = registration.slice(authorityAt + authorityAndPause.length, writeAt);
+  const hasHandoff = registration.includes('handoff?:{prepareOnly:boolean;beforeCommit:(context:Data)=>Promise<void>}');
+  if (hasHandoff) {
+    const reviewedPreparation = "if(handoff)awaithandoff.beforeCommit({companyId,actorUid,jobId:input.jobId,queueId,observed,job,staff,snapshot,sourceSnapshot,confirmedFields,payOffer,requestHash,prospectiveJobRevision:assignedRevision});if(externalReceiptMode)assertExternalIntakeEnabled();need((awaitgetProductionOperationalState(companyId,tx)).operational,\"GLOBAL_OPERATION_STOPPED_BEFORE_MANUAL_COMMIT\");if(handoff?.prepareOnly)return{status:\"MANUAL_PREPARED_ONLY\",schema:\"LK_CREW_MANUAL_PREPARE_PROPOSAL_V1\",clientNameUpConfirmed:false,companyId,actorUid,jobId:input.jobId,prospectiveQueueId:queueId,caseId:a.sourceCaseId,staffId:a.staffId,staffName:a.staffName,canonicalStaffName:staff.displayName,dateKey,expectedJobRevision:input.expectedJobRevision,expectedSourceRevision:input.expectedSourceRevision,observationHash:input.observationHash,observedValuesHash:observed.observedValuesHash,sourceWritableHash:hashCaseList(sourceSnapshot),sourceCatalog:snapshot.catalog,dependencyHash:snapshot.dependencyHash,confirmedFields,payOffer,currentJobHash:hashCaseList(currentJob),currentObservationHash:hashCaseList(currentObservation),sourceWrites:0,monthlyWrites:0,businessRecordsCreated:0};";
+    if (preWrite !== reviewedPreparation || !registration.includes('},handoff?.prepareOnly?{readOnly:true}:undefined);') ||
+        (registration.match(/handoff\.beforeCommit\(/g) ?? []).length !== 1) return false;
+  } else if (preWrite || /\bhandoff\b/.test(registration)) return false;
+  const external = sourceFile('functions/src/case-list-external-transfer.ts').replace(/\s+/g, '');
+  const owner = external.slice(external.indexOf('functionassertOwner('), external.indexOf('constsourceHash='));
+  const run = external.slice(external.indexOf('asyncfunctionrunExternal('));
+  const preLease = run.slice(0, run.indexOf('awaitdb.runTransaction('));
+  if (![
+    'need(typeofcommitGuard==="function","HANDOFF_COMMIT_GUARD_REQUIRED");returnrunExternal(queueRef,uid,token,true,input,commitGuard);',
+    'need(typeofcommitGuard==="function","HANDOFF_COMMIT_GUARD_REQUIRED");returnrunExternal(queueRef,uid,token,false,undefined,commitGuard);',
+    'if(commitGuard)awaitcommitGuard(plan.kind,uid,token,r);need((awaitgetProductionOperationalState(initial!.companyId,tx)).operational,"GLOBAL_OPERATION_STOPPED_BEFORE_EXTERNAL_COMMIT");ownLease(r);',
+    'writeAt-window.readStartedAt<=60_000',
+  ].every(part=>reviewedCompact(sourceFile('functions/src/case-list-external-transfer.ts')).includes(part))) return false;
+  return [
+    'assertExecutive(token,process.env.EXECUTIVE_APPROVER_EMAILS??"");',
+    'ID.test(uid)&&token.companyId===companyId&&(token.uid??token.sub)===uid',
+  ].every(part => owner.includes(part)) && [
+    'initial&&initial.operation==="case_list.assign"', 'assertOwner(uid,token,initial!.companyId);',
+    '(awaitgetProductionOperationalState(initial!.companyId)).operational',
+    'if(select)assertExternalIntakeEnabled();',
+  ].every(part => preLease.includes(part)) && [
+    'if(plan.kind==="SELECT_EXTERNAL"){assertExternalIntakeEnabled();tx.set(operationRef,',
+    'returnrunExternal(queueRef,uid,token,true,input);',
+  ].every(part => external.includes(part));
+}
+
 function checkImportIssues(name) {
   const staff = ["previewStaffImport", "syncStaffDirectoryReadOnly"].includes(name);
   const shift = ["previewShiftImport", "syncShiftSheetsReadOnly"].includes(name);
@@ -557,7 +800,7 @@ function checkImportIssues(name) {
   const marker = staff || shift ? "\n);" : "\n});";
   const end = source.indexOf(marker, start);
   if (start < 0 || end < start) return false;
-  const compact = text => text.replace(/\s+/g, "");
+  const compact = reviewedCompact;
   const block = compact(source.slice(start, end + marker.length)), whole = compact(source);
   const has = values => values.every(value => block.includes(value));
   const ownerReconcile = !staff && !shift && whole.includes("AcknowledgeQueueSchema");
@@ -583,17 +826,28 @@ function checkImportIssues(name) {
     const reader = compact(sourceFile("functions/src/sheet-reader.ts"));
     if (!reader.includes('scopes:["https://www.googleapis.com/auth/spreadsheets.readonly"]')
       || /sheets\.spreadsheets\.(?:batchUpdate|values\.(?:update|append|clear|batchUpdate|batchClear))\(/.test(whole + reader)) return false;
+    const usesMaintenance = staff && whole.includes('from"./staff-ng-maintenance";');
+    const staffImportChecks = usesMaintenance ? [
+      'awaitdb.runTransaction(async(tx)=>{constadmission=awaitreadImportAdmission(tx,companyId,token);constnow=Timestamp.now();constleaseUntil=Timestamp.fromMillis(now.toMillis()+10*60*1000);',
+      'registerImport(tx,admission);',
+      'constmaintenanceFence=awaitreadImportWriteFence(tx,this.companyId,this.lock.token);assertStaffImportLease((awaittx.get(this.lock.ref)).data(),this.companyId,this.lock.token);',
+      'recordImportMutation(tx,maintenanceFence,count);',
+      'assertStaffImportLease((awaitlock.ref.get()).data(),companyId,lock.token);constrevocationRunRef=db.collection("staffImportRuns").doc(runId);constrevocationKey=awaitbeforeSessionRevocation(companyId,lock.token,revocationRunRef,item.uid);try{awaitauth.revokeRefreshTokens(item.uid);}',
+      'catch(error){awaitrecordSessionRevocation(companyId,lock.token,revocationRunRef,revocationKey,false);throwerror;}awaitrecordSessionRevocation(companyId,lock.token,revocationRunRef,revocationKey,true);',
+    ] : [
+      'assertStaffImportLease((awaitlock.ref.get()).data(),companyId,lock.token);awaitauth.revokeRefreshTokens(item.uid);',
+      'awaitdb.runTransaction(async(tx)=>{constnow=Timestamp.now();constleaseUntil=Timestamp.fromMillis(now.toMillis()+10*60*1000);',
+    ];
     const requirements = staff ? [
       'if(mode==="commit"&&(!completeSelection||!completeRows))', 'if(failedSheets>0)',
       'newBatchWriter(companyId,lock)', 'if(!lock)thrownewHttpsError("aborted",',
       'lease.companyId!==companyId', 'lease.token!==token', '!(lease.leaseUntilinstanceofTimestamp)',
       'lease.leaseUntil.toMillis()<=Timestamp.now().toMillis()',
       'assertStaffImportLease((awaittx.get(this.lock.ref)).data(),this.companyId,this.lock.token);',
-      'assertStaffImportLease((awaitlock.ref.get()).data(),companyId,lock.token);awaitauth.revokeRefreshTokens(item.uid);',
       'assertStaffImportLease((awaittx.get(lock.ref)).data(),companyId,lock.token);',
       'constcommitted=awaitdb.runTransaction(asynctx=>{',
       'current?.companyId===item.data.companyId&&current?.staffId===item.data.staffId',
-      'awaitdb.runTransaction(async(tx)=>{constnow=Timestamp.now();constleaseUntil=Timestamp.fromMillis(now.toMillis()+10*60*1000);',
+      ...staffImportChecks,
     ] : [
       'constsourceReadStartedAtMs=Timestamp.now().toMillis();',
       'awaitwriteJobsAndLocks(allJobs,staffIndex.byName,runRef?.id??"",lock,sourceReadStartedAtMs)',
@@ -611,7 +865,7 @@ function checkImportIssues(name) {
     'writeVerificationRequired:data.writeVerificationRequired', 'status:"pending",attempts:0,',
     'manualRetryBy:session.uid', 'action:"sheet.issue.retry"',
   ]);
-  if (ownerReconcile && (!checkCaseListOwnerReconciliation(block, whole) || !checkCaseListOwnerSelection(block, whole))) return false;
+  if (ownerReconcile && (!checkCaseListOwnerReconciliation(block, whole) || !checkCaseListOwnerSelection(block, whole) || !checkOwnerPopupRoute(block))) return false;
   return has([
     'if(data.status==="acknowledged")', 'data.acknowledgedBy===session.uid&&data.acknowledgedNote===input.note',
     'if(!["blocked","dead_letter","retry_wait","error","paused_global"].includes(String(data.status??"")))',
@@ -704,7 +958,7 @@ function checkCapturedSourceCancellation(block) {
 }
 
 function checkAdminCore(name) {
-  const modules = { getSheetWriteIssues: "admin-operations", getOperationsDashboard: "analytics", getStaffPerformance: "analytics", createAdminJobGroup: "job-management", updateJobPublication: "job-management", adminEditJobInputs: "job-management", generateJobExport: "job-management", updateNetPrintNumbers: "netprint", adminSetJobCancellation: "analytics", adminRestoreCancelledJob: "analytics" };
+  const modules = { getSheetWriteIssues: "admin-operations", getOperationsDashboard: "analytics", getStaffPerformance: "analytics", createAdminJobGroup: "job-management", updateJobPublication: "job-management", adminEditJobInputs: "job-management", adminEditCaseListLocation: "job-management", generateJobExport: "job-management", updateNetPrintNumbers: "netprint", adminSetJobCancellation: "analytics", adminRestoreCancelledJob: "analytics" };
   const source = sourceFile("functions/src/" + modules[name] + ".ts");
   const start = source.indexOf("export const " + name + " =");
   const marker = name === "generateJobExport" ? "\n);" : "\n});";
@@ -767,9 +1021,17 @@ function checkAdminCore(name) {
       'constpublication=resolvePublication({', 'tx.set(snap.ref,', 'revision:FieldValue.increment(1)',
       'return{updated,blocked};', 'stageAudit(tx,companyId,session.uid,"job.publication.update",',
     ],
+    adminEditCaseListLocation: [
+      'CaseListLocationEditSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
+      'if(job?.companyId!==companyId)throw', 'if(!job.caseListSource||cancellationSourceAckPending(job))',
+      'if(input.revision!==revision||input.locationRevision!==locationRevision){throw',
+      'locationRevision:locationRevision+1,', 'for(constfieldofappOnlyJobFields)',
+      'tx.set(jobRef,update,{merge:true});',
+    ],
     adminEditJobInputs: [
       'EditSchema.parse(request.data??{})', 'awaitdb.runTransaction(async(tx)=>{',
       'if(!jobSnap.exists||jobSnap.data()?.companyId!==companyId)',
+      'if(job.caseListSource){thrownewHttpsError("failed-precondition",',
       'previousQueue.companyId!==companyId||previousQueue.jobId!==input.jobId||previousQueue.errorType==="verification_required"',
       'if(input.revision!==undefined&&input.revision!==currentRevision)',
       '!staffSnap.exists||staffSnap.data()?.companyId!==companyId||staffSnap.data()?.active!==true',
@@ -819,6 +1081,13 @@ function checkAdminCore(name) {
     ],
   };
   if (!has(requirements[name])) return false;
+  if (name === "adminEditCaseListLocation") {
+    const schema = compact(source).match(/constCaseListLocationEditSchema=z\.object\(\{(.+?)\}\)\.strict\(\);/)?.[1] ?? "";
+    if (!schema.includes('fields:z.object(locationFields).strict().refine(fields=>Object.keys(fields).length>0),') ||
+        !compact(source).includes('constappOnlyJobFields=["storeAddress","storeNearestStation"]asconst;') ||
+        /sheetSyncQueue|sheetWriteQueued|update\.revision=|(?:^|[,{])revision:revision\+1/.test(block) ||
+        !checkAtomicMutationAudit(source, block, "job.case_list.location.edit", "return{revision,locationRevision:update.locationRevision};});")) return false;
+  }
   if (name === "adminSetJobCancellation" && !checkCapturedSourceCancellation(block)) return false;
   if (["updateJobPublication","adminEditJobInputs"].includes(name) && !checkAtomicMutationAudit(source, block, name === "updateJobPublication" ? "job.publication.update" : "job.admin_edit", name === "updateJobPublication" ? "return{updated,blocked};});" : "returnresult;});")) return false;
   if (name === "createAdminJobGroup" && !checkNativeCreationRetry(source, block, "create")) return false;
@@ -865,6 +1134,41 @@ function checkAdminCore(name) {
   return true;
 }
 
+function checkLiveStaffSession() {
+  const source = reviewedCompact(sourceFile("functions/src/staff-session.ts"));
+  return [
+    'tx.get(db.collection("staffProfiles").doc(staffId))',
+    'tx.get(db.collection("authIdentities").doc(uid))',
+    'if(staff?.active!==true||staff.companyId!==companyId||(requireIdentity&&!identity.exists)||(identity.exists&&(linked?.active!==true||linked.companyId!==companyId||linked.staffId!==staffId))){throwdenied();}',
+    'if(revokedAt!=null&&(!(revokedAtinstanceofTimestamp)||typeofauthTime!=="number"||!Number.isSafeInteger(authTime)||authTime<0||authTime>253402300799||authTime<revokedAt.seconds||(authTime===revokedAt.seconds&&revokedAt.nanoseconds>0))){throwdenied();}',
+  ].every(boundary => source.includes(boundary));
+}
+
+
+function checkApplicationReceiptLookup(source) {
+  const compact = reviewedCompact(source);
+  const start = compact.indexOf("asyncfunctionreadApplicationReceipts(");
+  if (start < 0) return false;
+  const block = compact.slice(start);
+  const currentSession = "awaitreadActiveStaffProfile(tx,companyId,staffId,uid,token.auth_time,{requireIdentity:true,deviceClaims:token});";
+  const receiptRead = 'awaittx.get(db.collection("idempotencyKeys").doc(uid+"_"+requestId))';
+  return [
+    ".min(1).max(20)",
+    "ApplicationReceiptLookupSchema.safeParse(attempts)",
+    "awaitassertProductionOperational(companyId);",
+    currentSession,
+    receiptRead,
+    'constsaved=snapshot.exists?snapshot.data():readStaffApplicationQueueReceipt((awaittx.get(db.collection("sheetSyncQueue").doc(staffApplicationQueueKey(uid,requestId)))).data(),requestId);',
+    "saved?.uid===uid&&saved.companyId===companyId&&saved.staffId===staffId",
+    "saved.result?.ok===true&&saved.result.jobId===jobId",
+    'return{jobId,requestId,status:accepted?"accepted":"not_observed"}',
+    "return{receipts};",
+  ].every(value => (value === ".min(1).max(20)" ? compact : block).includes(value)) &&
+    block.indexOf(currentSession) < block.indexOf(receiptRead) &&
+    !/\.(?:add|create|set|update|delete|commit)\(/.test(block) &&
+    !block.includes("readOnly:true");
+}
+
 function checkStaffJourney(name) {
   const modules = {applyToJob:"jobs",getMyTasks:"staff-tasks",listMyMailApplications:"automation-intake",setSalesFloorClientSubmitted:"submission-status",submitPreContact:"precontact"};
   const source = sourceFile("functions/src/" + modules[name] + ".ts");
@@ -882,10 +1186,23 @@ function checkStaffJourney(name) {
       || (block.match(/\.set\(/g)??[]).length !== (block.match(/(?:jobMap|cache)\.set\(/g)??[]).length)) return false;
   if (!readOnly && (!has(["awaitassertProductionOperational(companyId);", "awaitdb.runTransaction(async(tx)=>{"])
       || !source.includes('import { assertProductionOperational } from "./system-safety";'))) return false;
-  if (name === "getMyTasks") return has([
-    'db.collection("jobs").where("companyId","==",companyId).where("assignedStaffId","==",staffId)',
-    '.where("dateKey",">=",from).where("dateKey","<=",through).limit(2000).get()',
-    'db.collection("resubmissionRequests").where("companyId","==",companyId).where("staffId","==",staffId).where("status","==","open").limit(100).get()',
+  if (["applyToJob", "getMyTasks", "listMyMailApplications", "setSalesFloorClientSubmitted", "submitPreContact"].includes(name) &&
+      (!source.includes('import { readActiveStaffProfile } from "./staff-session";') || !checkLiveStaffSession())) return false;
+  if (name === "applyToJob") {
+    const reviewed = reviewedCompact(source.slice(start, end + 4));
+    const gate = "awaitreadActiveStaffProfile(tx,companyId,staffId,session.uid,session.token.auth_time,{deviceClaims:session.token});";
+    const entry = "awaittx.get(idempotencyRef)";
+    if (!reviewed.includes(gate) || !reviewed.includes(entry) || reviewed.indexOf(gate) > reviewed.indexOf(entry)) return false;
+  }
+  if (name === "getMyTasks") return checkApplicationReceiptLookup(source) && has([
+    'if(session.token.role!=="staff")throw',
+    'if(request.data?.applicationReceiptLookup!==undefined){returnreadApplicationReceipts(request.data.applicationReceiptLookup,companyId,staffId,session.uid,session.token);}',
+    'constconfirmStaffSession=()=>db.runTransaction(tx=>readActiveStaffProfile(tx,companyId,staffId,session.uid,session.token.auth_time,{requireIdentity:true,deviceClaims:session.token}));',
+    'awaitconfirmStaffSession();constresult=awaitdb.runTransaction(asynctx=>{',
+    'tx.get(db.collection("jobs").where("companyId","==",companyId).where("assignedStaffId","==",staffId)',
+    '.where("status","==","assigned").where("dateKey",">=",from).where("dateKey","<=",through).limit(2000))',
+    'tx.get(db.collection("resubmissionRequests").where("companyId","==",companyId).where("staffId","==",staffId).where("status","==","open").limit(100))',
+    '},{readOnly:true});awaitconfirmStaffSession();returnresult;',
     'snapshot.exists&&data?.companyId===companyId&&data?.assignedStaffId===staffId',
     'returnjob?.status==="assigned"&&job.cancelled!==true&&job.sourceMissing!==true&&job.applicationUnconfirmed!==true&&job.assignmentUnresolved!==true&&!caseMailPreparationHeld(job);',
     'deriveStaffTasks({jobs,resubmissions,nowMs:Date.now()})',
@@ -910,8 +1227,7 @@ function checkStaffJourney(name) {
     'ListApplicationsSchema.parse(request.data??{})',
     'db.collection("automationApplications").where("companyId","==",companyId).where("staffId","==",staffId).where("status","==","review").orderBy(FieldPath.documentId()).limit(26)',
     'if(input.cursor)query=query.startAfter(input.cursor);',
-    'returndb.runTransaction(asynctx=>{',
-    'if(staff?.companyId!==companyId||staff.active!==true)throw',
+    'returndb.runTransaction(asynctx=>{awaitreadActiveStaffProfile(tx,companyId,staffId,session.uid,session.token.auth_time,{requireIdentity:true,deviceClaims:session.token});constpolicySnap=awaittx.get(db.collection("automationRecruitmentPolicies").doc(companyId));',
     'if(!policySnap.exists)return{ok:true,mode:"not_configured",items:[],nextCursor:null};',
     'RecruitmentRoutingSchema.parse(requireRecord(policySnap.data(),companyId))',
     'if(policy.phase!=="app")return{ok:true,mode:"legacy_mail",items:[],nextCursor:null};',
@@ -929,8 +1245,8 @@ function checkStaffJourney(name) {
     'if(previous.staffId!==staffId)',
     '(previous.mailApplicationId??null)!==(input.mailApplicationId??null)',
     'response?.ok!==true||response.jobId!==input.jobId',
-    'if(job.companyId!==companyId||staff.companyId!==companyId)',
-    'if(staff.active!==true)', 'if(job.status!=="open"||job.assignedStaffId)',
+    'if(job.companyId!==companyId)',
+    'if(job.status!=="open"||job.assignedStaffId)',
     'if(job.recruitmentStopped===true||job.cancelled===true||job.mailIntakeReviewRequired===true||job.mailTargetHold!=null)',
     'job.sourceMissing===true||job.assignmentUnresolved===true||job.applicationUnconfirmed===true||job.publishable!==true',
     'awaitreadMailPublication(tx,input.jobId,job,input.expectedJobRevision,newDate(),"apply")',
@@ -940,7 +1256,7 @@ function checkStaffJourney(name) {
     'awaitreadMailApplicationForAssignment(tx,{companyId,staffId,jobId:input.jobId,applicationId:input.mailApplicationId,revision:input.mailApplicationRevision!,})',
     'tx.update(jobRef,{revision:nextAssignmentRevision(job),status:"assigned",assignedStaffId:staffId,assignedStaffName:displayName,assignedUid:session.uid,',
     'tx.set(lockRef,{companyId,staffId,dateKey:workDate,jobId:input.jobId,active:true,',
-    caseListApply ? 'tx.set(queueRef,{companyId,jobId:input.jobId,operation:caseListChecked?"case_list.assign":"job.assign",' : 'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.assign",',
+    caseListApply ? 'tx.create(queueRef,{companyId,jobId:input.jobId,operation:caseListChecked?"case_list.assign":"job.assign",' : 'tx.set(queueRef,{companyId,jobId:input.jobId,operation:"job.assign",',
     'actorUid:session.uid,actorStaffId:staffId,',
     ...(caseListApply ? [] : ['tx.set(idempotencyRef,{expectedJobRevision:input.expectedJobRevision??null,mailApplicationRevision:input.mailApplicationRevision??null,mailApplicationId:input.mailApplicationId??null,uid:session.uid,companyId,staffId,result:response,']),
   ]);
@@ -950,6 +1266,8 @@ function checkStaffJourney(name) {
     'tx.update(jobRef,',
   ])) return false;
   if (name === "setSalesFloorClientSubmitted") return source.includes('import { submissionSheetWriteIdentity } from "./sheet-write-core";') && has([
+    'if(session.token.role!=="staff")throw',
+    'awaitdb.runTransaction(async(tx)=>{awaitreadActiveStaffProfile(tx,companyId,staffId,session.uid,session.token.auth_time,{requireIdentity:true,deviceClaims:session.token});',
     'ClientSubmittedSchema.parse(request.data??{})', 'constsnap=awaittx.get(jobRef);', 'assertSubmissionReadiness(job);', 'assertCaseMailSubmissionRevision(job,input.expectedRevision);',
     'constlipKnotsSubmitted=current?.lipKnotsSubmitted===true;',
     'if(current?.clientSubmitted===input.submitted&&current.completed===(input.submitted||lipKnotsSubmitted))return;',
@@ -959,7 +1277,8 @@ function checkStaffJourney(name) {
     'actorUid:session.uid,actorStaffId:staffId,',
   ]);
   return has([
-    'Schema.parse(request.data)', 'constjobSnap=awaittx.get(jobRef);',
+    'if(session.token.role!=="staff")throw', 'Schema.parse(request.data)',
+    'awaitdb.runTransaction(async(tx)=>{awaitreadActiveStaffProfile(tx,companyId,staffId,session.uid,session.token.auth_time,{requireIdentity:true,deviceClaims:session.token});constjobSnap=awaittx.get(jobRef);',
     'if(!workDate.success||(input.dateKey!==undefined&&input.dateKey!==workDate.data))throw',
     'if(job.sourceMissing===true)throw', 'if(job.applicationUnconfirmed===true)throw', 'if(job.assignmentUnresolved===true)throw',
     'if(caseMailPreparationHeld(job))throw',
@@ -977,13 +1296,22 @@ function checkBusinessRecovery(name) {
   const file = name === "markNetPrintPrinted" ? "netprint" : name === "adminCancelJob" ? "jobs" : name === "duplicateAdminJob" ? "job-management" : "admin-operations";
   const source = sourceFile('functions/src/' + file + '.ts');
   const compact = text => text.replace(/\s+/g, '');
-  const block = compact(functionBlock(source, name));
+  let block = compact(functionBlock(source, name).split(/\nexport (?:async )?function /)[0]);
+  if (name === "completeExpenseReview" && source.includes("export async function handleCompleteExpenseReview(")) {
+    const start = source.indexOf("export async function handleCompleteExpenseReview(");
+    const end = source.indexOf("export const completeExpenseReview", start);
+    if (end < 0 || !block.startsWith("exportconstcompleteExpenseReview=onCall(request=>handleCompleteExpenseReview(request));")) return false;
+    block = compact(source.slice(start, end));
+    const sourceHold = block.indexOf('thrownewHttpsError("failed-precondition",CASE_LIST_EXPENSE_HOLD,{reason:"case_list_private_expense_completion_held"});');
+    const queueStart = block.indexOf('constqueueRef=db.collection("sheetSyncQueue").doc();');
+    if (!block.includes('if(externalCase&&writer&&input.expectedVersion)') || sourceHold < 0 || queueStart <= sourceHold) return false;
+  }
   const has = conditions => conditions.every(condition => block.includes(condition));
   const staff = name === "markNetPrintPrinted";
   const readOnly = ["getExpenseReview", "getJobSheetLink"].includes(name);
   const requiredAuth = staff ? 'requireAuth' : 'requireAdmin';
   if (!new RegExp('import \\{[^}]*\\b' + requiredAuth + '\\b[^}]*\\} from "\\./utils";').test(source)
-      || !has([requiredAuth + '(request)', 'companyFromClaims(session.token)'])
+      || !has(['constsession=' + requiredAuth + '(request);', 'constcompanyId=companyFromClaims(session.token);'])
       || /(?:input|request\.data)\.(?:companyId|uid|actorUid|staffId)/.test(block)) return false;
   if (readOnly && /\.(?:add|create|delete|set|update|commit)\(/.test(block)) return false;
   if (!readOnly && (!has(['awaitassertProductionOperational(companyId);'])
@@ -994,11 +1322,23 @@ function checkBusinessRecovery(name) {
         || !has(['awaitrequireCompanyJob(companyId,input.' + (name === 'duplicateAdminJob' ? 'sourceJobId' : 'jobId') + ')'])) return false;
   }
   if (name === 'getJobSheetLink') return has(['JobSchema.parse(request.data??{})', 'return{url:buildSheetUrl(job)}']);
-  if (name === 'getExpenseReview') return has([
-    'JobSchema.parse(request.data??{})', 'if(!job.exists||job.data()?.companyId!==companyId)',
-    'if(draft.exists&&(draft.data()?.companyId!==companyId||draft.data()?.jobId!==input.jobId))',
-    'reviewVersion:expenseReviewVersion(companyId,input.jobId,job,draft)',
-  ]);
+  if (name === 'getExpenseReview') {
+    const helperStart = source.indexOf('async function requireCompanyJob(');
+    const helper = compact(source.slice(helperStart, source.indexOf('\nfunction ', helperStart)));
+    const statusStart = block.indexOf('if(request.data&&Object.hasOwn(request.data,"mode"))');
+    const amountStart = block.indexOf('constinput=JobSchema.parse(request.data??{})');
+    const status = block.slice(statusStart, amountStart);
+    return statusStart >= 0 && amountStart > statusStart &&
+      status.includes('const{jobId,operationId}=ExpenseStatusSchema.parse(request.data);constjob=awaitrequireCompanyJob(companyId,jobId);') &&
+      status.includes('return{jobId,confirmationOperation:awaittraceExternalExpense(companyId,jobId,job,operationId)};') &&
+      !/readExternalCaseListExpenses|completeExternalExpense|\.runTransaction\(/.test(status) &&
+      helper.includes('if(!snap.exists||snap.data()?.companyId!==companyId)') &&
+      has([
+        'if(!job.exists||job.data()?.companyId!==companyId)',
+        'if(draft.exists&&(draft.data()?.companyId!==companyId||draft.data()?.jobId!==input.jobId))',
+        'reviewVersion:expenseReviewVersion(companyId,input.jobId,job,draft,rawJob.caseListSource?jobData:undefined)',
+      ]);
+  }
   if (name === 'saveExpenseReviewDraft' || name === 'completeExpenseReview') {
     const helper = compact(source.slice(source.indexOf('function assertExpenseWriteContext('), source.indexOf('async function requireCompanyJob(')));
     if (!['if(!currentJob.exists||job?.companyId!==companyId)',
@@ -1016,9 +1356,9 @@ function checkBusinessRecovery(name) {
       'actorUid:session.uid', 'tx.set(reviewRef,{companyId,jobId:input.jobId,', 'completedBy:session.uid',
       'constrevision=previousRevision+1;', 'idempotencyKey:' + String.fromCharCode(96) + 'expense.review:']);
   }
-  if (name === 'markNetPrintPrinted') return has([
-    'staffFromClaims(session.token)', 'PrintSchema.parse(request.data??{})',
-    'awaitdb.runTransaction(async(tx)=>{', 'constsnap=awaittx.get(jobRef);',
+  if (name === 'markNetPrintPrinted') return source.includes('import { readActiveStaffProfile } from "./staff-session";') && checkLiveStaffSession() && has([
+    'if(session.token.role!=="staff")throw', 'staffFromClaims(session.token)', 'PrintSchema.parse(request.data??{})',
+    'awaitdb.runTransaction(async(tx)=>{awaitreadActiveStaffProfile(tx,companyId,staffId,session.uid,session.token.auth_time,{requireIdentity:true,deviceClaims:session.token});constsnap=awaittx.get(jobRef);',
     'if(job.companyId!==companyId||job.assignedStaffId!==staffId)throw',
     'if(job.cancelled===true||job.status==="cancelled")throw', 'if(job.status!=="assigned")throw',
     'if(job.sourceMissing===true||job.assignmentUnresolved===true||job.applicationUnconfirmed===true)throw',
@@ -1061,7 +1401,9 @@ function checkResubmission(name) {
   if (name === "getMyResubmissionRequests" || name === "getAdminResubmissionRequests") {
     return includes(['db.collection("resubmissionRequests").where("companyId","==",companyId)',
       '.where("status","in",["open","submitted"])', staff ? ".limit(100).get()" : ".limit(200).get()"])
-      && (!staff || includes(["staffFromClaims(session.token)", '.where("staffId","==",staffId)']))
+      && (!staff || includes(["staffFromClaims(session.token)", '.where("staffId","==",staffId)',
+        'if(session.token.role!=="staff")throw',
+        'awaitdb.runTransaction(tx=>readActiveStaffProfile(tx,companyId,staffId,session.uid,session.token.auth_time,{requireIdentity:true,deviceClaims:session.token}));']))
       && !/\.(?:add|create|delete|set|update)\(/.test(block);
   }
   if (!includes(["awaitassertProductionOperational(companyId);", "awaitdb.runTransaction(asynctx=>{"])
@@ -1076,7 +1418,7 @@ function checkResubmission(name) {
       'if(String(current.data()?.assignedStaffId??"")!==staffId)throw',
       'if(current.data()?.cancelled===true||current.data()?.status==="cancelled")throw',
       'if(current.data()?.status!=="assigned")throw',
-      'if(!source||source.companyId!==companyId||source.jobId!==input.jobId||source.type!==input.type)throw',
+      'if(!source||source.companyId!==companyId||source.jobId!==input.jobId||source.type!==input.type||source.staffId!==staffId)throw',
       "assertSubmissionFileIdentity(source,file.data(),input.sourceSubmissionId);",
       'if(file.data()?.status!=="completed")throw',
       "tx.create(ref,{...(current.data()!.mailIntake?{acceptedMailContext:caseMailSubmissionContext(current.data()!)}:{}),companyId,staffId,jobId:input.jobId,",
@@ -1147,8 +1489,16 @@ function checkBootstrapSession() {
   const source = sourceFile("functions/src/auth.ts");
   const bootstrap = functionBlock(source, "bootstrapSession");
   const compact = bootstrap.replace(/\s+/g, "");
+  const reviewed = reviewedCompact(bootstrap);
+  const revocation = 'if(user.disabled||(validSince!==null&&(!Number.isFinite(validSince)||typeofauthTime!=="number"||!Number.isSafeInteger(authTime)||authTime*1000<validSince))){thrownewHttpsError("permission-denied",';
   const checks = {
     authenticated: /requireAuth\s*\(\s*request\s*\)/.test(bootstrap),
+    currentAuthentication: [
+      'constuser=awaitauth.getUser(session.uid);',
+      'constvalidSince=user.tokensValidAfterTime?Date.parse(user.tokensValidAfterTime):null;',
+      'constauthTime=session.token.auth_time;',
+      revocation,
+    ].every(boundary => reviewed.includes(boundary)) && reviewed.indexOf(revocation)<reviewed.indexOf("constemail="),
     verifiedEmail: /user\.emailVerified/.test(bootstrap),
     adminAllowlist: /admins\.includes\s*\(\s*email\s*\)/.test(bootstrap),
     refreshRequiresAdmin:
@@ -1163,13 +1513,24 @@ function checkBootstrapSession() {
       /async function fetchAdminDirectory\s*\(\s*companyId\s*:\s*string\s*\)/.test(source)
       && (source.match(/\.where\s*\(\s*"companyId"\s*,\s*"=="\s*,\s*companyId\s*\)/g) ?? []).length === 2,
     noClientCompanyScope: !/input\.companyId/.test(bootstrap),
-    indexIdentity: compact.includes('db.collection("emailIndex").doc(emailHash(email)).get()')
+    indexIdentity: compact.includes("constnormalizedEmailHash=emailHash(email);")
+      && compact.includes('tx.get(db.collection("emailIndex").doc(normalizedEmailHash))')
       && compact.includes('index.active!==true')
       && compact.includes('[index.companyId,index.staffId].some(value=>typeofvalue!=="string"||!value.trim()||')
       && compact.includes(String.raw`/[\/\\\u0000-\u001f\u007f]/.test(value)`),
-    staffProfileIdentity: compact.includes('db.collection("staffProfiles").doc(index.staffId).get()')
+    staffProfileIdentity: compact.includes('constprofileRef=db.collection("staffProfiles").doc(index.staffId);')
+      && compact.includes("Promise.all([tx.get(profileRef),tx.get(identityRef)])")
       && compact.includes('!profileSnap.exists||profileSnap.data()?.active!==true||profileSnap.data()?.companyId!==index.companyId'),
-    staffClaimsFromIndex: /constclaims=\{role:"staff",companyId:index\.companyId,staffId:index\.staffId,?\};/.test(compact),
+    staffClaimsFromIndex: compact.includes('return{role:"staff",companyId:index.companyId,staffId:index.staffId}asconst;'),
+    atomicStaffBinding: reviewed.includes('constclaims=awaitdb.runTransaction(async(tx)=>{')
+      && reviewed.includes('constidentityRef=db.collection("authIdentities").doc(session.uid);')
+      && reviewed.includes('tx.set(profileRef,{lastLoginAt:FieldValue.serverTimestamp(),authUids:FieldValue.arrayUnion(session.uid),},{merge:true});')
+      && reviewed.includes('tx.set(identityRef,{companyId:index.companyId,staffId:index.staffId,email,emailHash:normalizedEmailHash,active:true,lastLoginAt:FieldValue.serverTimestamp(),},{merge:true});')
+      && reviewed.indexOf('if(identitySnap.exists){') < reviewed.indexOf('tx.set(profileRef,')
+      && reviewed.includes('});constrefreshToken=!customClaimsMatch(user.customClaims,claims);if(refreshToken)awaitauth.setCustomUserClaims(session.uid,claims);'),
+    retainedStaffRevocation: reviewed.includes('if(identitySnap.exists){constidentity=identitySnap.data();if(identity?.companyId!==index.companyId||identity.staffId!==index.staffId){throwunavailable();}')
+      && reviewed.includes('active!==true&&(active!==false||revokedAt==null)')
+      && reviewed.includes('revokedAt!=null&&(!(revokedAtinstanceofTimestamp)||typeofauthTime!=="number"||!Number.isSafeInteger(authTime)||authTime<revokedAt.seconds||(authTime===revokedAt.seconds&&revokedAt.nanoseconds>0))'),
     claimUpdatesForAuthenticatedUser: (compact.match(/auth\.setCustomUserClaims\(session\.uid,claims\)/g) ?? []).length === 2,
   };
   return Object.values(checks).every(Boolean);
@@ -1216,28 +1577,70 @@ function checkRequestStaffLoginLink() {
       'profileSnap.data()?.companyId!==initial.loginCodeCompanyId',
       'index.companyId!==input.companyId||index.staffId!==input.staffId',
     ].every(value => compact.includes(value)) && send.includes('profile.companyId!==input.companyId'),
+    firstLoginScoped: [
+      "awaitreadContext(tx);checkInitialProfile(profile,email);",
+      "awaitassertProductionOperational(companyId);",
+      "prepareBoundLogin(email,initial.loginCodeCompanyId,initial.loginCodeStaffId,deviceId,initial.loginCodeCreatedAt,enrollment)",
+      "user=awaitauth.createUser({uid:enrollment.uid,email,emailVerified:true});",
+      "uid!==enrollment.uid||identity.exists||device.exists||!pending||!pendingEnrollmentMatches(pending,enrollment)",
+      "tx.update(enrollmentRef,{status:\"linked\",linkedAt:FieldValue.serverTimestamp()});",
+      "const{profile,gateway}=awaitreadContext(tx);",
+    ].every(value => compact.includes(value)),
     mailSecretScoped: /secrets\s*:\s*\[gmailServiceAccountJson\]/.test(block),
   };
   return Object.values(checks).every(Boolean);
 }
 
+function checkSubmissionActor(source) {
+  const start = source.indexOf("async function readSubmissionActor(");
+  const end = source.indexOf("export const getSubmissionTimeline", start);
+  const helper = reviewedCompact(source.slice(start, end));
+  return start >= 0 && end > start && [
+    'if(session.token.role==="admin")return{uid:session.uid,role:"admin"};',
+    'if(session.token.role!=="staff")throw',
+    'constauthTime=session.token.auth_time;',
+    'constconfirmStaff=(reader:FirebaseFirestore.Transaction)=>readActiveStaffProfile(reader,companyId,staffId,session.uid,authTime,{requireIdentity:true,deviceClaims:session.token});',
+    'if(tx)awaitconfirmStaff(tx);elseawaitdb.runTransaction(confirmStaff);',
+  ].every(value => helper.includes(value)) && checkLiveStaffSession();
+}
+
 function checkSubmissionTimeline() {
   const source = sourceFile("functions/src/submission-files.ts");
-  const block = functionBlock(source, "getSubmissionTimeline");
+  const block = reviewedCompact(functionBlock(source, "getSubmissionTimeline"));
+  const authorized = 'awaitassertJobAccess(input.jobId,companyId,actor.role,actor.role==="staff"?actor.staffId:"");';
+  if (!checkSubmissionActor(source) || ![
+    "constsession=requireAuth(request);", "constcompanyId=companyFromClaims(session.token);",
+    "constactor=awaitreadSubmissionActor(session,companyId);", authorized,
+    '.where("companyId","==",companyId).where("jobId","==",input.jobId).where("type","==",input.type)',
+    'constscoped=actor.role==="staff"?query.where("staffId","==",actor.staffId):query;',
+  ].every(part => block.includes(part)) || block.indexOf(authorized) >= block.indexOf('db.collection("submissions")')) return false;
+  if (!block.includes("input.page")) return block.includes('actor.role==="staff"&&data.staffId!==actor.staffId');
   return [
-    /requireAuth\s*\(\s*request\s*\)/,
-    /companyFromClaims\s*\(\s*session\.token\s*\)/,
-    /assertJobAccess\s*\(\s*input\.jobId\s*,\s*companyId/,
-  ].every((pattern) => pattern.test(block));
+    '!!data&&data.companyId===companyId&&data.jobId===input.jobId&&data.type===input.type&&(actor.role==="admin"||data.staffId===actor.staffId);',
+    "constsubmission=awaitcollection.doc(submissionId).get();constdata=submission.data();if(!matchesScope(data))return{submissions:[]};",
+    "assertSubmissionFileIdentity(data,fileData,submissionId);",
+    'constordered=scoped.orderBy("createdAt","desc");letpageQuery=ordered;',
+    'constcursor=awaitcollection.doc(input.page.afterSubmissionId).get();constdata=cursor.data();if(!matchesScope(data)||data.createdAt===undefined){thrownewHttpsError("failed-precondition",',
+    "pageQuery=ordered.startAfter(cursor);",
+    "awaitpageQuery.limit(input.page?HISTORY_PAGE_SIZE+1:100).get();",
+  ].every(part => block.includes(part));
 }
 
 function checkSubmissionProcessingStatus() {
   const source = sourceFile("functions/src/submission-files.ts");
   const block = functionBlock(source, "getSubmissionProcessingStatus");
+  const compact = reviewedCompact(block);
   const checks = {
     requireAuth: /requireAuth\s*\(\s*request\s*\)/.test(block),
     companyScope: /companyFromClaims/.test(block) && /companyId/.test(block),
-    jobAccess: /assertJobAccess/.test(block),
+    liveStaff: checkSubmissionActor(source),
+    consistentReads: [
+      'returndb.runTransaction(asynctx=>{constactor=awaitreadSubmissionActor(session,companyId,tx);',
+      'awaitassertJobAccess(input.jobId,companyId,actor.role,actor.role==="staff"?actor.staffId:"",tx);',
+      'awaittx.get(db.collection("submissions").doc(input.submissionId));',
+      'awaittx.get(db.collection("resubmissionRequests").doc(String(data.resubmissionRequestId)));',
+    ].every(value => compact.includes(value)) && !compact.includes("readOnly:true"),
+    companySubmissionMatch: compact.includes("snap.data()?.companyId!==companyId"),
     staffScope: /data\.staffId/.test(block) && /permission-denied/.test(block),
     jobSubmissionMatch: /data\.jobId\s*!==\s*input\.jobId/.test(block),
   };
@@ -1251,7 +1654,9 @@ function checkResubmissionComparison() {
     requireAuth: /requireAuth\s*\(\s*request\s*\)/.test(block),
     companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
     documentScope: /snap\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block),
-    staffScope: /session\.token\.role\s*!==\s*"admin"[\s\S]*data\.staffId\s*!==\s*staffId/.test(block),
+    staffScope: /actor\.role\s*===\s*"staff"\s*&&\s*data\.staffId\s*!==\s*actor\.staffId/.test(block) &&
+      /actor\.role\s*===\s*"staff"\s*&&\s*submission\.staffId\s*!==\s*actor\.staffId/.test(block),
+    liveStaff: checkSubmissionActor(source) && /await readSubmissionActor\(session, companyId\)/.test(block),
   };
   return Object.values(checks).every(Boolean);
 }
@@ -1267,7 +1672,11 @@ function checkDriveFilePreview() {
     tokenLookup: /filePreviewTokens/.test(block) && /\.doc\s*\(\s*hash\s*\)/.test(block),
     activeAndExpiry:
       /data\.active\s*!==\s*true/.test(block)
-      && /expires\.toMillis\(\)\s*<\s*Date\.now\(\)/.test(block),
+      && /expires\.toMillis\(\)\s*<=\s*Date\.now\(\)/.test(block),
+    boundBeforeDrive: /await readActiveStaffProfile\(tx, data\.companyId, data\.actorStaffId, data\.actorUid, data\.actorAuthTime, \{ requireIdentity: true, deviceClaims: data\.actorDeviceCredential \?\? \{\} \}\)/.test(handler)
+      && /await assertJobAccess\(data\.jobId, data\.companyId, "staff", data\.actorStaffId, tx\)/.test(handler)
+      && /actorRole: actor\.role/.test(handler) && /setHeader\("Cache-Control", "private, no-store"\)/.test(handler)
+      && !/\{\s*readOnly:\s*true\s*\}/.test(handler),
     invalidTokenRejected: /status\s*\(\s*400\s*\)/.test(block),
   };
   return Object.values(checks).every(Boolean);
@@ -1282,13 +1691,14 @@ function checkCreateUploadSession() {
   const includes = items => items.every(item => block.includes(item));
   return checkFinalizeStagedUpload()
     && /import \{[^}]*\bcompanyFromClaims\b[^}]*\brequireAuth\b[^}]*\bstaffFromClaims\b[^}]*\} from "\.\/utils";/.test(source)
+    && /import \{ readActiveStaffSession, readStaffDeviceCredential \} from "\.\/staff-session";/.test(source)
     && includes([
       'exportconstcreateUploadSession=onCall(async(request)=>{',
-      'constsession=requireAuth(request);', 'CreateSchema.parse(request.data)',
+      'constsession=requireAuth(request);if(session.token.role!=="staff")throw', 'CreateSchema.parse(request.data)',
       'constcompanyId=companyFromClaims(session.token);', 'conststaffId=staffFromClaims(session.token);',
       'if(awaitsubmissionTransferPaused(companyId))throw',
       'if((input.purpose==="replacement")!==Boolean(input.resubmissionRequestId))',
-      'awaitdb.runTransaction(async(tx)=>{',
+      'constloadReceipt=(readExistingOnly=false)=>db.runTransaction(async(tx)=>{const{revokedAt,identity}=awaitreadActiveStaffSession(tx,companyId,staffId,session.uid,session.token.auth_time,{requireIdentity:true,deviceClaims:session.token});',
       'constjobSnap=awaittx.get(db.collection("jobs").doc(input.jobId));',
       'if(!jobSnap.exists)', 'if(job.companyId!==companyId||job.assignedStaffId!==staffId)',
       'if(job.cancelled===true||job.status==="cancelled")throw', 'if(job.status!=="assigned")throw',
@@ -1302,11 +1712,23 @@ function checkCreateUploadSession() {
       'assertSubmissionFile(parent,saved,submissionRef.id);',
       'assertReplacementRequest(replacement.data(),parent,submissionRef.id);',
       'object.metadata?.lkcContentSha256!==saved.contentSha256',
+      'if(input.receiptOnly||readExistingOnly){throw',
+      'constversion=bucket.file(source.path,{generation:source.generation});',
+      'awaitverifyUploadBytes(version.createReadStream({decompress:false}),saved.size,saved.contentSha256);',
+      'constlatest=awaitloadReceipt(true);',
+      'if(source)assertStagedReceiptSource(file,source);',
       'if(saved.status!=="waiting_upload")throw',
       'tx.create(submissionRef,{', 'completedFiles:0,',
       'tx.create(submissionRef.collection("files").doc(record.fileId),{',
       'submissionId:submissionRef.id,type:input.type,', 'storagePath:record.storagePath,',
+      'if(current.status!=="waiting_upload"||current.driveTransferPlan||current.driveFileId||current.pausedTransferSource||current.verifiedUploadBytes||current.authorizedStagedKey)throwheld();',
+      'if(matchesUploadCredential(current,deviceCredential)&&(!cutoff||pathIssuedAfter(current,cutoff))){issueGrant(current.storagePath);returncurrent.storagePath;}',
+      'grantSubmissionUploads(tx,identityRef,identity,fileRecords,Timestamp.now());',
+      'tx.update(fileRef,{baseStoragePath:saved.baseStoragePath,storagePath:newPath,uploadPathIssuedAt:FieldValue.serverTimestamp(),...(deviceCredential?{uploadDeviceCredential:deviceCredential}:{}),});',
     ])
+    && (block.match(/assertSubmissionReadiness\(job\);/g) ?? []).length === 2
+    && (block.match(/parent\.requestFingerprint!==fingerprint/g) ?? []).length === 2
+    && (block.match(/assertReplacementRequest\(replacement\.data\(\),parent,submissionRef\.id\);/g) ?? []).length === 2
     && block.indexOf('if(awaitsubmissionTransferPaused(companyId))') < block.indexOf('db.collection("submissions")')
     && (block.match(/companyId,jobId:input\.jobId,staffId,uid:session\.uid,/g) ?? []).length === 2
     && !/(?:input|request\.data)\.(?:companyId|staffId|uid|submissionId|storagePath)/.test(block)
@@ -1333,6 +1755,14 @@ function checkFinalizeStagedUpload() {
     stagingPathOnly: /parts\[0\]\s*!==\s*"staging"/.test(block),
     completeIdentity: /!companyId\s*\|\|\s*!uid\s*\|\|\s*!submissionId\s*\|\|\s*!fileId/.test(block),
     metadataScope: /meta\.uid\s*!==\s*uid\s*\|\|\s*meta\.companyId\s*!==\s*companyId/.test(block),
+    exactStoredPath:
+      /parts\.length\s*!==\s*6/.test(block)
+      && /if\s*\(file\.storagePath\s*!==\s*path\) return;/.test(block)
+      && /if\s*\(meta\.storagePath\s*!==\s*path\) return;/.test(block)
+      && !/security_error/.test(block),
+    issuedUpload: /mayFinalizePendingUpload\(meta, identitySnap\.data\(\), stagedKey\)/.test(block)
+      && /staffSnap\.data\(\)\?\.active\s*!==\s*true\s*\|\|\s*!mayFinalizePendingUpload\(file, identity\.data\(\), stagedKey, staffSnap\.data\(\)\?\.deviceBoundAuthRequired === true\)/.test(block)
+      && /authorizedStagedKey:\s*stagedKey/.test(block),
     operationalGate: /getProductionOperationalState\s*\(\s*companyId\s*\)/.test(block) || scopedOperationalGate,
   };
   return Object.values(checks).every(Boolean);
@@ -1346,9 +1776,10 @@ function checkRegisterDeviceSession() {
     companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
     staffScope: /staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
     operationalGate: /assertProductionOperational\s*\(\s*companyId\s*\)/.test(block),
-    activeCompanyProfile:
-      /profile\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block)
-      && /profile\.data\(\)\?\.active\s*!==\s*true/.test(block),
+    activeStaffSession:
+      /import \{[^}]*readActiveStaffProfile[^}]*\} from "\.\/staff-session";/.test(source)
+      && /db\.runTransaction\(async\s*\(tx\)\s*=>[\s\S]*readActiveStaffProfile\(tx,\s*companyId,\s*staffId,\s*session\.uid,\s*session\.token\.auth_time,\s*\{\s*requireIdentity:\s*true,\s*deviceClaims:\s*session\.token\s*\}\)/.test(block)
+      && checkLiveStaffSession(),
     serverOwnedSessionId:
       /\$\{companyId\}\|\$\{staffId\}\|\$\{session\.uid\}\|\$\{input\.deviceId\}/.test(block),
     serverOwnedIdentity:
@@ -1373,6 +1804,11 @@ function checkHeartbeatDeviceSession() {
       && /snap\.data\(\)\?\.uid\s*!==\s*session\.uid/.test(block)
       && /snap\.data\(\)\?\.staffId\s*!==\s*staffId/.test(block),
     activeOnly: /snap\.data\(\)\?\.active\s*!==\s*true/.test(block),
+    activeStaffSession:
+      /import \{[^}]*readActiveStaffProfile[^}]*\} from "\.\/staff-session";/.test(source)
+      && /db\.runTransaction\(async\s*\(tx\)\s*=>[\s\S]*readActiveStaffProfile\(tx,\s*companyId,\s*staffId,\s*session\.uid,\s*session\.token\.auth_time,\s*\{\s*requireIdentity:\s*true,\s*deviceClaims:\s*session\.token\s*\}\)/.test(block)
+      && checkLiveStaffSession(),
+    atomicUpdate: /db\.runTransaction\(async\s*\(tx\)\s*=>[\s\S]*tx\.get\(ref\)[\s\S]*assertDeviceAuthentication\([\s\S]*tx\.update\(ref,/.test(block),
     serverTimestampOnly:
       /lastSeenAt:\s*FieldValue\.serverTimestamp\(\)/.test(block)
       && !/input\.(?:companyId|staffId|uid|active)/.test(block),
@@ -1384,13 +1820,17 @@ function checkListMyDevices() {
   const source = sourceFile("functions/src/devices.ts");
   const block = functionBlock(source, "listMyDevices");
   const checks = {
-    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block)
+      && /session\.token\.role\s*!==\s*"staff"/.test(block),
     companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
     staffScope: /staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
     companyFilter:
       /\.where\s*\(\s*"companyId"\s*,\s*"=="\s*,\s*companyId\s*\)/.test(block),
     staffFilter:
       /\.where\s*\(\s*"staffId"\s*,\s*"=="\s*,\s*staffId\s*\)/.test(block),
+    liveIdentity: /readActiveStaffProfile\(tx,\s*companyId,\s*staffId,\s*session\.uid,\s*session\.token\.auth_time,\s*\{\s*requireIdentity:\s*true,\s*deviceClaims:\s*session\.token\s*\}\)/.test(block)
+      && checkLiveStaffSession(),
+    atomicRead: /db\.runTransaction\([\s\S]*readActiveStaffProfile\(tx,[\s\S]*return tx\.get\(query\);[\s\S]*readOnly:\s*true/.test(block),
     boundedRead: /\.limit\s*\(\s*30\s*\)/.test(block),
     noWrites: !/\.(?:add|create|delete|set|update)\s*\(/.test(block),
   };
@@ -1401,9 +1841,13 @@ function checkRevokeMyDevice() {
   const source = sourceFile("functions/src/devices.ts");
   const block = functionBlock(source, "revokeMyDevice");
   const checks = {
-    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block)
+      && /session\.token\.role\s*!==\s*"staff"/.test(block),
     companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
     staffScope: /staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
+    liveIdentity: /readActiveStaffProfile\(tx,\s*companyId,\s*staffId,\s*session\.uid,\s*session\.token\.auth_time,\s*\{\s*requireIdentity:\s*true,\s*deviceClaims:\s*session\.token\s*\}\)/.test(block)
+      && checkLiveStaffSession(),
+    atomicAction: /db\.runTransaction\([\s\S]*readActiveStaffProfile\(tx,[\s\S]*tx\.get\(ref\)[\s\S]*tx\.update\(ref,[\s\S]*await revokeDevicePushTokens/.test(block),
     exactStaffCompany:
       /snap\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block)
       && /snap\.data\(\)\?\.staffId\s*!==\s*staffId/.test(block),
@@ -1422,10 +1866,17 @@ function checkRevokeAllMyDevices() {
   const helperStart = source.indexOf("async function revokeAllSessions");
   const helper = helperStart < 0 ? "" : source.slice(helperStart);
   const checks = {
-    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
+    authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block)
+      && /session\.token\.role\s*!==\s*"staff"/.test(block),
     companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
     staffScope: /staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
-    companyProfile: /profile\.data\(\)\?\.companyId\s*!==\s*companyId/.test(block),
+    liveIdentity: /readActiveStaffProfile\(tx,\s*companyId,\s*staffId,\s*session\.uid,\s*session\.token\.auth_time,\s*\{\s*requireIdentity:\s*true,\s*deviceClaims:\s*session\.token\s*\}\)/.test(block)
+      && checkLiveStaffSession(),
+    actionBound:
+      /db\.runTransaction\(readCaller,\s*\{\s*readOnly:\s*true\s*\}\)/.test(block) &&
+      /"staff\.self_all",\s*async\s*\(tx\)\s*=>\s*\{[\s\S]*await readCaller\(tx\)/.test(block) &&
+      /if\s*\(!devices\.size\s*&&\s*authorize\)\s*await db\.runTransaction\(authorize/.test(helper) &&
+      /db\.runTransaction\(async\s*\(tx\)\s*=>\s*\{\s*await authorize\?\.\(tx\);[\s\S]*tx\.update\(device\.ref/.test(helper),
     serverScopedHelper: /revokeAllSessions\s*\(\s*companyId\s*,\s*staffId/.test(block),
     companyFilteredBatch:
       /\.where\s*\(\s*"companyId"\s*,\s*"=="\s*,\s*companyId\s*\)/.test(helper)
@@ -1476,8 +1927,8 @@ function checkRegisterPushToken() {
       /role\s*!==\s*"staff"\s*&&\s*role\s*!==\s*"admin"/.test(block)
       && /permission-denied/.test(block),
     activeStaffGate:
-      /staffProfiles/.test(block)
-      && /profile\.data\(\)\?\.active\s*!==\s*true/.test(block),
+      reviewedCompact(block).includes("awaitreadActiveStaffProfile(tx,companyId,staffId,session.uid,session.token.auth_time,{deviceClaims:session.token});") &&
+      reviewedCompact(block).includes("awaitverifyPushDevice(tx,companyId,staffId,session.uid,session.token.auth_time,input.deviceSessionId,credential);"),
     hashedTokenDocument:
       /hashToken\s*\(\s*input\.token\s*\)/.test(block)
       && /collection\(\s*"pushTokens"\s*\)\.doc\(\s*tokenHash\s*\)/.test(block),
@@ -1528,9 +1979,9 @@ function checkSendTestPush() {
     authenticated: /requireAuth\s*\(\s*request\s*\)/.test(block),
     companyScope: /companyFromClaims\s*\(\s*session\.token\s*\)/.test(block),
     operationalGate: /assertProductionOperational\s*\(\s*companyId\s*\)/.test(block),
-    staffTarget:
-      /targetStaffId:\s*staffFromClaims\s*\(\s*session\.token\s*\)/.test(block),
-    adminTarget: /targetRole:\s*"admin"/.test(block),
+    exactTarget: /targetUid:\s*session\.uid/.test(block) && !/(?:targetRole|targetStaffId)\s*:/.test(block),
+    staffScope: /staffFromClaims\s*\(\s*session\.token\s*\)/.test(block) &&
+      /readActiveStaffProfile\s*\(\s*tx,\s*companyId,\s*staffId,\s*session\.uid,\s*authTime,\s*\{ requireIdentity: true, deviceClaims: session\.token \}/.test(block),
     roleGate: /permission-denied/.test(block),
     noClientTarget:
       !/request\.data/.test(block)
@@ -1549,9 +2000,48 @@ function checkProcessNotificationQueue() {
   const dispatcher = dispatcherStart < 0
     ? ""
     : source.slice(dispatcherStart, dispatcherEnd < 0 ? source.length : dispatcherEnd);
+  const flow = reviewedCompact(dispatcher);
+  const authorize = flow.indexOf("awaitcheckDispatchReadiness(ref,leaseToken,prepared.operationId,notification,state,emergencyControlNotice,prepared.recipients,)");
+  const send = flow.indexOf("awaitmessaging.sendEachForMulticast(");
+  const readinessStart = flow.indexOf("asyncfunctioncheckDispatchReadiness(");
+  const preparationStart = flow.indexOf("asyncfunctionprepareNotificationChunk(");
+  const reminderStart = flow.indexOf("asyncfunctioncurrentReminderContent(");
+  const readiness = flow.slice(readinessStart, preparationStart);
+  const preparation = flow.slice(preparationStart, reminderStart);
+  const finalContentGate = flow.indexOf("if(!dispatch||Date.now()>=expiresAt)return;", authorize);
+  const message = flow.slice(send, readinessStart);
+  const auxiliaryData = message.indexOf('...(isPushTest(notification.category)?{}:stringData(notification.data))');
   const checks = {
+    freshReminderContent: authorize >= 0 && finalContentGate > authorize && send > finalContentGate &&
+      flow.slice(send, readinessStart).includes("body:content.body??notification.body") &&
+      readiness.includes("constcontent=test?{}:awaitcurrentReminderContent(current,ref.id,tx);") &&
+      readiness.includes("if(!content){tx.update(ref,{status:\"superseded\""),
+    sameDispatchContent: reviewedCompact(source).includes('constDISPATCH_CONTENT_FIELDS=["category","title","body","route","data","reminderContext","bundledQueueIds","deliverAt","bypassQuietHours"]asconst;') &&
+      readiness.includes("!DISPATCH_CONTENT_FIELDS.every(field=>isDeepStrictEqual(current[field],notification[field]))") &&
+      readiness.includes('supersededReason:"notification_content_changed",dispatchIntent:null') &&
+      auxiliaryData >= 0 && auxiliaryData < message.indexOf("title:notification.title") &&
+      auxiliaryData < message.indexOf("body:content.body") && auxiliaryData < message.indexOf("route:notification.route") && auxiliaryData < message.indexOf("category:notification.category"),
+    freshRecipientBinding: finalContentGate > authorize && send > finalContentGate &&
+      flow.slice(finalContentGate,send).includes('if(dispatch.kind==="skipped")continue;const{content,operationId,recipients}=dispatch;') &&
+      flow.slice(send,readinessStart).includes("tokens:recipients.map((item)=>item.token)") &&
+      readiness.includes('awaittx.getAll(...recipients.map(item=>db.collection("pushTokens").doc(item.id)))') &&
+      readiness.includes("returnmatchesPushRecipient(item,binding)&&matchesTestPushRecipient(current,binding)?[{...item,binding}]:[];") &&
+      readiness.includes("constverifiedRecipients=awaitcurrentPushDevices(tx,recipients.flatMap(") &&
+      preparation.includes("constrecipients=awaitcurrentPushDevices(tx,chunk.flatMap(") &&
+      readiness.includes("verifiedRecipients.length!==recipients.length||!recipient") &&
+      readiness.includes('if(!verifiedRecipients.length){tx.update(ref,{dispatchIntent:null,updatedAt:FieldValue.serverTimestamp()});return{kind:"skipped"}asconst;}') &&
+      readiness.includes('if(verifiedRecipients.length===recipients.length){return{kind:"ready",content,operationId,recipients:verifiedRecipients}asconst;}') &&
+      readiness.includes('constdispatchIntent=buildDispatchIntent(leaseToken,verifiedRecipients);tx.update(ref,{dispatchIntent});return{kind:"ready",content,operationId:dispatchIntent.operationId,recipients:verifiedRecipients}asconst;'),
+    freshOperationalGate: authorize >= 0 && send > authorize && readinessStart > send &&
+      preparationStart > readinessStart && reminderStart > preparationStart &&
+      readiness.includes("current.dispatchIntent?.operationId!==operationId") &&
+      readiness.includes("awaitgetProductionOperationalState(current.companyId,tx)") &&
+      readiness.includes("constreason=productionPauseReason(currentState,originalState);") &&
+      preparation.includes("awaitgetProductionOperationalState(notification.companyId,tx)") &&
+      preparation.includes("constreason=productionPauseReason(currentState,originalState);") &&
+      flow.includes("current.generation!==original.generation"),
     deliveryPause: pause === 'constmode=process.env.LKC_NOTIFICATION_DELIVERY_MODE;if(mode!==undefined&&mode!=="active")returntrue;returnprocess.env.APP_ENVIRONMENT==="staging"&&mode!=="active";'
-      && /import \{ notificationDeliveryPaused \} from "\.\/notification-core";/.test(source)
+      && /import \{[^}]*\bnotificationDeliveryPaused\b[^}]*\} from "\.\/notification-core";/.test(source)
       && /async \(event\) => \{\s*if \(notificationDeliveryPaused\(\)\) return;/.test(block)
       && /\): Promise<void> \{\s*if \(notificationDeliveryPaused\(\)\) return;/.test(dispatcher),
     exactEventTrigger: /onDocumentCreated\s*\(\s*"notificationQueue\/\{queueId\}"/.test(block),
@@ -1561,7 +2051,7 @@ function checkProcessNotificationQueue() {
     operationalGate: /getProductionOperationalState\s*\(\s*pendingData\.companyId\s*\)/.test(dispatcher),
     leasedTransaction:
       /db\.runTransaction/.test(dispatcher)
-      && /current\.status\s*!==\s*"queued"/.test(dispatcher)
+      && reviewedCompact(dispatcher).includes('if(current.status!=="queued"||current.companyId!==pendingData.companyId)returnnull;')
       && /status:\s*"sending"/.test(dispatcher),
     scopedActiveTokens:
       /where\(\s*"companyId"\s*,\s*"=="\s*,\s*data\.companyId\s*\)/.test(dispatcher)
@@ -1784,6 +2274,7 @@ function checkCaseMailReceiver(name) {
 }
 
 const checkers = {
+  caseListGasSync: () => { try { assertSyncSource(sourceFile); return true; } catch { return false; } },
   receiveCaseMailMessage: () => checkCaseMailReceiver("receiveCaseMailMessage"),
   receiveCaseMailMessages: () => checkCaseMailReceiver("receiveCaseMailMessages"),
   listCaseMailReceipts: () => checkCaseMail("listCaseMailReceipts"),
@@ -1840,6 +2331,7 @@ const checkers = {
   createAdminJobGroup: () => checkAdminCore("createAdminJobGroup"),
   updateJobPublication: () => checkAdminCore("updateJobPublication"),
   adminEditJobInputs: () => checkAdminCore("adminEditJobInputs"),
+  adminEditCaseListLocation: () => checkAdminCore("adminEditCaseListLocation"),
   generateJobExport: () => checkAdminCore("generateJobExport"),
   updateNetPrintNumbers: () => checkAdminCore("updateNetPrintNumbers"),
   adminSetJobCancellation: () => checkAdminCore("adminSetJobCancellation"),
@@ -1908,4 +2400,5 @@ if (requestedFunctions.includes("retrySafeSheetWrites")) console.log("SCHEDULED_
 console.log(`SOURCE_GUARD_STATUS=${allPass ? "PASS" : "FAIL"}`);
 
 if (requirePass && !allPass) process.exitCode = 1;
+
 

@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 import { runInNewContext } from "node:vm";
-const require = createRequire(import.meta.url), ts = require("typescript");
+const require = createRequire(process.env.LKC_TEST_DEPENDENCY_ROOT ? join(process.env.LKC_TEST_DEPENDENCY_ROOT,"package.json") : import.meta.url), ts = require("typescript");
 const { Timestamp } = require("firebase-admin/firestore");
 const { HttpsError } = require("firebase-functions/v2/https");
 const companyId = "synthetic-company";
@@ -92,13 +93,34 @@ function harness() {
   };
   function load(name) {
     if (Object.hasOwn(boundaries, name)) return boundaries[name];
+    // Load only the local runtime modules reached by the synthetic assignment and review fixtures.
+    if ([
+      "../src/case-list-assignment-observation.cjs",
+      "../src/case-list-external-core.cjs",
+      "../src/case-list-gas-formal-ticket.cjs",
+      "../src/case-list-gas-handoff-core.cjs",
+      "../src/case-list-gas-planner.cjs",
+      "../src/case-list-manual-confirmation.cjs",
+      "../src/case-list-manual-review-store.cjs",
+      "../src/case-list-monthly-adapter.cjs",
+      "../src/case-list-monthly-compact.cjs",
+      "../src/case-list-monthly-controller.cjs",
+      "../src/case-list-owner-authorization.cjs",
+      "../src/case-list-projection.cjs",
+      "../src/private-ng/capacity.cjs",
+      "../src/private-ng/compose-runtime.cjs",
+      "../src/private-ng/crew-wiring.cjs",
+      "../src/private-ng/models.cjs",
+    ].includes(name)) {
+      return require(fileURLToPath(new URL("../functions/" + name.slice(3), import.meta.url)));
+    }
     if (/^\.\.\/case-mail-runtime\/(preview|adapter|provider)\.cjs$/.test(name)) return require(fileURLToPath(new URL("../functions/" + name.slice(3), import.meta.url)));
-    assert.match(name, /^\.\/[a-z0-9-]+$/, "external dependency refused");
+    assert.match(name, /^\.\/[a-z0-9-]+$/, "external dependency refused: " + name);
     if (modules.has(name)) return modules.get(name);
     const source = fs.readFileSync(new URL("../functions/src/" + name.slice(2) + ".ts", import.meta.url), "utf8");
     const exports = {}; modules.set(name, exports);
     runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-      { exports, require: load, Date, console, process: { env: { LKC_SHEET_WRITE_MODE: "active" } } }, { timeout: 5000 });
+      { exports, require: load, Date, console, process: { env: { LKC_SHEET_WRITE_MODE: "active", DEFAULT_COMPANY_ID: companyId } } }, { timeout: 5000 });
     return exports;
   }
   const management = load("./job-management"), key = load("./case-mail-job-creation").caseMailRecordKey;

@@ -6,6 +6,7 @@ import { db } from "./firebase";
 import { companyFromClaims, requireAdmin, requireAuth, staffFromClaims } from "./utils";
 import { tokyoParts } from "./notification-time";
 import { assertProductionOperational } from "./system-safety";
+import { readActiveStaffProfile } from "./staff-session";
 import { AutomationBindingSchema } from "./automation-bridge-core";
 import { RecruitmentApplicationSchema, RecruitmentRoutingSchema, reconcileCaseMailApplication } from "./automation-recruitment-core";
 
@@ -206,11 +207,8 @@ export const listMyMailApplications = onCall(async request => {
     .where("staffId","==",staffId).where("status","==","review").orderBy(FieldPath.documentId()).limit(26);
   if (input.cursor) query = query.startAfter(input.cursor);
   return db.runTransaction(async tx => {
-    const [staffSnap,policySnap] = await Promise.all([
-      tx.get(db.collection("staffProfiles").doc(staffId)),tx.get(db.collection("automationRecruitmentPolicies").doc(companyId)),
-    ]);
-    const staff = staffSnap.data();
-    if (staff?.companyId !== companyId || staff.active !== true) throw new HttpsError("permission-denied","スタッフの利用状態を確認できません。");
+    await readActiveStaffProfile(tx, companyId, staffId, session.uid, session.token.auth_time, { requireIdentity: true, deviceClaims: session.token });
+    const policySnap = await tx.get(db.collection("automationRecruitmentPolicies").doc(companyId));
     if (!policySnap.exists) return {ok:true,mode:"not_configured",items:[],nextCursor:null};
     const policy = RecruitmentRoutingSchema.parse(requireRecord(policySnap.data(),companyId));
     if (policy.phase !== "app") return {ok:true,mode:"legacy_mail",items:[],nextCursor:null};
@@ -218,7 +216,7 @@ export const listMyMailApplications = onCall(async request => {
     const records = page.docs.slice(0,25);
     const cache = new Map<string,Promise<FirebaseFirestore.DocumentSnapshot>>([
       ...page.docs.map(doc=>[doc.ref.path,Promise.resolve(doc)] as const),
-      [staffSnap.ref.path,Promise.resolve(staffSnap)], [policySnap.ref.path,Promise.resolve(policySnap)],
+      [policySnap.ref.path,Promise.resolve(policySnap)],
     ]);
     const reader: IntakeReader = {get:ref=>{
       let value = cache.get(ref.path);

@@ -6,7 +6,7 @@ const timestamp = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT/.test
 const exact = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 
 // 入力は読取結果を正規化したローカルJSON。署名済み証跡や実クラウド受入を装わない。
-export function verifySubmissionAcceptanceResult(kit, result, now = Date.now()) {
+export function verifySubmissionAcceptanceResult(kit, result, now = Date.now(), { requireFolderBindings = false } = {}) {
   const expected = createSubmissionAcceptanceKit({ driveRootId: kit?.drive?.rootFolderId ?? null });
   if (!exact(kit, expected)) throw new Error('Kit changed; regenerate from source');
   const issues = [];
@@ -20,7 +20,7 @@ export function verifySubmissionAcceptanceResult(kit, result, now = Date.now()) 
   const document = path => documents.find(item => item?.path === path)?.data;
   const expectedPaths = kit.seedDocuments.map(item => item.path).concat(kit.indirectWrites.counterPath);
   const queues = documents.filter(item => typeof item?.path === 'string' && /^sheetSyncQueue\/[^/]+$/.test(item.path));
-  check(documents.length === expectedPaths.length + 1 && expectedPaths.every(path => documents.some(item => item?.path === path)) && queues.length === 1, 'document_scope');
+  check(documents.length === expectedPaths.length + 1 + (requireFolderBindings ? 2 : 0) && expectedPaths.every(path => documents.some(item => item?.path === path)) && queues.length === 1, 'document_scope');
   for (const seed of kit.seedDocuments) {
     const current = document(seed.path);
     // 完了時に変更される値だけを比較対象から外す。所属・隔離設定は照合する。
@@ -45,6 +45,15 @@ export function verifySubmissionAcceptanceResult(kit, result, now = Date.now()) 
   const client = folders.find(item => item?.name === kit.drive.childFolders[0]);
   const month = folders.find(item => item?.name === kit.drive.childFolders[1]);
   check(folders.length === 3 && folders.every(item => typeof item?.id === 'string' && item.id.length > 0 && item.mimeType === 'application/vnd.google-apps.folder' && item.trashed === false) && new Set(folders.map(item => item?.id)).size === 3 && root?.name === kit.companyId && exact(root?.parents, [kit.drive.parentId]) && exact(client?.parents, [root?.id]) && exact(month?.parents, [client?.id]), 'dedicated_folder_hierarchy');
+  if (requireFolderBindings) {
+    for (const [parent, folder] of [[root, client], [client, month]]) {
+      const key = hash([parent?.id, folder?.name]);
+      const entry = document(`driveSubmissionFolders/${key}`);
+      check(entry && Object.keys(entry).length === 4 && entry.parentId === parent?.id &&
+        entry.name === folder?.name && entry.folderId === folder?.id && typeof entry.allocated === 'boolean' &&
+        (!entry.allocated || folder?.appProperties?.lkcFolder === key), 'verified_folder_binding');
+    }
+  }
   const driveFiles = Array.isArray(result?.drive?.files) ? result.drive.files : [];
   const sources = Array.isArray(result?.storage) ? result.storage : [];
   check(driveFiles.length === 2 && new Set(driveFiles.map(item => item?.id)).size === 2, 'drive_file_count');

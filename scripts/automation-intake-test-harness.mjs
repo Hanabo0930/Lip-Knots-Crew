@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {createRequire} from "node:module";
+import {fileURLToPath} from "node:url";
 import {runInNewContext} from "node:vm";
 const require=createRequire(import.meta.url), ts=require("typescript");
 const {Timestamp}=require("firebase-admin/firestore");
@@ -30,6 +31,7 @@ export function harness(){
         if(!ref.path){const docs=queryResult(ref);queryReads.push([ref,JSON.stringify(docs.map(doc=>doc.path))]);for(const doc of docs)reads.set(doc.path,JSON.stringify(records.get(doc.path)));return {docs:docs.map(snap)};}
         reads.set(ref.path,JSON.stringify(records.get(ref.path)));return snap(ref);
       },
+        create:(ref,data)=>writes.push({ref,data:clone(data),create:true}),
         set:(ref,data,options)=>writes.push({ref,data:clone(data),merge:options?.merge}),
         update:(ref,data)=>writes.push({ref,data:clone(data),merge:true,update:true})};
       const result=await callback(tx);await h.beforeCommit?.({attempt,reads,writes});
@@ -37,6 +39,7 @@ export function harness(){
       if(h.failCommit)throw Error("synthetic commit failure");
       const next=new Map(records);
       for(const write of writes){
+        if(write.create)assert.ok(!next.has(write.ref.path),"create requires a missing document");
         if(write.update)assert.ok(next.has(write.ref.path),"update missing");
         const value=write.merge?{...next.get(write.ref.path)}:{};
         for(const [k,v] of Object.entries(write.data)){assert.notEqual(v,undefined,"undefined field");if(v?.__delete)delete value[k];else value[k]=clone(v);}
@@ -57,12 +60,15 @@ export function harness(){
     zod:require("zod"),"node:crypto":require("node:crypto")};
   function load(name){
     if(Object.hasOwn(boundaries,name))return boundaries[name];
-    assert.match(name,/^\.\/[a-z0-9-]+$/,"external dependency refused");
+    if(["../src/case-list-projection.cjs","../src/private-ng/capacity.cjs"].includes(name)){
+      return require(fileURLToPath(new URL("../functions/src/"+name.slice("../src/".length),import.meta.url)));
+    }
+    assert.match(name,/^\.\/[a-z0-9-]+$/,"external dependency refused: "+name);
     if(modules.has(name))return modules.get(name);
     const source=fs.readFileSync(new URL("../functions/src/"+name.slice(2)+".ts",import.meta.url),"utf8");
     const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
     const exports={};modules.set(name,exports);
-    runInNewContext(code,{exports,require:load,process:{env:{APP_ENVIRONMENT:"development"}},Date,console},{timeout:5000});
+    runInNewContext(code,{exports,require:load,process:{env:{APP_ENVIRONMENT:"development",DEFAULT_COMPANY_ID:companyId}},Date,console},{timeout:5000});
     return exports;
   }
   const intake=load("./automation-intake"),jobs=load("./jobs"),core=load("./automation-recruitment-core");
@@ -90,7 +96,10 @@ export function harness(){
   records.set(paths.person,{companyId,staffId,personKey,active:true,revision:"person-1",verification:"verified",evidenceRecordId:"synthetic-person-proof"});
   records.set(paths.sender,{companyId,producerId:"synthetic-producer",uid:admin.uid,revision:"principal-1",active:true});
   records.set(paths.job,job);
-  records.set(paths.staff,{companyId,displayName:"Synthetic Staff",active:true});
+  records.set("staffNgMaintenance/"+companyId,{schema:"LK_STAFF_NG_MAINTENANCE_V1",companyId,state:"OPEN",generation:0});
+  records.set("authIdentities/"+staff.uid,{companyId,staffId,active:true});
+  const ng=load('./staff-ng'),ngHeader=Array(11).fill('');ngHeader[10]='NG会社';
+  records.set(paths.staff,{companyId,displayName:'Synthetic Staff',active:true,ngCompanies:ng.mergeStaffNg([{sourceRef:{spreadsheetId:'synthetic-staff-master',sheetName:'マスターデータ'},ngCompanyObservation:ng.observeStaffNgCell('マスターデータ',ngHeader,Array(11).fill(''),10)}],companyId,staffId)});
   return Object.assign(h,{paths,admin,staff,incoming,key,core, handoff:(data,auth=admin)=>load("./automation-notice-handoff").getAutomationNoticeHandoff({auth,data}), precontact:(data,auth=staff)=>load("./precontact").submitPreContact({auth,data}), receiveNotice:(data,auth=admin)=>load("./automation-notice-receipts").receiveAutomationNoticeReceipt({auth,data}), listNotices:(data,auth=admin)=>load("./automation-notice-receipts").listAutomationNoticeReceipts({auth,data}), cancelHeld:(data,auth=admin)=>intake.cancelHeldMailApplicationReview({auth,data}), listHeld:(data,auth=admin)=>intake.listHeldMailApplications({auth,data}), readHeld:(data,auth=admin)=>intake.getHeldMailApplication({auth,data}), recheckHeld:(data,auth=admin)=>intake.recheckHeldMailApplication({auth,data}), importSnapshot:(data,auth=admin)=>load("./automation-import-snapshot").getCaseMailImportSnapshot({auth,data}), previewCampaign:(data,auth=admin)=>load("./automation-campaigns").previewCaseMailCampaignRegistration({auth,data}), cancelCampaign:(data,auth=admin)=>load("./automation-campaigns").cancelCaseMailCampaignRegistration({auth,data}), registerCampaign:(data,auth=admin)=>load("./automation-campaigns").registerCaseMailCampaign({auth,data}), readCampaign:(data,auth=admin)=>load("./automation-campaigns").getCaseMailCampaignRegistration({auth,data}), registryCancel:(data,auth=admin)=>load("./automation-registry").cancelAutomationRegistryAttempt({auth,data}), registryRead:(data,auth=admin)=>load("./automation-registry").getAutomationRegistry({auth,data}), registry:(data,auth=admin)=>load("./automation-registry").saveAutomationRegistry({auth,data}),
     list:name=>[...records].filter(([path])=>path.startsWith(name+"/")).map(([path,data])=>({id:path.slice(name.length+1),...data})),
     listApplications:(data={},auth=staff)=>intake.listMyMailApplications({auth,data}),

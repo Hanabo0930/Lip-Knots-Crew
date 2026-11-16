@@ -1,13 +1,29 @@
 import {submissionAttemptBoundary,syntheticSubmissionRequestId} from "./submission-attempt-test-boundary.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {createHash,webcrypto} from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 function moduleFrom(path,dependencies={}) {
-  const scope={exports:{},require:name=>{assert.ok(Object.hasOwn(dependencies,name),"Unexpected module "+name);return dependencies[name];}};
+  const scope={exports:{},crypto:webcrypto,TextEncoder,require:name=>{assert.ok(Object.hasOwn(dependencies,name),"Unexpected module "+name);return dependencies[name];}};
   runInNewContext(ts.transpileModule(readFileSync(path,"utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,scope);
   return scope.exports;
 }
+const {hasValidDateKey}=moduleFrom("apps/staff/src/job-list.ts");
+const attemptHandlers=moduleFrom("apps/staff/src/submission-attempt-store.ts");
+const contextKey="synthetic-submission-context";
+const hash=value=>createHash("sha256").update(value).digest("hex");
+const submissionId="submission_"+hash(JSON.stringify(["company","staff","user",syntheticSubmissionRequestId]));
+const firstFileId="file_"+hash(submissionId+"|0").slice(0,32);
+const uploadBoundary={...submissionAttemptBoundary,hasValidDateKey,companyId:"company",staffId:"staff",user:{uid:"user"},
+  submissionConfirmationContext:contextKey,submissionConfirmationContextRef:{current:contextKey},
+  loadSubmissionAttempt:async()=>{
+    const fixture=await submissionAttemptBoundary.loadSubmissionAttempt();
+    return {...attemptHandlers,...fixture,prepareSubmissionAttempt:async(key,files,_types,_current,expectedRevision,expectedDateKey)=>({
+      ...await fixture.prepareSubmissionAttempt(key,files),expectedRevision,expectedDateKey,
+    })};
+  },
+};
 const {runWithConcurrency}=moduleFrom("apps/staff/src/concurrency.ts");
 const {submissionDraftKey}=moduleFrom("apps/staff/src/submission-draft-key.ts");
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};};
@@ -249,28 +265,49 @@ console.log('Future shifts passed: 1000 historical jobs do not hide today/tomorr
 
 assert.match(app,/isPending\("task-job"\)\|\|isPending\("uploadSubmission"\)/);
 
-// 転送が済んだ後は、端末の後片付け失敗でも完了確認を開始して再送用ファイルを残さない。
-const receiptStart=app.indexOf('        const durable=markDraftSubmitted(draftKey);');
+// 提出が受理されていれば、端末で下書きを整理できなくても提出IDを使って転送を照会する。
+const cleanupStart=app.indexOf('  async function finishSubmittedDraft(');
+const uploadStart=app.indexOf('  async function uploadSubmission()',cleanupStart);
+const receiptStart=app.indexOf('        const cleanup=await finishSubmittedDraft(',uploadStart);
 const receiptEnd=app.indexOf('      },{setMessage:value',receiptStart);
-assert.ok(receiptStart>=0&&receiptEnd>receiptStart);
-for(const scenario of ['success','cleanup-failure','receipt-unavailable','auth-changed']){
- const events=[];
- const state={draftKey:'owner/job',typeLabel:'報告書',jobId:'job',data:{submissionId:'sent-id',files:[{uploadRequired:true}]},currentType:'report',currentRequestId:'',skipNextDraftSaveRef:{current:false},
- attempt:{clientRequestId:'synthetic-attempt'},clearSubmissionAttempt:async()=>{events.push('clear-attempt');return true;},
- markDraftSubmitted:()=>{events.push('receipt');return scenario!=='receipt-unavailable';},setFiles:files=>events.push(['files',files.length]),setSubmissionConfirmed:value=>events.push(['confirmed',value]),
- setDraftCleanup:value=>{state.cleanupValue=typeof value==='function'?value(state.cleanupValue):value;events.push(['cleanup',state.cleanupValue]);},showSubmissionMessage:()=>events.push('message'),pollSubmissionProcessing:(...args)=>events.push(['poll',...args]),
- clearDraft:async()=>{events.push('clear');if(scenario!=='success'&&scenario!=='auth-changed')throw new Error('disk');},isCurrentUpload:()=>scenario!=='auth-changed',
- };
- runInNewContext(ts.transpileModule(`async function finish(){${app.slice(receiptStart,receiptEnd)}}`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,state);
- await state.finish();
- if(scenario==='auth-changed'){assert.equal(state.skipNextDraftSaveRef.current,false);assert.equal(events.some(event=>Array.isArray(event)&&['files','confirmed','cleanup','poll'].includes(event[0])),false);continue;}
- assert.equal(state.skipNextDraftSaveRef.current,true);
- assert.ok(events.some(event=>Array.isArray(event)&&event[0]==='files'&&event[1]===0));
- assert.ok(events.some(event=>Array.isArray(event)&&event[0]==='confirmed'&&event[1]===false));
- assert.ok(events.some(event=>Array.isArray(event)&&event[0]==='poll'&&event[2]==='sent-id'));
- assert.equal(events.filter(event=>Array.isArray(event)&&event[0]==='cleanup'&&event[1]===null).length,scenario==='success'?1:0);
+assert.ok(cleanupStart>=0&&uploadStart>cleanupStart&&receiptStart>uploadStart&&receiptEnd>receiptStart);
+const cleanupCode=ts.transpileModule(
+  app.slice(cleanupStart,uploadStart)+'async function finish(){'+app.slice(receiptStart,receiptEnd)+'}',
+  {compilerOptions:{target:ts.ScriptTarget.ES2022}},
+).outputText;
+for(const scenario of ['success','cleanup-failure','receipt-unavailable','preserved','auth-changed']){
+  const events=[], files=[{name:'synthetic.pdf'}], attempt={clientRequestId:'synthetic-attempt'};
+  let current=true;
+  const context={draftKey:'owner/job',files,attempt,typeLabel:'報告書',jobId:'job',
+    data:{submissionId:'sent-id',files:[{uploadRequired:true}]},currentType:'report',currentRequestId:'',
+    isCurrentUpload:()=>current,skipNextDraftSaveRef:{current:false},
+    clearSubmittedDraft:async(key,selection)=>{
+      assert.equal(key,'owner/job');assert.equal(selection,files);events.push('clear-draft');
+      if(scenario==='auth-changed')current=false;
+      if(scenario==='cleanup-failure')throw Error('disk');
+      return scenario==='preserved'?'preserved':'cleared';
+    },
+    clearSubmissionAttempt:async(target)=>{assert.equal(target,attempt);events.push('clear-attempt');return scenario!=='receipt-unavailable';},
+    setFiles:value=>events.push(['files',value.length]),setSubmissionConfirmed:value=>events.push(['confirmed',value]),
+    setDraftCleanup:value=>{context.pending=value;events.push('cleanup');},
+    showSubmissionMessage:value=>events.push(value),pollSubmissionProcessing:(...args)=>events.push(['poll',...args]),
+  };
+  runInNewContext(cleanupCode,context);
+  await context.finish();
+  if(scenario==='auth-changed'){
+    assert.deepEqual(events,['clear-draft']);
+    assert.equal(context.skipNextDraftSaveRef.current,false);
+    continue;
+  }
+  assert.ok(events.some(event=>Array.isArray(event)&&event[0]==='files'&&event[1]===0));
+  assert.ok(events.some(event=>Array.isArray(event)&&event[0]==='confirmed'&&event[1]===false));
+  assert.ok(events.some(event=>Array.isArray(event)&&event[0]==='poll'&&event[2]==='sent-id'));
+  assert.equal(context.skipNextDraftSaveRef.current,true);
+  assert.equal(events.includes('clear-attempt'),['success','receipt-unavailable'].includes(scenario));
+  assert.equal(context.pending===null,['success','preserved'].includes(scenario));
+  if(scenario==='preserved')assert.ok(events.some(event=>typeof event==='string'&&event.includes('下書きと提出ID')));
 }
-console.log('Post-transfer cleanup passed: completion polling continues after local failure; files/confirmation cleared and old auth cannot dismiss recovery.');
+console.log('Post-transfer cleanup passed: a saved receipt still drives processing recovery; newer drafts and changed accounts are preserved.');
 
 // 実選択ハンドラーで、再提出の無効な選び直しと通常追加の無変更を検査する。
 const selectionStart=app.indexOf('  function addSubmissionFiles(');
@@ -306,21 +343,26 @@ assert.equal(selectFiles([photo('boundary.pdf',50*1024*1024,'application/pdf')])
 console.log('File selection recovery passed: cancel, invalid replacement, size boundary, duplicate, full list, valid replacement, mixed input, append, and action lock.');
 
 for(const requestId of ['', 'request']){const result=selectFiles([photo('empty.pdf',0,'application/pdf')],{requestId});assert.equal(result.files[0],original);assert.equal(result.writes,0);assert.equal(result.confirmed,true);assert.match(result.message,/空のファイル/);const mixed=selectFiles([photo('empty.png',0),replacement],{requestId});assert.ok(mixed.files.includes(replacement));assert.ok(!mixed.files.some(file=>file.size===0));assert.match(mixed.message,/空のファイル/);}
-{const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const code=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;for(const size of [0,50*1024*1024+1]){const messages=[];const ctx={...submissionAttemptBoundary,files:[photo('restored.pdf',size,'application/pdf')],submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,showSubmissionMessage:value=>messages.push(value)};runInNewContext(code,ctx);await ctx.uploadSubmission();assert.match(messages[0],/送信できません/);}}
+{const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const code=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;for(const size of [0,50*1024*1024+1]){const messages=[];const ctx={...uploadBoundary,files:[photo('restored.pdf',size,'application/pdf')],submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,showSubmissionMessage:value=>messages.push(value)};runInNewContext(code,ctx);await ctx.uploadSubmission();assert.match(messages[0],/送信できません/);}}
 console.log('Empty files rejected at selection and restored-draft upload; valid existing selection preserved.');
 
 {
  const helperStart=app.indexOf('function submissionFileContentType('),helperEnd=app.indexOf('function fileStateKey(',helperStart);const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const code=ts.transpileModule(app.slice(helperStart,helperEnd)+app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const [name,type,expected] of [['report.pdf','','application/pdf'],['REPORT.PDF','application/octet-stream','application/pdf'],['report.pdf','application/pdf','application/pdf'],['photo.jpg','image/jpeg','image/jpeg'],['photo.pdf','image/png','image/png']]){
-  const file=photo(name,100,type),job={id:'job'};const state={requests:[],metadata:[],messages:[]};const ctx={...submissionAttemptBoundary,files:[file],submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],submissionType:'report',requestId:'',firebaseConfigured:true,functions:{},firebaseApp:{},loadUploadStorage:async()=>({getClientStorage:()=>({}),ref:(...args)=>ctx.ref(...args),uploadBytesResumable:(...args)=>ctx.uploadBytesResumable(...args)}),authLoadVersionRef:{current:1},UPLOAD_CONCURRENCY:3,setSubmissionMessage:()=>{},showSubmissionMessage:m=>state.messages.push(m),setUploadState:()=>{},fileStateKey:f=>f.name,run:async(_key,fn,options)=>{try{await fn()}catch(error){options.setMessage(error.message);throw error}},httpsCallable:()=>async payload=>{state.requests.push(payload);return {data:{submissionId:'synthetic',clientRequestId:syntheticSubmissionRequestId,files:[{storagePath:'synthetic/path',uploadRequired:true}]}}},runWithConcurrency:async(items,_limit,fn)=>{for(const item of items)await fn(item)},ref:(_storage,path)=>path,uploadBytesResumable:(_target,_file,metadata)=>{state.metadata.push(metadata);return {on:(_event,_progress,reject)=>reject(Error('synthetic stop after metadata capture'))}}};runInNewContext(code,ctx);await ctx.uploadSubmission();assert.equal(state.requests[0].files[0].contentType,expected);assert.equal(state.metadata[0].contentType,expected);assert.equal(state.messages.length,1);
+  const file=photo(name,100,type),job={id:'job',dateKey:'2026-09-10',revision:1};const state={requests:[],metadata:[],messages:[]};const ctx={...uploadBoundary,files:[file],submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],submissionType:'report',requestId:'',firebaseConfigured:true,functions:{},firebaseApp:{},loadUploadStorage:async()=>({getClientStorage:()=>({}),ref:(...args)=>ctx.ref(...args),uploadBytesResumable:(...args)=>ctx.uploadBytesResumable(...args)}),authLoadVersionRef:{current:1},UPLOAD_CONCURRENCY:3,setSubmissionMessage:()=>{},showSubmissionMessage:m=>state.messages.push(m),setUploadState:()=>{},fileStateKey:f=>f.name,run:async(_key,fn,options)=>{try{await fn()}catch(error){options.setMessage(error.message);throw error}},httpsCallable:()=>async payload=>{state.requests.push(payload);return {data:{submissionId,clientRequestId:syntheticSubmissionRequestId,acceptedContext:{jobId:payload.jobId,dateKey:payload.expectedDateKey,revision:payload.expectedRevision},files:[{fileId:firstFileId,storagePath:"staging/company/user/"+submissionId+"/"+firstFileId+"/report.pdf",uploadRequired:true}]}}},runWithConcurrency:async(items,_limit,fn)=>{for(const item of items)await fn(item)},ref:(_storage,path)=>path,uploadBytesResumable:(_target,_file,metadata)=>{state.metadata.push(metadata);return {on:(_event,_progress,reject)=>reject(Error('synthetic stop after metadata capture'))}}};runInNewContext(code,ctx);await ctx.uploadSubmission();assert.equal(state.requests[0].files[0].contentType,expected);assert.equal(state.metadata[0].contentType,expected);assert.equal(state.messages.length,1);
  }
 }
 console.log('Submission MIME parity: 5 PDF/image cases use identical session and Storage metadata; synthetic transport only.');
 
 {
  const helperStart=app.indexOf('function submissionFileContentType('),helperEnd=app.indexOf('function fileStateKey(',helperStart);const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const code=ts.transpileModule(app.slice(helperStart,helperEnd)+app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
- const invalid=[null,{}, {submissionId:3,files:[]},{submissionId:' ',files:[]},{submissionId:'id'}, {submissionId:'id',files:{}},{submissionId:'id',files:[]}, {submissionId:'id',files:[null,null]}, {submissionId:'id',files:[{storagePath:''},{storagePath:'p'}]}, {submissionId:'id',files:[{storagePath:1},{storagePath:'p'}]}, {submissionId:'id',files:[{storagePath:' '},{storagePath:'p'}]}, {submissionId:'id',files:[{storagePath:'same'},{storagePath:'same'}]}];
- for(const data of invalid){const files=[photo('a.pdf'),photo('b.pdf')],job={id:'job'},messages=[];let started=0;const ctx={...submissionAttemptBoundary,files,submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],submissionType:'report',requestId:'',firebaseConfigured:true,functions:{},firebaseApp:{},loadUploadStorage:async()=>({getClientStorage:()=>({}),ref:(...args)=>ctx.ref(...args),uploadBytesResumable:(...args)=>ctx.uploadBytesResumable(...args)}),authLoadVersionRef:{current:1},setSubmissionMessage:()=>{},showSubmissionMessage:m=>messages.push(m),run:async(_key,fn,options)=>{try{await fn()}catch(error){options.setMessage(error.message);throw error}},httpsCallable:()=>async()=>({data}),setUploadState:()=>started++,runWithConcurrency:()=>started++};runInNewContext(code,ctx);await ctx.uploadSubmission();assert.equal(started,0);assert.equal(ctx.files,files);assert.equal(ctx.submissionConfirmed,true);assert.match(messages[0],/送信先を正しく準備できませんでした/);}
+ const invalid=[null,{}, {submissionId:3,files:[]},{submissionId:' ',files:[]},{submissionId}, {submissionId,files:{}},{submissionId,files:[]}, {submissionId,files:[null,null]}, {submissionId,files:[{storagePath:''},{storagePath:'p'}]}, {submissionId,files:[{storagePath:1},{storagePath:'p'}]}, {submissionId,files:[{storagePath:' '},{storagePath:'p'}]}, {submissionId,files:[{storagePath:'same'},{storagePath:'same'}]}];
+ for(const data of invalid){const files=[photo('a.pdf'),photo('b.pdf')],job={id:'job',dateKey:'2026-09-10',revision:1},messages=[];let started=0;const ctx={...uploadBoundary,files,submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],submissionType:'report',requestId:'',firebaseConfigured:true,functions:{},firebaseApp:{},loadUploadStorage:async()=>({getClientStorage:()=>({}),ref:(...args)=>ctx.ref(...args),uploadBytesResumable:(...args)=>ctx.uploadBytesResumable(...args)}),authLoadVersionRef:{current:1},setSubmissionMessage:()=>{},showSubmissionMessage:m=>messages.push(m),run:async(_key,fn,options)=>{try{await fn()}catch(error){options.setMessage(error.message);throw error}},httpsCallable:()=>async()=>({data:data&&{clientRequestId:syntheticSubmissionRequestId,acceptedContext:{jobId:job.id,dateKey:job.dateKey,revision:job.revision},...data,files:Array.isArray(data.files)?data.files.map((file,index)=>{
+     if(!file)return file;
+     const fileId="file_"+hash(submissionId+"|"+index).slice(0,32);
+     return {fileId,uploadRequired:true,...file,
+       storagePath:file.storagePath==="p"?"staging/company/user/"+submissionId+"/"+fileId+"/report.pdf":file.storagePath};
+   }):data.files}}),setUploadState:()=>started++,runWithConcurrency:()=>started++};runInNewContext(code,ctx);await ctx.uploadSubmission();assert.equal(started,0);assert.equal(ctx.files,files);assert.equal(ctx.submissionConfirmed,true);assert.match(messages[0],data===null?/提出先を照合できません/:/送信先を正しく準備できませんでした/);}
 }
 console.log('Upload preparation: 12 malformed/missing/duplicate target responses blocked before any transfer; selection retained.');
 
@@ -368,7 +410,7 @@ console.log('Japan business date: midnight/year/leap boundaries and past/open sh
   const state={jobs:[],tasks:[],saved:0};
   const scope={authLoadVersionRef:{current:1},tasksReadVersionRef:{current:0},pastShiftVersionRef:{current:0},staffId:'staff',companyId:'a',user:{uid:'u'},db:{},isPending:()=>false,
    fetchMyJobs:()=>{scope.pastShiftVersionRef.current++;return ++calls===1?gate.promise:Promise.resolve([{id:'new-list'}]);},fetchTasks:async()=>[],
-   setMyJobs:value=>state.jobs=typeof value==='function'?value(state.jobs):value,setTasks:value=>state.tasks=value,setSelectedJob:()=>{},saveBusinessSnapshot:()=>state.saved++,nextShiftJob:()=>null,
+   setMyJobs:value=>state.jobs=typeof value==='function'?value(state.jobs):value,setTasks:value=>state.tasks=value,setTaskRefreshSource:()=>{},setSelectedJob:()=>{},saveBusinessSnapshot:()=>state.saved++,nextShiftJob:()=>null,
    doc:()=>({}),getDocFromServer:async()=>({exists:()=>true,id:'accepted-job',data:()=>({companyId:'a',assignedStaffId:'staff',status:'assigned'})}),run:async(key,fn)=>fn(),orderAssignedJobs:jobs=>jobs};
   runInNewContext(ts.transpileModule(app.slice(primaryStart,primaryEnd)+app.slice(taskStart,taskEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,scope);
   const pending=scope.loadPrimaryBusinessData();
@@ -428,7 +470,7 @@ console.log('Japan business date: midnight/year/leap boundaries and past/open sh
  const oldCursor={id:'old-cursor'};
  const scope={...queryScope,user:{uid:'u'},staffId:'staff',companyId:'a',authLoadVersionRef:{current:1},tasksReadVersionRef:{current:0},pastShiftVersionRef:{current:0},upcomingShiftCursorRef:{current:oldCursor},pastShiftCursorRef:{current:oldCursor},pastShiftDateRef:{current:'old-date'},
   fetchTasks:()=>gate.promise,setHasMoreUpcomingShifts:()=>{},setHasMorePastShifts:()=>{},setUpcomingShiftMessage:()=>{},setPastShiftMessage:()=>{},
-  setMyJobs:value=>state.jobs=value,setTasks:()=>{},setSelectedJob:()=>{},saveBusinessSnapshot:()=>state.saved++,
+  setMyJobs:value=>state.jobs=value,setTasks:()=>{},setTaskRefreshSource:()=>{},setSelectedJob:()=>{},saveBusinessSnapshot:()=>state.saved++,
   getDocs:async()=>({docs:[{id:'new',data:()=>({dateKey:today,status:'assigned'})}]})};
  runInNewContext(ts.transpileModule(app.slice(from,to)+app.slice(primaryStart,primaryEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,scope);
  const pending=scope.loadPrimaryBusinessData();
@@ -471,13 +513,13 @@ console.log('Japan business date: midnight/year/leap boundaries and past/open sh
 {
  const start=app.indexOf('  async function pollSubmissionProcessing('),end=app.indexOf('  async function uploadSubmission()',start);const code=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  const invalid=[{status:'completed',completedFiles:0,totalFiles:1,errorMessage:null},{status:'completed',completedFiles:1,totalFiles:'1',errorMessage:null},{status:'completed',completedFiles:0,totalFiles:0,errorMessage:null},{status:'completed',completedFiles:1.5,totalFiles:1.5,errorMessage:null},{status:'unknown',completedFiles:0,totalFiles:1,errorMessage:null},{status:'error',completedFiles:0,totalFiles:1,errorMessage:{}}];
- for(const data of [...invalid,{status:'completed',completedFiles:1,totalFiles:1,errorMessage:null}]){let now=0;const messages=[],effects=[];const ctx={...submissionAttemptBoundary,functions:{},authLoadVersionRef:{current:1},submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},setProcessingSubmission:v=>effects.push(v),httpsCallable:()=>async()=>({data}),showSubmissionMessage:m=>messages.push(m),loadSubmissionHistory:async()=>effects.push('history'),refreshSelectedJob:async()=>effects.push('job'),loadTasks:async()=>effects.push('tasks'),sleep:async()=>{now+=60000;},Date:{now:()=>now}};runInNewContext(code,ctx);await ctx.pollSubmissionProcessing('job','submission','report','');const valid=!invalid.includes(data);if(valid){assert.equal(effects.includes('history'),true);assert.match(messages[0],/保存が完了/);}else{assert.equal(effects.includes('history'),false);assert.match(messages[0],/提出状況を確認できません/);}assert.equal(effects.at(-1),false);}
+ for(const data of [...invalid,{status:'completed',completedFiles:1,totalFiles:1,errorMessage:null}]){let now=0;const messages=[],effects=[];const ctx={...uploadBoundary,functions:{},authLoadVersionRef:{current:1},submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},setProcessingSubmission:v=>effects.push(v),httpsCallable:()=>async()=>({data}),showSubmissionMessage:m=>messages.push(m),loadSubmissionHistory:async()=>effects.push('history'),refreshSelectedJob:async()=>effects.push('job'),loadTasks:async()=>effects.push('tasks'),sleep:async()=>{now+=60000;},Date:{now:()=>now}};runInNewContext(code,ctx);await ctx.pollSubmissionProcessing('job','submission','report','');const valid=!invalid.includes(data);if(valid){assert.equal(effects.includes('history'),true);assert.match(messages[0],/保存が完了/);}else{assert.equal(effects.includes('history'),false);assert.match(messages[0],/提出状況を確認できません/);}assert.equal(effects.at(-1),false);}
  console.log('Processing response validation passed: six malformed responses and valid completion.');
 }
 
 {
  const start=app.indexOf('  async function pollSubmissionProcessing('),end=app.indexOf('  async function uploadSubmission()',start);const code=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
- for(const late of [false,true]){let now=0,calls=0;const messages=[],effects=[],timeouts=[];const ctx={...submissionAttemptBoundary,functions:{},authLoadVersionRef:{current:1},submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},setProcessingSubmission:v=>effects.push(v),showSubmissionMessage:m=>messages.push(m),Date:{now:()=>now},sleep:async ms=>{now+=ms;},httpsCallable:(_f,_name,options)=>async()=>{calls++;const timeout=options?.timeout??70000;timeouts.push(timeout);if(late&&calls===1){now=58000;return {data:{status:'processing',completedFiles:0,totalFiles:1,errorMessage:null}};}now+=timeout;throw Error('synthetic timeout');}};runInNewContext(code,ctx);await ctx.pollSubmissionProcessing('job','submission','report','');assert.ok(now<=60000,'Polling request must fit the overall confirmation window.');assert.ok(timeouts.every(t=>t>0&&t<=15000));assert.equal(effects.at(-1),false);assert.match(messages.at(-1),/提出状況を確認できません/);}
+ for(const late of [false,true]){let now=0,calls=0;const messages=[],effects=[],timeouts=[];const ctx={...uploadBoundary,functions:{},authLoadVersionRef:{current:1},submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},setProcessingSubmission:v=>effects.push(v),showSubmissionMessage:m=>messages.push(m),Date:{now:()=>now},sleep:async ms=>{now+=ms;},httpsCallable:(_f,_name,options)=>async()=>{calls++;const timeout=options?.timeout??70000;timeouts.push(timeout);if(late&&calls===1){now=58000;return {data:{status:'processing',completedFiles:0,totalFiles:1,errorMessage:null}};}now+=timeout;throw Error('synthetic timeout');}};runInNewContext(code,ctx);await ctx.pollSubmissionProcessing('job','submission','report','');assert.ok(now<=60000,'Polling request must fit the overall confirmation window.');assert.ok(timeouts.every(t=>t>0&&t<=15000));assert.equal(effects.at(-1),false);assert.match(messages.at(-1),/提出状況を確認できません/);}
  console.log('Processing timeout budget passed: first and near-deadline stalled requests unlock with recovery guidance.');
 }
 
@@ -485,7 +527,7 @@ console.log('Japan business date: midnight/year/leap boundaries and past/open sh
  const start=app.indexOf('  async function pollSubmissionProcessing('),end=app.indexOf('  async function uploadSubmission()',start);const code=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const failed of ['history','job','tasks','detail','none','stale','unconfirmed']){
   const gates={},messages=[],effects=[];const read=name=>()=>new Promise((resolve,reject)=>{gates[name]={resolve,reject};});
-  const ctx={...submissionAttemptBoundary,functions:{},authLoadVersionRef:{current:1},submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},setProcessingSubmission:v=>effects.push(v),httpsCallable:()=>async()=>({data:{status:'completed',completedFiles:1,totalFiles:1,errorMessage:null}}),showSubmissionMessage:m=>messages.push(m),loadSubmissionHistory:read('history'),refreshSelectedJob:read('job'),loadTasks:read('tasks'),loadResubmissionDetail:read('detail'),Date:{now:()=>0}};
+  const ctx={...uploadBoundary,functions:{},authLoadVersionRef:{current:1},submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},setProcessingSubmission:v=>effects.push(v),httpsCallable:()=>async()=>({data:{status:'completed',completedFiles:1,totalFiles:1,errorMessage:null}}),showSubmissionMessage:m=>messages.push(m),loadSubmissionHistory:read('history'),refreshSelectedJob:read('job'),loadTasks:read('tasks'),loadResubmissionDetail:read('detail'),Date:{now:()=>0}};
   runInNewContext(code,ctx);const pending=ctx.pollSubmissionProcessing('job','submission','report','request');for(let tick=0;tick<20;tick++)await Promise.resolve();
   assert.equal(Object.keys(gates).length,4,'All completion reads, including request detail, start independently');
   if(failed==='unconfirmed')gates.history.resolve(false);else if(!['none','stale'].includes(failed))gates[failed].reject(Error('read failed'));else gates.history.resolve(true);
@@ -530,7 +572,7 @@ console.log('Calendar validity: six real dates and fifteen invalid dates/types; 
  const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);assert.ok(start>=0&&end>start);const code=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  const valid={id:'request',jobId:'job',type:'report',status:'open'};
  for(const request of [null,{...valid,status:'submitted'},{...valid,status:'completed'},{...valid,status:'cancelled'},{...valid,status:'unknown'},{...valid,id:'other'},{...valid,jobId:'other'},{...valid,type:'sales_floor'},valid]){
-  const job={id:'job'},messages=[];let sent=0;const ctx={...submissionAttemptBoundary,files:[photo('a.pdf')],submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],requestId:'request',resubmissionDetail:request?{request}:null,submissionType:'report',showSubmissionMessage:m=>messages.push(m),firebaseConfigured:false,setSubmissionMessage:()=>{},setUploadState:()=>sent++,fileStateKey:()=> 'file',setSubmissionConfirmed:()=>{}};
+  const job={id:'job',dateKey:'2026-09-10',revision:1},messages=[];let sent=0;const ctx={...uploadBoundary,files:[photo('a.pdf')],submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],requestId:'request',resubmissionDetail:request?{request}:null,submissionType:'report',showSubmissionMessage:m=>messages.push(m),firebaseConfigured:false,setSubmissionMessage:()=>{},setUploadState:()=>sent++,fileStateKey:()=> 'file',setSubmissionConfirmed:()=>{}};
   runInNewContext(code,ctx);await ctx.uploadSubmission();assert.equal(sent,request===valid?1:0);assert.equal(messages[0].includes('再提出できる依頼を確認できません'),request!==valid);assert.equal(ctx.files.length,1);
  }
  console.log('Resubmission send guard passed: 9 request identity/status cases, blocked requests retain selected files.');
@@ -539,8 +581,8 @@ console.log('Calendar validity: six real dates and fifteen invalid dates/types; 
 {
  const start=app.indexOf('  async function uploadSubmission()'),end=app.indexOf('  async function retryDraftCleanup()',start);const helperStart=app.indexOf('function submissionFileContentType('),helperEnd=app.indexOf('function fileStateKey(',helperStart);const code=ts.transpileModule(app.slice(helperStart,helperEnd)+app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const missing of ['functions','storage','both']){
-  const job={id:'job'},files=[photo('retained.pdf')],messages=[];let starts=0;
-  const ctx={...submissionAttemptBoundary,files,submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],requestId:'',submissionType:'report',firebaseConfigured:true,functions:missing==='storage'?{}:null,firebaseApp:missing==='functions'?{}:null,loadUploadStorage:async()=>({getClientStorage:()=>({})}),setSubmissionMessage:()=>{},showSubmissionMessage:m=>messages.push(m),authLoadVersionRef:{current:1},run:async(_key,fn)=>fn(),httpsCallable:()=>async()=>{starts++;throw Error('synthetic stop before upload');}};
+  const job={id:'job',dateKey:'2026-09-10',revision:1},files=[photo('retained.pdf')],messages=[];let starts=0;
+  const ctx={...uploadBoundary,files,submissionConfirmed:true,isSubmissionActionPending:()=>false,MAX_SUBMISSION_FILE_SIZE:50*1024*1024,selectedJob:job,myJobs:[job],requestId:'',submissionType:'report',firebaseConfigured:true,functions:missing==='storage'?{}:null,firebaseApp:missing==='functions'?{}:null,loadUploadStorage:async()=>({getClientStorage:()=>({})}),setSubmissionMessage:()=>{},showSubmissionMessage:m=>messages.push(m),authLoadVersionRef:{current:1},run:async(_key,fn)=>fn(),httpsCallable:()=>async()=>{starts++;throw Error('synthetic stop before upload');}};
   runInNewContext(code,ctx);await ctx.uploadSubmission();assert.equal(starts,0);assert.equal(ctx.files,files);assert.equal(ctx.submissionConfirmed,true);assert.match(messages.at(-1),/接続準備を確認できません/);
   ctx.functions={};ctx.firebaseApp={};await ctx.uploadSubmission();assert.equal(starts,1);assert.equal(ctx.files,files);
  }
@@ -550,22 +592,22 @@ console.log('Calendar validity: six real dates and fifteen invalid dates/types; 
 {
  const start=app.indexOf('  async function pollSubmissionProcessing('),end=app.indexOf('  async function uploadSubmission()',start);const code=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const errorMessage of [null,'','  ','転送先を確認してください']){
-  const messages=[],effects=[];const ctx={...submissionAttemptBoundary,functions:{},authLoadVersionRef:{current:1},submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},setProcessingSubmission:v=>effects.push(v),httpsCallable:()=>async()=>({data:{status:'error',completedFiles:0,totalFiles:1,errorMessage}}),showSubmissionMessage:m=>messages.push(m),Date:{now:()=>0}};
+  const messages=[],effects=[];const ctx={...uploadBoundary,functions:{},authLoadVersionRef:{current:1},submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},setProcessingSubmission:v=>effects.push(v),httpsCallable:()=>async()=>({data:{status:'error',completedFiles:0,totalFiles:1,errorMessage}}),showSubmissionMessage:m=>messages.push(m),Date:{now:()=>0}};
   runInNewContext(code,ctx);await ctx.pollSubmissionProcessing('job','submission','report','');assert.equal(messages.length,1);assert.match(messages[0],/エラーが発生/);assert.match(messages[0],/「提出情報を再読み込み」/);if(errorMessage?.trim())assert.ok(messages[0].includes(errorMessage));assert.deepEqual(effects,[true,false]);
  }
- const messages=[];const ctx={...submissionAttemptBoundary,functions:null,showSubmissionMessage:m=>messages.push(m)};runInNewContext(code,ctx);await ctx.pollSubmissionProcessing('job','submission','report','');assert.match(messages[0],/接続準備を確認できません/);assert.match(messages[0],/「提出情報を再読み込み」/);
+ const messages=[];const ctx={...uploadBoundary,functions:null,showSubmissionMessage:m=>messages.push(m)};runInNewContext(code,ctx);await ctx.pollSubmissionProcessing('job','submission','report','');assert.match(messages[0],/接続準備を確認できません/);assert.match(messages[0],/「提出情報を再読み込み」/);
  console.log('Processing recovery guidance passed: missing service and 4 error-detail values keep actionable guidance; error unlocks controls.');
 }
 
 {
  const start=app.indexOf('  async function pollSubmissionProcessing('),end=app.indexOf('  async function uploadSubmission()',start);const code=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const stale of [false,true]){
-  const messages=[],effects=[];let finish,reads=0;const ctx={...submissionAttemptBoundary,functions:{},authLoadVersionRef:{current:1},submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},setProcessingSubmission:v=>effects.push(v),httpsCallable:()=>()=>{reads++;return new Promise(resolve=>finish=resolve);},showSubmissionMessage:m=>messages.push(m),Date:{now:()=>0},sleep:()=>assert.fail('Paused transfer must release controls without polling further')};
+  const messages=[],effects=[];let finish,reads=0;const ctx={...uploadBoundary,functions:{},authLoadVersionRef:{current:1},submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},setProcessingSubmission:v=>effects.push(v),httpsCallable:()=>()=>{reads++;return new Promise(resolve=>finish=resolve);},showSubmissionMessage:m=>messages.push(m),Date:{now:()=>0},sleep:()=>assert.fail('Paused transfer must release controls without polling further')};
   runInNewContext(code,ctx);const pending=ctx.pollSubmissionProcessing('job','submission','report','');if(stale)ctx.authLoadVersionRef.current++;
   finish({data:{status:'paused_global',completedFiles:0,totalFiles:1,errorMessage:null}});await pending;assert.equal(reads,1);
   if(stale){assert.deepEqual(messages,[]);assert.deepEqual(effects,[true]);}else{assert.equal(messages.length,1);assert.match(messages[0],/一時停止中/);assert.match(messages[0],/再送せず/);assert.match(messages[0],/「提出情報を再読み込み」/);assert.deepEqual(effects,[true,false]);}
  }
- const toneStart=app.indexOf('function messageTone('),toneEnd=app.indexOf(String.fromCharCode(10),toneStart);const ctx={...submissionAttemptBoundary,};runInNewContext(ts.transpileModule(app.slice(toneStart,toneEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);assert.equal(ctx.messageTone('Drive転送は一時停止中です。再送せず、「提出情報を再読み込み」で状態を確認してください。'),'warning');
+ const toneStart=app.indexOf('function messageTone('),toneEnd=app.indexOf(String.fromCharCode(10),toneStart);const ctx={...uploadBoundary,};runInNewContext(ts.transpileModule(app.slice(toneStart,toneEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);assert.equal(ctx.messageTone('Drive転送は一時停止中です。再送せず、「提出情報を再読み込み」で状態を確認してください。'),'warning');
  console.log('Paused transfer recovery passed: immediate unlock and refresh guidance, stale response isolation and warning tone.');
 }
 
@@ -581,14 +623,14 @@ console.log('Closed resubmission selection guard: valid/invalid incoming selecti
 {
  const a=app.indexOf('  async function loadPrimaryBusinessData('),b=app.indexOf('  async function loadOpenJobs(',a),c=app.indexOf('  async function loadTasks('),d=app.indexOf('  function showSubmissionMessage(',c);assert.ok(a>=0&&b>a&&c>=0&&d>c);const code=ts.transpileModule(app.slice(a,b)+app.slice(c,d),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  for(const first of ['tasks','primary'])for(const second of ['tasks','primary'])for(const rejectOld of [false,true]){
-  const gates=[deferred(),deferred()];let calls=0;const state={tasks:[],saved:[]};const ctx={...submissionAttemptBoundary,authLoadVersionRef:{current:1},pastShiftVersionRef:{current:0},tasksReadVersionRef:{current:0},staffId:'s',companyId:'c',user:{uid:'u'},fetchTasks:()=>gates[calls++].promise,fetchMyJobs:async()=>[{id:'job'}],setTasks:t=>state.tasks=t,setMyJobs:()=>{},setSelectedJob:()=>{},saveBusinessSnapshot:(u,c,s,j,t)=>state.saved.push(t),nextShiftJob:()=>null};runInNewContext(code,ctx);const old=first==='tasks'?ctx.loadTasks():ctx.loadPrimaryBusinessData();const observed=old.then(value=>({value}),error=>({error}));const fresh=second==='tasks'?ctx.loadTasks():ctx.loadPrimaryBusinessData();const current=[{id:'fresh'}];gates[1].resolve(current);await fresh;assert.equal(state.tasks,current);rejectOld?gates[0].reject(Error('old request failed')):gates[0].resolve([{id:'obsolete'}]);const result=await observed;assert.equal(state.tasks,current);assert.ok(state.saved.every(t=>t===current));assert.equal(result.value,false);
+  const gates=[deferred(),deferred()];let calls=0;const state={tasks:[],saved:[]};const ctx={...uploadBoundary,authLoadVersionRef:{current:1},pastShiftVersionRef:{current:0},tasksReadVersionRef:{current:0},staffId:'s',companyId:'c',user:{uid:'u'},fetchTasks:()=>gates[calls++].promise,fetchMyJobs:async()=>[{id:'job'}],setTasks:t=>state.tasks=t,setTaskRefreshSource:source=>state.taskSource=source,setMyJobs:()=>{},setSelectedJob:()=>{},saveBusinessSnapshot:(u,c,s,j,t)=>state.saved.push(t),nextShiftJob:()=>null};runInNewContext(code,ctx);const old=first==='tasks'?ctx.loadTasks():ctx.loadPrimaryBusinessData();const observed=old.then(value=>({value}),error=>({error}));const fresh=second==='tasks'?ctx.loadTasks():ctx.loadPrimaryBusinessData();const current=[{id:'fresh'}];gates[1].resolve(current);await fresh;assert.equal(state.tasks,current);rejectOld?gates[0].reject(Error('old request failed')):gates[0].resolve([{id:'obsolete'}]);const result=await observed;assert.equal(state.tasks,current);assert.equal(state.taskSource,second==='tasks'?'live':null);assert.ok(state.saved.every(t=>t===current));assert.equal(result.value,false);
  }
  console.log('Task read ordering: 8 standalone/primary overlapping success/failure combinations preserve the latest tasks and cached snapshot.');
 }
 
 {
  const start=app.indexOf('  async function loadTasks('),end=app.indexOf('  function showSubmissionMessage(',start),code=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
- for(const stale of [false,true])for(const failure of [false,true]){const gate=deferred(),tasks=[{id:'task'}];let writes=0;const ctx={...submissionAttemptBoundary,authLoadVersionRef:{current:1},tasksReadVersionRef:{current:0},fetchTasks:()=>gate.promise,setTasks:v=>{writes++;assert.equal(v,tasks);}};runInNewContext(code,ctx);const pending=ctx.loadTasks();const observed=pending.then(value=>({value}),error=>({error}));if(stale)ctx.authLoadVersionRef.current++;const error=Error('current task read failed');failure?gate.reject(error):gate.resolve(tasks);const result=await observed;assert.equal(writes,!stale&&!failure?1:0);if(stale)assert.equal(result.value,false);else if(failure)assert.equal(result.error,error);else assert.equal(result.value,true);}
+ for(const stale of [false,true])for(const failure of [false,true]){const gate=deferred(),tasks=[{id:'task'}];let writes=0;const sources=[];const ctx={...uploadBoundary,authLoadVersionRef:{current:1},tasksReadVersionRef:{current:0},fetchTasks:()=>gate.promise,setTasks:v=>{writes++;assert.equal(v,tasks);},setTaskRefreshSource:source=>sources.push(source),isShiftAccessDenied:()=>false};runInNewContext(code,ctx);const pending=ctx.loadTasks();const observed=pending.then(value=>({value}),error=>({error}));if(stale)ctx.authLoadVersionRef.current++;const error=Error('current task read failed');failure?gate.reject(error):gate.resolve(tasks);const result=await observed;assert.equal(writes,!stale&&!failure?1:0);assert.deepEqual(sources,stale?[]:[failure?"stale":"live"]);if(stale)assert.equal(result.value,false);else if(failure)assert.equal(result.error,error);else assert.equal(result.value,true);}
  console.log('Task refresh result: auth-stale success/failure return false without writes; current failures remain actionable and current success returns true.');
 }
 
@@ -603,3 +645,142 @@ console.log('Resubmission scope: file remains one; explicitly whole-submission s
 
 // The monthly confirmation boundary is shared by all shift entry origins.
 await import("./test-staff-monthly-confirmation.mjs");
+
+
+if(process.env.LKC_SUBMISSION_POLL_LOAD_EVIDENCE){
+ const start=app.indexOf("  async function pollSubmissionProcessing("),end=app.indexOf("  async function finishSubmittedDraft(",start);
+ assert.ok(start>=0&&end>start);
+ const code=ts.transpileModule(app.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ let seed=41319;
+ const sample=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/2**32;};
+ async function scenario(index,outcome){
+  let elapsed=0;
+  const requests=[],messages=[],busy=[];
+  const math=Object.create(Math);math.random=sample;
+  const submissionId="synthetic-receipt-"+index;
+  const context={Math:math,Date:{now:()=>elapsed},functions:{},authLoadVersionRef:{current:1},
+    submissionContextVersionRef:{current:1},submissionProcessingVersionRef:{current:0},
+    sleep:async delay=>{elapsed+=delay;},
+    setProcessingSubmission:value=>busy.push(value),showSubmissionMessage:value=>messages.push(value),
+    httpsCallable:(_functions,name,{timeout})=>async request=>{
+     assert.equal(name,"getSubmissionProcessingStatus");
+     assert.equal(request.jobId,"synthetic-job");assert.equal(request.submissionId,submissionId);
+     assert.ok(timeout>0&&timeout<=15000&&elapsed+timeout<=60000);
+     requests.push(elapsed);
+     const complete=outcome==="fast"&&requests.length===1 || outcome==="eventual"&&elapsed>=14000;
+     return {data:{status:complete?"completed":"processing",completedFiles:complete?1:0,totalFiles:1,errorMessage:null}};
+    },
+    loadSubmissionHistory:async()=>true,refreshSelectedJob:async()=>true,loadTasks:async()=>true,
+  };
+  runInNewContext(code,context);
+  await context.pollSubmissionProcessing("synthetic-job",submissionId,"report","");
+  assert.deepEqual(busy,[true,false]);
+  assert.equal(requests[0],0);
+  assert.ok(requests.every((time,rank)=>time<60_000&&(!rank||time>requests[rank-1])));
+  if(outcome==="fast"){assert.deepEqual(requests,[0]);assert.match(messages.at(-1),/保存が完了/);}
+  if(outcome==="eventual"){assert.match(messages.at(-1),/保存が完了/);assert.ok(requests.at(-1)>=14_000&&requests.at(-1)<=21_500);}
+  if(outcome==="pending"){assert.equal(elapsed,60_000);assert.match(messages.at(-1),/完了をまだ確認できていません/);}
+  return requests;
+ }
+ const pending=[];
+ for(let index=0;index<300;index++)pending.push(await scenario(index,"pending"));
+ await scenario(300,"fast");
+ for(let index=301;index<321;index++)await scenario(index,"eventual");
+ const by100ms=new Map();
+ for(const time of pending.flatMap(times=>times.slice(1))){
+  const bucket=Math.floor(time/100);by100ms.set(bucket,(by100ms.get(bucket)??0)+1);
+ }
+ const reruns={sessions:300,firstChecks:pending.length,retryCalls:pending.reduce((sum,values)=>sum+values.length-1,0),
+  peakRetryCallsPer100ms:Math.max(...by100ms.values()),oldCloudLatencyMeasured:false,networkAttempts:0};
+ const target=process.env.LKC_SUBMISSION_POLL_LOAD_EVIDENCE;
+ writeFileSync(target,JSON.stringify(reruns,null,2)+"\n",{flag:"wx"});
+ assert.deepEqual(JSON.parse(readFileSync(target)),reruns);
+ console.log(JSON.stringify({submissionPollLoad:reruns}));
+ if(process.env.LKC_SUBMISSION_POLL_PREVIOUS!=="1"){
+  assert.ok(reruns.peakRetryCallsPer100ms<200);
+  assert.ok(reruns.retryCalls<5000);
+ }
+}
+
+
+// Exercise the real task callable adapter and Home refresh handlers without browser or cloud access.
+{
+ const start=app.indexOf('  async function fetchTasks('),end=app.indexOf('  async function loadPrimaryBusinessData(',start);
+ const actionsStart=app.indexOf('  async function loadTasks('),actionsEnd=app.indexOf('  async function refreshBusinessData(',actionsStart);
+ assert.ok(start>=0&&end>start&&actionsStart>=0&&actionsEnd>actionsStart);
+ const code=ts.transpileModule(app.slice(start,end)+app.slice(actionsStart,actionsEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+ const sales={id:'sales',jobId:'same-job',kind:'sales_floor',title:'売場画像',body:'',priority:'normal'};
+ const report={id:'report',jobId:'same-job',kind:'report',title:'報告書',body:'',priority:'normal'};
+ const old=[report,sales];const state={source:null,tasks:old,calls:[],forgotten:0,writes:0};
+ const pending=new Set();
+ const scope={
+  user:{uid:'user'},staffId:'staff',companyId:'company',functions:{},taskRefreshKey:'home-tasks:1',
+  authLoadVersionRef:{current:1},tasksReadVersionRef:{current:0},businessRefreshing:false,isSubmissionActionPending:()=>false,
+  httpsCallable:(_functions,name)=>input=>{
+   assert.equal(name,'getMyTasks');
+   assert.equal(Object.keys(input).length,0);
+   const call=deferred();state.calls.push(call);return call.promise;
+  },
+  setTasks:tasks=>{state.tasks=tasks;state.writes++;},setTaskRefreshSource:source=>state.source=source,
+  isShiftAccessDenied:error=>error.code==='functions/permission-denied',
+  forgetInaccessibleShifts:()=>{state.forgotten++;state.tasks=[];scope.tasksReadVersionRef.current++;},
+  run:async(key,fn)=>{
+   if(pending.has(key))return;
+   pending.add(key);try{await fn();}finally{pending.delete(key);}
+  },
+ };
+ runInNewContext(code,scope);
+ const failure=scope.loadTasks();
+ state.calls[0].reject(Error('synthetic offline after accepted submission'));
+ await assert.rejects(failure,/offline after accepted submission/);
+ assert.equal(state.source,'stale');assert.equal(state.tasks,old);
+
+ const refreshed=scope.refreshHomeTasks();const duplicate=scope.refreshHomeTasks();
+ assert.equal(state.calls.length,2);
+ state.calls[1].resolve({data:{tasks:[sales]}});
+ await Promise.all([refreshed,duplicate]);assert.deepEqual(state.tasks,[sales]);assert.equal(state.source,'live');
+ const otherDevice=scope.refreshHomeTasks();
+ state.calls[2].resolve({data:{tasks:[]}});
+ await otherDevice;assert.equal(state.tasks.length,0);assert.equal(state.source,'live');
+
+ const obsolete=scope.refreshHomeTasks();
+ scope.authLoadVersionRef.current++;scope.taskRefreshKey='home-tasks:2';
+ const current=scope.refreshHomeTasks();
+ state.calls[4].resolve({data:{tasks:[report]}});
+ await current;
+ state.calls[3].reject(Error('old account offline'));await obsolete;
+ assert.deepEqual(state.tasks,[report]);assert.equal(state.source,'live');
+ const revoked=scope.refreshHomeTasks();
+ state.calls[5].reject(Object.assign(Error('permission denied'),{code:'functions/permission-denied'}));
+ await revoked;assert.equal(state.forgotten,1);assert.equal(state.tasks.length,0);assert.equal(state.source,'stale');
+ scope.businessRefreshing=true;
+ await scope.refreshHomeTasks();assert.equal(state.calls.length,6);
+ console.log('Home task refresh: offline preserves previous data with stale status; task-only retry deduplicates; partial and complete readback update independently; stale sessions do not relabel results; revoked data is forgotten.');
+}
+
+{
+ const start=app.indexOf('      <section className="hero-card"');
+ const end=app.indexOf('\n      <section><h2>次回シフト',start);
+ assert.ok(start>=0&&end>start);
+ const code=ts.transpileModule('globalThis.rendered='+app.slice(start,end),{compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}}).outputText;
+ const react={createElement:(type,props,...children)=>({type,props,children}),Fragment:Symbol('Fragment')};
+ let refreshes=0;
+ const report={id:'r',kind:'report',title:'報告書を提出',body:'',priority:'normal'};
+ const render=(source,tasks,pending=false)=>{
+  const ctx={React:react,taskDataSource:source,businessDataFallback:null,businessRefreshing:false,taskRefreshPending:pending,homeHeadingRef:{},tasks,visibleTasks:tasks,taskSummary:'未対応',showAllTasks:false,submissionEditPending:false,isPending:()=>false,firebaseConfigured:true,refreshHomeTasks:()=>refreshes++};
+  runInNewContext(code,ctx);
+  const nodes=[];
+  const walk=node=>{if(Array.isArray(node)){node.forEach(walk);return;}if(node&&typeof node==='object'){nodes.push(node);walk(node.children);}};
+  walk(ctx.rendered);
+  return {nodes,text:JSON.stringify(ctx.rendered),button:label=>nodes.find(node=>node.type==='button'&&JSON.stringify(node.children).includes(label))};
+ };
+ const stale=render('stale',[report]);
+ assert.match(stale.text,/更新未確認/);assert.doesNotMatch(stale.text,/最新/);
+ assert.equal(stale.button(report.title).props.disabled,true);
+ const retry=stale.button('対応事項を更新');assert.equal(retry.props.disabled,false);retry.props.onClick();assert.equal(refreshes,1);
+ const unconfirmedEmpty=render('stale',[]);assert.match(unconfirmedEmpty.text,/現在の対応事項を確認できません/);assert.doesNotMatch(unconfirmedEmpty.text,/すべて完了/);
+ const live=render('live',[]);assert.match(live.text,/今日の対応はすべて完了/);
+ const cached=render('cached',[]);assert.match(cached.text,/前回確認時点では/);assert.doesNotMatch(cached.text,/すべて完了/);
+ const updating=render('stale',[report],true);assert.match(updating.text,/更新中/);assert.equal(updating.button('対応事項を更新').props.disabled,true);
+ console.log('Home task rendering: verified empty, prior empty and unconfirmed empty distinguished; retry action only reads and stale rows stay inactive.');
+}

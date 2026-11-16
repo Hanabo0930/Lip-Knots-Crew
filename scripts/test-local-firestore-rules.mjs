@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {createRequire} from 'node:module';
 import {localAcceptanceEnvironment,blockNonEmulatorConnections} from './local-firestore-acceptance-safety.mjs';
+import {runStaffRevocationClientCases,runDeviceBoundRuleCases} from './staff-revocation-client-cases.mjs';
 const environment=localAcceptanceEnvironment(process.env);
 const network=blockNonEmulatorConnections(environment.port);
-const require=createRequire(import.meta.url);
+const require=createRequire(process.env.LKC_TEST_DEPENDENCY_ROOT
+  ? new URL('package.json', 'file:///'+process.env.LKC_TEST_DEPENDENCY_ROOT.replace(/\\/g,'/').replace(/\/$/,'')+'/')
+  : import.meta.url);
 const adminApp=require('firebase-admin/app');
 const adminStore=require('firebase-admin/firestore');
 const appApi=require('firebase/app');
@@ -14,7 +17,8 @@ const seed=adminStore.getFirestore(app), clients=[], results=[];
 function client(name,claims) {
   const app=appApi.initializeApp({projectId:environment.project,apiKey:'synthetic-emulator-key'},name);
   const db=clientApi.initializeFirestore(app,{});
-  clientApi.connectFirestoreEmulator(db,environment.host,environment.port,claims ? {mockUserToken:{sub:name,...claims}} : {});
+  const mockUserToken=typeof claims==='string'?claims:{sub:name,...claims};
+  clientApi.connectFirestoreEmulator(db,environment.host,environment.port,claims ? {mockUserToken} : {});
   clients.push({app,db});return db;
 }
 const staff=client('staff-a',{role:'staff',companyId:'company-a',staffId:'staff-a'});
@@ -153,6 +157,9 @@ try {
   await test('会社と本人が一致する有効identityは許可',async()=>assert.ok((await read(staff,'tasks/own')).exists()));
   await seed.doc('authIdentities/staff-a').delete();
   await test('identity未作成の既存互換経路は維持',async()=>assert.ok((await read(staff,'tasks/own')).exists()));
+  await runStaffRevocationClientCases({seed,adminStore,client,read,list,test});
+  const update=(db,path,data)=>clientApi.updateDoc(clientApi.doc(db,path),data);
+  await runDeviceBoundRuleCases({seed,client,read,list,test,update});
 
 } finally {
   for(const {db,app} of clients){await clientApi.terminate(db);await appApi.deleteApp(app);}
@@ -160,7 +167,7 @@ try {
   const stats=network.stats();network.restore();
   const result={project:environment.project,passed:results.filter(x=>x.passed).length,failed:results.filter(x=>!x.passed).length+(stats.blocked?1:0),network:stats,
     rulesEngine:'real Firestore emulator',authentication:'synthetic emulator claims; actual token verification and deployed Rules not certified',cloudWrites:0,actualMessagesSent:0,results};
-  fs.writeFileSync(process.argv[2],JSON.stringify(result,null,2)+'\n');
+  fs.writeFileSync(process.argv[2],JSON.stringify(result,null,2)+'\n',{flag:'wx'});
   console.log(JSON.stringify({passed:result.passed,failed:result.failed,network:stats,cloudWrites:0}));
   if(result.failed)process.exitCode=1;
 }

@@ -8,6 +8,8 @@ const functionsSource = JSON.parse(fs.readFileSync(path.join(root, "firebase.jso
 assert.equal(functionsSource.source, "functions");
 assert.equal(functionsSource.ignore, undefined, "A new upload exclusion needs explicit asset closure review");
 const assets = [
+  ["case-list-monthly-worker", "case-list-assignment-observation.cjs", ["sourcePay", "observeRow", "dependency"]],
+  ["case-list-gas-read-ports", "case-list-assignment-observation.cjs", ["sourcePay", "observeRow", "dependency"]],
   ["case-list-publication-core", "case-list-monthly-controller.cjs", ["checkPromisedPay", "transferCapability", "assertSnapshotCoverage"]],
   ["case-list-publication-worker", "case-list-monthly-adapter.cjs", ["createGoogleSheetsMutationAdapter"]],
   ["case-list-recruitment", "recruitment-mail-core.cjs", ["compose", "subjects", "normalizeNotice"]],
@@ -25,4 +27,7 @@ for (const [module, asset, exports] of assets) {
   const loaded = runtimeRequire(relative);
   for (const name of exports) assert.equal(typeof loaded[name], "function", asset + " missing " + name);
 }
-console.log(JSON.stringify({ status: "PASS", assets: assets.length, scope: "BUILT_FUNCTIONS_RELATIVE_ASSET_CLOSURE", nativeRequests: 0 }));
+const coreRequire = createRequire(path.join(root, "functions/src/case-list-external-core.cjs"));
+assert.equal(coreRequire.resolve("./case-list-assignment-observation.cjs"), path.join(root, "functions/src/case-list-assignment-observation.cjs"));
+assert.equal(typeof coreRequire("./case-list-assignment-observation.cjs").observeRow, "function");
+console.log(JSON.stringify({ standaloneCoreEdge: true, status: "PASS", assets: assets.length, scope: "BUILT_FUNCTIONS_RELATIVE_ASSET_CLOSURE", nativeRequests: 0 }));

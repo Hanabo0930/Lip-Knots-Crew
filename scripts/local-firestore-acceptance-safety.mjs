@@ -21,6 +21,26 @@ export function localAcceptanceEnvironment(env) {
 export function allowedConnection(options, port) {
   return options && !options.path && ['127.0.0.1','localhost'].includes(options.host ?? 'localhost') && Number(options.port) === port;
 }
+
+export async function seedLocalApplicationAccess(db, companyId, staff) {
+  localAcceptanceEnvironment(process.env);
+  if (!/^synthetic-(?:sdk|journey)-[1-9][0-9]*$/.test(companyId) || !staff.length ||
+      staff.some(({uid, token}) => !uid.startsWith(companyId + '-uid-') ||
+        token.role !== 'staff' || token.companyId !== companyId || !token.staffId.startsWith(companyId + '-staff-'))) {
+    throw new Error('SYNTHETIC_APPLICATION_SCOPE_REQUIRED');
+  }
+  const batch = db.batch();
+  batch.create(db.doc('staffNgMaintenance/' + companyId), {
+    schema: 'LK_STAFF_NG_MAINTENANCE_V1', companyId, state: 'OPEN', generation: 0,
+    ngWriteSequence: 0, activeImport: null, operationId: null, ownerUid: null, deadline: null,
+  });
+  for (const {uid, token: {staffId}} of staff) {
+    batch.create(db.doc('authIdentities/' + uid), {active: true, companyId, staffId});
+  }
+  await batch.commit();
+  // These fixtures run sequentially; the admission check targets the current synthetic tenant.
+  process.env.DEFAULT_COMPANY_ID = companyId;
+}
 export function blockNonEmulatorConnections(port) {
   const connect = net.Socket.prototype.connect;
   let allowed = 0, blocked = 0;

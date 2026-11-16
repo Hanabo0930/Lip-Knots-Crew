@@ -6,8 +6,9 @@ import {runInNewContext} from 'node:vm';
 const require=createRequire(path.join(process.env.LKC_TEST_DEPENDENCY_ROOT||process.cwd(),'package.json'));
 const ts=require('typescript');
 const source=fs.readFileSync('apps/staff/src/App.tsx','utf8');
-function loadModule(file,globals={}){const scope={exports:{},...globals};runInNewContext(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,scope);return scope.exports;}
+function loadModule(file,globals={}){const scope={exports:{},...globals};runInNewContext(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText,scope);return scope.exports;}
 const access=loadModule('apps/staff/src/shift-access.ts');
+const historyFiles=loadModule('apps/staff/src/SubmissionHistoryFiles.tsx',{require:name=>name==='./SubmissionPreviewImage'?{}:require(name)});
 const forgetStart=source.indexOf('  function forgetInaccessibleShifts('),forgetEnd=source.indexOf('  async function loadTaskJob(',forgetStart);
 assert.ok(forgetStart>=0&&forgetEnd>forgetStart);
 const forgetCode=ts.transpileModule(source.slice(forgetStart,forgetEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
@@ -19,7 +20,10 @@ function setup(){
  const cache=new Map(),businessCache=loadModule('apps/staff/src/business-cache.ts',{localStorage:{getItem:key=>cache.get(key)??null,setItem:(key,value)=>cache.set(key,value),removeItem:key=>cache.delete(key)}});
  const ctx={submissionMessage:'',setMessage:fn=>{state.visibleMessage=fn(state.visibleMessage);},refreshSelectedJob:async()=>{state.jobRefreshes++;return true;},loadTasks:async()=>{state.taskRefreshes++;return [];},firebaseConfigured:true,functions:{},resubmissionDetail:null,authLoadVersionRef:{current:1},navigationVersionRef:{current:0},submissionHistoryVersionRef:{current:0},resubmissionDetailVersionRef:{current:0},submissionContextVersionRef:{current:0},previewContextRef:{current:'A'},selectedJob:{id:'A'},submissionType:'report',draftOwner:'user',hydratedDraftKeyRef:{current:''},draftHydratingRef:{current:false},submissionDraftKey:(_owner,job,type,req)=>[job,type,req].join(':'),
  httpsCallable:(_f,name)=>input=>new Promise((resolve,reject)=>state.calls.push({name,input,resolve,reject})),
- setSubmissionHistory:v=>state.history=v,setSubmissionHistoryStatus:v=>state.status=v,setResubmissionDetail:v=>state.detail=v,showSubmissionMessage:v=>{state.visibleMessage=v;if(v)state.messages.push(v);else state.clears++;},
+ loadSubmissionHistoryFiles:async()=>historyFiles,
+ submissionHistory:state.history,submissionHistoryStatus:"idle",nextSubmissionHistoryCursor:null,
+ setSubmissionHistory:update=>{state.history=typeof update==="function"?update(state.history):update;ctx.submissionHistory=state.history;},setSubmissionHistoryStatus:v=>{state.status=v;ctx.submissionHistoryStatus=v;},
+ setNextSubmissionHistoryCursor:v=>ctx.nextSubmissionHistoryCursor=v,setSubmissionHistoryPageError:v=>state.pageError=v,setResubmissionDetail:v=>state.detail=v,showSubmissionMessage:v=>{state.visibleMessage=v;if(v)state.messages.push(v);else state.clears++;},
  setDraftHydrating:()=>{},setSelectedJob:v=>ctx.selectedJob=v,setSubmissionType:v=>ctx.submissionType=v,setRequestId:()=>{},setSubmissionConfirmed:()=>{},setSubmissionMessage:()=>{},setFiles:()=>{},navigate:()=>{}};
  Object.assign(ctx,access,businessCache,{user:{uid:'user'},companyId:'company',staffId:'staff',pastShiftVersionRef:{current:0},tasksReadVersionRef:{current:0},mailPanelVersion:{current:0},setTasks:update=>state.tasks=typeof update==='function'?update(state.tasks):update,setOpenJobs:update=>state.openJobs=typeof update==='function'?update(state.openJobs):update,setShowMailApplications:value=>state.showMailApplications=value});
  const hook={exports:{},require:()=>({useCallback:f=>f,useRef:value=>({current:value}),useState:initial=>[initial(),()=>{}]})};
@@ -53,12 +57,94 @@ for(const failOld of [false,true])test(`prepare initial invalidates old detail $
  if(failOld)state.calls[1].reject(Error('offline'));else state.calls[1].resolve({data:detail('request-A')});
  await old;assert.equal(state.detail,null);assert.equal(state.history[0].id,'B');assert.equal(state.messages.length,0);
 });
+
+const historyResponse=(ids,nextCursor=null)=>({submissions:ids.map(id=>({id,files:[]})),nextCursor});
+async function firstHistoryPage(ctx,state){
+ const task=ctx.loadSubmissionHistory('A','report');
+ state.calls[0].resolve({data:historyResponse(['new','boundary'],'boundary')});
+ assert.equal(await task,true);
+}
+test('older history appends once and stops after the last page',async()=>{
+ const {ctx,state}=setup();await firstHistoryPage(ctx,state);
+ const pending=ctx.loadEarlierSubmissionHistory();
+ await ctx.loadEarlierSubmissionHistory();
+ assert.equal(state.calls.length,2);
+ assert.equal(ctx.isPending('submission-history-page'),true);
+ assert.equal(JSON.stringify(state.calls[1].input),JSON.stringify({jobId:'A',type:'report',previewMode:'on-demand',page:{afterSubmissionId:'boundary'}}));
+ state.calls[1].resolve({data:historyResponse(['earlier'])});
+ await pending;
+ assert.equal(ctx.isPending('submission-history-page'),false);
+ assert.deepEqual(JSON.parse(JSON.stringify(state.history)).map(group=>group.id),['new','boundary','earlier']);
+ assert.equal(ctx.nextSubmissionHistoryCursor,null);
+ await ctx.loadEarlierSubmissionHistory();
+ assert.equal(state.calls.length,2);
+});
+for(const outcome of ['network','duplicate','invalid-cursor','forbidden','cursor-removed'])test('older history handle '+outcome,async()=>{
+ const {ctx,state}=setup();await firstHistoryPage(ctx,state);
+ const pending=ctx.loadEarlierSubmissionHistory();
+ if(outcome==='network')state.calls[1].reject(Error('offline'));
+ if(outcome==='duplicate')state.calls[1].resolve({data:historyResponse(['boundary'])});
+ if(outcome==='invalid-cursor')state.calls[1].resolve({data:historyResponse(['older'],'another')});
+ if(outcome==='forbidden')state.calls[1].reject(Object.assign(Error('revoked'),{code:'functions/permission-denied'}));
+ if(outcome==='cursor-removed')state.calls[1].reject(Object.assign(Error('cursor unavailable'),{code:'functions/failed-precondition'}));
+ await pending;
+ assert.equal(ctx.isPending('submission-history-page'),false);
+ if(outcome==='forbidden'){
+  assert.equal(state.history.length,0);assert.equal(state.status,'error');assert.equal(ctx.nextSubmissionHistoryCursor,null);
+  return;
+ }
+ assert.equal(state.history.length,2);
+ assert.equal(state.status,'ready');
+ if(outcome==='cursor-removed'){
+  assert.equal(ctx.nextSubmissionHistoryCursor,null);assert.match(state.pageError,/最初のページ/);
+  return;
+ }
+ assert.equal(ctx.nextSubmissionHistoryCursor,'boundary');
+ assert.match(state.pageError,/もう一度/);
+ const retry=ctx.loadEarlierSubmissionHistory();
+ state.calls[2].resolve({data:historyResponse(['older'])});
+ await retry;
+ assert.equal(state.history.length,3);
+ assert.equal(state.pageError,'');
+});
+for(const domain of ['authLoadVersionRef','submissionContextVersionRef','navigationVersionRef','submissionHistoryVersionRef']){
+ for(const reject of [false,true])test('older history ignores stale '+domain+' '+reject,async()=>{
+  const {ctx,state}=setup();await firstHistoryPage(ctx,state);
+  const pending=ctx.loadEarlierSubmissionHistory();ctx[domain].current++;
+  if(reject)state.calls[1].reject(Error('old request'));else state.calls[1].resolve({data:historyResponse(['stale'])});
+  await pending;assert.equal(state.history.length,2);assert.equal(state.pageError,'');
+  assert.equal(ctx.nextSubmissionHistoryCursor,'boundary');
+ });
+}
+test('history refresh supersedes a pending older page',async()=>{
+ const {ctx,state}=setup();await firstHistoryPage(ctx,state);
+ const pending=ctx.loadEarlierSubmissionHistory();
+ const refreshed=ctx.refreshSubmissionInformation();
+ state.calls[2].resolve({data:historyResponse(['newest'])});await refreshed;
+ state.calls[1].resolve({data:historyResponse(['stale'])});await pending;
+ assert.equal(state.history.length,1);assert.equal(state.history[0].id,'newest');
+ assert.equal(ctx.nextSubmissionHistoryCursor,null);
+});
+test('older server response stays compatible without a continuation property',async()=>{
+ const {ctx,state}=setup();const task=ctx.loadSubmissionHistory('A','report');
+ state.calls[0].resolve({data:{submissions:[{id:'legacy',files:[]}]}});
+ assert.equal(await task,true);assert.equal(state.history[0].id,'legacy');assert.equal(ctx.nextSubmissionHistoryCursor,null);
+});
+
+test('history refresh on revoked access clears loaded receipts and continuation',async()=>{
+ const {ctx,state}=setup();await firstHistoryPage(ctx,state);
+ const refresh=ctx.loadSubmissionHistory('A','report');assert.equal(ctx.nextSubmissionHistoryCursor,null);
+ state.calls[1].reject(Object.assign(Error('revoked'),{code:'functions/permission-denied'}));
+ await assert.rejects(refresh,/revoked/);
+ assert.equal(state.history.length,0);assert.equal(state.status,'error');
+ assert.match(source,/SubmissionProcessingRecovery[^\n]+submissions=\{submissionHistoryStatus==="ready"\?submissionHistory:\[\]\}/);
+});
 test('current history error remains actionable',async()=>{const {ctx,state}=setup();const task=ctx.loadSubmissionHistory('A','report');state.calls[0].reject(Error('offline'));await assert.rejects(task,/offline/);assert.equal(state.status,'error');});
 test('current detail error remains actionable',async()=>{const {ctx,state}=setup();const task=ctx.loadResubmissionDetail('A');state.calls[0].reject(Error('offline'));await assert.rejects(task,/offline/);});
 for(const data of [{request:{id:'B',reasons:[]},replacements:[]},{request:{id:'A'},replacements:[]},null])test(`invalid detail ${JSON.stringify(data)}`,async()=>{const {ctx,state}=setup();const task=ctx.loadResubmissionDetail('A');state.calls[0].resolve({data});await assert.rejects(task);assert.equal(state.detail,null);});
 test('malformed history is not successful empty history',async()=>{const {ctx,state}=setup();const task=ctx.loadSubmissionHistory('A','report');state.calls[0].resolve({data:{}});await assert.rejects(task);assert.equal(state.status,'error');});
 test('preview refresh cannot overwrite newer history',async()=>{
- const {ctx,state}=setup();const preview=ctx.refreshFilePreview({id:'file',submissionId:'old'});assert.equal(JSON.stringify(state.calls[0].input),JSON.stringify({jobId:'A',type:'report',previewFile:{submissionId:'old',fileId:'file'}}));const history=ctx.loadSubmissionHistory('A','report');assert.equal(state.calls[1].input.previewFile,undefined);
+ const {ctx,state}=setup();const preview=ctx.refreshFilePreview({id:'file',submissionId:'old'});assert.equal(JSON.stringify(state.calls[0].input),JSON.stringify({jobId:'A',type:'report',previewFile:{submissionId:'old',fileId:'file'}}));const history=ctx.loadSubmissionHistory('A','report');assert.equal(JSON.stringify(state.calls[1].input),JSON.stringify({jobId:"A",type:"report",previewMode:"on-demand",page:{}}));
  state.calls[1].resolve({data:{submissions:[{id:'new',files:[]}]}});await history;
  state.calls[0].resolve({data:{submissions:[{id:'old',files:[{id:'file',submissionId:'old',previewUrl:'refreshed'}]}]}});
  assert.equal(await preview,'refreshed');assert.equal(state.history[0].id,'new');

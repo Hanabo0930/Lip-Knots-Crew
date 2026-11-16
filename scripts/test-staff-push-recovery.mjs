@@ -135,4 +135,27 @@ for(const mode of ['during','already-pending','failed-report','stale-auth'])awai
 for(const mode of ['during','already-refreshing','other-failure','old-business-failure','both','unchanged'])await test('diagnostic business snapshot '+mode,async()=>{
  const h=readSetup();if(mode==='already-refreshing')h.ctx.businessRefreshing=true;const pending=h.ctx.openQuickDiagnostics();await settle();if(!['already-refreshing','unchanged'].includes(mode))h.ctx.pastShiftVersionRef.current++;if(mode==='both')h.ctx.pushStateVersionRef.current++;h.state.calls[0].resolve({summary:['other-failure','old-business-failure'].includes(mode)?'fail':'pass',serverPushEnabled:true,checks:[{id:'network',level:mode==='other-failure'?'fail':'pass'},{id:'business',level:mode==='old-business-failure'?'fail':'pass'},{id:'refresh',level:'pass'},{id:'push',level:'pass'}]});await pending;if(mode==='unchanged'){assert.equal(h.state.report.summary,'pass');assert.equal(h.state.report.checks.length,4);return;}assert.equal(h.state.report.summary,mode==='other-failure'?'fail':'warn');assert.equal(h.state.report.checks.some(c=>c.id==='business'||c.id==='refresh'),false);assert.match(h.state.report.checks.find(c=>c.id==='business-changed').detail,/もう一度診断/);assert.equal(h.state.report.serverPushEnabled,mode==='both'?null:true);assert.equal(h.state.messages.some(m=>m.includes('すべて正常')),false);
 });
+await test('unknown result suppresses automatic repair even after a known invalid token',async()=>{
+ const h=appSetup(),pending=h.ctx.requestPushTest();
+ h.state.calls[0].resolve('queue');await settle();
+ h.state.calls[1].resolve({
+  finished:true,status:'error',failureReason:'unknown',invalidTokenCount:1,deliveryVerificationRequired:true,
+ });
+ await settle();
+ const names=h.state.calls.map(call=>call.name);
+ if(h.state.calls.length>2)h.state.calls[2].reject(new Error('unexpected notification repair'));
+ await pending;
+ assert.deepEqual(names,['request','status']);
+ assert.match(h.state.messages.at(-1),/送信結果を確認できません/);
+});
+await test('push status parser accepts the typed hold and rejects malformed or inconsistent flags',async()=>{
+ const start=push.indexOf('export async function loadTestPushStatus('),end=push.indexOf('export async function listenForForegroundPush(',start);
+ const code=ts.transpileModule(push.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
+ const base={queueId:'queue',status:'error',finished:true,successCount:0,failureCount:0,invalidTokenCount:0,failureReason:'unknown'};
+ for(const change of [{deliveryVerificationRequired:true},{deliveryVerificationRequired:'true'},{deliveryVerificationRequired:true,status:'completed'}]){
+  const test={...base,...change},ctx={exports:{},httpsCallable:()=>async()=>({data:{test}})};runInNewContext(code,ctx);
+  if(change.deliveryVerificationRequired===true&&!change.status)assert.equal(await ctx.exports.loadTestPushStatus({},'queue'),test);
+  else await assert.rejects(ctx.exports.loadTestPushStatus({},'queue'),/処理結果/);
+ }
+});
 console.log(JSON.stringify({cases:results.length,passed:results.every(r=>r.passed),results},null,2));if(results.some(r=>!r.passed))process.exitCode=1;

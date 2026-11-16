@@ -4,7 +4,7 @@ import {runInNewContext} from 'node:vm';
 const read=p=>fs.readFileSync(new URL('../../'+p,import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^import .*;\n/gm,'');
 const modules={applyToJob:'jobs',getMyTasks:'staff-tasks',listMyMailApplications:'automation-intake',setSalesFloorClientSubmitted:'submission-status',submitPreContact:'precontact'};
-const sources=Object.fromEntries([...Object.values(modules),'case-list-source','case-list-source-core'].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
+const sources=Object.fromEntries([...Object.values(modules),'staff-session','case-list-source','case-list-source-core'].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
 let cases=0;
 function run(name,change) {
  const files={...sources};change?.(files);
@@ -36,19 +36,23 @@ const mutations={
   ['session.token.role !== "staff"','false'],
   ['previous?.uid !== session.uid || previous?.companyId !== companyId','false'],
   ['previous.staffId !== staffId','false'],
-  ['job.companyId !== companyId || staff.companyId !== companyId','job.companyId !== companyId'],
-  ['staff.active !== true','false'],
+  ['if (job.companyId !== companyId)','if (false)'],
   ['job.status !== "open" || job.assignedStaffId','false'],
   ['job.sourceMissing === true || job.assignmentUnresolved === true || job.applicationUnconfirmed === true || job.publishable !== true','false'],
   ['lockSnap.exists && (lockSnap.data()?.active === true || (caseListChecked && lockSnap.data()?.active !== false))','false'],
   ['await readMailApplicationForAssignment(tx,','await unverifiedApplication(tx,'],
   ['tx.set(idempotencyRef,','await idempotencyRef.set('],
+  ['staffApplicationQueueKey(session.uid, input.requestId)','staffApplicationQueueKey(input.uid, input.requestId)'],
+  ['if (!previous) throw new HttpsError','if (false) throw new HttpsError'],
+  ['tx.create(queueRef,','await queueRef.set('],
+  ['requestId: input.requestId, assignedAt: response.assignedAt, ...receiptBinding','requestId: input.jobId, assignedAt: response.assignedAt, ...receiptBinding'],
  ],
  getMyTasks:[
   ['job.sourceMissing !== true','true'],
   ['job.applicationUnconfirmed !== true','true'],
   ['job.assignmentUnresolved !== true','true'],
   ['.where("assignedStaffId", "==", staffId)',''],
+  ['.where("status", "==", "assigned")',''],
   ['.where("staffId", "==", staffId)',''],
   ['.limit(2000)','.limit(100000)'],
   ['snapshot.exists && data?.companyId === companyId && data?.assignedStaffId === staffId','snapshot.exists'],
@@ -58,7 +62,7 @@ const mutations={
   ['session.token.role !== "staff"','false'],
   ['.where("staffId","==",staffId)',''],
   ['.limit(26)','.limit(2600)'],
-  ['staff?.companyId !== companyId || staff.active !== true','false'],
+  ['await readActiveStaffProfile(tx, companyId, staffId, session.uid, session.token.auth_time, { requireIdentity: true, deviceClaims: session.token });',''],
   ['policy.phase !== "app"','false'],
   ['candidate.companyId !== companyId || candidate.staffId !== staffId','false'],
   ['jobData && jobData.companyId !== companyId','false'],
@@ -86,6 +90,10 @@ const mutations={
   ['tx.set(queueRef,','await queueRef.set('],
  ],
 };
+reject("applyToJob", "deviceClaims: session.token", "deviceClaims: {}");
+reject("listMyMailApplications", "deviceClaims: session.token", "deviceClaims: {}");
+reject("setSalesFloorClientSubmitted", "deviceClaims: session.token", "deviceClaims: {}");
+reject("submitPreContact", "deviceClaims: session.token", "deviceClaims: {}");
 for(const [name,pairs]of Object.entries(mutations))for(const [before,after]of pairs)reject(name,before,after);
 for(const name of ['applyToJob','listMyMailApplications'])for(const [before,after]of [
  ['parsed.data.companyId !== input.companyId || parsed.data.staffId !== input.staffId ||',''],
@@ -93,6 +101,9 @@ for(const name of ['applyToJob','listMyMailApplications'])for(const [before,afte
  ['currentSender.data.producerId !== savedReceipt.producerId || currentSender.data.revision !== savedReceipt.principalRevision','false'],
  ['context.person.revision !== candidate.personRevision || context.selected.workDate !== candidate.workDate','false'],
 ])reject(name,before,after,'functions/src/automation-intake.ts');
+for(const name of Object.keys(modules))for(const check of ['staff?.active !== true','staff.companyId !== companyId','authTime === revokedAt.seconds && revokedAt.nanoseconds > 0']){
+ reject(name,check,'false','functions/src/staff-session.ts');
+}
 const config=JSON.parse(read('config/automation/staging-safety.json'));
 assert.ok(Object.keys(modules).every(name=>config.allowedFunctions.includes(name)));cases++;
 console.log(JSON.stringify({staffJourneyAuthGuardTests:cases,functions:Object.keys(modules),cloudOperations:false}));
@@ -108,5 +119,8 @@ reject("submitPreContact", "input.expectedRevision !== job.revision", "false");
 console.log("受信案件の事前連絡ガード追加2条件成功");
 
 reject("getMyTasks", "!caseMailPreparationHeld(job)", "true");
+for(const [before,after] of [["if (request.data?.applicationReceiptLookup !== undefined)","if (false)"],["request.data.applicationReceiptLookup, companyId, staffId, session.uid, session.token","request.data.applicationReceiptLookup, companyId, staffId, request.data.uid, session.token"],["ApplicationReceiptLookupSchema.safeParse(attempts)","({success:true,data:attempts})"],["await assertProductionOperational(companyId);",""],["saved?.uid === uid && saved.companyId === companyId","saved?.uid === uid"],["saved.staffId === staffId && saved.result?.ok === true","saved.result?.ok === true"],["saved.result.jobId === jobId","true"],["const snapshot = await tx.get(db.collection(\"idempotencyKeys\").doc(uid + \"_\" + requestId));","const snapshot = await tx.get(db.collection(\"idempotencyKeys\").doc(requestId));"],["return Promise.all(input.data.map","await tx.update(db.collection('unsafe').doc('change'),{}); return Promise.all(input.data.map"],["  });\n  return { receipts };","  }, { readOnly: true });\n  return { receipts };"],["token.auth_time, { requireIdentity: true, deviceClaims: token }","token.auth_time, { requireIdentity: false, deviceClaims: token }"],["deviceClaims: token","deviceClaims: {}"]])reject("getMyTasks",before,after,"functions/src/staff-tasks.ts");
+reject("getMyTasks","staffApplicationQueueKey(uid, requestId)","staffApplicationQueueKey(requestId, requestId)","functions/src/staff-tasks.ts");
+reject("getMyTasks","snapshot.exists ? snapshot.data() :","snapshot.data() ??","functions/src/staff-tasks.ts");
 console.log("受信保留中のタスクガード追加1条件成功");
 

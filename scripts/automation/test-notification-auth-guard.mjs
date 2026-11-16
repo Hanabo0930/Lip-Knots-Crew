@@ -18,9 +18,52 @@ for(const [before,after]of [
  ['if (deliverAt > Date.now() + 5_000) return;','if (false) return;'],
  ['dispatchQueueDocument(snap.ref)','dispatchQueueDocument(event.ref)'],
  ['getProductionOperationalState(pendingData.companyId)','getProductionOperationalState("other")'],
- ['if (current.status !== "queued") return null;','if (false) return null;'],
+ ['getProductionOperationalState(notification.companyId, tx)','getProductionOperationalState(notification.companyId)'],
+ ['getProductionOperationalState(current.companyId, tx)','getProductionOperationalState("other", tx)'],
+ ['await checkDispatchReadiness(\n        ref, leaseToken, prepared.operationId, notification, state, emergencyControlNotice, prepared.recipients,\n      )','{}'],
+ ['if (!dispatch || Date.now() >= expiresAt) return;','if (Date.now() >= expiresAt) return;'],
+ ['if (dispatch.kind === "skipped") continue;','if (false) continue;'],
+ ['tokens: recipients.map((item) => item.token)','tokens: prepared.recipients.map(item => item.token)'],
+ ['return matchesPushRecipient(item, binding) && matchesTestPushRecipient(current, binding) ?','return true ?'],
+ ['const verifiedRecipients = await currentPushDevices(tx, recipients.flatMap','const verifiedRecipients = await ignoreDevices(tx, recipients.flatMap'],
+ ['const recipients = await currentPushDevices(tx, chunk.flatMap','const recipients = await ignoreDevices(tx, chunk.flatMap'],
+ ['buildDispatchIntent(leaseToken, verifiedRecipients)','buildDispatchIntent(leaseToken, recipients)'],
+ ['const dispatchIntent = buildDispatchIntent(leaseToken, verifiedRecipients);\n    tx.update(ref, { dispatchIntent });','const dispatchIntent = buildDispatchIntent(leaseToken, verifiedRecipients);'],
+ ['const content = test ? {} : await currentReminderContent(current, ref.id, tx);','const content = {};'],
+ ['body: content.body ?? notification.body','body: notification.body'],
+ ['!DISPATCH_CONTENT_FIELDS.every(field => isDeepStrictEqual(current[field], notification[field]))','false'],
+ ['supersededReason: "notification_content_changed"','supersededReason: "unknown"'],
+ ['...(isPushTest(notification.category) ? {} : stringData(notification.data)),',''],
+ ['current.dispatchIntent?.operationId !== operationId','false'],
+ ['current.generation !== original.generation','false'],
+ ['current.status !== "queued" || current.companyId !== pendingData.companyId','current.companyId !== pendingData.companyId'],
+ ['current.status !== "queued" || current.companyId !== pendingData.companyId','current.status !== "queued"'],
  ['.where("companyId", "==", data.companyId)','.where("companyId", "==", "other")'],
  ['.where("active", "==", true)','.where("active", "==", false)'],
  ['query.limit(1000)','query.limit(10000)'],
  ]){assert.ok(source.includes(before),'target absent '+before);assert.deepEqual(run(source.replace(before,after)),{passed:false,exitCode:1},before);cases++;}
+
+const push = read('functions/src/push-tokens.ts');
+function testPushScope(value) {
+  const output=[];
+  const process={argv:['node','guard','--functions','sendTestPush','--require-pass'],exitCode:0,exit:code=>{throw Error('unexpected exit '+code);}};
+  runInNewContext(guard,{process,console:{log:x=>output.push(x),error:x=>output.push(x)},execFileSync:(cmd,args)=>{
+    assert.equal(cmd,'git');
+    assert.match(args[1],/functions\/src\/push-tokens\.ts$/);
+    return value;
+  }},{timeout:3000});
+  return {passed:output.includes('SOURCE_GUARD_STATUS=PASS'),exitCode:process.exitCode};
+}
+assert.deepEqual(testPushScope(push),{passed:true,exitCode:0});cases++;
+for(const [from,to] of [
+  ['targetUid: session.uid','targetRole: "admin"'],
+  ['targetUid: session.uid','targetUid: request.data.uid'],
+  ['targetUid: session.uid','targetUid: "unverified"'],
+  ['requireIdentity: true','requireIdentity: false'],
+]){
+  assert.ok(push.includes(from),from);
+  assert.deepEqual(testPushScope(push.replace(from,to)),{passed:false,exitCode:1},from);
+  cases++;
+}
+
 console.log(JSON.stringify({notificationGuardTests:cases,functions:['processNotificationQueue'],cloudOperations:false}));

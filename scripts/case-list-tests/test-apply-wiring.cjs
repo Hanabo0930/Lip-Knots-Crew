@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
-const {stripTypeScriptTypes}=require('node:module');
+const ts=require('typescript');
 const clone=value=>value instanceof Timestamp?value:Array.isArray(value)?value.map(clone):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,clone(v)])):value;
 class Timestamp{constructor(ms){this.ms=ms;}static now(){return new Timestamp(Date.parse('2026-10-27T00:00:00Z'));}static fromMillis(ms){return new Timestamp(ms);}toMillis(){return this.ms;}toDate(){return new Date(this.ms);}}
 class HttpsError extends Error{constructor(code,message,details){super(message);this.code=code;this.details=details;}}
@@ -11,10 +11,12 @@ function setup(caseList=true){
  const db={collection:c=>({doc:id=>ref(c,id)}),runTransaction:async callback=>{
   for(let attempt=0;attempt<8;attempt++){
    const reads=new Map(),writes=[];
-   const tx={get:async r=>{assert.equal(writes.length,0,'read after write');reads.set(r.path,JSON.stringify(records.get(r.path)));return snap(r);},set:(r,data,options)=>writes.push({r,data:clone(data),merge:options?.merge}),update:(r,data)=>writes.push({r,data:clone(data),merge:true})};
+   const tx={get:async r=>{assert.equal(writes.length,0,'read after write');reads.set(r.path,JSON.stringify(records.get(r.path)));return snap(r);},set:(r,data,options)=>writes.push({r,data:clone(data),merge:options?.merge}),update:(r,data)=>writes.push({r,data:clone(data),merge:true}),create:(r,data)=>writes.push({r,data:clone(data),create:true})};
    const result=await callback(tx);
    if([...reads].some(([key,old])=>JSON.stringify(records.get(key))!==old))continue;
-   for(const w of writes)records.set(w.r.path,w.merge?{...records.get(w.r.path),...w.data}:w.data);
+   const committed=new Map(records);
+   for(const w of writes){if(w.create)assert.ok(!committed.has(w.r.path),'create requires a missing document');committed.set(w.r.path,w.merge?{...committed.get(w.r.path),...w.data}:w.data);}
+   for(const [key,value] of committed)records.set(key,value);
    commits.push(writes);return result;
   }throw Error('contention');
  }};
@@ -24,26 +26,40 @@ function setup(caseList=true){
   'firebase-functions/v2/https':{onCall:(...a)=>a.at(-1),HttpsError},'firebase-admin/firestore':{Timestamp,FieldValue:{}},zod:{z:chain},'./firebase':{db},
   './utils':{requireAuth:r=>{if(!r.auth)throw new HttpsError('unauthenticated','auth');return r.auth;},companyFromClaims:t=>t.companyId,staffFromClaims:t=>t.staffId,dateKeyFromIso:x=>x},
   './notification-core':{queueDocumentData:x=>x},'./notification-time':{tokyoParts:()=>({dateKey:'2026-10-27'})},'./sheet-write-core':{cancellationSheetWriteIdentity:j=>j.caseId+':'+j.assignedStaffId},
-  './assignment-preparation-core':{nextAssignmentRevision:j=>j.revision+1,assignmentPreparationPatch:()=>({}),applicationConfirmationIdentity:()=>'',mailPreparationContext:()=>''},
   './system-safety':{assertProductionOperational:async()=>{}},'./automation-intake':{readMailApplicationForAssignment:async()=>null},'./case-mail-publication':{readMailPublication:async()=>{throw Error('wrong source path');}},
   './cancellation-history-retention-core':{assertAcknowledgedCancellationCanChange:()=>{}},
   './case-list-source':{readCaseListPublication:async(tx,company,id,job,revision,hash)=>{sourceReads++;if(sourceChanged||revision!==job.revision||hash!==source.sourceRevision)throw new HttpsError('failed-precondition','source changed');return {source,preMonthlyContentHash:'d'.repeat(64),candidate:{},approval:{}};}},
  };
- const filename=path.join(__dirname,'../../functions/src/jobs.ts');
- let code=stripTypeScriptTypes(fs.readFileSync(filename,'utf8'),{mode:'transform'});
- code=code.replace(/import\s*\{([^}]+)\}\s*from\s*"([^"]+)";/g,(_,bindings,name)=>`const {${bindings}}=require(${JSON.stringify(name)});`).replace(/^export /gm,'');
- const context={require:n=>{if(!modules[n])throw Error('unexpected module '+n);return modules[n];},module:{exports:{}},Date,console};
- vm.runInNewContext(code+'\nmodule.exports={applyToJob};',context,{filename});
+ const src=path.resolve(__dirname,'../../functions/src'), cache=new Map();
+ function load(name){
+  if(Object.hasOwn(modules,name))return modules[name];
+  if(name.startsWith('node:')||name.endsWith('.cjs'))return require(name.startsWith('node:')?name:path.resolve(src,name));
+  if(!name.startsWith('./'))throw Error('unexpected module '+name);
+  if(cache.has(name))return cache.get(name);
+  const filename=path.join(src,name.slice(2)+'.ts'),module={exports:{}};
+  cache.set(name,module.exports);
+  const js=ts.transpileModule(fs.readFileSync(filename,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+  vm.runInNewContext(js,{require:load,module,exports:module.exports,process:{env:{DEFAULT_COMPANY_ID:companyId}},Date,console},{filename});
+  return module.exports;
+ }
+ const api=load('./jobs'),ng=load('./staff-ng');
+ records.set('staffNgMaintenance/'+companyId,{schema:'LK_STAFF_NG_MAINTENANCE_V1',companyId,state:'OPEN',generation:0});
  records.set('jobs/'+jobId,{companyId,caseId:source.caseId,dateKey:'2026-11-20',workDate:'2026-11-20',storeName:'合成店舗',revision:3,status:'open',publishable:true,sourceReady:true,...(caseList?{caseListSource:source}:{})});
- records.set('staffProfiles/'+staffId,{companyId,active:true,displayName:'合成スタッフ1'});records.set('staffProfiles/staff-2',{companyId,active:true,displayName:'合成スタッフ2'});
+ const header=Array(11).fill('');header[10]='NG会社';
+ const observation=ng.observeStaffNgCell('マスターデータ',header,Array(11).fill(''),10);
+ for(const [staffId,displayName]of [['staff-1','合成スタッフ1'],['staff-2','合成スタッフ2']]){
+  const ngCompanies=ng.mergeStaffNg([{sourceRef:{spreadsheetId:'synthetic-staff-book',sheetName:'マスターデータ'},ngCompanyObservation:observation}],companyId,staffId);
+  records.set('staffProfiles/'+staffId,{companyId,active:true,displayName,ngCompanies});
+ }
  const command={jobId,requestId:'synthetic-request-1',expectedJobRevision:3,...(caseList?{expectedSourceRevision:source.sourceRevision}:{})};
  const auth={uid:'user-1',token:{companyId,staffId,role:'staff'}};
- return {records,commits,command,auth,source,jobId,companyId,staffId,sourceReads:()=>sourceReads,changeSource:()=>{sourceChanged=true;},apply:(data=command,user=auth)=>context.module.exports.applyToJob({data,auth:user}),queues:()=>[...records].filter(([k])=>k.startsWith('sheetSyncQueue/')).map(([key,data])=>({key,...data})),job:()=>records.get('jobs/'+jobId)};
+ return {records,commits,command,auth,source,jobId,companyId,staffId,sourceReads:()=>sourceReads,changeSource:()=>{sourceChanged=true;},apply:(data=command,user=auth)=>api.applyToJob({data,auth:user}),queues:()=>[...records].filter(([k])=>k.startsWith('sheetSyncQueue/')).map(([key,data])=>({key,...data})),job:()=>records.get('jobs/'+jobId)};
 }
 const results=[];async function test(name,fn){await fn();results.push({name,passed:true});}
 (async()=>{
 await test('actual callable creates typed CaseList queue and keeps unconfirmed until native ACK',async()=>{const h=setup();await h.apply();const q=h.queues()[0];assert.equal(q.operation,'case_list.assign');assert.equal(q.caseListAssignment.sourceRevision,h.source.sourceRevision);assert.equal(q.caseListAssignment.sourceRowRevision,h.source.rowRevision);assert.equal(q.caseListAssignment.sourceLedgerRevision,h.source.ledgerRevision);assert.equal(q.caseListAssignment.assignedJobRevision,4);assert.equal(q.caseListAssignment.sourceCaseId,h.source.caseId);assert.equal(q.caseListAssignment.staffId,h.staffId);assert.equal(h.job().applicationUnconfirmed,true);assert.equal(h.job().assignmentSheetWrite.operation,'case_list.assign');});
 await test('same request replays saved result before liveSource GET after manualedit',async()=>{const h=setup(),a=await h.apply();h.changeSource();const reads=h.sourceReads(),b=await h.apply();assert.deepEqual(a,b);assert.equal(h.sourceReads(),reads);assert.equal(h.queues().length,1);});
+await test('existing queue receipt replays the same request after the separate receipt expires',async()=>{const h=setup(),a=await h.apply();assert.equal(h.records.delete(`idempotencyKeys/${h.auth.uid}_${h.command.requestId}`),true);h.changeSource();const reads=h.sourceReads(),b=await h.apply();assert.deepEqual(a,b);assert.equal(h.sourceReads(),reads);assert.equal(h.queues().length,1);});
 await test('request reused with changedSourceHash rejects before another queue',async()=>{const h=setup();await h.apply();await assert.rejects(()=>h.apply({...h.command,expectedSourceRevision:'d'.repeat(64)}));assert.equal(h.queues().length,1);});
 await test('new application rejects stale live source with zero assignment writes',async()=>{const h=setup();h.changeSource();await assert.rejects(()=>h.apply());assert.equal(h.queues().length,0);assert.equal(h.job().status,'open');});
 await test('known precommit source rejection has exact safe retry identity',async()=>{const h=setup();h.changeSource();await assert.rejects(()=>h.apply(),e=>e.details?.accepted===false&&e.details.reason==='case_list_job_changed'&&e.details.jobId===h.jobId&&e.details.requestId===h.command.requestId&&e.details.expectedSourceRevision===h.source.sourceRevision);assert.equal(h.queues().length,0);});

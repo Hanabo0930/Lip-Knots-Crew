@@ -2,10 +2,22 @@ import {useEffect,useRef,useState} from "react";
 export function isNotificationDocumentId(value:unknown):value is string {
   return typeof value==="string"&&value.trim().length>0&&value!=="."&&value!==".."&&!/[\/\\\u0000-\u001f\u007f]/.test(value);
 }
+function decodeNotificationId(encoded:string):string|null {
+  try {
+    const id=decodeURIComponent(encoded);
+    return isNotificationDocumentId(id)?id:null;
+  } catch { return null; }
+}
+
 export function shiftNotificationJobId(path:string):string|null {
-  const match=/^\/shifts\/([^/]+)(?:\/netprint)?\/?$/.exec(path);
-  if(!match)return null;
-  try{const id=decodeURIComponent(match[1]);return isNotificationDocumentId(id)?id:null;}catch{return null;}
+  const match=/^\/shifts\/([^/]+)(?:\/(?:netprint|precontact))?\/?$/.exec(path);
+  return match?decodeNotificationId(match[1]):null;
+}
+
+export function submissionNotificationRoute(path:string):{jobId:string;type:"report"|"sales_floor"}|null {
+  const match=/^\/submissions\/([^/]+)\/(report|sales-floor)\/?$/.exec(path);
+  const jobId=match&&decodeNotificationId(match[1]);
+  return jobId?{jobId,type:match[2]==="report"?"report":"sales_floor"}:null;
 }
 export function useShiftNotificationRoute<T>({ready,scope,load,onOpen,parse=shiftNotificationJobId}:{ready:boolean;scope:string;load:(id:string)=>Promise<T|null>;onOpen:(job:T,consume:()=>void)=>void|boolean|Promise<void|boolean>;parse?:(path:string)=>string|null}){
   const [jobId,setJobId]=useState(()=>parse(window.location.pathname));

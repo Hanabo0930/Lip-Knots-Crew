@@ -74,8 +74,13 @@ export function inspectCaseList(rows: Cell[][], ledgerRows: Cell[][], nowISO: st
       if (name || reason || (status && !["未手配", "未手配・募集継続"].includes(status))) holds.push("ASSIGNMENT_LEDGER_HOLD");
       try {
         const metadata = JSON.parse(text(record[19]));
-        if (metadata?.schema !== "LK_HISTORY_CORE_SNAPSHOT_V1" || metadata.caseId !== slot.jobId) throw new Error();
-        linked = metadata.monthly !== null && metadata.monthly !== undefined;
+        if (!["LK_HISTORY_CORE_SNAPSHOT_V1", "LK_CASE_RESULT_LEDGER_V1"].includes(metadata?.schema) || metadata.caseId !== slot.jobId) throw new Error();
+        const modern = metadata.schema === "LK_CASE_RESULT_LEDGER_V1";
+        const monthly = modern ? metadata.monthlyTransfer : metadata.monthly;
+        linked = monthly !== null && monthly !== undefined;
+        // Only the V17 contract uses A as cancellation. Preserve the native
+        // legacy selection-column semantics for historical snapshots.
+        if (modern && (row[0]?.userEnteredValue?.boolValue !== false || row[63]?.userEnteredValue?.boolValue !== false || value(record[17]) !== false)) holds.push("LEDGER_SOURCE_CANCELLATION_REVIEW");
         if (linked) holds.push("EXISTING_MONTHLY_LINK");
       } catch { holds.push("ASSIGNMENT_LEDGER_METADATA_REQUIRED"); }
     }

@@ -52,13 +52,13 @@ const actionStart=appSource.indexOf('async function saveJobEditAction(');
 const actionEnd=appSource.indexOf('\nasync function exportJobs()',actionStart);
 assert.ok(actionStart>=0&&actionEnd>actionStart);
 const actionCode=ts.transpileModule(appSource.slice(actionStart,actionEnd),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
-function saveHarness(fields,caseListJob=true,configured=true){
- const state={calls:[],confirmations:0,messages:[],busy:[],jobs:[{id:'j',revision:3,storeAddress:'Before',storeNearestStation:'Before station',...(caseListJob?{caseListSource:{sourceRevision:'synthetic'}}:{})}]};
- const ctx={Error,Symbol,Object,jobEditId:'j',jobEditContextRef:{current:{}},jobEditBaselineRef:{current:{}},jobEdit:{...fields},jobEditRevision:3,
+function saveHarness(fields,caseListJob=true,configured=true,reply){
+ const state={calls:[],confirmations:0,messages:[],busy:[],locationRevision:caseListJob?2:null,jobs:[{id:'j',revision:3,storeAddress:'Before',storeNearestStation:'Before station',...(caseListJob?{caseListSource:{sourceRevision:'synthetic'},locationRevision:2}:{})}]};
+ const ctx={Error,Symbol,Object,jobEditId:'j',jobEditContextRef:{current:{}},jobEditBaselineRef:{current:{}},jobEdit:{...fields},jobEditRevision:3,jobEditLocationRevision:state.locationRevision,
   jobs:state.jobs,staff:[],firebaseConfigured:configured,functions:{},changedJobEditFields:()=>fields,
   window:{confirm:()=>{state.confirmations++;return true;}},setMessage:v=>state.messages.push(v),setJobEditBusy:v=>state.busy.push(v),
-  setJobEdit:()=>{},setJobEditRevision:()=>{},setJobs:fn=>{state.jobs=fn(state.jobs);},
-  httpsCallable:(_functions,name)=>async payload=>{state.calls.push({name,payload});return{data:{revision:4}};},
+  setJobEdit:()=>{},setJobEditRevision:()=>{if(caseListJob)assert.fail('CaseList location save must preserve the assignment revision');},setJobEditLocationRevision:revision=>state.locationRevision=revision,setJobs:fn=>{state.jobs=fn(state.jobs);},
+  httpsCallable:(_functions,name)=>async payload=>{state.calls.push({name,payload});return{data:reply??(name==='adminEditCaseListLocation'?{revision:3,locationRevision:3}:{revision:4})};},
   refreshJobsAfterAction:async()=>{},
  };
  runInNewContext(actionCode,ctx);return {state,ctx};
@@ -78,8 +78,15 @@ for(const configured of [false,true]){
   const h=saveHarness(fields,true,configured);await h.ctx.saveJobEditAction(()=>true);
   assert.equal(h.state.confirmations,1);
   assert.equal(h.state.calls.length,configured?1:0);
-  if(configured){assert.equal(h.state.calls[0].name,'adminEditJobInputs');assert.deepEqual(JSON.parse(JSON.stringify(h.state.calls[0].payload.fields)),fields);}
-  else for(const key of Object.keys(fields))assert.equal(h.state.jobs[0][key],fields[key]);
+  if(configured){
+   assert.equal(h.state.calls[0].name,'adminEditCaseListLocation');
+   assert.deepEqual(JSON.parse(JSON.stringify(h.state.calls[0].payload)),{jobId:'j',revision:3,locationRevision:2,fields});
+  }else{
+   for(const key of Object.keys(fields))assert.equal(h.state.jobs[0][key],fields[key]);
+   assert.equal(h.state.jobs[0].revision,3);
+   assert.equal(h.state.jobs[0].locationRevision,3);
+  }
+  assert.equal(h.state.locationRevision,3);
   boundarySaves++;
  }
 }
@@ -90,5 +97,14 @@ for(const configured of [false,true]){
 {
  const h=saveHarness({},true,true);await h.ctx.saveJobEditAction(()=>true);
  assert.equal(h.state.calls.length,0);assert.equal(h.state.confirmations,0);assert.equal(h.state.messages.at(-1),'変更はありません。');boundarySaves++;
+}
+for(const invalidReceipt of [{revision:4,locationRevision:3},{revision:3,locationRevision:2}]){
+ const h=saveHarness({storeAddress:'After'},true,true,invalidReceipt);
+ await h.ctx.saveJobEditAction(()=>true);
+ assert.equal(h.state.calls.length,1);
+ assert.equal(h.state.locationRevision,2);
+ assert.equal(h.state.jobs[0].storeAddress,'Before');
+ assert.match(h.state.messages.at(-1),/保存結果を確認できません/);
+ boundarySaves++;
 }
 console.log('CaseList actual App save boundary: '+boundarySaves+' synthetic cases passed; no real API calls.');

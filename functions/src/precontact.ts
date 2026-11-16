@@ -6,6 +6,7 @@ import { z } from "zod";
 import { db } from "./firebase";
 import { companyFromClaims, requireAuth, staffFromClaims } from "./utils";
 import { assertProductionOperational } from "./system-safety";
+import { readActiveStaffProfile } from "./staff-session";
 import {readAutomationJobContext,automationPreContactEvidence,makeAutomationPreContactProof,matchesAutomationPreContactProof} from "./automation-precontact-proof";
 
 const Schema = z.object({
@@ -18,6 +19,7 @@ const Schema = z.object({
 
 export const submitPreContact = onCall(async (request) => {
   const session = requireAuth(request);
+  if (session.token.role !== "staff") throw new HttpsError("permission-denied", "スタッフ権限が必要です。");
   const input = Schema.parse(request.data);
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
@@ -26,6 +28,7 @@ export const submitPreContact = onCall(async (request) => {
 
   const queueRef = db.collection("sheetSyncQueue").doc();
   await db.runTransaction(async (tx) => {
+    await readActiveStaffProfile(tx, companyId, staffId, session.uid, session.token.auth_time, { requireIdentity: true, deviceClaims: session.token });
     const jobSnap = await tx.get(jobRef);
     if (!jobSnap.exists) {
       throw new HttpsError("not-found", "案件が見つかりません。");

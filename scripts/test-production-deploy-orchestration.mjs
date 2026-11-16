@@ -7,6 +7,7 @@ import {
   buildProductionDeploymentPlan,
   createApprovalDraft,
   createRollbackPlan,
+  failedDeploymentResultKeys,
   projectListIncludesProject,
   runDeploymentWithExecutor,
   sanitizeCommandResult,
@@ -43,8 +44,8 @@ const validationOptions = { now, allowedApproverEmails: ["executive@lipknots.tes
 await test("valid config", () => assert.deepEqual(validateProductionDeployConfig(config), []));
 await test("deterministic fingerprint", () => assert.equal(buildProductionDeploymentPlan(structuredClone(config)).fingerprint, plan.fingerprint));
 await test("fingerprint length", () => assert.match(plan.fingerprint, /^[a-f0-9]{64}$/u));
-await test("stage order", () => assert.deepEqual(plan.stages.map((item) => item.key), ["rules_and_storage", "functions", "hosting"]));
-await test("exact deploy scopes", () => assert.deepEqual(plan.stages.map((item) => item.args[2]), ["firestore,storage", "functions", "hosting:staff,hosting:admin"]));
+await test("stage order", () => assert.deepEqual(plan.stages.map((item) => item.key), ["firestore", "functions", "functions_inventory", "storage_rules", "hosting"]));
+await test("exact deploy scopes", () => assert.deepEqual(plan.stages.filter(item => item.args[0] === "deploy").map(item => item.args[2]), ["firestore", "functions", "storage", "hosting:staff,hosting:admin"]));
 await test("valid approval", () => assert.equal(validateProductionApproval(approval, plan, validationOptions).valid, true));
 
 const configRejections = [
@@ -82,12 +83,26 @@ await test("project list reject", () => assert.equal(projectListIncludesProject(
 await test("evidence redaction", () => { const value = sanitizeCommandResult({ code: 1, stdout: "access_token=abc123 Bearer secret.token", stderr: "" }); assert.doesNotMatch(value.stdout, /abc123|secret\.token/u); });
 await test("rollback plan", () => { const value = createRollbackPlan({ plan, approval, failedStageKey: "functions" }); assert.equal(value.failedStageKey, "functions"); assert.equal(value.recovery.length, 3); });
 
+const listResult = { code: 0, stdout: JSON.stringify({ status: "success", result: [
+  { id: "createUploadSession", project: config.projectId, region: "asia-northeast1", platform: "gcfv2", callableTrigger: {}, environmentVariables: { PRIVATE_SETTING: "never-write-this" } },
+  { id: "finalizeStagedUpload", project: config.projectId, region: "asia-northeast1", platform: "gcfv2", eventTrigger: { eventType: "google.cloud.storage.object.v1.finalized" } },
+] }) };
+const projectList = { code: 0, stdout: JSON.stringify({ result: [{ projectId: config.projectId }] }) };
+const apply = (executor, httpProbe = async () => ({ code: 0 })) => runDeploymentWithExecutor({
+  plan, approval, confirmFingerprint: plan.fingerprint, executor, httpProbe, allowedApproverEmails: validationOptions.allowedApproverEmails, now,
+});
+
 await test("successful orchestration", async () => {
   const calls = [];
-  const executor = async (step) => { calls.push(step.key); return step.key === "project_access" ? { code: 0, stdout: JSON.stringify({ result: [{ projectId: config.projectId }] }), stderr: "" } : { code: 0, stdout: "{}", stderr: "" }; };
+  const executor = async (step) => { calls.push(step.key); return step.key === "project_access" ? projectList : step.key === "functions_inventory" ? listResult : { code: 0 }; };
   const result = await runDeploymentWithExecutor({ plan, approval, confirmFingerprint: plan.fingerprint, executor, httpProbe: async (step) => { calls.push(step.key); return { code: 0, stdout: "200", stderr: "" }; }, allowedApproverEmails: validationOptions.allowedApproverEmails, now });
   assert.equal(result.status, "succeeded");
-  assert.deepEqual(calls, ["project_access", "rules_and_storage", "functions", "hosting", "functions_inventory", "hosting_inventory", "staff_https", "admin_https"]);
+  assert.deepEqual(calls, ["project_access", "firestore", "functions", "functions_inventory", "storage_rules", "hosting", "hosting_inventory", "staff_https", "admin_https"]);
+  assert.deepEqual(failedDeploymentResultKeys(result), []);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_SETTING|never-write-this/u);
+  const misordered = structuredClone(result);
+  [misordered.results[3], misordered.results[4]] = [misordered.results[4], misordered.results[3]];
+  assert.deepEqual(failedDeploymentResultKeys(misordered), ["sequence"]);
 });
 
 await test("failure stops later stages", async () => {
@@ -96,7 +111,28 @@ await test("failure stops later stages", async () => {
   const result = await runDeploymentWithExecutor({ plan, approval, confirmFingerprint: plan.fingerprint, executor, httpProbe: async () => ({ code: 0 }), allowedApproverEmails: validationOptions.allowedApproverEmails, now });
   assert.equal(result.status, "failed");
   assert.equal(result.failedStageKey, "functions");
-  assert.deepEqual(calls, ["project_access", "rules_and_storage", "functions"]);
+  assert.deepEqual(calls, ["project_access", "firestore", "functions"]);
+});
+
+for (const [name, mutate] of [
+  ["missing upload issuer", endpoints => endpoints.shift()],
+  ["missing finalizer", endpoints => endpoints.pop()],
+  ["wrong project", endpoints => { endpoints[0].project = "other-project"; }],
+  ["wrong event", endpoints => { endpoints[1].eventTrigger.eventType = "google.cloud.storage.object.v1.deleted"; }],
+  ["duplicate finalizer", endpoints => endpoints.push(endpoints[1])],
+]) await test("Storage stays gated with " + name, async () => {
+  const calls = [];
+  const value = JSON.parse(listResult.stdout);
+  mutate(value.result);
+  const result = await apply(async step => {
+    calls.push(step.key);
+    if (step.key === "project_access") return projectList;
+    if (step.key === "functions_inventory") return { code: 0, stdout: JSON.stringify(value) };
+    return { code: 0 };
+  });
+  assert.equal(result.failedStageKey, "functions_inventory");
+  assert.deepEqual(calls, ["project_access", "firestore", "functions", "functions_inventory"]);
+  assert.doesNotMatch(JSON.stringify(result), /never-write-this/u);
 });
 
 await test("access failure stops deploy", async () => {
@@ -107,7 +143,7 @@ await test("access failure stops deploy", async () => {
 });
 
 await test("postcheck failure is recorded", async () => {
-  const executor = async (step) => step.key === "project_access" ? { code: 0, stdout: JSON.stringify({ result: [{ projectId: config.projectId }] }), stderr: "" } : { code: step.key === "hosting_inventory" ? 1 : 0, stdout: "{}", stderr: "" };
+  const executor = async (step) => step.key === "project_access" ? projectList : step.key === "functions_inventory" ? listResult : { code: step.key === "hosting_inventory" ? 1 : 0 };
   const result = await runDeploymentWithExecutor({ plan, approval, confirmFingerprint: plan.fingerprint, executor, httpProbe: async () => ({ code: 0 }), allowedApproverEmails: validationOptions.allowedApproverEmails, now });
   assert.equal(result.failedStageKey, "hosting_inventory");
 });

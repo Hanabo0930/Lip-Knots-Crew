@@ -12,12 +12,16 @@ let cases=0;
 function run(name,source=sources[files[name]]) {
  const lines=[],process={argv:['node','guard','--functions',name,'--require-pass'],exitCode:0,exit:code=>{throw Error('unexpected exit '+code);}};
  runInNewContext(guard,{process,console:{log:x=>lines.push(x),error:x=>lines.push(x)},execFileSync:(cmd,args)=>{
-  assert.equal(cmd,'git');assert.equal(args[0],'show');const target=args[1].split(':').at(-1);if(['functions/src/native-job-creation.ts','functions/src/job-group-creation.ts'].includes(target))return read(target);assert.equal(target,'functions/src/'+files[name]+'.ts');return source;
+  assert.equal(cmd,'git');assert.equal(args[0],'show');const target=args[1].split(':').at(-1);if(['functions/src/native-job-creation.ts','functions/src/job-group-creation.ts','functions/src/staff-session.ts'].includes(target))return read(target);assert.equal(target,'functions/src/'+files[name]+'.ts');return source;
  }},{timeout:3000});
  return {passed:lines.includes('SOURCE_GUARD_STATUS=PASS'),exitCode:process.exitCode};
 }
 function reject(name,before,after,whole=false) {
- const source=sources[files[name]],start=source.indexOf('export const '+name+' ='),next=source.indexOf('\nexport const ',start+1),end=next<0?source.length:next;
+ const source=sources[files[name]];
+ const start=name==="completeExpenseReview"&&source.includes("export async function handleCompleteExpenseReview(")
+  ?source.indexOf("export async function handleCompleteExpenseReview("):source.indexOf("export const "+name+" =");
+ const next=source.slice(start+1).search(/\nexport (?:const |(?:async )?function )/);
+ const end=next<0?source.length:start+1+next;
  const block=whole?source:source.slice(start,end);
  assert.ok(block.includes(before),name+': missing mutation target '+before);
  const changed=block.replace(before,after);
@@ -39,7 +43,7 @@ const mutations={
   ['JobSchema.parse(request.data ?? {})','request.data'],
   ['!job.exists || job.data()?.companyId !== companyId','!job.exists'],
   ['draft.data()?.companyId !== companyId || draft.data()?.jobId !== input.jobId','false'],
-  ['reviewVersion: expenseReviewVersion(companyId, input.jobId, job, draft)','reviewVersion: null'],
+  ['reviewVersion: expenseReviewVersion(companyId, input.jobId, job, draft, rawJob.caseListSource ? jobData : undefined)','reviewVersion: null'],
  ],
  saveExpenseReviewDraft:[
   ['DraftSchema.parse(request.data ?? {})','request.data'],

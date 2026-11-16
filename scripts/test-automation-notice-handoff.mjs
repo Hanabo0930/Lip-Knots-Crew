@@ -127,7 +127,9 @@ await test("認証なし・スタッフ・確認会社/本人変更・余分な�
  assert.equal(snapshot(h),before);
 });
 await test("連携未登録でも通常の本人入力を保存し、同一値の書戻しは増やさない",async()=>{
- const h=fixture();h.records.delete(h.paths.binding);h.readCounts.clear();await submit(h);assert.equal(h.readCounts.size,2);assert.equal(contact(h).automationProof,null);
+ const h=fixture();h.records.delete(h.paths.binding);h.readCounts.clear();await submit(h);
+ assert.deepEqual([...h.readCounts.keys()].sort(),[h.paths.job,h.paths.binding,h.paths.staff,"authIdentities/"+h.staff.uid].sort());
+ assert.equal(contact(h).automationProof,null);
  const before=snapshot(h);await submit(h);assert.equal(snapshot(h),before);assert.equal(h.list("sheetSyncQueue").length,1);
 });
 await test("連携本人記録不明でも通常入力は保存、誤った本人証跡は付けない",async()=>{

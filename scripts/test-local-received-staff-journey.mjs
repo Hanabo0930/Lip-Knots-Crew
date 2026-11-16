@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import {Readable} from 'node:stream';
+import {createSyntheticSubmissionDrive} from './local-submission-drive-fixture.mjs';
 import {createRequire} from 'node:module';
-import {localAcceptanceEnvironment,blockNonEmulatorConnections} from './local-firestore-acceptance-safety.mjs';
+import {localAcceptanceEnvironment,blockNonEmulatorConnections,seedLocalApplicationAccess} from './local-firestore-acceptance-safety.mjs';
 const environment=localAcceptanceEnvironment(process.env),network=blockNonEmulatorConnections(environment.port);
 const require=createRequire(import.meta.url),{google}=require('googleapis');
 const {analyzeFetchedCaseMail}=await import('./case-mail-intake-adapter.mjs');
@@ -10,24 +12,17 @@ const {db,storage}=require('../functions/lib/firebase.js'),safety=require('../fu
 const originalSheets=google.sheets,originalState=safety.getProductionOperationalState,originalMode=process.env.LKC_SHEET_WRITE_MODE,originalTransferMode=process.env.LKC_SUBMISSION_TRANSFER_MODE;
 process.env.LKC_SHEET_WRITE_MODE='active';safety.getProductionOperationalState=async()=>({operational:true});
 const load=name=>require('../functions/lib/'+name+'.js');
-const driveFiles=new Map(),storageObjects=new Map();let allocated=0,driveCopies=0;
-const drive={files:{
-  generateIds:async()=>({data:{ids:['synthetic-drive-'+(++allocated)]}}),
-  list:async()=>({data:{files:[{id:'synthetic-folder'}]}}),
-  get:async({fileId})=>{if(!driveFiles.has(fileId))throw {code:404};return {data:structuredClone(driveFiles.get(fileId))};},
-  create:async input=>{
-    assert.ok(input.media,'only synthetic file transfers are allowed');
-    const id=input.requestBody.id;if(driveFiles.has(id))throw {code:409};
-    const file={...input.requestBody,id,size:'100',md5Checksum:'00000000000000000000000000000000',createdTime:new Date().toISOString()};
-    driveFiles.set(id,file);driveCopies++;return {data:structuredClone(file)};
-  }
-}};
+const storageObjects=new Map();
+const uploadedBytes=Buffer.alloc(100,0x61);
+const uploadSha256=crypto.createHash('sha256').update(uploadedBytes).digest('hex');
+const uploadMd5=crypto.createHash('md5').update(uploadedBytes).digest();
+const {drive,files:driveFiles,rootId,copies:driveCopies}=createSyntheticSubmissionDrive(uploadedBytes);
 load('google-drive-client').getWritableDriveClient=()=>drive;
 storage.bucket=(name='synthetic-bucket')=>{
   assert.equal(name,'synthetic-bucket');
   return {file:(key,options)=>({
     getMetadata:async()=>{if(!storageObjects.has(key))throw {code:404};return [structuredClone(storageObjects.get(key))];},
-    createReadStream:()=>{assert.equal(options?.generation,'1');assert.ok(storageObjects.has(key));return {syntheticPath:key};},
+    createReadStream:()=>{assert.equal(options?.generation,'1');assert.ok(storageObjects.has(key));return Readable.from([uploadedBytes]);},
     delete:async()=>{storageObjects.delete(key);}
   })};
 };
@@ -86,7 +81,9 @@ async function assignedFixture(nativeKind){
  }else await h.start();
  await h.run();await h.import();assert.deepEqual((await h.publishCurrent()).updated,[h.job.id]);
  h.staff=[0,1].map(i=>({uid:h.companyId+'-uid-'+i,token:{role:'staff',companyId:h.companyId,staffId:h.companyId+'-staff-'+i}}));
- for(const [i,user] of h.staff.entries())await db.doc('staffProfiles/'+user.token.staffId).set({companyId:h.companyId,active:true,displayName:'Synthetic Staff '+i});
+ await seedLocalApplicationAccess(db,h.companyId,h.staff);
+ const ng=require('../functions/lib/staff-ng.js'),ngHeader=Array(11).fill('');ngHeader[10]='NG会社';
+ for(const [i,user] of h.staff.entries()){const staffId=user.token.staffId,ngCompanies=ng.mergeStaffNg([{sourceRef:{spreadsheetId:'synthetic-staff-master',sheetName:'マスターデータ'},ngCompanyObservation:ng.observeStaffNgCell('マスターデータ',ngHeader,Array(11).fill(''),10)}],h.companyId,staffId);await db.doc('staffProfiles/'+staffId).set({companyId:h.companyId,active:true,displayName:'Synthetic Staff '+i,ngCompanies});}
  h.publishedRevision=(await h.job.get()).data().revision;
  h.apply=(i=0,requestId='synthetic-apply-request')=>jobs.applyToJob.run({auth:h.staff[i],data:{jobId:h.job.id,requestId,expectedJobRevision:h.publishedRevision}});return h;
 }
@@ -100,10 +97,10 @@ async function assertNativeReplayKeepsState(h){
   saved.submissionFiles=Object.fromEntries(await Promise.all((await h.list('submissions')).map(async doc=>[doc.id,snapshots((await doc.ref.collection('files').get()).docs)])));
   return saved;
  };
- const before=await capture(),writeCount=sheetWrites,copies=driveCopies,stored=structuredClone([...storageObjects]);
+ const before=await capture(),writeCount=sheetWrites,copies=driveCopies(),stored=structuredClone([...storageObjects]);
  assert.deepEqual((await h.retryNative()).jobIds,h.created.jobIds);
  assert.equal((await h.retryNative('cancel')).nativeCreationReceipt.status,'committed');
- assert.deepEqual(await capture(),before);assert.equal(sheetWrites,writeCount);assert.equal(driveCopies,copies);assert.deepEqual([...storageObjects],stored);
+ assert.deepEqual(await capture(),before);assert.equal(sheetWrites,writeCount);assert.equal(driveCopies(),copies);assert.deepEqual([...storageObjects],stored);
  assert.equal((await h.job.get()).data().nativeCreationReceiptId,receipt);
 }
 try{
@@ -163,18 +160,18 @@ try{
   await h.import();const imported=(await h.job.get()).data();assert.equal(imported.preContactSyncPending,false);assert.equal(imported.preContactNeedsReview,false);assert.equal(imported.preContact.temperature,36.5);assert.equal(imported.preContact.arrivalTime,'09:30');assert.equal(imported.preContact.staffId,h.staff[0].token.staffId);
   const completedWrites=sheetWrites;await writes.processSafeSheetWrite.run(preEvent);assert.equal(sheetWrites,completedWrites);
   const uploads=load('uploads'),requests=load('resubmissions'),views=load('submission-files');
-  await db.doc('companies/'+h.companyId+'/settings/drive').set({rootFolderId:'synthetic-root'});process.env.LKC_SUBMISSION_TRANSFER_MODE='active';
-  const start=async patch=>uploads.createUploadSession.run({auth:h.staff[0],data:{jobId:h.job.id,type:'report',expectedRevision:(await h.job.get()).data().revision,files:[{originalName:'synthetic.png',contentType:'image/png',size:100,contentSha256:'a'.repeat(64)}],...patch}});
-  const finish=file=>{storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:'a'.repeat(64)}});return uploads.finalizeStagedUpload.run({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:'1',md5Hash:'AAAAAAAAAAAAAAAAAAAAAA=='}});};
+  await db.doc('companies/'+h.companyId+'/settings/drive').set({rootFolderId:rootId});process.env.LKC_SUBMISSION_TRANSFER_MODE='active';
+  const start=async patch=>uploads.createUploadSession.run({auth:h.staff[0],data:{jobId:h.job.id,type:'report',expectedRevision:(await h.job.get()).data().revision,files:[{originalName:'synthetic.png',contentType:'image/png',size:100,contentSha256:uploadSha256}],...patch}});
+  const finish=file=>{storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:uploadSha256}});return uploads.finalizeStagedUpload.run({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:'1',md5Hash:uploadMd5.toString('base64')}});};
   if(!kind)await assert.rejects(()=>start({expectedRevision:0}),e=>e.code==='failed-precondition');
-  const copiesBefore=driveCopies;const clientRequestId=crypto.randomUUID();const sessions=await Promise.all([start({clientRequestId}),start({clientRequestId})]);assert.equal(sessions[0].submissionId,sessions[1].submissionId);const first=sessions[0];await finish(first.files[0]);await finish(first.files[0]);assert.equal(driveCopies-copiesBefore,1);
+  const copiesBefore=driveCopies();const clientRequestId=crypto.randomUUID();const sessions=await Promise.all([start({clientRequestId}),start({clientRequestId})]);assert.equal(sessions[0].submissionId,sessions[1].submissionId);const first=sessions[0];await finish(first.files[0]);await finish(first.files[0]);assert.equal(driveCopies()-copiesBefore,1);
   const original=(await db.doc('submissions/'+first.submissionId+'/files/'+first.files[0].fileId).get()).data().driveFileId;assert.ok(original);assert.equal((await db.doc('submissions/'+first.submissionId).get()).data().completedFiles,1);
   const reports=(await h.list('sheetSyncQueue')).filter(doc=>doc.data().operation==='submission.report');assert.equal(reports.length,1);await writes.processSafeSheetWrite.run({data:{after:await reports[0].ref.get()}});assert.equal((await reports[0].ref.get()).data().status,'completed');
   const resubmissionRequest=await requests.createResubmissionRequest.run({auth:h.auth,data:{jobId:h.job.id,type:'report',sourceSubmissionId:first.submissionId,sourceFileId:first.files[0].fileId,reasons:['その他'],expectedRevision:(await h.job.get()).data().revision}});
   await assert.rejects(()=>requests.completeResubmissionRequest.run({auth:h.auth,data:resubmissionRequest}),e=>e.code==='failed-precondition');
   const replacement=await start({clientRequestId:crypto.randomUUID(),purpose:'replacement',resubmissionRequestId:resubmissionRequest.requestId});await finish(replacement.files[0]);assert.equal((await db.doc('resubmissionRequests/'+resubmissionRequest.requestId).get()).data().status,'submitted');
   const comparison=await views.getResubmissionComparison.run({auth:h.auth,data:resubmissionRequest});assert.equal(comparison.replacements.length,1);
-  await Promise.all([requests.completeResubmissionRequest.run({auth:h.auth,data:resubmissionRequest}),requests.completeResubmissionRequest.run({auth:h.auth,data:resubmissionRequest})]);assert.equal((await db.doc('resubmissionRequests/'+resubmissionRequest.requestId).get()).data().status,'completed');assert.equal(driveCopies-copiesBefore,2);assert.ok(driveFiles.has(original));
+  await Promise.all([requests.completeResubmissionRequest.run({auth:h.auth,data:resubmissionRequest}),requests.completeResubmissionRequest.run({auth:h.auth,data:resubmissionRequest})]);assert.equal((await db.doc('resubmissionRequests/'+resubmissionRequest.requestId).get()).data().status,'completed');assert.equal(driveCopies()-copiesBefore,2);assert.ok(driveFiles.has(original));
   if(kind)await assertNativeReplayKeepsState(h);
 
 
@@ -221,5 +218,5 @@ try{
 }finally{
  google.sheets=originalSheets;safety.getProductionOperationalState=originalState;if(originalMode===undefined)delete process.env.LKC_SHEET_WRITE_MODE;else process.env.LKC_SHEET_WRITE_MODE=originalMode;
  if(originalTransferMode===undefined)delete process.env.LKC_SUBMISSION_TRANSFER_MODE;else process.env.LKC_SUBMISSION_TRANSFER_MODE=originalTransferMode;
- await db.terminate();const stats=network.stats();network.restore();const result={project:environment.project,passed:results.filter(x=>x.passed).length,failed:results.filter(x=>!x.passed).length+(stats.blocked?1:0),network:stats,syntheticFetches,syntheticSheetReads:sheetReads,syntheticSheetWrites:sheetWrites,realCloud:false,realSheetWrites:0,realMessages:0,syntheticDriveCopies:driveCopies,authentication:'synthetic callable claims; real login, token verification and Security Rules are not certified',sourceModules:['job-management','sheet-row-creation','shift-import','jobs','admin-operations','safe-sheet-writes','precontact','uploads','resubmissions'].map(name=>({name,sha256:crypto.createHash('sha256').update(fs.readFileSync(new URL('../functions/lib/'+name+'.js',import.meta.url))).digest('hex')})),results};fs.writeFileSync(process.argv[2],JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify({passed:result.passed,failed:result.failed,network:stats}));if(result.failed)process.exitCode=1;
+ await db.terminate();const stats=network.stats();network.restore();const result={project:environment.project,passed:results.filter(x=>x.passed).length,failed:results.filter(x=>!x.passed).length+(stats.blocked?1:0),network:stats,syntheticFetches,syntheticSheetReads:sheetReads,syntheticSheetWrites:sheetWrites,realCloud:false,realSheetWrites:0,realMessages:0,syntheticDriveCopies:driveCopies(),authentication:'synthetic callable claims; real login, token verification and Security Rules are not certified',sourceModules:['job-management','sheet-row-creation','shift-import','jobs','admin-operations','safe-sheet-writes','precontact','uploads','resubmissions'].map(name=>({name,sha256:crypto.createHash('sha256').update(fs.readFileSync(new URL('../functions/lib/'+name+'.js',import.meta.url))).digest('hex')})),results};fs.writeFileSync(process.argv[2],JSON.stringify(result,null,2)+'\n');console.log(JSON.stringify({passed:result.passed,failed:result.failed,network:stats}));if(result.failed)process.exitCode=1;
 }

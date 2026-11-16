@@ -32,7 +32,7 @@ export function transferSource(input: {
   return { bucket: input.bucket, path: input.name, generation, size,
     contentType: input.contentType, md5: Buffer.from(checksum, "base64").toString("hex") };
 }
-function sourceKey(source: TransferSource): string {
+export function sourceKey(source: TransferSource): string {
   return createHash("sha256").update(JSON.stringify(source)).digest("hex");
 }
 export function assertTransferSource(plan: unknown, source: TransferSource): void {

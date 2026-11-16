@@ -116,12 +116,17 @@ async function readPrivateRecords(companyId: string, jobId: string, job: Data, t
 }
 
 export async function resolveCaseListPrivateSheetRef(companyId: string, jobId: string, job: Data): Promise<CaseListPrivateSheetRef> {
+  if (job.assignmentSheetWrite?.externalAck) {
+    const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
+    return external.resolveExternalCaseListSheetRef(companyId, jobId, job);
+  }
   return assertCaseListPrivateSheetRef(companyId, jobId, job, await readPrivateRecords(companyId, jobId, job));
 }
 
 /** Finance stays server-private. Missing or stale observations are a hold;
  * neither a missing amount nor an unobserved cell becomes zero. */
 export async function resolveCaseListPrivateFinancialJob(companyId: string, jobId: string, job: Data, tx?: FirebaseFirestore.Transaction): Promise<Data> {
+  if (job.assignmentSheetWrite?.externalAck) unavailable("case_list_external_finance_observation_required");
   const observationRef = db.collection("caseListMonthlyObservations").doc(jobId);
   const [records, observationDocument] = await Promise.all([
     readPrivateRecords(companyId, jobId, job, tx), tx ? tx.get(observationRef) : observationRef.get(),

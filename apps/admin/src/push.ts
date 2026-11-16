@@ -102,7 +102,11 @@ export async function requestTestPush(functions: Functions,isCurrent:()=>boolean
   assertCurrentPushAction(isCurrent);
   const callable = httpsCallable(functions, "sendTestPush");
   if(progress)progress.started=true;
-  await callable({});
+  const response=await callable({});
+  const acceptance=response.data as {queueId?:unknown}|null;
+  if(typeof acceptance?.queueId!=="string"||!/^nq_[a-f0-9]{36}$/.test(acceptance.queueId)){
+    throw new Error("管理者通知テストの受付結果を確認できません。");
+  }
   if(progress)progress.completed=true;
   assertCurrentPushAction(isCurrent);
 }

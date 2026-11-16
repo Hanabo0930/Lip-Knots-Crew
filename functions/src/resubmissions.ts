@@ -6,6 +6,7 @@ import { db } from "./firebase";
 import { notificationQueueId, queueDocumentData } from "./notification-core";
 import { companyFromClaims, requireAdmin, requireAuth, staffFromClaims } from "./utils";
 import { assertProductionOperational } from "./system-safety";
+import { readActiveStaffProfile } from "./staff-session";
 const ReasonEnum=z.enum(["手ブレで文字が読めません","画像が暗い・反射しています","一部が切れています","レシート全体が写っていません","金額・日付が確認できません","その他"]);
 const OptionalSourceIdSchema=z.string().nullish().transform(value=>value??undefined);
 const CreateSchema=z.object({expectedRevision:z.number().int().nonnegative().optional(),jobId:z.string().min(1),type:z.enum(["report","sales_floor"]),sourceSubmissionId:OptionalSourceIdSchema,sourceFileId:OptionalSourceIdSchema,reasons:z.array(ReasonEnum).min(1).max(6),note:z.string().max(1000).default("")}).refine(v=>!v.sourceFileId||!!v.sourceSubmissionId,{message:"元ファイルの提出IDが必要です"});
@@ -33,7 +34,7 @@ export const createResubmissionRequest = onCall(async request => {
   if(input.sourceSubmissionId){
    const submission=await tx.get(db.collection("submissions").doc(input.sourceSubmissionId));
    const source=submission.data();
-   if(!source||source.companyId!==companyId||source.jobId!==input.jobId||source.type!==input.type)throw new HttpsError("failed-precondition","元の提出と案件の所属情報が一致しません。");
+   if(!source||source.companyId!==companyId||source.jobId!==input.jobId||source.type!==input.type||source.staffId!==staffId)throw new HttpsError("failed-precondition","元の提出と案件の所属情報が一致しません。");
    if(current.data()!.mailIntake) assertSubmissionOwner(source, current.data());
    if(input.sourceFileId){
     const file=await tx.get(submission.ref.collection("files").doc(input.sourceFileId));
@@ -48,7 +49,16 @@ export const createResubmissionRequest = onCall(async request => {
 
  return{requestId:ref.id};
 });
-export const getMyResubmissionRequests=onCall(async request=>{const session=requireAuth(request);const companyId=companyFromClaims(session.token);const staffId=staffFromClaims(session.token);const snap=await db.collection("resubmissionRequests").where("companyId","==",companyId).where("staffId","==",staffId).where("status","in",["open","submitted"]).limit(100).get();return{requests:snap.docs.map(doc=>({id:doc.id,...serialize(doc.data())}))};});
+export const getMyResubmissionRequests = onCall(async request => {
+ const session = requireAuth(request);
+ if (session.token.role !== "staff") throw new HttpsError("permission-denied", "スタッフ権限が必要です。");
+ const companyId = companyFromClaims(session.token);
+ const staffId = staffFromClaims(session.token);
+ await db.runTransaction(tx => readActiveStaffProfile(tx, companyId, staffId, session.uid, session.token.auth_time, { requireIdentity: true, deviceClaims: session.token }));
+ const snap = await db.collection("resubmissionRequests").where("companyId","==",companyId)
+  .where("staffId","==",staffId).where("status","in",["open","submitted"]).limit(100).get();
+ return {requests:snap.docs.map(doc=>({id:doc.id,...serialize(doc.data())}))};
+});
 export const getAdminResubmissionRequests=onCall(async request=>{const session=requireAdmin(request);const companyId=companyFromClaims(session.token);const snap=await db.collection("resubmissionRequests").where("companyId","==",companyId).where("status","in",["open","submitted"]).limit(200).get();return{requests:snap.docs.map(doc=>({id:doc.id,...serialize(doc.data())}))};});
 export const completeResubmissionRequest = onCall(async request => {
  const session = requireAdmin(request); const companyId = companyFromClaims(session.token);

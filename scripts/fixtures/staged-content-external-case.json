@@ -1,0 +1,163 @@
+{
+  "sourceSha256": "ee0c17529c827fae1e4db2339440c5c2f964913949b854729a18c75d834b6bb8",
+  "pending": {
+    "id": "job_09d74dfbf8760200ec033517",
+    "dateKey": "2026-12-06",
+    "workDate": "2026-12-06",
+    "clientName": "SYNTHETIC_CLIENT",
+    "storeName": "SYNTHETIC_STORE",
+    "makerName": "SYNTHETIC_MAKER",
+    "menuName": "SYNTHETIC_DEMO",
+    "entryTime": "9:30",
+    "workTime": "10:00～18:00",
+    "region": "関東",
+    "companyId": "company_synthetic",
+    "caseId": "LKCASE_00000000-0000-0000-0000-000000000001",
+    "caseListSource": {
+      "version": 1,
+      "sheetId": 2026101601,
+      "caseId": "LKCASE_00000000-0000-0000-0000-000000000001",
+      "sourceRevision": "d698b95c16608e2fab629bad3dbc9ff6a7579718ec45cc49ee2e456dcb69f50a",
+      "rowRevision": "21315f6e2cd3f8ccad09874578bdcdcfde22a68bf4b3f0c544260d09bdf60194",
+      "ledgerRevision": "536617026a9043fa57f839085702c6652967087006f6134f2a7b7ce32b981596",
+      "bindingHash": "1a58c042d6eae1092fddb451227cd893bbc0961968a099d1232f7272135762e2"
+    },
+    "source": {
+      "type": "case_list",
+      "bindingHash": "1a58c042d6eae1092fddb451227cd893bbc0961968a099d1232f7272135762e2",
+      "sheetId": 2026101601
+    },
+    "status": "assigned",
+    "sourceReady": true,
+    "publishable": false,
+    "recruitmentStopped": true,
+    "caseListHoldReasons": [
+      "SOURCE_MISSING_RETAINED"
+    ],
+    "sourceMissing": true,
+    "revision": 2,
+    "updatedAt": {
+      "ms": 1794298965476
+    },
+    "createdAt": {
+      "ms": 1794298965289
+    },
+    "basePay": 10000,
+    "assignedStaffId": "staff_synthetic",
+    "assignedStaffName": "架空担当",
+    "applicationUnconfirmed": true,
+    "publicPayOffer": {
+      "dailyWageJPY": 10000,
+      "travelExpenses": "全額支給",
+      "communicationExpenses": "全額支給"
+    },
+    "caseListPublication": {
+      "sourceRevision": "d698b95c16608e2fab629bad3dbc9ff6a7579718ec45cc49ee2e456dcb69f50a"
+    },
+    "assignedUid": "staff_uid_synthetic",
+    "assignedAt": {
+      "ms": 1794298965316
+    },
+    "applicationAdminConfirmed": false,
+    "applicationAdminConfirmedBy": null,
+    "applicationAdminConfirmedAt": null,
+    "applicationAdminConfirmedRevision": null,
+    "preContact": null,
+    "preContactNeedsReview": true,
+    "preContactSyncPending": false,
+    "assignmentSheetWrite": {
+      "queueId": "generated_fixture_1",
+      "identity": "[\"LKCASE_00000000-0000-0000-0000-000000000001\",\"staff_synthetic\",\"架空担当\",\"2026-12-06\",\"2026-12-06\",\"1a58c042d6eae1092fddb451227cd893bbc0961968a099d1232f7272135762e2\",null,null]",
+      "sourceRevision": "d698b95c16608e2fab629bad3dbc9ff6a7579718ec45cc49ee2e456dcb69f50a",
+      "assignedJobRevision": 2,
+      "operation": "case_list.assign"
+    }
+  },
+  "accepted": {
+    "id": "job_09d74dfbf8760200ec033517",
+    "dateKey": "2026-12-06",
+    "workDate": "2026-12-06",
+    "clientName": "SYNTHETIC_CLIENT",
+    "storeName": "SYNTHETIC_STORE",
+    "makerName": "SYNTHETIC_MAKER",
+    "menuName": "SYNTHETIC_DEMO",
+    "entryTime": "9:30",
+    "workTime": "10:00～18:00",
+    "region": "関東",
+    "companyId": "company_synthetic",
+    "caseId": "LKCASE_00000000-0000-0000-0000-000000000001",
+    "caseListSource": {
+      "version": 1,
+      "sheetId": 2026101601,
+      "caseId": "LKCASE_00000000-0000-0000-0000-000000000001",
+      "sourceRevision": "d698b95c16608e2fab629bad3dbc9ff6a7579718ec45cc49ee2e456dcb69f50a",
+      "rowRevision": "21315f6e2cd3f8ccad09874578bdcdcfde22a68bf4b3f0c544260d09bdf60194",
+      "ledgerRevision": "536617026a9043fa57f839085702c6652967087006f6134f2a7b7ce32b981596",
+      "bindingHash": "1a58c042d6eae1092fddb451227cd893bbc0961968a099d1232f7272135762e2"
+    },
+    "source": {
+      "type": "case_list",
+      "bindingHash": "1a58c042d6eae1092fddb451227cd893bbc0961968a099d1232f7272135762e2",
+      "sheetId": 2026101601
+    },
+    "status": "assigned",
+    "sourceReady": true,
+    "publishable": false,
+    "recruitmentStopped": true,
+    "caseListHoldReasons": [
+      "SOURCE_MISSING_RETAINED"
+    ],
+    "sourceMissing": false,
+    "revision": 2,
+    "updatedAt": {
+      "ms": 1794298965490
+    },
+    "createdAt": {
+      "ms": 1794298965289
+    },
+    "basePay": 10000,
+    "assignedStaffId": "staff_synthetic",
+    "assignedStaffName": "架空担当",
+    "applicationUnconfirmed": false,
+    "publicPayOffer": {
+      "dailyWageJPY": 10000,
+      "travelExpenses": "全額支給",
+      "communicationExpenses": "全額支給"
+    },
+    "caseListPublication": {
+      "sourceRevision": "d698b95c16608e2fab629bad3dbc9ff6a7579718ec45cc49ee2e456dcb69f50a"
+    },
+    "assignedUid": "staff_uid_synthetic",
+    "assignedAt": {
+      "ms": 1794298965316
+    },
+    "applicationAdminConfirmed": false,
+    "applicationAdminConfirmedBy": null,
+    "applicationAdminConfirmedAt": null,
+    "applicationAdminConfirmedRevision": null,
+    "preContact": null,
+    "preContactNeedsReview": true,
+    "preContactSyncPending": false,
+    "assignmentSheetWrite": {
+      "queueId": "generated_fixture_1",
+      "identity": "[\"LKCASE_00000000-0000-0000-0000-000000000001\",\"staff_synthetic\",\"架空担当\",\"2026-12-06\",\"2026-12-06\",\"1a58c042d6eae1092fddb451227cd893bbc0961968a099d1232f7272135762e2\",434431224,\"2026.12\"]",
+      "sourceRevision": "d698b95c16608e2fab629bad3dbc9ff6a7579718ec45cc49ee2e456dcb69f50a",
+      "assignedJobRevision": 2,
+      "operation": "case_list.assign",
+      "pending": false,
+      "externalAck": {
+        "schema": "LK_CREW_EXTERNAL_TRANSFER_ACCEPTANCE_V1",
+        "acceptanceHash": "3b64a31d954820ddd23d3c5de5675a240b0c6d29ad77ec5c685fc0b4e02e57b4"
+      }
+    },
+    "sheetRef": {
+      "sheetId": 434431224,
+      "sheetName": "2026.12",
+      "headerRow": 1,
+      "currentRow": 3,
+      "caseId": "LKCASE_00000000-0000-0000-0000-000000000001",
+      "caseIdColumn": "BD",
+      "bindingHash": "a730f874dfaa48b06d667ce0bbefd29157e0a0f23ab086929297094282e93379"
+    }
+  }
+}

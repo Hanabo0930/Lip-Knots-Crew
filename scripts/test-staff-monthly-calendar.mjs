@@ -31,8 +31,8 @@ for(const changes of [{cancelled:true},{status:'cancelled'},{status:'open'},{dat
 assert.throws(()=>monthCalendar([confirmed,{...confirmed}],'2026-11'),/重複/);
 const Calendar=moduleFrom('apps/staff/src/MonthlyShiftCalendar.tsx',{'react':React,'./monthly-shift-calendar':model,'./job-list':jobList,'./monthly-shift-calendar.css':{}}).default;
 const html=renderToStaticMarkup(React.createElement(Calendar,{jobs:[confirmed,{...confirmed,id:'pending',dateKey:'2026-11-03',applicationUnconfirmed:true}],today:'2026-11-01',onSelect:()=>{}}));
-assert.ok(html.includes('2026-11-02の確定シフト 1件を表示'));
-assert.ok(!html.includes('2026-11-03の確定シフト'));
+assert.ok(html.includes('2026-11-02の勤務予定 1件を表示'));
+assert.ok(!html.includes('2026-11-03の勤務予定'));
 assert.ok(html.includes('scope="col"'));assert.ok(html.includes('読み込んだシフト'));
 console.log('Monthly calendar model/render: PASS (month boundaries/leap years, pending phases, cancellation, duplicate stop, loaded-data wording)');
 if(process.argv.includes('--browser')){
@@ -50,16 +50,16 @@ if(process.argv.includes('--browser')){
   await page.route('**/*',route=>{const url=new URL(route.request().url());if(url.hostname==='127.0.0.1'||['data:','blob:'].includes(url.protocol))return route.continue();external.push(url.origin);return route.abort();});
   for(const width of [320,390,1280]){
    await page.setViewportSize({width,height:900});await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__monthly_calendar_test.html`);
-   const calendar=page.getByRole('region',{name:'確定シフトの月間カレンダー',exact:true});
-   await calendar.getByRole('button',{name:'2026-11-02の確定シフト 1件を表示',exact:true}).click();
-   const detail=calendar.getByRole('region',{name:'2026-11-02の確定シフト',exact:true});
+   const calendar=page.getByRole('region',{name:'勤務予定の月間カレンダー',exact:true});
+   await calendar.getByRole('button',{name:'2026-11-02の勤務予定 1件を表示',exact:true}).click();
+   const detail=calendar.getByRole('region',{name:'2026-11-02の勤務予定',exact:true});
    for(const text of ['合成メーカー','合成業務','09:45','10:00〜18:00','合成住所'])assert.ok((await detail.innerText()).includes(text));
    await detail.getByRole('button',{name:'このシフトの詳細を確認',exact:true}).focus();await page.keyboard.press('Enter');assert.equal(await page.evaluate(()=>window.selectedCalendarJob),'confirmed');
-   assert.equal(await calendar.getByRole('button',{name:'2026-11-03の確定シフト 1件を表示',exact:true}).count(),0);
-   await page.evaluate(()=>window.calendarFixture.confirm());await calendar.getByRole('button',{name:'2026-11-03の確定シフト 1件を表示',exact:true}).waitFor();
+   assert.equal(await calendar.getByRole('button',{name:'2026-11-03の勤務予定 1件を表示',exact:true}).count(),0);
+   await page.evaluate(()=>window.calendarFixture.confirm());await calendar.getByRole('button',{name:'2026-11-03の勤務予定 1件を表示',exact:true}).waitFor();
    await calendar.getByRole('button',{name:'次の月を表示',exact:true}).click();await calendar.getByText('2026年12月',{exact:true}).waitFor();
-   assert.equal(await calendar.getByRole('region',{name:'2026-11-02の確定シフト',exact:true}).count(),0);
-   await calendar.getByRole('button',{name:'前の月を表示',exact:true}).click();await calendar.getByRole('button',{name:'2026-11-02の確定シフト 1件を表示',exact:true}).waitFor();
+   assert.equal(await calendar.getByRole('region',{name:'2026-11-02の勤務予定',exact:true}).count(),0);
+   await calendar.getByRole('button',{name:'前の月を表示',exact:true}).click();await calendar.getByRole('button',{name:'2026-11-02の勤務予定 1件を表示',exact:true}).waitFor();
    await page.evaluate(()=>window.calendarFixture.cancel());await page.waitForFunction(()=>document.querySelectorAll('.calendar-day-shifts').length===0);assert.equal(await calendar.locator('.calendar-day-shifts').count(),0);
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   }

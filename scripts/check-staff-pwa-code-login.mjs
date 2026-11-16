@@ -6,7 +6,7 @@ const indexSource = await readFile("functions/src/index.ts", "utf8");
 const failures = [];
 
 assert(
-  /emailActionLink[\s\S]*?signInWithEmailLink\(activeAuth,email,emailActionLink\)/u.test(appSource),
+  /emailActionLink[\s\S]*?signInWithEmailLink\(activeAuth,normalizedEmail,emailActionLink\)/u.test(appSource),
   "The installed Staff app must redeem the code and complete the email-link sign-in inside the PWA"
 );
 assert(
@@ -18,7 +18,7 @@ assert(
   "The existing request schema must accept only an optional six-digit code"
 );
 assert(
-  /if \(input\.data\.code\)[\s\S]*?return redeemStaffLoginCode\(email, input\.data\.code\)/u.test(loginSource),
+  /if \(input\.data\.code\)[\s\S]*?return redeemStaffLoginCode\(email, input\.data\.code, input\.data\.deviceId\)/u.test(loginSource),
   "Code redemption must short-circuit before sending another login email"
 );
 assert(
@@ -36,9 +36,9 @@ assert(
 );
 assert(
   /loginCodeGatewayTokenHash: tokenHash/u.test(loginSource)
-    && /return \{ emailActionLink \}/u.test(loginSource)
-    && !/createCustomToken|signInWithCustomToken/u.test(appSource + loginSource),
-  "Code login must reuse the existing one-time Firebase email action link without IAM signing"
+    && /return binding \? \{ customToken: binding\.customToken \} : \{ emailActionLink: gateway\.actionLink \}/u.test(loginSource)
+    && /signInWithCustomToken\(activeAuth,data\.customToken\)/u.test(appSource),
+  "Only enrolled staff receive a device-bound custom token; the existing email action link remains available to other staff"
 );
 assert(
   /確認コードは15分間・1回限り有効です/u.test(loginSource),

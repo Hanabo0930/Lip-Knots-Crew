@@ -72,13 +72,14 @@ export function buildProductionDeploymentPlan(config, { releaseId = productionRe
     projectId,
     deployScope: [...productionDeployScopes],
     stages: [
-      stage("rules_and_storage", "Firestore Rules・indexes・Storage Rules", "firestore,storage", projectId),
+      stage("firestore", "Firestore Rules・indexes", "firestore", projectId),
       stage("functions", "Cloud Functions", "functions", projectId),
+      command("functions_inventory", "提出受付・完了処理の配備一覧", ["functions:list", "--project", projectId, "--json"]),
+      stage("storage_rules", "Storage Rules", "storage", projectId),
       stage("hosting", "Staff・Admin Hosting", "hosting:staff,hosting:admin", projectId),
     ],
     prechecks: [command("project_access", "Firebase認証・Projectアクセス", ["projects:list", "--json", "--non-interactive"])],
     postchecks: [
-      command("functions_inventory", "Functions配備一覧", ["functions:list", "--project", projectId, "--json"]),
       command("hosting_inventory", "Hosting site一覧", ["hosting:sites:list", "--project", projectId, "--json"]),
       { key: "staff_https", label: "Staff HTTPS smoke", kind: "http", url: config.staffAppUrl },
       { key: "admin_https", label: "Admin HTTPS smoke", kind: "http", url: config.adminAppUrl },
@@ -149,6 +150,36 @@ export function projectListIncludesProject(result, projectId) {
   } catch { return false; }
 }
 
+function uploadFunctionsPresent(result, projectId) {
+  if (result?.code !== 0) return false;
+  let endpoints;
+  try {
+    const value = typeof result.stdout === "string" ? JSON.parse(result.stdout) : result.stdout;
+    endpoints = Array.isArray(value) ? value : value?.result;
+  } catch { return false; }
+  if (!Array.isArray(endpoints)) return false;
+  const expected = ["createUploadSession", "finalizeStagedUpload"];
+  const pair = expected.map(id => endpoints.filter(endpoint => endpoint?.id === id));
+  if (pair.some(items => items.length !== 1)) return false;
+  const [[issuer], [finalizer]] = pair;
+  return [issuer, finalizer].every(endpoint => endpoint.project === projectId && endpoint.platform === "gcfv2") &&
+    typeof issuer.region === "string" && issuer.region.length > 0 && issuer.region === finalizer.region &&
+    issuer.callableTrigger != null && finalizer.eventTrigger?.eventType === "google.cloud.storage.object.v1.finalized";
+}
+
+const legacyDeploymentKeys = ["project_access", "rules_and_storage", "functions", "hosting", "functions_inventory", "hosting_inventory", "staff_https", "admin_https"];
+const storageAfterFunctionsKeys = ["project_access", "firestore", "functions", "functions_inventory", "storage_rules", "hosting", "hosting_inventory", "staff_https", "admin_https"];
+
+export function failedDeploymentResultKeys(evidence) {
+  const sequence = evidence?.storageAfterFunctions;
+  const items = Array.isArray(evidence?.results) ? evidence.results : [];
+  if (sequence !== undefined && sequence !== true) return ["sequence"];
+  const keys = sequence ? storageAfterFunctionsKeys : legacyDeploymentKeys;
+  if (sequence && (items.length !== keys.length || items.some((item, index) => item?.key !== keys[index]))) return ["sequence"];
+  const results = new Map(items.map(item => [item?.key, item?.code]));
+  return keys.filter(key => Number(results.get(key)) !== 0);
+}
+
 export function sanitizeCommandResult(result) {
   const sanitize = (value) => String(value ?? "")
     .replace(/(["']?(?:access[_-]?token|refresh[_-]?token|authorization|private[_-]?key|client[_-]?secret)["']?\s*[:=]\s*)[^\s,"'}]+/giu, "$1[REDACTED]")
@@ -189,7 +220,15 @@ export async function runDeploymentWithExecutor({ plan, approval, confirmFingerp
   results.push({ key: precheck.key, phase: "precheck", ...accessResult });
   if (!projectListIncludesProject(accessResult, plan.projectId)) return failed("project_access", "Firebase認証またはProjectアクセスを確認できません。", results);
   for (const stage of plan.stages) {
-    const result = sanitizeCommandResult(await executor(stage));
+    const raw = await executor(stage);
+    if (stage.key === "functions_inventory") {
+      const found = uploadFunctionsPresent(raw, plan.projectId);
+      const message = found ? "提出受付とStorage完了トリガーを配備一覧で確認しました。" : "提出受付とStorage完了トリガーの配備一覧を確認できません。";
+      results.push({ key: stage.key, phase: "precheck", code: found ? 0 : 1, stdout: "", stderr: found ? "" : message });
+      if (!found) return failed(stage.key, message, results);
+      continue;
+    }
+    const result = sanitizeCommandResult(raw);
     results.push({ key: stage.key, phase: "deploy", ...result });
     if (result.code !== 0) return failed(stage.key, `${stage.label}で停止しました。`, results);
   }
@@ -199,9 +238,9 @@ export async function runDeploymentWithExecutor({ plan, approval, confirmFingerp
     results.push({ key: check.key, phase: "postcheck", ...result });
     if (result.code !== 0) return failed(check.key, `${check.label}で停止しました。`, results);
   }
-  return { status: "succeeded", startedAt, completedAt: new Date().toISOString(), failedStageKey: null, message: "全stageと事後確認に合格しました。", results };
+  return { status: "succeeded", storageAfterFunctions: true, startedAt, completedAt: new Date().toISOString(), failedStageKey: null, message: "全stageと事後確認に合格しました。", results };
 
   function failed(failedStageKey, message, currentResults) {
-    return { status: "failed", startedAt, completedAt: new Date().toISOString(), failedStageKey, message, results: currentResults };
+    return { status: "failed", storageAfterFunctions: true, startedAt, completedAt: new Date().toISOString(), failedStageKey, message, results: currentResults };
   }
 }

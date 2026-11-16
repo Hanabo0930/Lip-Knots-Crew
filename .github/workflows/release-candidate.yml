@@ -46,6 +46,8 @@ jobs:
         run: |
           npm run test:staff-company-scope
           npm run test:staff-ux-performance
+          node scripts/test-staff-pending-origin.mjs
+          node scripts/test-crew-external-components.cjs
           node scripts/test-staff-submission-recovery.mjs
           node scripts/test-staff-shift-cards.mjs
           node scripts/test-staff-application-confirmation.mjs
@@ -112,6 +114,19 @@ jobs:
       - name: Build and test Functions
         run: |
           npm run build -w @lkc/functions
+          node scripts/test-crew-external-receipt.cjs
+          LKC_TEST_DEPENDENCY_ROOT="$PWD" node scripts/test-staff-checked-application.cjs
+          node scripts/test-assignment-observed-blank.cjs
+          node scripts/test-case-list-gas-sync-entry.cjs
+          node scripts/automation/test-staging-gas-sync-readiness.mjs
+          bash -n scripts/automation/deploy-staging-functions.sh
+          node scripts/test-case-list-gas-handoff.cjs
+          node scripts/test-case-list-mfa-observation.cjs
+          node scripts/test-approved-owner-handoff.cjs
+          node scripts/test-firebase-owner-callable.cjs
+          node scripts/test-owner-review-ui-handlers.cjs
+          node scripts/test-sent-metadata-first.cjs
+          node scripts/test-crew-external-compatibility.cjs
           node scripts/test-cancellation-lock-ownership.mjs
           node scripts/test-cancellation-privacy.mjs
           node scripts/test-staging-cancellation-privacy-audit.mjs

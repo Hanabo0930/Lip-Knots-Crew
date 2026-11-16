@@ -107,7 +107,8 @@
     "confirmCaseMailDraftReview",
     "holdCaseMailTarget",
     "resolveCaseMailTargetHold",
-    "confirmCaseMailReview"
+    "confirmCaseMailReview",
+    "caseListGasSync"
   ],
   "allowedHostingTargets": [
     "staff",
@@ -133,6 +134,7 @@
     "gmailSmoke": "SEND_LKC_STAGING_GMAIL_SMOKE",
     "hostingPromote": "PROMOTE_LKC_STAGING_HOSTING",
     "wifBootstrap": "BOOTSTRAP_LKC_STAGING_WIF",
-    "retryWorkerRecovery": "RECOVER_LKC_STAGING_RETRY_PAUSED"
+    "retryWorkerRecovery": "RECOVER_LKC_STAGING_RETRY_PAUSED",
+    "gasSyncReadiness": "DEPLOY_LKC_GAS_SYNC_PRIVATE_READINESS"
   }
 }

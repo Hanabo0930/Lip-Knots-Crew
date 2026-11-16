@@ -152,6 +152,14 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
         const old = current.data();
         if (old && caseListPublicationPending(old)) { heldLinked++; return; }
         if (old && (old.companyId !== companyId || old.caseId !== entry.caseId || !old.caseListSource)) { heldLinked++; return; }
+        if (old?.assignmentSheetWrite?.externalAck) {
+          tx.update(jobRef, { externalImportReviewRequired: true, assignmentUnresolved: true,
+            applicationUnconfirmed: true, sourceReady: false, sourceMissing: false,
+            publishable: false, recruitmentStopped: true, caseListHoldReasons: ["EXTERNAL_SOURCE_REAPPEARED"], updatedAt: Timestamp.now() });
+          tx.set(leaseRef, { activeUntil: Timestamp.fromMillis(Date.now() + 120000) }, { merge: true });
+          writes++;
+          return;
+        }
         if (!old && entry.ledgerLinked) { heldLinked++; return; }
         const manualRef = db.collection("caseListManualObservations").doc(jobId), priorManual = (await tx.get(manualRef)).data();
         const rawRow = snapshot.rows.find(row => row[60]?.userEnteredValue?.stringValue === entry.caseId);
@@ -271,13 +279,37 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
       });
     }
     const currentIds = new Set(snapshot.inspected.jobs.map(job => job.caseId));
+    const retainedExternalIds = new Set<string>();
     for (const caseId of previousIds) if (!currentIds.has(caseId)) {
       const ref = db.collection("jobs").doc(createJobIdFromPersistedCaseId(companyId, caseId));
+      const before = (await ref.get()).data();
+      let externalEvidence: Record<string, any> | null = null;
+      if (before?.assignmentSheetWrite?.externalAck && before.externalImportReviewRequired !== true) {
+        const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
+        try { externalEvidence = await external.observeAcceptedExternalImport(companyId, ref.id, before); }
+        catch { /* Unverified external history stays held; no fallback ACK. */ }
+      }
       await db.runTransaction(async tx => {
         const [current, lease, config] = await Promise.all([tx.get(ref), tx.get(leaseRef), tx.get(db.collection("sheetImportConfigs").doc(companyId))]);
         if (lease.data()?.tokenId !== tokenId || config.data()?.caseListEnabled !== true) throw new HttpsError("aborted", "案件リスト取込の設定または処理権限が変わりました。");
         const job = current.data();
         if (!job || job.companyId !== companyId || !job.caseListSource) return;
+        if (job.assignmentSheetWrite?.externalAck) {
+          retainedExternalIds.add(caseId);
+          let valid = false;
+          if (externalEvidence && job.externalImportReviewRequired !== true && lease.data()?.activeUntil instanceof Timestamp && lease.data()!.activeUntil.toMillis() > Date.now()) {
+            const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
+            try { await external.assertAcceptedExternalImport(tx, companyId, ref.id, job, externalEvidence); valid = true; }
+            catch { /* Preserve the same assignment and require explicit review. */ }
+          }
+          tx.update(ref, valid ? { sourceMissing: false, publishable: false, recruitmentStopped: true,
+            caseListHoldReasons: [], externalArchiveObservedAt: Timestamp.now(), updatedAt: Timestamp.now() } : {
+            sourceMissing: true, publishable: false, recruitmentStopped: true, sourceReady: false,
+            applicationUnconfirmed: true, externalImportReviewRequired: true,
+            caseListHoldReasons: ["EXTERNAL_ARCHIVE_REVIEW_REQUIRED"], updatedAt: Timestamp.now() });
+          tx.set(leaseRef, { activeUntil: Timestamp.fromMillis(Date.now() + 120000) }, { merge: true });
+          return;
+        }
         const manualRef = db.collection("caseListManualObservations").doc(ref.id), priorManual = (await tx.get(manualRef)).data();
         if (priorManual && priorManual.selected !== true && priorManual.state !== "source_missing") tx.set(manualRef, {
           ...priorManual, state: "source_missing", selected: false, clientNameUpConfirmed: false,
@@ -289,7 +321,7 @@ export async function executeCaseListImport(companyId: string, mode: "preview" |
     await db.runTransaction(async tx => {
       const [lease, config] = await Promise.all([tx.get(leaseRef), tx.get(db.collection("sheetImportConfigs").doc(companyId))]);
       if (lease.data()?.tokenId !== tokenId || config.data()?.caseListEnabled !== true) throw new HttpsError("aborted", "案件リスト取込の設定または処理権限が変わりました。");
-      tx.set(catalogRef, { companyId, caseIds: [...currentIds], digest: snapshot.inspected.digest, observedAt: snapshot.observedAt, completedAt: Timestamp.now(), actorUid });
+      tx.set(catalogRef, { companyId, caseIds: [...new Set([...currentIds, ...retainedExternalIds])], digest: snapshot.inspected.digest, observedAt: snapshot.observedAt, completedAt: Timestamp.now(), actorUid });
     });
     return { ...makePreview(snapshot), writes, heldLinked, publications: 0 };
   } finally {

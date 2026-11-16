@@ -11,6 +11,19 @@ function installInvokerAdapter(run, plan, log = console.log) {
     || !Array.isArray(plan.functions) || !plan.functions.length
     || plan.functions.some(name => !/^[A-Za-z][A-Za-z0-9]*$/.test(name))) throw Error("INVALID_INVOKER_PLAN");
   if (typeof run.setInvokerCreate !== "function") throw Error("CLI_INVOKER_CONTRACT_CHANGED");
+  if (plan.functions.includes("caseListGasSync")) {
+    if (plan.functions.length !== 1 || typeof run.setInvokerUpdate !== "function") throw Error("GAS_SYNC_PRIVATE_INVOKER_CONTRACT_REQUIRED");
+    const privateOnly = async (projectId, serviceName, invokers) => {
+      if (projectId !== plan.project || serviceName !== "projects/" + plan.project + "/locations/" + plan.region + "/services/caselistgassync"
+        || !Array.isArray(invokers) || invokers.length !== 1 || invokers[0] !== "private") throw Error("GAS_SYNC_IAM_MUTATION_NOT_AUTHORIZED");
+      // A private create needs no IAM write. Existing public state is rejected by
+      // read-only preflight/postflight; this adapter never clears/grants bindings.
+      log("GAS_SYNC_PRIVATE_INVOKER_NO_IAM_WRITE");
+    };
+    run.setInvokerCreate = privateOnly;
+    run.setInvokerUpdate = privateOnly;
+    return;
+  }
   const sheetWorkers = ["retrySafeSheetWrites", "processSafeSheetWrite"];
   // 定期workerは更新時もCLIがIAMを設定する。作成経路の除外だけでは不十分。
   if (plan.functions.some(name => sheetWorkers.includes(name))) {
@@ -85,6 +98,12 @@ async function main() {
   assertNotificationDeliveryPaused(plan, source);
   const {assertSheetWorkerRecovery} = await import(pathToFileURL(path.join(__dirname, "validate-staging-sheet-worker.mjs")).href);
   assertSheetWorkerRecovery(plan, source);
+  if (plan.functions.includes("caseListGasSync")) {
+    if ((process.env.LKC_TRANSFER_MODE_REQUESTED ?? "preserve") !== "preserve") throw Error("GAS_SYNC_TRANSFER_MODE_MUST_BE_PRESERVED");
+    const sync = await import(pathToFileURL(path.join(__dirname, "staging-gas-sync-readiness.mjs")).href);
+    sync.assertPrivateReadiness(plan, source);
+    sync.verifyPrivateService(plan, "before");
+  }
   const cli = resolveCli();
   if (plan.functions.includes("retrySafeSheetWrites")) {
     const {runRetryWorkerRecovery} = await import(pathToFileURL(path.join(__dirname, "run-retry-worker-recovery.mjs")).href);

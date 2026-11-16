@@ -11,6 +11,7 @@ function fixture(at,dateKey,flag){
  const h=setup(at),job={companyId:"company-a",assignedStaffId:"staff-a",assignedStaffName:"Synthetic Staff",status:"assigned",dateKey,storeName:"Synthetic Store",
   ...(flag?{[flag]:true}:{}),submissionStatus:{report:{completed:true},salesFloor:{completed:true}},netPrint:{items:[]}};
  h.state.records.set("notificationSettings/company-a",{enabled:true,importantAnnouncementHour:2});
+ h.state.records.set("authIdentities/synthetic-staff",{companyId:"company-a",staffId:"staff-a",active:true});
  h.state.records.set("jobs/synthetic-job",job);
  return {h,job,schedule:()=>h.load("./reminder-scheduler").scheduleOperationalReminders(),
   tasks:()=>h.load("./staff-tasks").getMyTasks({auth:{uid:"synthetic-staff",token:{companyId:"company-a",staffId:"staff-a",role:"staff"}},data:{}}),
@@ -20,6 +21,53 @@ async function test(name,run){try{await run();results.push({name,passed:true});}
 await test("ready assignment retains the existing reminder and task",async()=>{
  const f=fixture(slots[0][1],slots[0][2]);await f.schedule();assert.equal(f.notices().length,1);
  const task=(await f.tasks()).tasks.find(task=>task.kind==="precontact");assert.equal(task.title,"事前連絡を送ってください");assert.equal(typeof task.dueAtMs,"number");assert.deepEqual(f.h.state.sent,[]);
+});
+const invalidContact = [
+ ["null",null,"09:30"], ["boolean",true,"09:30"], ["spaces"," ","09:30"],
+ ["below range",33.9,"09:30"], ["above range",42.1,"09:30"],
+ ["hexadecimal string","0x24","09:30"], ["non-finite number",Infinity,"09:30"],
+ ["numeric arrival",36.5,930], ["invalid hour",36.5,"24:00"], ["invalid minute",36.5,"09:60"],
+];
+for(const [label,temperature,arrivalTime] of invalidContact)await test("precontact saved values / invalid "+label,async()=>{
+ const [,at,dateKey]=slots[1],f=fixture(at,dateKey);
+ f.job.preContact={temperature,arrivalTime};
+ const task=(await f.tasks()).tasks.find(item=>item.kind==="precontact");
+ assert.equal(task?.title,"事前連絡を送ってください","invalid values cannot clear the task");
+ await f.schedule();await f.schedule();
+ assert.equal(f.notices().length,1,"the same incomplete contact queues once");
+ const [queuePath,notice]=[...f.h.state.records].find(([k,v])=>k.startsWith("notificationQueue/")&&v.category==="precontact_reminder");
+ const current=f.h.load("./operational-reminder").operationalReminderIsCurrent;
+ assert.equal(current(notice.reminderContext,"company-a",f.h.state.records.get("jobs/synthetic-job")),true);
+ f.h.state.records.get("jobs/synthetic-job").preContact={temperature:36.5,arrivalTime:"09:30"};
+ assert.equal((await f.tasks()).tasks.some(item=>item.kind==="precontact"),false);
+ assert.equal(current(notice.reminderContext,"company-a",f.h.state.records.get("jobs/synthetic-job")),false);
+ await f.h.trigger(queuePath.split("/").at(-1));
+ assert.equal(f.h.state.records.get(queuePath).status,"superseded");
+ assert.deepEqual(f.h.state.sent,[]);
+});
+for(const [label,preContact] of [
+ ["legacy decimal string",{temperature:" 36.5 ",arrivalTime:"9:30"}],
+ ["minimum",{temperature:34,arrivalTime:"0:00"}], ["maximum",{temperature:42,arrivalTime:"23:59"}]
+])await test("precontact saved values / completed "+label,async()=>{
+ const [,at,dateKey]=slots[3],f=fixture(at,dateKey);
+ f.job.preContact=preContact;
+ assert.equal((await f.tasks()).tasks.some(item=>item.kind==="precontact"),false);
+ await f.schedule();assert.equal(f.notices().length,0);
+ assert.notEqual(f.h.state.records.get("jobs/synthetic-job").preContactLate,true);
+ assert.deepEqual(f.h.state.sent,[]);
+});
+await test("precontact saved values / transaction retry uses the incomplete current row",async()=>{
+ const [,at,dateKey]=slots[3],f=fixture(at,dateKey);
+ let changed=false;
+ f.h.state.onRead=async p=>{
+  if(changed||!p.startsWith("notificationQueue/"))return;
+  changed=true;f.h.state.records.get("jobs/synthetic-job").preContact={temperature:null,arrivalTime:"09:30"};
+ };
+ await f.schedule();
+ assert.equal(changed,true);assert.ok(f.h.state.transactionRetries>0);
+ assert.equal(f.notices().length,1,"the retry must not accept a partial row as completed");
+ assert.equal(f.h.state.records.get("jobs/synthetic-job").preContactLate,true);
+ assert.deepEqual(f.h.state.sent,[]);
 });
 for(const [flag,reason] of [["sourceMissing","取込状況"],["applicationUnconfirmed","担当確認待ち"],["assignmentUnresolved","担当者の照合待ち"]])for(const [slot,at,dateKey] of slots)await test(flag+" / "+slot,async()=>{
  const f=fixture(at,dateKey,flag),waiting=(await f.tasks()).tasks.find(task=>task.kind==="precontact");await f.schedule();

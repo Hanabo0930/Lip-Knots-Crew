@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import {Readable} from 'node:stream';
+import {createSyntheticSubmissionDrive} from './local-submission-drive-fixture.mjs';
 import {createRequire} from 'node:module';
-import {localAcceptanceEnvironment,blockNonEmulatorConnections} from './local-firestore-acceptance-safety.mjs';
+import {localAcceptanceEnvironment,blockNonEmulatorConnections,seedLocalApplicationAccess} from './local-firestore-acceptance-safety.mjs';
 const environment=localAcceptanceEnvironment(process.env);
 const network=blockNonEmulatorConnections(environment.port);
 const require=createRequire(import.meta.url);
@@ -31,24 +33,17 @@ google.sheets=()=>({spreadsheets:{
 }});
 const load=name=>require('../functions/lib/'+name+'.js');
 const {db,storage}=load('firebase');
-const driveFiles=new Map(),storageObjects=new Map();let allocated=0,driveCopies=0;
-const drive={files:{
-  generateIds:async()=>({data:{ids:['synthetic-drive-'+(++allocated)]}}),
-  list:async()=>({data:{files:[{id:'synthetic-folder'}]}}),
-  get:async({fileId})=>{if(!driveFiles.has(fileId))throw {code:404};return {data:structuredClone(driveFiles.get(fileId))};},
-  create:async input=>{
-    assert.ok(input.media,'only synthetic file transfers are allowed');
-    const id=input.requestBody.id;if(driveFiles.has(id))throw {code:409};
-    const file={...input.requestBody,id,size:'100',md5Checksum:'00000000000000000000000000000000',createdTime:new Date().toISOString()};
-    driveFiles.set(id,file);driveCopies++;return {data:structuredClone(file)};
-  }
-}};
+const storageObjects=new Map();
+const uploadedBytes=Buffer.alloc(100,0x61);
+const uploadSha256=crypto.createHash('sha256').update(uploadedBytes).digest('hex');
+const uploadMd5=crypto.createHash('md5').update(uploadedBytes).digest();
+const {drive,files:driveFiles,rootId,copies:driveCopies}=createSyntheticSubmissionDrive(uploadedBytes);
 load('google-drive-client').getWritableDriveClient=()=>drive;
 storage.bucket=(name='synthetic-bucket')=>{
   assert.equal(name,'synthetic-bucket');
   return {file:(key,options)=>({
     getMetadata:async()=>{if(!storageObjects.has(key))throw {code:404};return [structuredClone(storageObjects.get(key))];},
-    createReadStream:()=>{assert.equal(options?.generation,'1');assert.ok(storageObjects.has(key));return {syntheticPath:key};},
+    createReadStream:()=>{assert.equal(options?.generation,'1');assert.ok(storageObjects.has(key));return Readable.from([uploadedBytes]);},
     delete:async()=>{storageObjects.delete(key);}
   })};
 };
@@ -63,7 +58,9 @@ async function fixture(count=1) {
   const companyId='synthetic-sdk-'+(++sequence),sheetId='synthetic-sheet-'+sequence;
   const staff=[0,1].map(i=>({uid:companyId+'-uid-'+i,token:{role:'staff',companyId,staffId:companyId+'-staff-'+i}}));
   const manager={uid:companyId+'-admin',token:{role:'admin',companyId}};
-  for(const [i,user] of staff.entries())await db.doc('staffProfiles/'+user.token.staffId).set({companyId,active:true,displayName:'Synthetic Staff '+i});
+  await seedLocalApplicationAccess(db,companyId,staff);
+ const ng=load('staff-ng'),ngHeader=Array(11).fill('');ngHeader[10]='NG会社';
+ for(const [i,user] of staff.entries()){const staffId=user.token.staffId,ngCompanies=ng.mergeStaffNg([{sourceRef:{spreadsheetId:'synthetic-staff-master',sheetName:'マスターデータ'},ngCompanyObservation:ng.observeStaffNgCell('マスターデータ',ngHeader,Array(11).fill(''),10)}],companyId,staffId);await db.doc('staffProfiles/'+staffId).set({companyId:companyId,active:true,displayName:'Synthetic Staff '+i,ngCompanies});}
   const month=tomorrow.slice(0,4)+'.'+Number(tomorrow.slice(5,7));
   const rows=Array.from({length:count},(_,i)=>{
     const row=Array(55).fill('');Object.assign(row,{0:tomorrow,1:'',5:'Not assignment',9:'Synthetic Client',10:'Synthetic Store '+i,11:'Synthetic Maker',12:'Synthetic Menu',14:'10:00-18:00',16:'sdk-case-'+i});return row;
@@ -151,7 +148,7 @@ try {
     await assert.rejects(preparation(h,1),e=>e.code==='permission-denied');
     await assert.rejects(call(admin.confirmApplication,h.staff[0],{jobId:h.jobId,expectedRevision:(await h.job()).revision}),e=>e.code==='permission-denied');
     assert.equal((await h.list('sheetSyncQueue')).length,before);
-    assert.equal((await call(tasks.getMyTasks,{...h.staff[0],token:{...h.staff[0].token,companyId:'synthetic-other'}})).count,0);
+    await assert.rejects(call(tasks.getMyTasks,{...h.staff[0],token:{...h.staff[0].token,companyId:'synthetic-other'}}),e=>e.code==='permission-denied');
   });
   await test('書込後の応答喪失: 結果未確認で保持し実SDK再呼出でも再書込みしない',async()=>{
     const h=await fixture();await h.apply();await confirmSource(h);await preparation(h);
@@ -175,14 +172,14 @@ try {
   for(const scope of ['file','submission'])await test('提出・再提出の実SDK一往復: '+scope,async()=>{
     const h=await fixture();await h.apply();await confirmSource(h);
     await call(admin.confirmApplication,h.manager,{jobId:h.jobId,expectedRevision:(await h.job()).revision});
-    await db.doc('companies/'+h.companyId+'/settings/drive').set({rootFolderId:'synthetic-root'});
+    await db.doc('companies/'+h.companyId+'/settings/drive').set({rootFolderId:rootId});
     process.env.LKC_SUBMISSION_TRANSFER_MODE='active';
-    const initialCopies=driveCopies,initialSize=driveFiles.size;
+    const initialCopies=driveCopies(),initialSize=driveFiles.size;
     const start=(count,patch={})=>call(uploads.createUploadSession,h.staff[0],{jobId:h.jobId,type:'report',
-      files:Array.from({length:count},(_,i)=>({originalName:'synthetic-'+i+'.png',contentType:'image/png',size:100,contentSha256:'a'.repeat(64)})),...patch});
+      files:Array.from({length:count},(_,i)=>({originalName:'synthetic-'+i+'.png',contentType:'image/png',size:100,contentSha256:uploadSha256})),...patch});
     const finish=file=>{
-      storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:'a'.repeat(64)}});
-      return uploads.finalizeStagedUpload.run({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:'1',md5Hash:'AAAAAAAAAAAAAAAAAAAAAA=='}});
+      storageObjects.set(file.storagePath,{size:'100',contentType:'image/png',generation:'1',metadata:{lkcContentSha256:uploadSha256}});
+      return uploads.finalizeStagedUpload.run({data:{name:file.storagePath,bucket:'synthetic-bucket',contentType:'image/png',size:100,generation:'1',md5Hash:uploadMd5.toString('base64')}});
     };
     const clientRequestId=crypto.randomUUID();
     const sessions=await Promise.all([start(2,{clientRequestId}),start(2,{clientRequestId})]);
@@ -190,12 +187,14 @@ try {
     const first=sessions[0];
     assert.equal((await h.list('submissions')).length,1);
     assert.equal((await db.doc('submissions/'+first.submissionId).collection('files').get()).size,2);
-    await Promise.all(first.files.map(finish));
+    const initialTransfers=await Promise.allSettled(first.files.map(finish));
+    const transferErrors=initialTransfers.filter(result=>result.status==='rejected').map(result=>result.reason);
+    if(transferErrors.length)throw new AggregateError(transferErrors,'Initial synthetic uploads failed: '+transferErrors.map(error=>error.message).join('; '));
     const originalIds=await Promise.all(first.files.map(async file=>(await db.doc('submissions/'+first.submissionId+'/files/'+file.fileId).get()).data().driveFileId));
     assert.equal((await db.doc('submissions/'+first.submissionId).get()).data().completedFiles,2);
     await finish(first.files[0]);
     assert.equal((await db.doc('submissions/'+first.submissionId).get()).data().completedFiles,2);
-    assert.equal(driveCopies-initialCopies,2);
+    assert.equal(driveCopies()-initialCopies,2);
     const reports=(await h.list('sheetSyncQueue')).filter(x=>x.data().operation==='submission.report');assert.equal(reports.length,1);
     await h.run(reports[0]);assert.equal((await reports[0].ref.get()).data().status,'completed');
     assert.equal((await h.job()).submissionStatus.report.sheetWrite.pending,false);
@@ -224,7 +223,7 @@ try {
   const stats=network.stats();network.restore();
   const failed=results.filter(x=>!x.passed).length;
   const result={project:environment.project,firestore:'real SDK / local emulator',passed:results.length-failed,failed,network:stats,
-    sheets:'synthetic boundary',storageAndDrive:'synthetic boundaries',syntheticDriveCopies:driveCopies,sheetReads,syntheticSheetWrites:sheetWrites,realSheetWrites:0,actualMessagesSent:0,
+    sheets:'synthetic boundary',storageAndDrive:'synthetic boundaries',syntheticDriveCopies:driveCopies(),sheetReads,syntheticSheetWrites:sheetWrites,realSheetWrites:0,actualMessagesSent:0,
     authentication:'synthetic callable context; token verification, Auth emulator and Security Rules are not certified',
     sourceModules:['jobs','admin-operations','precontact','netprint','safe-sheet-writes','shift-import','staff-tasks','uploads','drive-transfer','resubmissions','submission-status','submission-files'].map(name=>({name,sha256:crypto.createHash('sha256').update(fs.readFileSync(path.resolve('functions/lib/'+name+'.js'))).digest('hex')})),results};
   if(stats.blocked)result.failed++;

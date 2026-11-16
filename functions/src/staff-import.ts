@@ -1,4 +1,5 @@
 import { assertProductionOperational } from "./system-safety";
+import {ensureImportCapacity,readImportAdmission,registerImport,readImportWriteFence,recordImportMutation,finishImport,beforeSessionRevocation,recordSessionRevocation} from "./staff-ng-maintenance";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
@@ -23,6 +24,7 @@ const RequestSchema = z.object({
 });
 
 const ColumnSchema = z.object({
+  ngCompanies: z.literal('K').default('K'),
   displayName: z.string().min(1),
   homePrefecture: z.string().optional(),
   nearestStation: z.string().optional(),
@@ -35,7 +37,7 @@ const ColumnSchema = z.object({
   evaluationMemo: z.string().optional(),
 });
 
-const ConfigSchema = z.object({
+export const ConfigSchema = z.object({
   companyId: z.string().min(1),
   enabled: z.boolean(),
   scheduleEnabled: z.boolean().default(false),
@@ -173,6 +175,7 @@ async function executeStaffImport(
 
   const lock = mode === "commit" ? await acquireLock(companyId) : null;
   let runRef: FirebaseFirestore.DocumentReference | null = null;
+let importSucceeded=false;
 
   try {
     if (mode === "commit") {
@@ -338,6 +341,7 @@ async function executeStaffImport(
       }, { merge: true });
     }
 
+    importSucceeded=true;
     return result;
   } catch (error) {
     if (runRef) {
@@ -353,7 +357,7 @@ async function executeStaffImport(
       error instanceof Error ? error.message : String(error)
     );
   } finally {
-    if (lock) await releaseLock(lock);
+    if (lock) await releaseLock(lock,companyId,importSucceeded);
   }
 }
 
@@ -389,6 +393,8 @@ async function writeStaffDirectory(
     indexes.push(index);
     activeIndexesByStaff.set(data.staffId, indexes);
   }
+  const capacityUids:string[]=[];for(const old of existing.values()){const uids=old.authUids??[];if(!Array.isArray(uids)||uids.some((id:unknown)=>typeof id!=='string'))throw new HttpsError('failed-precondition','REVOCATION_UID_SCOPE_UNKNOWN');capacityUids.push(...uids);}
+  await ensureImportCapacity(companyId,lock.token,runId,capacityUids);
   const writer = new BatchWriter(companyId, lock);
   const now = Timestamp.now();
   const revocations: Array<{ uid: string; staffId: string; emailHash: string; reason: string }> = [];
@@ -433,6 +439,7 @@ async function writeStaffDirectory(
     const profileData: FirebaseFirestore.DocumentData = {
       companyId,
       displayName: profile.displayName,
+      ngCompanies: profile.ngCompanies,
       normalizedName: profile.normalizedName,
       emails: acceptedEmails,
       primaryEmail: acceptedEmails[0] ?? "",
@@ -536,8 +543,13 @@ async function writeStaffDirectory(
       if (!matches(identity.data(), profile.data())) throw new Error("Staff revocation identity changed");
       if (!required(profile.data()!)) continue;
       assertStaffImportLease((await lock.ref.get()).data(), companyId, lock.token);
-      await auth.revokeRefreshTokens(item.uid);
+      const revocationRunRef=db.collection("staffImportRuns").doc(runId);
+      const revocationKey=await beforeSessionRevocation(companyId,lock.token,revocationRunRef,item.uid);
+      try {await auth.revokeRefreshTokens(item.uid);}
+      catch(error){await recordSessionRevocation(companyId,lock.token,revocationRunRef,revocationKey,false);throw error;}
+      await recordSessionRevocation(companyId,lock.token,revocationRunRef,revocationKey,true);
       await db.runTransaction(async tx => {
+        const revocationFence=await readImportWriteFence(tx,companyId,lock.token);
         assertStaffImportLease((await tx.get(lock.ref)).data(), companyId, lock.token);
         const [latestIdentity, latestProfile] = await Promise.all([tx.get(identityRef), tx.get(profileRef)]);
         if (!matches(latestIdentity.data(), latestProfile.data()) || !required(latestProfile.data()!)) {
@@ -546,6 +558,7 @@ async function writeStaffDirectory(
         tx.update(identityRef, {
           active: false, revokedAt: FieldValue.serverTimestamp(), revokeReason: item.reason,
         });
+        recordImportMutation(tx,revocationFence,1);
       });
       sessionsRevoked++;
     } catch {
@@ -649,6 +662,7 @@ class BatchWriter {
     if (!this.pending.length) return;
     const pending = this.pending;
     const committed = await db.runTransaction(async tx => {
+      const maintenanceFence=await readImportWriteFence(tx,this.companyId,this.lock.token);
       assertStaffImportLease((await tx.get(this.lock.ref)).data(), this.companyId, this.lock.token);
       const refs = new Map(pending.filter(item => item.emailAction).map(item => [item.ref.path, item.ref]));
       const snapshots = await Promise.all([...refs.values()].map(ref => tx.get(ref)));
@@ -670,6 +684,7 @@ class BatchWriter {
         }
         count++;
       }
+      recordImportMutation(tx,maintenanceFence,count);
       return count;
     });
     this.writeCount += committed;
@@ -720,6 +735,7 @@ async function acquireLock(companyId: string): Promise<{
   const ref = db.collection("syncLocks").doc(`${companyId}_staff_import`);
   const token = db.collection("_ids").doc().id;
   await db.runTransaction(async (tx) => {
+    const admission=await readImportAdmission(tx,companyId,token);
     const now = Timestamp.now();
     const leaseUntil = Timestamp.fromMillis(now.toMillis() + 10 * 60 * 1000);
     const snap = await tx.get(ref);
@@ -731,6 +747,7 @@ async function acquireLock(companyId: string): Promise<{
       );
     }
     tx.set(ref, { companyId, token, acquiredAt: now, leaseUntil });
+    registerImport(tx,admission);
   });
 
   return { ref, token };
@@ -739,9 +756,10 @@ async function acquireLock(companyId: string): Promise<{
 async function releaseLock(lock: {
   ref: FirebaseFirestore.DocumentReference;
   token: string;
-}): Promise<void> {
+},companyId:string,successful:boolean): Promise<void> {
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(lock.ref);
+    await finishImport(tx,companyId,lock.token,successful);
     if (snap.data()?.token === lock.token) tx.delete(lock.ref);
   });
 }

@@ -2,13 +2,14 @@ import ts from 'typescript';import {runInNewContext} from 'node:vm';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 const source=readFileSync('apps/staff/src/App.tsx','utf8');
-const start=source.indexOf('  async function apply(job:Job){');
+const readError=source.split('\n').find(line=>line.trimStart().startsWith('const applicationAttemptsReadError='));assert.ok(readError);
+const start=source.includes('  async function readAcceptedApplicationReceipts(')?source.indexOf('  async function readAcceptedApplicationReceipts('):source.indexOf('  async function apply(job:Job){');
 const end=source.indexOf('  async function submitPreContact()',start);
 assert.ok(start>=0&&end>start);
-const handler=source.slice(start,end).replace('job:Job','job');
+const handler=ts.transpileModule(source.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
 assert.match(source,/const authLoadVersion=\+\+authLoadVersionRef.current;\s*applicationAttemptsRef.current.clear\(\);/);
 function harness({apiFailure=false,refreshFailure=false,refreshUnconfirmed=false,staleAt='',demo=false,loseFirstResponse=false,shiftFailure=false,shiftMissing=false,missingFunctions=false,savedStorage=new Map(),locks={request:async(name,options,fn)=>fn({name})}}={}){
- const state={messages:[],jobs:[{id:'one'},{id:'two'}],pending:'',accepted:'',expanded:'one',calls:0,refreshes:0,shiftReads:0,assigned:[],writes:0,requests:[],replyOverride:undefined,now:100000};
+ const state={messages:[],jobs:[{id:'one'},{id:'two'}],pending:'',accepted:'',expanded:'one',calls:0,refreshes:0,shiftReads:0,assigned:[],writes:0,requests:[],receiptLookups:[],replyOverride:undefined,now:100000};
  const version={current:1};
  const attempts={current:new Map()};
  const completed=new Map();
@@ -23,9 +24,19 @@ function harness({apiFailure=false,refreshFailure=false,refreshUnconfirmed=false
   setPendingApplicationJobId:value=>state.pending=value,
   setAcceptedApplicationJobId:value=>state.accepted=value,
   firebaseConfigured:!demo,functions:missingFunctions?null:{},
-  httpsCallable:()=>async input=>{
+  httpsCallable:(_functions,callable)=>async input=>{
+   if(callable==="getMyTasks"){
+    const lookup=input.applicationReceiptLookup;
+    state.receiptLookups.push(...lookup.map(row=>JSON.parse(JSON.stringify(row))));
+    if(state.beforeReceipt)await state.beforeReceipt();
+    if(state.receiptError)throw state.receiptError;
+    if(state.receiptOverride)return {data:{receipts:state.receiptOverride}};
+    return {data:{receipts:lookup.map(row=>({...row,status:completed.get(row.requestId)?.data.jobId===row.jobId?"accepted":"not_observed"}))}};
+   }
+   assert.equal(callable,"applyToJob");
    state.calls++;state.requests.push(input);
    if(staleAt==='api'){version.current++;attempts.current.clear();attempts.current.set(input.jobId,{requestId:'new-session',startedAt:state.now});}
+   await state.beforeApplicationResponse?.();
    if(state.errorOverride)throw state.errorOverride;
    if(apiFailure)throw Error('API rejected');
    if(completed.has(input.requestId))return state.replyOverride===undefined?completed.get(input.requestId):state.replyOverride;
@@ -46,6 +57,23 @@ function harness({apiFailure=false,refreshFailure=false,refreshUnconfirmed=false
  const apply=Function(...Object.keys(dependencies),handler+';return apply;')(...Object.values(dependencies));
  return {state,apply,attempts,version,savedStorage,store:storageScope.exports};
 }
+for(const mode of ["accepted-after-24h","lookup-offline","mismatched-receipt","auth-switch"]){
+ const h=harness({loseFirstResponse:true});await h.apply({id:"one",revision:7});
+ const attempt=h.attempts.current.get("one");assert(attempt);
+ if(mode==="accepted-after-24h")h.state.now+=25*3600*1000;
+ if(mode==="lookup-offline")h.state.receiptError=Error("synthetic lookup unavailable");
+ if(mode==="mismatched-receipt")h.state.receiptOverride=[{jobId:"one",requestId:"different-request",status:"accepted"}];
+ if(mode==="auth-switch")h.state.beforeReceipt=()=>{h.version.current++;h.attempts.current.clear();h.attempts.current.set("one",{requestId:"another-session",startedAt:1});};
+ const before=h.state.messages.length;
+ assert.equal(await h.apply({id:"one",revision:9}),mode==="accepted-after-24h","receipt-first UI "+mode);
+ assert.deepEqual(h.state.receiptLookups,[{jobId:"one",requestId:attempt.requestId}]);
+ assert.equal(h.state.calls,1,"fallback must not resend an accepted or uncertain attempt");
+ assert.equal(h.state.writes,1);
+ if(mode==="accepted-after-24h"){assert.equal(h.attempts.current.size,0);assert.equal(h.state.accepted,"one");assert.equal(h.state.shiftReads,1);}
+ else if(mode==="auth-switch"){assert.equal(h.attempts.current.get("one").requestId,"another-session");assert.equal(h.state.messages.length,before);}
+ else{assert.equal(h.attempts.current.get("one").requestId,attempt.requestId);assert.equal(h.state.accepted,"");}
+}
+console.log("Receipt-first application: late acceptance, failed and mismatched lookups, and auth changes.");
 {
  const {state,apply,attempts}=harness({refreshFailure:true});await apply({id:'one'});
  assert.equal(state.calls,1);assert.equal(state.refreshes,1);
@@ -55,7 +83,7 @@ function harness({apiFailure=false,refreshFailure=false,refreshUnconfirmed=false
 }
 {
  const {state,apply}=harness();await apply({id:'one'});
- assert.equal(state.messages.at(-1),'応募を受け付けました。シフトで担当の確認状況を確認してください。');assert.equal(state.calls,1);assert.equal(state.accepted,'one');
+ assert.equal(state.messages.at(-1),'応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。');assert.equal(state.calls,1);assert.equal(state.accepted,'one');
  assert.deepEqual(state.jobs,[{id:'two'}]);assert.equal(state.pending,'');
 }
 {
@@ -70,7 +98,7 @@ function harness({apiFailure=false,refreshFailure=false,refreshUnconfirmed=false
 }
 {
  const {state,apply}=harness({staleAt:'refresh',refreshFailure:true});await apply({id:'one'});
- assert.deepEqual(state.messages,['応募を受け付けました。シフトで担当の確認状況を確認してください。']);
+ assert.deepEqual(state.messages,['応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。']);
 }
 {
  const {state,apply,attempts}=harness({demo:true});await apply({id:'one'});
@@ -82,9 +110,9 @@ function harness({apiFailure=false,refreshFailure=false,refreshUnconfirmed=false
  const {state,apply,attempts}=harness({loseFirstResponse:true});
  await apply({id:'one'});assert.equal(state.writes,1);assert.equal(state.jobs.length,2);
  await apply({id:'one'});
- assert.equal(state.calls,2);assert.equal(state.writes,1);
- assert.equal(state.requests[0].requestId,state.requests[1].requestId);
- assert.equal(state.messages.at(-1),'応募を受け付けました。シフトで担当の確認状況を確認してください。');assert.equal(attempts.current.size,0);
+ assert.equal(state.calls,1,'accepted retry must not call the application endpoint again');assert.equal(state.writes,1);
+ assert.equal(state.requests[0].requestId,state.receiptLookups[0].requestId);
+ assert.equal(state.messages.at(-1),'応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。');assert.equal(attempts.current.size,0);
 }
 {
  const {state,apply}=harness({apiFailure:true});
@@ -115,8 +143,8 @@ for(const reply of [null,{}, {data:null},{data:[]},{data:{ok:false,jobId:'one',a
  assert.match(state.messages.at(-1),/応募結果を確認できません/);
  const request=attempts.current.get('one').requestId;state.replyOverride=undefined;
  await apply({id:'one'});
- assert.equal(state.requests[1].requestId,request);assert.equal(state.writes,1);assert.equal(attempts.current.size,0);
- assert.equal(state.messages.at(-1),'応募を受け付けました。シフトで担当の確認状況を確認してください。');
+ assert.equal(state.receiptLookups[0].requestId,request);assert.equal(state.calls,1);assert.equal(state.writes,1);assert.equal(attempts.current.size,0);
+ assert.equal(state.messages.at(-1),'応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。');
 }
 console.log('Application response integrity: 8 malformed replies retain listing/request; corrected retry confirms exactly one synthetic write.');
 
@@ -124,8 +152,8 @@ for(const mode of ['success','shiftFailure','shiftMissing','stale','both-fail'])
  const {state,apply,attempts}=harness({shiftFailure:mode==='shiftFailure'||mode==='both-fail',shiftMissing:mode==='shiftMissing',staleAt:mode==='stale'?'shift':'',refreshFailure:mode==='both-fail'});
  await apply({id:'one'});assert.equal(state.shiftReads,1,'Accepted application must reload its assigned shift');
  assert.equal(state.writes,1);assert.equal(attempts.current.size,0);
- if(mode==='success'){assert.deepEqual(state.assigned,[{id:'one',status:'assigned'}]);assert.equal(state.messages.at(-1),'応募を受け付けました。シフトで担当の確認状況を確認してください。');}
- else if(mode==='stale'){assert.deepEqual(state.messages,['応募を受け付けました。シフトで担当の確認状況を確認してください。']);assert.equal(state.refreshes,0);}
+ if(mode==='success'){assert.deepEqual(state.assigned,[{id:'one',status:'assigned'}]);assert.equal(state.messages.at(-1),'応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。');}
+ else if(mode==='stale'){assert.deepEqual(state.messages,['応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。']);assert.equal(state.refreshes,0);}
  else{assert.equal(state.refreshes,1);assert.match(state.messages.at(-1),/応募は受付済みです/);assert.match(state.messages.at(-1),/シフトを更新/);}
 }
 console.log('Accepted application shift refresh: 5 success/missing/failure/auth/both-failure cases.');
@@ -138,12 +166,12 @@ console.log('Application setup: missing Functions reports recovery guidance, ret
 
 for(const stale of [false,true])for(const shiftMissing of [false,true]){
  const {state,apply,attempts}=harness({refreshUnconfirmed:true,staleAt:stale?'refresh':'',shiftMissing});await apply({id:'one'});assert.equal(state.calls,1);assert.equal(state.writes,1);assert.equal(attempts.current.size,0);assert.deepEqual(state.jobs,[{id:'two'}]);assert.equal(state.accepted,'one');
- if(stale)assert.deepEqual(state.messages,['応募を受け付けました。シフトで担当の確認状況を確認してください。']);else{assert.equal(state.pending,'');assert.match(state.messages.at(-1),/応募は受付済みです/);assert.match(state.messages.at(-1),shiftMissing?/シフトを更新/:/募集案件を更新/);}
+ if(stale)assert.deepEqual(state.messages,['応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。']);else{assert.equal(state.pending,'');assert.match(state.messages.at(-1),/応募は受付済みです/);assert.match(state.messages.at(-1),shiftMissing?/シフトを更新/:/募集案件を更新/);}
 }
 console.log('Accepted application unconfirmed listing: 4 current/stale and loaded/missing shift combinations preserve acceptance and guide the relevant refresh.');
 
 {
- const savedStorage=new Map(),first=harness({loseFirstResponse:true,savedStorage});await first.apply({id:'one'});const requestId=first.state.requests[0].requestId;assert.equal(first.attempts.current.size,1);const reopened=harness({savedStorage});await reopened.apply({id:'one'});assert.equal(reopened.state.requests[0].requestId,requestId);assert.equal(reopened.state.messages.at(-1),'応募を受け付けました。シフトで担当の確認状況を確認してください。');assert.equal(reopened.store.loadSavedApplicationAttempts(reopened.store.applicationAttemptOwner('company','staff','user')).size,0);
+ const savedStorage=new Map(),first=harness({loseFirstResponse:true,savedStorage});await first.apply({id:'one'});const requestId=first.state.requests[0].requestId;assert.equal(first.attempts.current.size,1);const reopened=harness({savedStorage});await reopened.apply({id:'one'});assert.equal(reopened.state.requests[0].requestId,requestId);assert.equal(reopened.state.messages.at(-1),'応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。');assert.equal(reopened.store.loadSavedApplicationAttempts(reopened.store.applicationAttemptOwner('company','staff','user')).size,0);
 }
 {
  const savedStorage=new Map(),first=harness({loseFirstResponse:true,savedStorage});await first.apply({id:'one'});const reopened=harness({savedStorage});reopened.state.now+=23*60*60*1000;await reopened.apply({id:'one'});assert.equal(reopened.state.calls,0);assert.match(reopened.state.messages.at(-1),/時間が経過/);
@@ -158,13 +186,13 @@ for(const broken of ['invalid-json',JSON.stringify({version:2,attempts:[]}),JSON
  const savedStorage=new Map();savedStorage.set=()=>{throw Error('quota');};const h=harness({savedStorage});await h.apply({id:'one'});assert.equal(h.state.calls,0);assert.equal(h.attempts.current.size,0);assert.match(h.state.messages.at(-1),/保存記録を確認できません/);
 }
 {
- const savedStorage=new Map();let writes=0;const set=savedStorage.set.bind(savedStorage);savedStorage.set=(key,value)=>{if(++writes>1)throw Error('cleanup failed');return set(key,value);};const h=harness({savedStorage});await h.apply({id:'one'});assert.equal(h.state.calls,1);assert.equal(h.state.messages.at(-1),'応募を受け付けました。シフトで担当の確認状況を確認してください。');assert.equal(h.state.accepted,'one');assert.equal(h.attempts.current.size,0);
+ const savedStorage=new Map();let writes=0;const set=savedStorage.set.bind(savedStorage);savedStorage.set=(key,value)=>{if(++writes>1)throw Error('cleanup failed');return set(key,value);};const h=harness({savedStorage});await h.apply({id:'one'});assert.equal(h.state.calls,1);assert.equal(h.state.messages.at(-1),'応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。');assert.equal(h.state.accepted,'one');assert.equal(h.attempts.current.size,1);assert.equal(h.attempts.current.get('one').requestId,h.state.requests[0].requestId);
 }
 console.log('Application storage safety: company/staff/user separation, conditional removal, malformed records and quota fail closed before API, cleanup failure preserves confirmed acceptance.');
 
 {
  const effect=source.split(String.fromCharCode(10)).find(line=>line.includes('useEffect(()=>{applicationAttemptsRef.current.clear();'));assert.ok(effect);
- for(const mode of ['restored','different-owner','missing-owner','broken']){const h=harness();const owner=h.store.applicationAttemptOwner('company','staff','user');h.store.saveApplicationAttempt(owner,'saved-job',{requestId:'saved-id',startedAt:100});if(mode==='broken')h.savedStorage.set('lkc.applicationAttempts.v1:'+owner,'broken');const ctx={...h.store,firebaseConfigured:true,companyId:mode==='different-owner'?'other':'company',staffId:'staff',user:mode==='missing-owner'?null:{uid:'user'},applicationAttemptsRef:{current:new Map([['old-owner',{}]])},refreshApplicationAttempts:()=>{},setMessage:()=>{},useEffect:fn=>fn()};runInNewContext(effect,ctx);assert.equal(ctx.applicationAttemptsRef.current.has('old-owner'),false);assert.equal(ctx.applicationAttemptsRef.current.has('saved-job'),mode==='restored');}
+ for(const mode of ['restored','different-owner','missing-owner','broken']){const h=harness();const owner=h.store.applicationAttemptOwner('company','staff','user');h.store.saveApplicationAttempt(owner,'saved-job',{requestId:'saved-id',startedAt:100});if(mode==='broken')h.savedStorage.set('lkc.applicationAttempts.v1:'+owner,'broken');const messages=[];const ctx={...h.store,firebaseConfigured:true,companyId:mode==='different-owner'?'other':'company',staffId:'staff',user:mode==='missing-owner'?null:{uid:'user'},applicationAttemptsRef:{current:new Map([['old-owner',{}]])},refreshApplicationAttempts:()=>{},setMessage:value=>messages.push(value),useEffect:fn=>fn()};runInNewContext(readError+'\n'+effect,ctx);assert.equal(ctx.applicationAttemptsRef.current.has('old-owner'),false);assert.equal(ctx.applicationAttemptsRef.current.has('saved-job'),mode==='restored');if(mode==='broken')assert.match(messages[0],/保存済みの応募確認記録を読み込めません/);else assert.deepEqual(messages,[]);}
 }
 console.log('Application hydration: restored owner records populate the retry map; different/missing owners and corrupt storage do not retain prior owner records.');
 
@@ -205,7 +233,7 @@ console.log('Application storage observer: matching owner/local storage and focu
  for(const missing of [false,true]){
   let receive,errors,cleanup,stopped=false,rendered=0;const h=harness();
   const ctx={firebaseConfigured:true,companyId:'company',staffId:'staff',user:missing?null:{uid:'user'},applicationAttemptOwner:h.store.applicationAttemptOwner,observeApplicationAttempts:(owner,onChange,onError)=>{assert.equal(owner,h.store.applicationAttemptOwner('company','staff','user'));receive=onChange;errors=onError;return()=>{stopped=true;};},applicationAttemptsRef:{current:new Map([['uncertain',{requestId:'keep',startedAt:1}]])},refreshApplicationAttempts:()=>rendered++,setMessage:message=>assert.match(message,/シフトでの確定状況/),useEffect:fn=>{cleanup=fn();}};
-  runInNewContext(effect,ctx);
+  runInNewContext(readError+'\n'+effect,ctx);
   if(missing){assert.equal(receive,undefined);continue;}
   receive(new Map([['other-tab',{requestId:'new',startedAt:2}]]));assert.equal(ctx.applicationAttemptsRef.current.get('uncertain').requestId,'keep');assert.equal(ctx.applicationAttemptsRef.current.get('other-tab').requestId,'new');receive(new Map());assert.equal(ctx.applicationAttemptsRef.current.size,2);assert.equal(rendered,2);errors();cleanup();assert.equal(stopped,true);
  }
@@ -213,7 +241,7 @@ console.log('Application storage observer: matching owner/local storage and focu
 console.log('Application observer effect: owner-bound records merge without discarding unresolved local attempts; missing identity does not subscribe and unmount cleans up.');
 
 for(const elapsed of [-1,23*60*60*1000,7*24*60*60*1000]){
- const h=harness({loseFirstResponse:true});await h.apply({id:'one'});const request=h.attempts.current.get('one').requestId;const before=[...h.savedStorage.entries()];h.state.now+=elapsed;await h.apply({id:'one'});
+ const h=harness({apiFailure:true});await h.apply({id:'one'});const request=h.attempts.current.get('one').requestId;const before=[...h.savedStorage.entries()];h.state.now+=elapsed;await h.apply({id:'one'});
  assert.equal(h.state.calls,1);assert.equal(h.attempts.current.get('one').requestId,request);assert.deepEqual([...h.savedStorage.entries()],before);assert.equal(h.state.pending,'');
  const message=h.state.messages.at(-1);assert.match(message,/シフトを更新/);
  if(elapsed<0){assert.match(message,/端末の日時設定/);assert.doesNotMatch(message,/時間が経過/);}else{assert.match(message,/再送を停止/);assert.match(message,/見つからない場合は管理者/);}
@@ -244,6 +272,55 @@ for(const staleAt of ["api","shift","refresh"])assert.equal(await harness({stale
 console.log("メール応募復元: 導線変更3通りで元の要求を維持し、不完全な組合せ・改訂の上書き・旧認証の成功表示を拒否。");
 
 
+for(const reason of ["case_list_job_changed","case_mail_job_changed","mail_application_changed"]){
+ for(const race of ["other tab holds the lock","newer attempt is already visible"]){
+  const firstRequest="synthetic-request-1",latestRequest="other-tab-request";
+  const sourceRevision="a".repeat(64),applicationId="b".repeat(64);
+  const common={reason,accepted:false};
+  const details=reason==="mail_application_changed"?{...common,applicationId,revision:1}:
+   {...common,jobId:"one",requestId:firstRequest,expectedJobRevision:7,
+    ...(reason==="case_list_job_changed"?{expectedSourceRevision:sourceRevision}:{})};
+  let locked=false,refusals=0;
+  const locks={request:async(name,options,fn)=>{
+   assert.deepEqual([options.mode,options.ifAvailable],["exclusive",true]);
+   if(locked){refusals++;return fn(null);}
+   return fn({name});
+  }};
+  const h=harness({locks}),owner=h.store.applicationAttemptOwner("company","staff","user");
+  const job={id:"one",revision:7,
+   ...(reason==="case_list_job_changed"?{caseListSource:{sourceRevision}}:{mailApplication:{id:applicationId,revision:1}})};
+  h.state.errorOverride=Object.assign(Error("synthetic definitive rejection"),{code:"functions/failed-precondition",details});
+  h.state.beforeApplicationResponse=()=>{
+   if(race==="other tab holds the lock"){locked=true;return;}
+   h.store.removeSavedApplicationAttempt(owner,job.id,firstRequest);
+   const next={requestId:latestRequest,startedAt:h.state.now};
+   h.store.saveApplicationAttempt(owner,job.id,next);
+   h.attempts.current.set(job.id,next);
+  };
+  assert.equal(await h.apply(job),false);
+  assert.equal(h.state.calls,1);
+  assert.equal(h.state.writes,0);
+  assert.equal(h.state.accepted,"");
+  assert.match(h.state.messages.at(-1),/まだ確定していません/);
+  const expected=race==="other tab holds the lock"?firstRequest:latestRequest;
+  assert.equal(h.store.loadSavedApplicationAttempts(owner).get(job.id)?.requestId,expected,
+   reason+" must preserve the saved request while "+race);
+  assert.equal(h.attempts.current.get(job.id)?.requestId,expected,
+   reason+" must preserve the displayed request while "+race);
+  if(race==="other tab holds the lock"){
+   assert.equal(refusals,1);
+   locked=false;
+   h.state.beforeApplicationResponse=null;
+   assert.equal(await h.apply(job),false);
+   assert.equal(h.state.requests[1].requestId,firstRequest);
+   assert.equal(h.store.loadSavedApplicationAttempts(owner).size,0);
+   assert.equal(h.attempts.current.size,0);
+   assert.equal(h.state.writes,0);
+  }
+ }
+}
+console.log("Application rejection cleanup: six cases preserve recorded requests through cross-tab races.");
+
 for(const change of ["valid","wrong-code","wrong-id","wrong-revision","not-definitive","missing-details"]){
  const h=harness(),mail={id:"a".repeat(64),revision:1};
  const detail={reason:"mail_application_changed",accepted:false,applicationId:mail.id,revision:1};
@@ -261,7 +338,7 @@ for(const change of ["valid","wrong-code","wrong-id","wrong-revision","not-defin
 console.log("改訂拒否の復旧: 確定前拒否6条件を照合し、該当する要求だけ解除。最新内容の手動確認後に新たな要求で応募。");
 
 {
- const h=harness({loseFirstResponse:true});await h.apply({id:"one",revision:7});
+ const h=harness();h.state.errorOverride=Error("synthetic pre-commit failure");await h.apply({id:"one",revision:7});h.state.errorOverride=null;
  assert.equal(h.state.requests[0].expectedJobRevision,7);
  const request=h.attempts.current.get("one").requestId;h.attempts.current.clear();
  await h.apply({id:"one",revision:9});assert.equal(h.state.requests[1].expectedJobRevision,7);
@@ -286,3 +363,40 @@ for(const revision of [-1,1.5,"7",null,Number.MAX_SAFE_INTEGER+1]){
  assert.throws(()=>h.store.saveApplicationAttempt(owner,"one",{requestId:"request-0001",startedAt:1,expectedJobRevision:revision}));
 }
 console.log("受信案件の応募画面13条件: 保存版の維持、確定前拒否7種の照合、不正保存版5種を検証。");
+
+for(const mode of ['matched','missing-details','wrong-request','wrong-job','wrong-revision','wrong-source','transport','other-tab','old-auth']){
+ const h=harness(),sourceRevision='a'.repeat(64);
+ const owner=h.store.applicationAttemptOwner('company','staff','user');
+ const details={reason:'case_list_slot_taken',accepted:false,jobId:'one',requestId:'synthetic-request-1',expectedJobRevision:7,expectedSourceRevision:sourceRevision};
+ const error=Object.assign(Error('synthetic closed slot'),{code:'functions/already-exists',details});
+ if(mode==='missing-details')delete error.details;
+ if(mode==='wrong-request')details.requestId='other-request';
+ if(mode==='wrong-job')details.jobId='two';
+ if(mode==='wrong-revision')details.expectedJobRevision=8;
+ if(mode==='wrong-source')details.expectedSourceRevision='b'.repeat(64);
+ if(mode==='transport')error.code='functions/deadline-exceeded';
+ h.state.errorOverride=error;
+ if(mode==='other-tab')h.state.beforeApplicationResponse=()=>{
+  h.store.removeSavedApplicationAttempt(owner,'one','synthetic-request-1');
+  const next={requestId:'new-other-tab-request',startedAt:h.state.now};
+  h.store.saveApplicationAttempt(owner,'one',next);
+  h.attempts.current.set('one',next);
+ };
+ if(mode==='old-auth')h.state.beforeApplicationResponse=()=>h.version.current++;
+ assert.equal(await h.apply({id:'one',revision:7,caseListSource:{sourceRevision}}),false);
+ assert.equal(h.state.calls,1);
+ assert.equal(h.state.refreshes,0,'A sold-out reply must not fan out into more list fetches');
+ assert.equal(h.state.writes,0);
+ assert.equal(h.state.accepted,'');
+ if(mode==='matched'){
+  assert.equal(h.attempts.current.size,0);
+  assert.equal(h.store.loadSavedApplicationAttempts(owner).size,0);
+  assert.deepEqual(h.state.jobs,[{id:'two'}]);
+  assert.match(h.state.messages.at(-1),/募集枠はすでに埋まりました/);
+ }else{
+  assert.equal(h.attempts.current.get('one').requestId,mode==='other-tab'?'new-other-tab-request':'synthetic-request-1');
+  assert.equal(h.state.jobs.length,2);
+  if(mode==='old-auth')assert.equal(h.state.messages.length,0);
+ }
+}
+console.log('Application capacity result: close only the exact rejected external request; ambiguous replies, old sessions and a newer request retain recovery; no extra listing call.');

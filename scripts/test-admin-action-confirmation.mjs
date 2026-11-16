@@ -13,7 +13,7 @@ function setup({apiFailure=false,refreshFailure=false,data={},demo=false,apiWait
  const state={messages:[],calls:[],refreshes:0,revision:2,busy:false,jobs:[{id:'j',workDate:'2026-09-20'}],form:{workDate:'2026-09-20',slots:'1',basePay:'',publishAt:''}};
  const form={...state.form};
  const deps={jobs:state.jobs,openWorkspace:(group,view)=>{state.navigation={group,view};},jobEditBaselineRef:{current:{}},jobEditContextRef:{current:0},blankJobEdit:{},setTimeout:()=>{},setJobEditId:id=>state.editId=id,setJobEdit:value=>state.edit=typeof value==="function"?value(state.edit??deps.jobEdit):value,auth:{currentUser:{}},adminJobActionRef:{current:null},firebaseConfigured:!demo,functions:{},window:{confirm:()=>true,prompt:(_label,value)=>value},
-  jobForm:form,blankJobForm:{slots:'1'},jobEditId:'j',jobEditRevision:2,jobEdit:{assignedStaffId:'',clientName:'Synthetic'},invoiceLabels:[],staffPayLabels:[],staff:[],
+  jobForm:form,blankJobForm:{slots:'1'},jobEditId:'j',jobEditRevision:2,jobEditLocationRevision:null,setJobEditLocationRevision:value=>state.locationRevision=value,jobEdit:{assignedStaffId:'',clientName:'Synthetic'},invoiceLabels:[],staffPayLabels:[],staff:[],
   setMessage:m=>state.messages.push(m),setJobCreateBusy:b=>state.busy=b,setJobEditBusy:b=>state.busy=b,
   setJobForm:f=>state.form=f(state.form),setJobs:f=>state.jobs=f(state.jobs),setJobEditRevision:r=>state.revision=typeof r==='function'?r(state.revision):r,
   httpsCallable:(_functions,name)=>async(payload)=>{state.payload=payload;state.calls.push(name);await apiWait();if(apiFailure)throw Error('API rejected');return {data:{jobIds:['new'],revision:3,...data}};},
@@ -28,7 +28,7 @@ const actions=[['createJobGroup',[],/1名分の案件を作成/],['duplicateJob'
 for(const [name,args,message] of actions){
  for(const refreshFailure of [false,true]){
   const {state,handlers}=setup({refreshFailure});await handlers[name](...args);
-  assert.equal(state.calls.length,1);assert.equal(state.refreshes,1);assert.match(state.messages.at(-1),message);
+  assert.equal(state.calls.length,1,name+': '+state.messages.at(-1));assert.equal(state.refreshes,1);assert.match(state.messages.at(-1),message);
   assert.equal(state.busy,false);
   if(refreshFailure){assert.match(state.messages.at(-1),/一覧/);assert.doesNotMatch(state.messages.at(-1),/READ_FAILED/);}
   if(name==='saveJobEdit')assert.equal(state.revision,3);

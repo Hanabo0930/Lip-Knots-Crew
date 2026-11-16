@@ -75,6 +75,8 @@ export const retrySafeSheetWrites = onSchedule({ schedule: "every 5 minutes", ti
   const expired = await db.collection("sheetSyncQueue").where("status", "==", "processing").where("retryAt", "<=", now).limit(100).get();
   for (const doc of expired.docs) await db.runTransaction(async tx => {
     const current = await tx.get(doc.ref), data = current.data();
+    // Case List assignments belong to the dedicated scheduler, including when its opt-in is off.
+    if (data?.operation === "case_list.assign") return;
     if (data?.operation === "case_list.publish" && process.env.LKC_CASE_LIST_PUBLICATION_MODE !== "active") return;
     if (data?.status !== "processing" || !(data.retryAt instanceof Timestamp) || data.retryAt.toMillis() > now.toMillis()) return;
     tx.set(doc.ref, {
@@ -86,6 +88,8 @@ export const retrySafeSheetWrites = onSchedule({ schedule: "every 5 minutes", ti
   // 読込後に状態が変わった依頼をpendingへ戻さない。確認待ちは自動再試行しない。
   for (const doc of snap.docs) await db.runTransaction(async tx => {
     const current = await tx.get(doc.ref), data = current.data();
+    // Case List assignments belong to the dedicated scheduler, including when its opt-in is off.
+    if (data?.operation === "case_list.assign") return;
     if (data?.operation === "case_list.publish" && process.env.LKC_CASE_LIST_PUBLICATION_MODE !== "active") return;
     if (data?.status !== "retry_wait" || !(data.retryAt instanceof Timestamp) || data.retryAt.toMillis() > now.toMillis()) return;
     tx.set(doc.ref, requiresWriteVerification(data) ? verificationHold(data, now) : { status: "pending", updatedAt: now }, { merge: true });
@@ -109,7 +113,7 @@ async function claim(ref: FirebaseFirestore.DocumentReference): Promise<Queue | 
   const token = randomUUID();
   return db.runTransaction(async tx => {
     const snap = await tx.get(ref), data = snap.data();
-    if (!snap.exists || data?.status !== "pending") return null;
+    if (!snap.exists || data?.status !== "pending" || data.operation === "case_list.assign") return null;
     // 状態だけが待機へ戻った旧依頼も、結果未確認なら試行回数を増やさず保持する。
     if (requiresWriteVerification(data)) { tx.set(ref, verificationHold(data), { merge: true }); return null; }
     const attempts = Number(data.attempts ?? 0) + 1;
@@ -279,6 +283,9 @@ function assertSubmissionState(ref: FirebaseFirestore.DocumentReference, queue: 
 
 function assertExpenseReview(ref: FirebaseFirestore.DocumentReference, queue: Queue, job: FirebaseFirestore.DocumentData, review: FirebaseFirestore.DocumentData | undefined): void {
   if (queue.operation !== "expense.review") return;
+  if (job.caseListSource && job.assignmentSheetWrite?.externalAck) {
+    throw new ConflictError("外部連携案件の経費は専用の非公開確定経路で確認してください。");
+  }
   if (expenseMailHoldReason(job)) throw new ConflictError("受信案件の担当・勤務条件・原本を確認中のため、経費反映を停止しました。");
   if (!review || review.companyId !== queue.companyId || review.jobId !== queue.jobId || review.queueId !== ref.id ||
       !["queued", "error"].includes(String(review.status)) ||

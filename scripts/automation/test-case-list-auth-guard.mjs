@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import {runInNewContext} from 'node:vm';
 const read=p=>fs.readFileSync(new URL('../../'+p,import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^import .*;\n/gm,'');
-const paths=['jobs','job-management','case-list-source','case-list-source-core','automation-intake','admin-operations','case-list-monthly-worker','case-list-publication','case-list-publication-finalizer','case-list-publication-core'];
+const paths=['jobs','staff-session','job-management','case-list-source','case-list-source-core','automation-intake','admin-operations','case-list-monthly-worker','case-list-publication','case-list-publication-finalizer','case-list-publication-core'];
 const sources=Object.fromEntries(paths.map(p=>['functions/src/'+p+'.ts',read('functions/src/'+p+'.ts')]));
 let cases=0;
 function run(name,mutate){

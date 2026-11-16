@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import crypto from 'node:crypto';
 const dependency=createRequire(process.env.LKC_TEST_DEPENDENCY_ROOT ? path.join(process.env.LKC_TEST_DEPENDENCY_ROOT,'package.json') : import.meta.url);
 const ts=dependency('typescript');
@@ -57,17 +57,24 @@ function harness(rows,clock,options={}){
   const boundaries={'./firebase':{db},'firebase-admin/firestore':{Timestamp,FieldValue:options.firestore?FieldValue:{delete:()=>deletion,serverTimestamp:()=>Timestamp.now()}},'firebase-functions/v2/https':{HttpsError,onCall:(...args)=>args.at(-1)},'firebase-functions/v2/scheduler':{onSchedule:(options,callback)=>callback},zod:dependency('zod'),'node:crypto':crypto,googleapis:{google:{auth:{GoogleAuth:class{constructor(options){assert.deepEqual(Array.from(options.scopes),['https://www.googleapis.com/auth/spreadsheets.readonly']);}}},sheets:()=>sheets}}};
   function load(name){
     if(Object.hasOwn(boundaries,name))return boundaries[name];
+    if(['../src/case-list-projection.cjs','../src/private-ng/capacity.cjs'].includes(name)){
+     return dependency(fileURLToPath(new URL('../functions/src/'+name.slice('../src/'.length),import.meta.url)));
+    }
     assert.match(name,/^\.\/[a-z0-9-]+$/,`External import refused: ${name}`);
     if(modules.has(name))return modules.get(name);
     const source=fs.readFileSync(new URL(`../functions/src/${name.slice(2)}.ts`,import.meta.url),'utf8');
     const code=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
     const exports={};modules.set(name,exports);loaded.add(name);
-    runInNewContext(code,{exports,require:load,Buffer,...(clock?{Date:class extends Date{constructor(...args){super(...(args.length?args:[clock.now]));}static now(){return new Date(clock.now).getTime();}}}:{}),process:{env:{get APP_ENVIRONMENT(){return h.environment;}}},console:{warn:()=>{},error:()=>{}},setTimeout:callback=>{callback();return 0;}},{timeout:5000});return exports;
+    runInNewContext(code,{exports,require:load,Buffer,...(clock?{Date:class extends Date{constructor(...args){super(...(args.length?args:[clock.now]));}static now(){return new Date(clock.now).getTime();}}}:{}),process:{env:{get APP_ENVIRONMENT(){return h.environment;},DEFAULT_COMPANY_ID:companyId}},console:{warn:()=>{},error:()=>{}},setTimeout:callback=>{callback();return 0;}},{timeout:5000});return exports;
   }
   const importer=load('./shift-import'),jobs=load('./jobs'),precontact=load('./precontact');
   records.set(`sheetImportConfigs/${companyId}`,{companyId,enabled:true,spreadsheetId:sheetId,headerRow:1,dataStartRow:2,readRangeEndColumn:'BC',columns:{workDate:'A',staffName:'B',temperature:'G',arrivalTime:'H',clientName:'J',storeName:'K',makerName:'L',menuName:'M',workTime:'O',cancelled:'BC'}});
-  records.set(`staffProfiles/${staffId}`,{companyId,active:true,displayName:'Synthetic Staff'});
+  const ng=load('./staff-ng'),ngHeader=Array(11).fill('');ngHeader[10]='NG会社';
+  const ngCompanies=ng.mergeStaffNg([{sourceRef:{spreadsheetId:'synthetic-staff-master',sheetName:'マスターデータ'},ngCompanyObservation:ng.observeStaffNgCell('マスターデータ',ngHeader,Array(11).fill(''),10)}],companyId,staffId);
+  records.set(`staffProfiles/${staffId}`,{companyId,active:true,displayName:'Synthetic Staff',ngCompanies});
+  records.set('staffNgMaintenance/'+companyId,{schema:'LK_STAFF_NG_MAINTENANCE_V1',companyId,state:'OPEN',generation:0});
   const admin={uid:'synthetic-admin',token:{companyId,role:'admin'}},staff={uid:'synthetic-user',token:{companyId,role:'staff',staffId}};
+  records.set('authIdentities/'+staff.uid,{companyId,staffId,active:true});
   h.managedCancel=jobId=>load('./analytics').adminSetJobCancellation({auth:admin,data:{jobId,reasonCategory:'other',reasonNote:'Synthetic cancellation',financialTreatment:'neither'}});
   h.restore=jobId=>load('./analytics').adminRestoreCancelledJob({auth:admin,data:{jobId,note:'Synthetic restore'}});
   h.checkCancellationSource=(old,incoming,readStartedAtMs)=>load('./sheet-write-core').importedCancellationSourceAck(old,incoming,readStartedAtMs);
@@ -328,6 +335,7 @@ await test('precontact from previous staff is quarantined across repeated import
  for(let i=0;i<2;i++){await h.sync();const current=h.records.get(`jobs/${job.id}`);assert.equal(current.preContact,null);assert.equal(current.preContactNeedsReview,true);}
  await assert.rejects(h.precontact(job.id),{code:'permission-denied'});
  const auth={uid:'new-user',token:{companyId,role:'staff',staffId:'new-staff'}};
+ h.records.set('authIdentities/'+auth.uid,{companyId,staffId:'new-staff',active:true});
  await h.precontact(job.id,{temperature:36.5,arrivalTime:'09:30'},auth);let current=h.records.get(`jobs/${job.id}`);assert.equal(current.preContact.staffId,'new-staff');assert.equal(current.preContactNeedsReview,false);
  await h.sync();current=h.records.get(`jobs/${job.id}`);assert.equal(current.preContact.staffId,'new-staff');assert.equal(current.preContact.temperature,36.5);
 });

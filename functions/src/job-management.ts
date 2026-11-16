@@ -71,14 +71,25 @@ const PublicationSchema = z.object({
   publishAt: z.string().nullable().optional(),
 });
 
+const locationFields = {
+  storeAddress: z.string().max(300).optional(),
+  storeNearestStation: z.string().max(120).optional(),
+};
+
+const CaseListLocationEditSchema = z.object({
+  jobId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/),
+  revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  locationRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  fields: z.object(locationFields).strict().refine(fields => Object.keys(fields).length > 0),
+}).strict();
+
 const EditSchema = z.object({
   jobId: z.string().min(1),
   revision: z.number().int().min(0).optional(),
   fields: z.object({
     clientName: z.string().max(200).optional(),
     storeName: z.string().max(200).optional(),
-    storeAddress: z.string().max(300).optional(),
-    storeNearestStation: z.string().max(120).optional(),
+    ...locationFields,
     makerName: z.string().max(200).optional(),
     menuName: z.string().max(500).optional(),
     entryTime: z.string().max(100).optional(),
@@ -472,6 +483,50 @@ export const publishScheduledJobs = onSchedule(
   }
 );
 
+export const adminEditCaseListLocation = onCall(async (request) => {
+  const session = requireAdmin(request);
+  const companyId = companyFromClaims(session.token);
+  await assertProductionOperational(companyId);
+  const input = CaseListLocationEditSchema.parse(request.data ?? {});
+  const jobRef = db.collection("jobs").doc(input.jobId);
+
+  const result = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(jobRef);
+    const job = snap.data();
+    if (job?.companyId !== companyId) throw new HttpsError("not-found", "案件が見つかりません。");
+    if (!job.caseListSource || cancellationSourceAckPending(job)) {
+      throw new HttpsError("failed-precondition", "連携中の案件情報を確認してから住所・最寄駅を編集してください。");
+    }
+    const revision = job.revision ?? 0;
+    const locationRevision = job.locationRevision === undefined ? 0 : job.locationRevision;
+    if (!Number.isSafeInteger(revision) || revision < 0 ||
+        !Number.isSafeInteger(locationRevision) || locationRevision < 0 || locationRevision >= Number.MAX_SAFE_INTEGER) {
+      throw new HttpsError("failed-precondition", "案件または住所の保存版を確認できません。");
+    }
+    if (input.revision !== revision || input.locationRevision !== locationRevision) {
+      throw new HttpsError("aborted", "案件または住所が先に更新されました。画面を再読込してください。");
+    }
+
+    const update: FirebaseFirestore.DocumentData = {
+      locationRevision: locationRevision + 1,
+      updatedAt: Timestamp.now(),
+      adminEditedAt: Timestamp.now(),
+      adminEditedBy: session.uid,
+    };
+    for (const field of appOnlyJobFields) {
+      const value = input.fields[field];
+      if (value !== undefined) update[field] = value.normalize("NFKC").trim();
+    }
+    Object.assign(update, assignmentPreparationPatch(job, { ...job, ...update }));
+    tx.set(jobRef, update, { merge: true });
+    stageAudit(tx, companyId, session.uid, "job.case_list.location.edit", {
+      jobId: input.jobId, fields: Object.keys(input.fields), revision, locationRevision: update.locationRevision,
+    });
+    return { revision, locationRevision: update.locationRevision };
+  });
+  return result;
+});
+
 export const adminEditJobInputs = onCall(async (request) => {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
@@ -504,8 +559,8 @@ export const adminEditJobInputs = onCall(async (request) => {
       throw new HttpsError("not-found", "案件が見つかりません。");
     }
     const job = jobSnap.data()!;
-    if (job.caseListSource && Object.keys(input.fields).some(key => !appOnlyJobFields.includes(key as typeof appOnlyJobFields[number]))) {
-      throw new HttpsError("failed-precondition", "案件リスト連携の担当・勤務条件・金額変更は、原本との照合が必要です。現在の担当と値を保持しました。");
+    if (job.caseListSource) {
+      throw new HttpsError("failed-precondition", "案件リスト連携の住所・最寄駅は最新の管理画面から編集してください。担当・勤務条件・金額は原本との照合が必要です。");
     }
     if (cancellationSourceAckPending(job)) {
       throw new HttpsError("failed-precondition", "取消の原本反映が未確認です。勤務枠を保持しているため、原本確認後に編集してください。");

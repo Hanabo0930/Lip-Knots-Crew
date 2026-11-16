@@ -1,4 +1,4 @@
-import PendingAssignmentsPanel from './PendingAssignmentsPanel';
+import { loadWhenShown } from "./loadWhenShown";
 import {staffShiftVisible,staffReservationConfirmed,type ReservationJob} from './job-list';
 import type {MailApplication} from "./MailApplicationsPanel";
 import {filterOpenJobs} from "./open-job-search";
@@ -56,6 +56,10 @@ import {
 import { sleep, useAsyncAction } from "./useAsyncAction";
 
 const loadStaffDiagnostics = () => import("./diagnostics");
+const PendingAssignmentsPanel = loadWhenShown(
+  () => import("./PendingAssignmentsPanel"),
+  "確認待ちの手配を読み込んでいます。",
+);
 
 type View = "home" | "jobs" | "shifts" | "submit" | "contact";
 type BusinessDataStatus = "idle" | "loading" | "ready" | "error";
@@ -2424,7 +2428,8 @@ export default function App(){
         <div className="section-heading"><p>この端末に受付確認できていない応募が{applicationAttemptsRef.current.size}件あります。</p>
           <button className="secondary" onClick={()=>void checkApplicationReceipts()} disabled={applicationPending} aria-busy={receiptLookupPending}>{receiptLookupPending?"照会中…":"応募の受付を確認"}</button></div>}
       {businessDataFallback??<>
-        <PendingAssignmentsPanel jobs={pendingApplications} busy={businessRefreshing||businessDataStatus==="loading"||submissionEditPending||applicationPending} onRefresh={()=>refreshBusinessData(true)}/>
+        {pendingApplications.length > 0 &&
+          <PendingAssignmentsPanel jobs={pendingApplications} busy={businessRefreshing||businessDataStatus==="loading"||submissionEditPending||applicationPending} onRefresh={()=>refreshBusinessData(true)}/>}
         <MonthlyShiftCalendar jobs={myJobs} onSelect={openShiftJob} today={businessDate}/>
         <div className="shift-list-heading"><h3>これからのシフト</h3><span>{upcomingShifts.length}件</span></div>
         {upcomingShifts.length

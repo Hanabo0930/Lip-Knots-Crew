@@ -37,15 +37,22 @@ const React = await import('react');
 const { renderToStaticMarkup } = await import('react-dom/server');
 const appPath = 'apps/staff/src/App.tsx';
 const app = ts.createSourceFile(appPath, readFileSync(appPath, 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
-let panelImport;
+let panelModule;
 let panel;
 function visit(node) {
- if (ts.isImportDeclaration(node) && node.importClause?.name?.text === 'PendingAssignmentsPanel') panelImport = node;
+ if (ts.isVariableDeclaration(node) && node.name.getText(app) === 'PendingAssignmentsPanel') {
+  const loader = node.initializer;
+  assert.ok(loader && ts.isCallExpression(loader) && loader.expression.getText(app) === 'loadWhenShown');
+  const load = loader.arguments[0];
+  assert.ok(load && ts.isArrowFunction(load) && ts.isCallExpression(load.body));
+  assert.equal(load.body.expression.kind, ts.SyntaxKind.ImportKeyword);
+  panelModule = load.body.arguments[0]?.getText(app);
+ }
  if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(app) === 'PendingAssignmentsPanel') panel = node;
  ts.forEachChild(node, visit);
 }
 visit(app);
-assert.equal(panelImport?.moduleSpecifier.text, './PendingAssignmentsPanel');
+assert.equal(panelModule, '"./PendingAssignmentsPanel"');
 assert.ok(panel, 'The shifts screen must mount the pending assignments panel');
 const props = new Map(panel.attributes.properties
  .filter(ts.isJsxAttribute)

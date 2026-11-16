@@ -373,8 +373,8 @@ const loginHandlers=app.slice(app.indexOf('  async function requestLogin()'),app
 const loginFixtureCode=ts.transpileModule(`
 import React from 'react';import {createRoot} from 'react-dom/client';import {useAsyncAction} from '/src/useAsyncAction.ts';import '/src/styles.css';
 window.loginFixture={calls:[],pending:[],signIns:0};
-const firebaseConfigured=true,functions={},auth={},authPersistenceReady=Promise.resolve();
-const httpsCallable=()=>input=>new Promise((resolve,reject)=>{window.loginFixture.calls.push(input);window.loginFixture.pending.push({resolve,reject});});
+const firebaseConfigured=true,functions={},auth={},authPersistenceReady=Promise.resolve(),currentDeviceId='synthetic-login-device';
+const httpsCallable=(_functions,name)=>input=>new Promise((resolve,reject)=>{window.loginFixture.calls.push({name,input});window.loginFixture.pending.push({resolve,reject});});
 const isSignInWithEmailLink=()=>true,signInWithEmailLink=async()=>{window.loginFixture.signIns++;};
 ${section(app,'function messageTone(','function submissionFileContentType(')}
 function Fixture(){
@@ -686,15 +686,22 @@ try {
     const button=page.getByRole('button',{name:action==='resend'?'ログインメールを送る':'確認コードでログイン',exact:true});
     const before=await page.evaluate(()=>window.loginFixture.calls.length);
     await button.evaluate(button=>{button.click();button.click();});
-    await page.waitForFunction(count=>window.loginFixture.calls.length===count,before+1);
+    await page.waitForFunction(count=>window.loginFixture.calls.length>=count,before+1);
+    const expectedCall={name:'requestStaffLoginLink',input:action==='resend'
+      ?{email:'synthetic@example.test',continueUrl:new URL(page.url()).origin}
+      :{email:'synthetic@example.test',code:'123456',deviceId:'synthetic-login-device'}};
+    assert.deepEqual(await page.evaluate(start=>window.loginFixture.calls.slice(start),before),[expectedCall]);
     assert.equal(await emailInput.isDisabled(),true);assert.equal(await codeInput.isDisabled(),true);
     assert.equal(await page.locator('button:disabled').count(),2);assert.equal(await codeInput.inputValue(),'123456');
     await page.evaluate(()=>window.loginFixture.pending.shift().reject(Error('合成処理に失敗しました。')));
     await page.getByRole('alert').waitFor();await page.waitForFunction(()=>!document.querySelector('input').disabled);
     assert.equal(await codeInput.inputValue(),'123456');assert.equal(await button.isEnabled(),true);
-    await button.click();await page.waitForFunction(count=>window.loginFixture.calls.length===count,before+2);
+    await button.click();await page.waitForFunction(count=>window.loginFixture.calls.length>=count,before+2);
+    assert.deepEqual(await page.evaluate(start=>window.loginFixture.calls.slice(start),before),[expectedCall,expectedCall]);
     assert.equal(await page.getByRole('alert').count(),0,'Previous error must disappear while retry is pending');
-    await page.evaluate(()=>window.loginFixture.pending.shift().resolve({data:{accepted:true,message:'送信しました。',emailActionLink:'https://example.test/synthetic'}}));
+    await page.evaluate(action=>window.loginFixture.pending.shift().resolve({data:action==='resend'
+      ?{accepted:true,message:'送信しました。'}
+      :{emailActionLink:'https://example.test/synthetic'}}),action);
     await page.waitForFunction(()=>!document.querySelector('input').disabled);assert.equal(await codeInput.inputValue(),'');
   }
   assert.equal(await page.evaluate(()=>window.loginFixture.signIns),1);

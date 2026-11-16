@@ -31,6 +31,7 @@ export function harness(){
         if(!ref.path){const docs=queryResult(ref);queryReads.push([ref,JSON.stringify(docs.map(doc=>doc.path))]);for(const doc of docs)reads.set(doc.path,JSON.stringify(records.get(doc.path)));return {docs:docs.map(snap)};}
         reads.set(ref.path,JSON.stringify(records.get(ref.path)));return snap(ref);
       },
+        create:(ref,data)=>writes.push({ref,data:clone(data),create:true}),
         set:(ref,data,options)=>writes.push({ref,data:clone(data),merge:options?.merge}),
         update:(ref,data)=>writes.push({ref,data:clone(data),merge:true,update:true})};
       const result=await callback(tx);await h.beforeCommit?.({attempt,reads,writes});
@@ -38,6 +39,7 @@ export function harness(){
       if(h.failCommit)throw Error("synthetic commit failure");
       const next=new Map(records);
       for(const write of writes){
+        if(write.create)assert.ok(!next.has(write.ref.path),"create requires a missing document");
         if(write.update)assert.ok(next.has(write.ref.path),"update missing");
         const value=write.merge?{...next.get(write.ref.path)}:{};
         for(const [k,v] of Object.entries(write.data)){assert.notEqual(v,undefined,"undefined field");if(v?.__delete)delete value[k];else value[k]=clone(v);}

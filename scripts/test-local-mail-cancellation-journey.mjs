@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
-import {localAcceptanceEnvironment,blockNonEmulatorConnections} from './local-firestore-acceptance-safety.mjs';
+import {localAcceptanceEnvironment,blockNonEmulatorConnections,seedLocalApplicationAccess} from './local-firestore-acceptance-safety.mjs';
 const environment=localAcceptanceEnvironment(process.env),network=blockNonEmulatorConnections(environment.port);
 const require=createRequire(import.meta.url),{google}=require('googleapis');
 const {analyzeFetchedCaseMail}=await import('./case-mail-intake-adapter.mjs');
@@ -56,6 +56,7 @@ async function test(name,body){try{await body();results.push({name,passed:true})
 async function assignedFixture(){
  const h=await (await fixture()).start();await h.run();await h.import();assert.deepEqual((await h.publishCurrent()).updated,[h.job.id]);
  h.staff=[0,1].map(i=>({uid:h.companyId+'-uid-'+i,token:{role:'staff',companyId:h.companyId,staffId:h.companyId+'-staff-'+i}}));
+ await seedLocalApplicationAccess(db,h.companyId,h.staff);
  const ng=load('staff-ng'),ngHeader=Array(11).fill('');ngHeader[10]='NG会社';
  for(const [i,user] of h.staff.entries()){const staffId=user.token.staffId,ngCompanies=ng.mergeStaffNg([{sourceRef:{spreadsheetId:'synthetic-staff-master',sheetName:'マスターデータ'},ngCompanyObservation:ng.observeStaffNgCell('マスターデータ',ngHeader,Array(11).fill(''),10)}],h.companyId,staffId);await db.doc('staffProfiles/'+staffId).set({companyId:h.companyId,active:true,displayName:'Synthetic Staff '+i,ngCompanies});}
  h.publishedRevision=(await h.job.get()).data().revision;

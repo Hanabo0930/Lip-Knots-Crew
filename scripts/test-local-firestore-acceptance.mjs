@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {createRequire} from 'node:module';
-import {localAcceptanceEnvironment,blockNonEmulatorConnections} from './local-firestore-acceptance-safety.mjs';
+import {localAcceptanceEnvironment,blockNonEmulatorConnections,seedLocalApplicationAccess} from './local-firestore-acceptance-safety.mjs';
 const environment=localAcceptanceEnvironment(process.env);
 const network=blockNonEmulatorConnections(environment.port);
 const require=createRequire(import.meta.url);
@@ -63,6 +63,7 @@ async function fixture(count=1) {
   const companyId='synthetic-sdk-'+(++sequence),sheetId='synthetic-sheet-'+sequence;
   const staff=[0,1].map(i=>({uid:companyId+'-uid-'+i,token:{role:'staff',companyId,staffId:companyId+'-staff-'+i}}));
   const manager={uid:companyId+'-admin',token:{role:'admin',companyId}};
+  await seedLocalApplicationAccess(db,companyId,staff);
  const ng=load('staff-ng'),ngHeader=Array(11).fill('');ngHeader[10]='NG会社';
  for(const [i,user] of staff.entries()){const staffId=user.token.staffId,ngCompanies=ng.mergeStaffNg([{sourceRef:{spreadsheetId:'synthetic-staff-master',sheetName:'マスターデータ'},ngCompanyObservation:ng.observeStaffNgCell('マスターデータ',ngHeader,Array(11).fill(''),10)}],companyId,staffId);await db.doc('staffProfiles/'+staffId).set({companyId:companyId,active:true,displayName:'Synthetic Staff '+i,ngCompanies});}
   const month=tomorrow.slice(0,4)+'.'+Number(tomorrow.slice(5,7));
@@ -152,7 +153,7 @@ try {
     await assert.rejects(preparation(h,1),e=>e.code==='permission-denied');
     await assert.rejects(call(admin.confirmApplication,h.staff[0],{jobId:h.jobId,expectedRevision:(await h.job()).revision}),e=>e.code==='permission-denied');
     assert.equal((await h.list('sheetSyncQueue')).length,before);
-    assert.equal((await call(tasks.getMyTasks,{...h.staff[0],token:{...h.staff[0].token,companyId:'synthetic-other'}})).count,0);
+    await assert.rejects(call(tasks.getMyTasks,{...h.staff[0],token:{...h.staff[0].token,companyId:'synthetic-other'}}),e=>e.code==='permission-denied');
   });
   await test('書込後の応答喪失: 結果未確認で保持し実SDK再呼出でも再書込みしない',async()=>{
     const h=await fixture();await h.apply();await confirmSource(h);await preparation(h);

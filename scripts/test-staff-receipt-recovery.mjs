@@ -11,6 +11,7 @@ const ts=req("typescript"),z=req("zod").z,{chromium}=req("@playwright/test");
 const app=readFileSync(path.join(repo,"apps/staff/src/App.tsx"),"utf8");
 const server=readFileSync(path.join(repo,"functions/src/submission-files.ts"),"utf8");
 const integrity=readFileSync(path.join(repo,"functions/src/submission-integrity.ts"),"utf8");
+const staffSession=readFileSync(path.join(repo,"functions/src/staff-session.ts"),"utf8");
 const transpile=s=>ts.transpileModule(s,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText;
 function block(source,start,end){const a=source.indexOf(start),b=source.indexOf(end,a);assert.ok(a>=0&&b>a,start);return source.slice(a,b);}
 const poll=block(app,"  async function pollSubmissionProcessing(","  async function uploadSubmission(");
@@ -19,27 +20,34 @@ const pending=block(app,"  function isSubmissionActionPending(","\n  useEffect("
 const hook=readFileSync(path.join(repo,"apps/staff/src/useAsyncAction.ts"),"utf8").split("\nexport function sleep(")[0].replace(/^import .*?;\s*/,"").replaceAll("export ","");
 const backendCode=transpile(
  block(server,"const ProcessingStatusSchema =","\ntype FileView =")+
+ staffSession.slice(staffSession.indexOf("type StaffSessionOptions")).replaceAll("export ","")+"\n"+
+ block(server,"async function readSubmissionActor(","\nexport const getSubmissionTimeline =")+
  block(integrity,"export function assertSubmissionCounters(","\n/**").replace("export ","")+
  block(integrity,"export function assertReplacementRequest(","\n}").replace("export ","")+"\n}"+
  block(server,"export const getSubmissionProcessingStatus =","\nexport const getResubmissionComparison =").replace("export const ","var ")
 );
 class HttpsError extends Error{constructor(code,message){super(message);this.code=code;}}
+class Timestamp{constructor(seconds,nanoseconds=0){this.seconds=seconds;this.nanoseconds=nanoseconds;}}
 const cases=[],record=(name)=>cases.push({name,passed:true});
 const deferred=()=>{let yes,no;const promise=new Promise((resolve,reject)=>{yes=resolve;no=reject;});return {promise,yes,no};};
 function fixture(options={}){
  const state={messages:[],refresh:[],api:[],reads:[],processing:[],queue:new Set(),now:0,mutations:0};
  const receipt={companyId:"test-company",staffId:"test-staff",jobId:"test-job",type:"report",status:"completed",totalFiles:1,completedFiles:1,jobStatusApplied:true,...options.receipt};
  const replacement={companyId:receipt.companyId,jobId:receipt.jobId,staffId:receipt.staffId,type:receipt.type,status:"submitted",replacementSubmissionId:"receipt-1",...options.replacement};
- const claims={companyId:"test-company",staffId:"test-staff",role:"staff"};
- const db={collection:name=>({doc:id=>({get:async()=>{
+ const claims={companyId:"test-company",staffId:"test-staff",role:"staff",auth_time:20};
+ const tx={get:async({name,id})=>{
   state.reads.push([name,id]);
   if(name==="submissions"){if(options.gate)await options.gate.promise;return {exists:!options.missing,id,data:()=>receipt};}
   if(name==="resubmissionRequests")return {exists:true,id,data:()=>replacement};
+  if(name==="staffProfiles"&&id===claims.staffId)return {exists:true,data:()=>({companyId:claims.companyId,active:true})};
+  if(name==="authIdentities"&&id==="test-uid")return {exists:!options.missingIdentity,data:()=>options.missingIdentity?undefined:({companyId:claims.companyId,staffId:claims.staffId,active:true,...options.identity})};
   throw Error("Unexpected read collection "+name);
- }})})};
- const api={z,HttpsError,db,requireAuth:request=>request.auth,companyFromClaims:token=>token.companyId,
-  staffFromClaimsSafe:token=>token.staffId,onCall:fn=>fn,assertJobAccess:async(job,company,role,staff)=>{
+ }};
+ const db={collection:name=>({doc:id=>({name,id})}),runTransaction:callback=>callback(tx)};
+ const api={z,HttpsError,Timestamp,db,requireAuth:request=>request.auth,companyFromClaims:token=>token.companyId,
+  staffFromClaimsSafe:token=>token.staffId,onCall:fn=>fn,assertJobAccess:async(job,company,role,staff,reader)=>{
    assert.equal(job,"test-job");assert.equal(company,"test-company");assert.equal(role,"staff");assert.equal(staff,"test-staff");
+   assert.equal(reader,tx);
   }};
  vm.runInNewContext(backendCode,api);
  let ctx;
@@ -72,10 +80,13 @@ function fixture(options={}){
 }
 async function verifyReviewDelta(){
  for(const change of ["auth","context"]){
+  let changed=false;
   const f=fixture({receipt:{status:"processing",completedFiles:0},sleep:async({ctx})=>{
+   changed=true;
    if(change==="auth")ctx.authLoadVersionRef.current++;else ctx.submissionContextVersionRef.current++;
   }});
   await f.ctx.recheckSubmissionProcessing("receipt-1");
+  assert.equal(changed,true,"The valid callable response must reach the polling backoff");
   assert.equal(f.state.api.length,1,"A stale backoff must not issue another status read");
   assert.equal(f.state.refresh.length,0);
   assert.equal(f.ctx.isPending("submission-refresh"),false);
@@ -96,6 +107,14 @@ if(process.argv.includes("--review-delta-only")){
 const browserDeltaOnly=process.argv.includes("--review-browser-delta-only");
 if(!browserDeltaOnly){
 await verifyReviewDelta();
+
+for(const options of [{missingIdentity:true},{identity:{revokedAt:new Timestamp(21)}}]){
+ const f=fixture(options);await f.ctx.recheckSubmissionProcessing("receipt-1");
+ assert.match(f.state.messages.at(-1),/確認できません/);
+ assert.equal(f.state.reads.some(([name])=>name==="submissions"),false);
+ assert.equal(f.state.refresh.length,0);
+ record("Missing or revoked staff identity blocks the receipt before the submission read");
+}
 
 {
  const f=fixture();await f.ctx.recheckSubmissionProcessing("receipt-1");
@@ -186,7 +205,7 @@ for(const [id,file]of [
 modules.recovery=transpile(readFileSync(path.join(repo,"apps/staff/src/SubmissionProcessingRecovery.tsx"),"utf8"));
 const historyStart=app.indexOf("<hr/><h3>提出履歴</h3>"),historyEnd=app.indexOf("\n    </section>}",historyStart);
 assert.ok(historyStart>=0&&historyEnd>historyStart);
-modules.history=transpile('import SubmissionProcessingRecovery from "recovery";export default function History(props){const {submissions:submissionHistory,disabled:submissionEditPending=false,status:submissionHistoryStatus="ready",scope:draftKey="synthetic-scope"}=props;const functions={},isPending=()=>submissionHistoryStatus==="loading",refreshSubmissionInformation=()=>{},recheckSubmissionProcessing=id=>window.checkRecovery(id),refreshFilePreview=async()=>null,SubmissionHistoryFiles=()=>null;return <>'+app.slice(historyStart,historyEnd)+'</>;}');
+modules.history=transpile('import SubmissionProcessingRecovery from "recovery";export default function History(props){const {submissions:submissionHistory,disabled:submissionEditPending=false,status:submissionHistoryStatus="ready",scope:draftKey="synthetic-scope"}=props;const functions={},isPending=()=>submissionHistoryStatus==="loading",refreshSubmissionInformation=()=>{},recheckSubmissionProcessing=id=>window.checkRecovery(id),refreshFilePreview=async()=>null,SubmissionHistoryFiles=()=>null,nextSubmissionHistoryCursor=null,submissionHistoryPageError="",loadEarlierSubmissionHistory=async()=>{};return <>'+app.slice(historyStart,historyEnd)+'</>;}');
 
 const bundle="const modules="+JSON.stringify(modules)+";const cache={};function require(id){if(cache[id])return cache[id].exports;if(!modules[id])throw Error('No local module '+id);const module={exports:{}};cache[id]=module;new Function('module','exports','require',modules[id])(module,module.exports,require);return module.exports;}"+
  "const React=require('react'),root=require('react-dom/client').createRoot(document.getElementById('root')),Recovery=require('recovery').default,History=require('history').default;"+
@@ -233,12 +252,17 @@ try{
     {id:"receipt-1",purpose:"initial",status:"processing",createdAt:"2026-10-03T00:00:00Z",files:[{}]},
     {id:"receipt-2",purpose:"replacement",status:"completed",createdAt:"2026-10-03T01:00:00Z",files:[{}]}
    ]}),status);
-   await page.waitForFunction(expected=>document.querySelector('[aria-label="状況を確認する提出"]').disabled===expected,status!=="ready");
-   assert.equal(await select.inputValue(),"receipt-2","Actual App history conditional must retain selected receipt through loading/error");
-   assert.equal(await button.isDisabled(),status!=="ready");
+   if(status!=="ready"){
+    await select.waitFor({state:"detached"});
+    assert.equal(await button.count(),0,"Unverified history must not offer a receipt action");
+   }else{
+    await select.waitFor();
+    assert.equal(await select.inputValue(),"receipt-2","Confirmed history restores the selected receipt in the same scope");
+    assert.equal(await button.isEnabled(),true);
+   }
   }
   assert.equal(errors.length,0);await context.close();
-  record("Review delta: actual App history JSX at "+width+"px retains receipt B and disables recheck during loading/error");
+  record("Review delta: actual App history JSX at "+width+"px hides stale actions during loading/error and restores receipt B after readback");
  }
 }finally{await browser.close();}
 assert.equal(external.length,0);

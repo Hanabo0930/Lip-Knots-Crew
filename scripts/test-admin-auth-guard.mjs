@@ -98,8 +98,9 @@ assert.ok(!pendingLoad.whileWaiting.includes('admin-ready'), 'the existing loadi
 const renderStart = source.indexOf('  if (firebaseConfigured && !user) {');
 const alternateStart = source.indexOf('  if (firebaseConfigured && (!user || !adminAuthorized&&!adminShellRetained)) {');
 const gateStart = renderStart >= 0 ? renderStart : alternateStart;
-const gateEnd = source.indexOf('\n\n  const unresolved =', gateStart);
-assert.ok(gateStart >= 0 && gateEnd > gateStart, 'the actual Admin login gate must be present');
+const gateClose = source.indexOf('\n  }\n', gateStart);
+assert.ok(gateStart >= 0 && gateClose > gateStart, 'the actual Admin login gate must be present');
+const gateEnd = gateClose + '\n  }'.length;
 const gate = `(() => { ${source.slice(gateStart, gateEnd)}; return null; })()`;
 const gateJs = ts.transpileModule(gate, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React } }).outputText;
 function renderGate({ configured = true, user = null, authorized = false, retained = false, ready = false, message = '', authMessage = '', loginMessage = '', loginBusy = false } = {}) {

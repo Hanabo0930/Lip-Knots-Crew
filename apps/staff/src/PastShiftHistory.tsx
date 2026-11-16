@@ -47,7 +47,7 @@ export function PastShiftHistoryView<T extends PastShiftRecord & ShiftCardJob>({
     <button className="secondary" onClick={onRetry} disabled={state.status === "loading" || state.loadingMore}>
       {state.error ? "もう一度読み込む" : "この年を更新"}
     </button>
-    <p>古い日付から読み込みます。給与明細・源泉徴収票は、この一覧には含まれません。</p>
+    <p>新しい勤務日から読み込みます。給与明細・源泉徴収票は、この一覧には含まれません。</p>
   </section>;
 }
 

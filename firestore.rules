@@ -22,18 +22,42 @@ service cloud.firestore {
     function isStaff() {
       return role() == 'staff';
     }
-    function activeIdentity() {
-      return !exists(/databases/$(database)/documents/authIdentities/$(request.auth.uid)) ||
-        (get(/databases/$(database)/documents/authIdentities/$(request.auth.uid)).data.active == true &&
-          get(/databases/$(database)/documents/authIdentities/$(request.auth.uid)).data.companyId == companyId() &&
-          get(/databases/$(database)/documents/authIdentities/$(request.auth.uid)).data.staffId == staffId());
+    function identityAuthenticationCurrent(identity) {
+      let revokedAt = identity.get('revokedAt', null);
+      let authTime = request.auth.token.get('auth_time', null);
+      return revokedAt == null ||
+        (revokedAt is timestamp && authTime is int && authTime >= 0 && authTime <= 253402300799 &&
+          timestamp.value(authTime * 1000) >= revokedAt);
+    }
+    function currentIdentity(identity) {
+      return identity.active == true && identity.companyId == companyId() && identity.staffId == staffId() &&
+        identityAuthenticationCurrent(identity);
+    }
+    function requiresDeviceCredential(profile) {
+      return ('deviceBoundAuthRequired' in profile && profile.deviceBoundAuthRequired == true) ||
+        'crewDeviceSession' in request.auth.token || 'crewDeviceGeneration' in request.auth.token;
+    }
+    function currentDeviceCredential(identity) {
+      return 'crewDeviceSession' in request.auth.token && 'crewDeviceGeneration' in request.auth.token &&
+        request.auth.token.crewDeviceSession is string &&
+        request.auth.token.crewDeviceSession.matches('device_[0-9a-f]{28}') &&
+        request.auth.token.crewDeviceGeneration is string &&
+        request.auth.token.crewDeviceGeneration.matches('[0-9a-f]{48}') &&
+        'deviceCredentials' in identity && identity.deviceCredentials is map &&
+        request.auth.token.crewDeviceSession in identity.deviceCredentials &&
+        identity.deviceCredentials[request.auth.token.crewDeviceSession] == request.auth.token.crewDeviceGeneration;
+    }
+    function activeIdentity(profile) {
+      let identityPath = /databases/$(database)/documents/authIdentities/$(request.auth.uid);
+      return exists(identityPath)
+        ? currentIdentity(get(identityPath).data) &&
+          (!requiresDeviceCredential(profile) || currentDeviceCredential(get(identityPath).data))
+        : !requiresDeviceCredential(profile);
     }
     function activeStaff() {
-      return isStaff() &&
-        exists(/databases/$(database)/documents/staffProfiles/$(staffId())) &&
-        get(/databases/$(database)/documents/staffProfiles/$(staffId())).data.active == true &&
-        sameCompany(get(/databases/$(database)/documents/staffProfiles/$(staffId())).data.companyId) &&
-        activeIdentity();
+      let profilePath = /databases/$(database)/documents/staffProfiles/$(staffId());
+      return isStaff() && exists(profilePath) && get(profilePath).data.active == true &&
+        sameCompany(get(profilePath).data.companyId) && activeIdentity(get(profilePath).data);
     }
     function emergencyUnlocked() {
       return !signedIn() ||
@@ -42,7 +66,7 @@ service cloud.firestore {
     }
 
     match /companies/{company}/public/{document=**} {
-      allow read: if signedIn() && companyId() == company;
+      allow read: if signedIn() && companyId() == company && (isAdmin() || activeStaff());
       allow write: if false;
     }
 
@@ -101,8 +125,9 @@ service cloud.firestore {
     }
 
     match /deviceTokens/{uid}/tokens/{tokenId} {
-      allow read: if signedIn() && request.auth.uid == uid;
-      allow create, update, delete: if signedIn() && request.auth.uid == uid && emergencyUnlocked();
+      allow read: if signedIn() && request.auth.uid == uid && (isAdmin() || activeStaff());
+      allow create, update, delete: if signedIn() && request.auth.uid == uid &&
+        (isAdmin() || activeStaff()) && emergencyUnlocked();
     }
 
 
@@ -178,6 +203,10 @@ service cloud.firestore {
       allow read: if signedIn() && isAdmin() &&
         sameCompany(resource.data.companyId);
       allow write: if false;
+    }
+
+    match /externalExpenseCompletionAttempts/{jobId} {
+      allow read, write: if false;
     }
 
 

@@ -55,6 +55,10 @@ function validDate(date: unknown): date is string {
 }
 const isManual = (a: Data): boolean => a.schema === "LK_CASE_LIST_MANUAL_ASSIGN_V1" && a.origin === "SOURCE_MANUAL";
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+function assertStaffApplicationCheck(queue:Data,job:Data,staff:Data,queueId:string):Data|null {
+  if(queue.staffApplicationCheck===undefined&&job.staffApplicationCheck===undefined)return null;
+  return (require('./staff-ng') as typeof import('./staff-ng')).assertStaffApplicationCheck(queue,job,staff,queueId);
+}
 function fingerprint(queue: Data): string {
   return hashCaseList({ companyId: queue.companyId ?? null, jobId: queue.jobId ?? null, operation: queue.operation ?? null, dateKey: queue.dateKey ?? null,
     actorUid: queue.actorUid ?? null, actorStaffId: queue.actorStaffId ?? null, idempotencyKey: queue.idempotencyKey ?? null,
@@ -382,6 +386,7 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
     const staff = staffSnap.data(), dayLock = daySnap.data(), identity = identitySnap.data();
     need(staff && dayLock && (!identitySnap.exists || identity?.active === true && identity.companyId === queue.companyId && (isManual(object(queue.caseListAssignment)) || identity.staffId === queue.actorStaffId)), "ACTOR_IDENTITY_REVOKED");
     const checked = assertCaseListMonthlyAuthority(queueRef.id, queue, job, staff, dayLock, currentConfig, approval, !!owner);
+    if (!owner && !isManual(checked.assignment) && String(queue.caseListPhase?.phase ?? 'SOURCE_PREPARE').startsWith('SOURCE_')) assertStaffApplicationCheck(queue,job,staff,queueRef.id);
     if (requireClaim) {
       const lease = leaseSnap.data(), operation = operationSnap.data();
       need(queue.status === "processing" && queue.claimToken === claimToken && queue.retryAt instanceof Timestamp && queue.retryAt.toMillis() > Date.now() &&
@@ -412,12 +417,12 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
     });
   }
   async function holdUnclaimed(reason: string): Promise<void> {
-    if (!(await getProductionOperationalState(initial!.companyId)).operational) return;
     await db.runTransaction(async tx => {
       const [queueSnap, configSnap, operationSnap] = await Promise.all([tx.get(queueRef), tx.get(configRef), tx.get(operationRef)]);
       const current = queueSnap.data(), enabled = configSnap.data();
       if (!current || !enabled || current.status !== "pending" || current.operation !== "case_list.assign" || fingerprint(current) !== fingerprint(initial!) ||
         enabled.companyId !== initial!.companyId || enabled.caseListEnabled !== true || enabled.caseListAssignmentsEnabled !== true) return;
+      if (!(await getProductionOperationalState(current.companyId, tx)).operational) return;
       const priorOperation = operationSnap.exists;
       let knownReady = false;
       if (priorOperation && reason === "ANOTHER_CASE_LIST_OPERATION_ACTIVE") {
@@ -457,6 +462,7 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
           phase = "SOURCE_PREPARE";
         }
       }
+      need((await getProductionOperationalState(current.queue.companyId, tx)).operational, "GLOBAL_OPERATION_STOPPED");
       const deadline = Timestamp.fromMillis(Date.now() + LEASE_MS), now = Timestamp.now();
       const phaseState = { schema: PHASE_SCHEMA, phase: owner ? "OWNER_RECONCILE" : phase, nonce: phaseNonce };
       tx.set(queueRef, { status: "processing", claimToken, retryAt: deadline, attempts: Number(current.queue.attempts ?? 0) + 1, processingStartedAt: now,
@@ -569,6 +575,10 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
           const current = await readTrusted(tx, true), records = await continuationRecords(tx, operationRef);
           const proof = checkedEvent(records[proofStage], proofStage, queueRef.id, current.queue, spreadsheetId), proofHash = hashCaseList(proof);
           const continuationHash = phaseHash(queueRef.id, current.queue, next, nonce, proofStage, proofHash), now = Timestamp.now();
+          const appCheck = proofStage === 'SOURCE_PROJECTED' && !isManual(current.assignment) ? assertStaffApplicationCheck(current.queue,current.job,current.staff,queueRef.id) : null;
+          const notificationRef = appCheck ? db.collection('notificationQueue').doc(sha256('staff-reservation|'+current.queue.companyId+'|'+queueRef.id)) : null;
+          const previousNotification = notificationRef ? await tx.get(notificationRef) : null;
+          if(appCheck) need(proof.postCatalog?.caseId===current.assignment.sourceCaseId&&HASH.test(proof.postCatalog?.sourceRevision??''),'STAFF_RESERVATION_SOURCE_PROOF_REQUIRED');
           const phaseData = { schema: PHASE_SCHEMA, phase: next, nonce, proofStage, proofHash, continuationHash };
           const nextOperation = { schema: "LK_CASE_LIST_MONTHLY_OPERATION_V1", companyId: current.queue.companyId, jobId: current.queue.jobId, queueId: queueRef.id,
             caseId: current.assignment.sourceCaseId, status: "awaiting_continuation", phaseState: "ready", phase: next, phaseNonce: nonce, proofStage, proofHash, continuationHash,
@@ -576,6 +586,14 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
           // Verify the proof we are about to publish through the same guard used
           // by the next invocation. Pending+phase+own-lease release are atomic.
           assertKnownCaseListContinuation(queueRef.id, { ...current.queue, caseListPhase: phaseData }, nextOperation, records, spreadsheetId);
+          if(appCheck){
+            // Source/NG/day-lock have been checked at this observation point.
+            // Sheets and Firestore are not one transaction. This proves a
+            // reserved staff slot, never SENT or monthly-business completion.
+            const staffReservation={schema:'LK_STAFF_RESERVATION_V1',state:'CONFIRMED',companyId:appCheck.companyId,staffId:appCheck.staffId,uid:appCheck.uid,jobId:appCheck.jobId,dateKey:appCheck.dateKey,assignedRevision:appCheck.assignedRevision,queueId:queueRef.id,applicationCheckHash:appCheck.hash,ngRevision:appCheck.ngRevision,sourceRevision:proof.postCatalog.sourceRevision,sourceProofHash:proofHash,confirmedAtMs:now.toMillis()};
+            tx.update(jobRef,{staffReservation,updatedAt:now});
+            if(notificationRef&&!previousNotification?.exists)tx.set(notificationRef,(require('./notification-core') as typeof import('./notification-core')).queueDocumentData({companyId:appCheck.companyId,targetStaffId:appCheck.staffId,title:'勤務枠を確保しました',body:`${current.assignment.dateKey} ${String(current.job.storeName??'')} / カレンダーに予定を表示しました。`,route:`/shifts/${current.queue.jobId}`,category:'staff_reservation_confirmed',data:{jobId:current.queue.jobId,staffReservationProofHash:proofHash},dedupeKey:`${queueRef.id}_reservation_confirmed`}));
+          }
           const waitForOwner = next === "MONTHLY_PREPARE";
           tx.set(queueRef, { status: waitForOwner ? "blocked" : "pending", caseListPhase: phaseData, retryAt: null, writeVerificationRequired: false,
             errorType: waitForOwner ? "owner_transfer_required" : FieldValue.delete(),
@@ -589,7 +607,6 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
     }
     if (!["MONTHLY_READBACK_VERIFIED", "NO_OP_ALREADY_ACCEPTED"].includes(result.status) || !result.ack) { await hold(result.reason ?? result.status); return { ...result, snapshotReads, nativeBatches }; }
     const ack = result.ack;
-    need((await getProductionOperationalState(binding.queue.companyId)).operational, "GLOBAL_OPERATION_STOPPED_BEFORE_ACK");
     await db.runTransaction(async tx => {
       const current = await readTrusted(tx, true), [eventSnap, intentSnap] = await Promise.all([tx.get(operationRef.collection("events").doc("ACCEPTED")), tx.get(operationRef.collection("events").doc("INTENT"))]);
       const a = current.assignment, accepted = eventSnap.data(), intent = intentSnap.data(); need(accepted && intent, "ACCEPTED_NATIVE_EVENT_REQUIRED");
@@ -603,6 +620,8 @@ async function runCaseListMonthlyAssignment(queueRef: Ref, owner?: { actorUid: s
       if (previousPrivateRef) need(previousPrivateRef.companyId === current.queue.companyId && previousPrivateRef.jobId === current.queue.jobId &&
         previousPrivateRef.sheetRef?.spreadsheetId === spreadsheetId && previousPrivateRef.sheetRef?.sheetId === target.sheetId && previousPrivateRef.sheetRef?.caseId === a.sourceCaseId &&
         previousPrivateRef.acceptedAckHash === hashCaseList(ack), "PRIVATE_MONTHLY_REF_CONFLICT");
+      // If the stop wins this commit, keep the receipt for read-only reconciliation.
+      need((await getProductionOperationalState(current.queue.companyId, tx)).operational, "GLOBAL_OPERATION_STOPPED_BEFORE_ACK");
       const nextJob = { ...current.job, sheetRef };
       tx.set(privateRef, { companyId: current.queue.companyId, jobId: current.queue.jobId, sheetRef: privateSheetRef, sourceBindingHash: publicSource.bindingHash, acceptedAckHash: hashCaseList(ack), updatedAt: now });
       tx.update(jobRef, { sheetRef, caseListSource: publicSource, applicationUnconfirmed: false,
@@ -682,11 +701,11 @@ export async function selectCaseListMonthlyTransfer(queueRef: Ref, actorUid: str
 /** Explicit executive selection for a Source C name already entered by the
  * owner. This only registers trusted metadata; Google writes stay in the
  * existing MONTHLY_* worker/adapter and Source C is never written here. */
-export async function selectCaseListManualMonthlyTransfer(companyId: string, actorUid: string, token: Data, input: Data, externalReceiptMode = false): Promise<Data> {
+export async function selectCaseListManualMonthlyTransfer(companyId: string, actorUid: string, token: Data, input: Data, externalReceiptMode = false, handoff?: {prepareOnly: boolean; beforeCommit: (context: Data) => Promise<void>}): Promise<Data> {
   assertExecutive(token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");
   need(ID.test(companyId) && ID.test(actorUid) && token.companyId === companyId && (token.uid ?? token.sub) === actorUid, "MANUAL_OWNER_IDENTITY_INVALID");
   if (externalReceiptMode) assertExternalIntakeEnabled();
-  need(ID.test(input.jobId ?? "") && HASH.test(input.observationHash ?? "") && HASH.test(input.expectedSourceRevision ?? "") && Number.isSafeInteger(input.expectedJobRevision) && input.expectedJobRevision >= 1 && input.clientNameUpConfirmed === true, "MANUAL_SELECTION_INPUT_INVALID");
+  need(ID.test(input.jobId ?? "") && HASH.test(input.observationHash ?? "") && HASH.test(input.expectedSourceRevision ?? "") && Number.isSafeInteger(input.expectedJobRevision) && input.expectedJobRevision >= 1 && (handoff?.prepareOnly === true ? input.clientNameUpConfirmed === false : input.clientNameUpConfirmed === true), "MANUAL_SELECTION_INPUT_INVALID");
   const confirmation = object(input.manualConfirmation), confirmedFields = object(confirmation.confirmedFields), payOffer = object(confirmation.payOffer) as PayOffer;
   need(canonical(confirmedFields) === canonical({ arrival: true, execution: true, headcount: true, dateMode: true, payOffer: true }) &&
     Number.isSafeInteger(payOffer.dailyWageJPY) && payOffer.dailyWageJPY > 0 && payOffer.dailyWageJPY <= 1_000_000 && payOffer.travelExpenses === "全額支給" && payOffer.communicationExpenses === "全額支給", "MANUAL_CONDITIONS_REQUIRED");
@@ -725,6 +744,7 @@ export async function selectCaseListManualMonthlyTransfer(companyId: string, act
     queueId, operationId: queueId, companyId, jobId: input.jobId, sourceCaseId: job.caseId, sourceRowRevision: snapshot.catalog.rowRevision, sourceLedgerRevision: snapshot.catalog.ledgerRevision, sourceRevision: snapshot.catalog.sourceRevision,
     preMonthlyContentHash: caseListMonthlyContentHash(row.cells), expectedJobRevision: input.expectedJobRevision, assignedJobRevision: assignedRevision, staffId: observed.staffId, staffName: observed.sourceStaffName, dateKey };
   const native = nativeAssignment(a, payOffer), sourceSnapshot = row.cells.map(cell => Object.fromEntries(["userEnteredValue", "note", "userEnteredFormat", "dataValidation", "textFormatRuns", "chipRuns"].filter(key => Object.hasOwn(cell, key)).map(key => [key, (cell as Data)[key]])));
+  if (externalReceiptMode) (require("../src/case-list-assignment-observation.cjs") as {sourcePay(row: unknown, wage: number): unknown}).sourcePay(row, payOffer.dailyWageJPY);
   const manualEvent: Data = { schema: "LK_SOURCE_MANUAL_OBSERVED_V1", stage: "SOURCE_MANUAL_OBSERVED", spreadsheetId, operationId: queueId, caseId: a.sourceCaseId,
     assignment: native, assignmentHash: hashCaseList(native), preCatalog: snapshot.catalog, postCatalog: snapshot.catalog, preMonthlyContentHash: a.preMonthlyContentHash, postMonthlyContentHash: a.preMonthlyContentHash,
     sourceSnapshot, dependencyHash: snapshot.dependencyHash, observationHash: a.observationHash, ownerConditionsHash, createdAt: Date.now() };
@@ -769,6 +789,15 @@ export async function selectCaseListManualMonthlyTransfer(companyId: string, act
     const dayLock = { companyId, staffId: a.staffId, jobId: input.jobId, dateKey, active: true, updatedAt: now };
     assertCaseListMonthlyAuthority(queueId, queue, nextJob, currentStaff, dayLock, config, manualConditions);
     if (externalReceiptMode) assertExternalIntakeEnabled();
+    if (handoff) await handoff.beforeCommit({companyId, actorUid, jobId: input.jobId, queueId, observed, job, staff, snapshot, sourceSnapshot, confirmedFields, payOffer, requestHash, prospectiveJobRevision: assignedRevision});
+    if (externalReceiptMode) assertExternalIntakeEnabled();
+    need((await getProductionOperationalState(companyId, tx)).operational, "GLOBAL_OPERATION_STOPPED_BEFORE_MANUAL_COMMIT");
+    if (handoff?.prepareOnly) return {status: "MANUAL_PREPARED_ONLY", schema: "LK_CREW_MANUAL_PREPARE_PROPOSAL_V1", clientNameUpConfirmed: false,
+      companyId, actorUid, jobId: input.jobId, prospectiveQueueId: queueId, caseId: a.sourceCaseId, staffId: a.staffId, staffName: a.staffName,
+      canonicalStaffName: staff.displayName, dateKey, expectedJobRevision: input.expectedJobRevision, expectedSourceRevision: input.expectedSourceRevision,
+      observationHash: input.observationHash, observedValuesHash: observed.observedValuesHash, sourceWritableHash: hashCaseList(sourceSnapshot),
+      sourceCatalog: snapshot.catalog, dependencyHash: snapshot.dependencyHash, confirmedFields, payOffer, currentJobHash: hashCaseList(currentJob), currentObservationHash: hashCaseList(currentObservation),
+      sourceWrites: 0, monthlyWrites: 0, businessRecordsCreated: 0};
     tx.update(jobRef, nextJob);
     tx.set(dayRef, dayLock);
     tx.create(queueRef, queue);
@@ -777,7 +806,7 @@ export async function selectCaseListManualMonthlyTransfer(companyId: string, act
     tx.set(observationRef, { ...currentObservation, state: "selected", selected: true, clientNameUpConfirmed: true, queueId, selectedBy: actorUid, selectedAt: now, ownerConditionsHash });
     tx.set(auditRef, { companyId, actorUid, action: "case-list.manual.monthly.select", jobId: input.jobId, queueId, observationHash: input.observationHash, clientNameUpConfirmed: true, createdAt: now });
     return { status: "OWNER_TRANSFER_SELECTED", selected: true, queueId, nativeBatches: 0 };
-  });
+  }, handoff?.prepareOnly ? {readOnly: true} : undefined);
 }
 
 /** Each trigger performs one known phase; old operation types keep their pause. */
@@ -789,13 +818,17 @@ export async function processCaseListMonthlyAssignment(queueRef: Ref): Promise<b
 
 /** Original-sheet read-only reconciliation. Exact after-images may finalize
  * immutable proof/ACK metadata; no prepare/apply or Google writer is reachable. */
-export async function reconcileCaseListMonthlyAssignment(queueRef: Ref, actorUid: string, token: Data): Promise<Data> {
+export async function reconcileCaseListMonthlyAssignment(queueRef: Ref, actorUid: string, token: Data,
+  reconcileExternal?: () => Promise<Data>): Promise<Data> {
   const queue = (await queueRef.get()).data();
   if (queue?.operation === "case_list.assign" && ID.test(queue.companyId ?? "")) {
     const operation = (await db.collection("caseListMonthlyOperations").doc(sha256(queue.companyId + "|" + queueRef.id)).get()).data();
-    if (operation?.externalManualRequested === true || Object.hasOwn(operation ?? {}, "externalSelection") || Object.hasOwn(operation ?? {}, "externalAcceptance")) {
-      const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
-      return external.reconcileExternalCaseListMonthlyTransfer(queueRef, actorUid, token);
+    if (queue.errorType === "external_transfer_selected" || typeof queue.caseListExternalAcceptanceHash === "string" ||
+        operation?.externalManualRequested === true || Object.hasOwn(operation ?? {}, "externalSelection") || Object.hasOwn(operation ?? {}, "externalAcceptance")) {
+      // A caller's earlier queue snapshot is not authority for this branch.
+      // Never fall back to an unguarded external ACK after this fresh read.
+      need(typeof reconcileExternal === "function", "EXTERNAL_RECONCILE_AUTHORITY_REQUIRED");
+      return reconcileExternal();
     }
   }
   return runCaseListMonthlyAssignment(queueRef, { actorUid, token });
@@ -827,7 +860,7 @@ export async function retryCaseListMonthlyAssignments(): Promise<void> {
       if (!activeCompanies.has(data.companyId) || (!knownPending && (!(data.retryAt instanceof Timestamp) || data.retryAt.toMillis() > now.toMillis()))) continue;
       const prewriteBusy = data.status === "retry_wait" && data.errorType === "case_list_prewrite_busy" && data.caseListMonthlyReason === "CASE_LIST_PREWRITE_BUSY" && data.writeVerificationRequired === false;
       const expired = data.status === "processing";
-      if ((!prewriteBusy && !expired && !knownPending) || !(await getProductionOperationalState(data.companyId)).operational) continue;
+      if (!prewriteBusy && !expired && !knownPending) continue;
       const configRef = db.collection("sheetImportConfigs").doc(data.companyId), operationRef = db.collection("caseListMonthlyOperations").doc(sha256(data.companyId + "|" + doc.id));
       await db.runTransaction(async tx => {
         const [queueSnap, configSnap, operationSnap] = await Promise.all([tx.get(doc.ref), tx.get(configRef), tx.get(operationRef)]);
@@ -835,6 +868,7 @@ export async function retryCaseListMonthlyAssignments(): Promise<void> {
         if (!current || !config || current.operation !== "case_list.assign" || current.companyId !== data.companyId ||
           config.companyId !== data.companyId || config.caseListEnabled !== true || config.caseListAssignmentsEnabled !== true ||
           (current.status !== "pending" && (!(current.retryAt instanceof Timestamp) || current.retryAt.toMillis() > now.toMillis()))) return;
+        if (!(await getProductionOperationalState(current.companyId, tx)).operational) return;
         if (current.status === "pending") {
           if (!current.caseListPhase || current.writeVerificationRequired === true || !operationSnap.exists) return;
           const records = await continuationRecords(tx, operationRef);
@@ -871,4 +905,94 @@ export async function retryCaseListMonthlyAssignments(): Promise<void> {
     });
     if (operations.size < 100) return;
   }
+}
+
+/** ISOLATED PROPOSAL: explicit commit guard, existing formal confirmation contract. */
+export function prepareCaseListManualForHandoff(companyId: string, actorUid: string, token: Data, input: Data, beforeCommit: (context: Data) => Promise<void>) {
+  need(typeof beforeCommit === "function", "MANUAL_HANDOFF_GUARD_REQUIRED");
+  return selectCaseListManualMonthlyTransfer(companyId, actorUid, token, input, true, {prepareOnly: true, beforeCommit});
+}
+export function registerCaseListManualForHandoff(companyId: string, actorUid: string, token: Data, input: Data, beforeCommit: (context: Data) => Promise<void>) {
+  need(typeof beforeCommit === "function", "MANUAL_HANDOFF_GUARD_REQUIRED");
+  return selectCaseListManualMonthlyTransfer(companyId, actorUid, token, input, true, {prepareOnly: false, beforeCommit});
+}
+
+/** PRIVATE PROPOSAL: unconfirmed display only; no implicit owner confirmation. */
+export async function readCaseListManualNameUpReviewForHandoff(companyId: string, actorUid: string, token: Data, input: Data, beforeReturn: () => Promise<void>): Promise<Data> {
+  assertExecutive(token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");
+  need(ID.test(companyId) && ID.test(actorUid) && token.companyId === companyId && (token.uid ?? token.sub) === actorUid && typeof beforeReturn === "function", "MANUAL_REVIEW_OWNER_REQUIRED");
+  assertExternalIntakeEnabled();
+  need((await getProductionOperationalState(companyId)).operational, "GLOBAL_OPERATION_STOPPED");
+  need(Object.keys(input).sort().join("|") === "expectedJobRevision|expectedSourceRevision|jobId|observationHash" && ID.test(input.jobId ?? "") && HASH.test(input.observationHash ?? "") && HASH.test(input.expectedSourceRevision ?? "") && Number.isSafeInteger(input.expectedJobRevision) && input.expectedJobRevision >= 1, "MANUAL_REVIEW_INPUT_INVALID");
+  const jobRef = db.collection("jobs").doc(input.jobId), obsRef = db.collection("caseListManualObservations").doc(input.jobId), configRef = db.collection("sheetImportConfigs").doc(companyId), leaseRef = db.collection("caseListSyncLocks").doc(companyId);
+  const [jobSnap, obsSnap, configSnap] = await Promise.all([jobRef.get(), obsRef.get(), configRef.get()]);
+  const job = jobSnap.data(), observed = obsSnap.data(), config = configSnap.data();
+  need(job && observed && config && job.companyId === companyId && observed.companyId === companyId && observed.jobId === input.jobId && observed.schema === "LK_CASE_LIST_MANUAL_OBSERVATION_V1" && observed.state === "blocked_requires_owner_review" && observed.selected === false && observed.observationHash === input.observationHash && manualOwnerReviewCanProceed(observed.holdReasons), "MANUAL_REVIEW_OBSERVATION_CHANGED");
+  need(job.revision === input.expectedJobRevision && job.caseListSource?.sourceRevision === input.expectedSourceRevision && job.caseId === observed.caseId && job.dateKey === observed.dateKey && job.sourceMissing !== true && job.cancelled !== true && job.status === "assigned" && job.applicationUnconfirmed === true && job.assignmentUnresolved !== true && !job.assignmentSheetWrite && job.assignedUid == null && job.assignedStaffId === observed.staffId && job.assignedStaffName === observed.sourceStaffName && job.caseListManualPending?.observationHash === observed.observationHash, "MANUAL_REVIEW_JOB_CHANGED");
+  const resolver = await loadResolver(companyId), snapshot = await readCaseListMonthlySnapshot(companyId, job.caseId, {includeDependencies: true, resolveStaff: resolver}), row = snapshot.source.rows.find(row => row.caseId === job.caseId);
+  need(snapshot.isolated === false && row && row.fullWritable === true && row.cells.length === 65 && snapshot.catalog?.sourceRevision === input.expectedSourceRevision && canonical(publicCaseListSource(snapshot.catalog)) === canonical(observed.source), "MANUAL_REVIEW_SOURCE_CHANGED");
+  need((require("./case-list-manual-origin-core") as typeof import("./case-list-manual-origin-core")).manualObservationCanBePending(observed, row.cells), "MANUAL_REVIEW_UNSUPPORTED_CONDITIONS");
+  need(row.cells[2]?.userEnteredValue?.stringValue === observed.sourceStaffName && row.cells[2]?.effectiveValue?.stringValue === observed.sourceStaffName && row.staffIdentityVerified === true && row.staffId === observed.staffId && resolver(observed.sourceStaffName)?.staffId === observed.staffId && row.cells[0]?.userEnteredValue?.boolValue === false && row.cells[63]?.userEnteredValue?.boolValue === false && hashCaseList(row.cells.map(cell => ({userEnteredValue: cell.userEnteredValue ?? {}, effectiveValue: cell.effectiveValue ?? {}}))) === observed.observedValuesHash, "MANUAL_REVIEW_SOURCE_CHANGED");
+  const staffRef = db.collection("staffProfiles").doc(observed.staffId), staff = (await staffRef.get()).data();
+  need(staff && staff.companyId === companyId && staff.active === true && staff.displayName === observed.canonicalStaffName && typeof staff.displayName === "string" && staff.displayName.trim(), "MANUAL_REVIEW_STAFF_CHANGED");
+  const textAt = (index: number): string => String(row.cells[index]?.effectiveValue?.stringValue ?? row.cells[index]?.userEnteredValue?.stringValue ?? "").trim();
+  const arrivalValue = row.cells[14]?.effectiveValue ?? row.cells[14]?.userEnteredValue ?? {}, arrival = arrivalValue.stringValue ?? (typeof arrivalValue.numberValue === "number" && arrivalValue.numberValue >= 0 && arrivalValue.numberValue < 1 && Math.abs(arrivalValue.numberValue * 1440 - Math.round(arrivalValue.numberValue * 1440)) < 1e-6 ? String(Math.floor(Math.round(arrivalValue.numberValue * 1440) / 60)).padStart(2, "0") + ":" + String(Math.round(arrivalValue.numberValue * 1440) % 60).padStart(2, "0") : "");
+  const wageCell = row.cells[36], wage = wageCell?.effectiveValue?.numberValue;
+  need(!wageCell?.effectiveValue?.errorValue && Number.isSafeInteger(wage) && Number(wage) > 0 && Number(wage) <= 1_000_000 && arrival && textAt(15) && validDate(observed.dateKey), "MANUAL_REVIEW_DISPLAY_FIELDS_REQUIRED");
+  const offer = job.publicPayOffer, offerKnown = offer && offer.dailyWageJPY === wage && offer.travelExpenses === "全額支給" && offer.communicationExpenses === "全額支給";
+  const sourceWritableHash = hashCaseList(row.cells.map(cell => Object.fromEntries(["userEnteredValue", "note", "userEnteredFormat", "dataValidation", "textFormatRuns", "chipRuns"].filter(key => Object.hasOwn(cell, key)).map(key => [key, (cell as Data)[key]]))));
+  const display = {date: observed.dateKey, staffName: staff.displayName, sourceStaffName: observed.sourceStaffName, client: textAt(10), store: textAt(11), maker: textAt(12), content: textAt(13), arrival, execution: textAt(15), headcount: 1, dateMode: textAt(58), dailyWageJPY: wage, travelExpenses: offerKnown ? offer.travelExpenses : null, communicationExpenses: offerKnown ? offer.communicationExpenses : null};
+  need([display.client, display.store, display.maker, display.content].every(value => value), "MANUAL_REVIEW_DISPLAY_FIELDS_REQUIRED");
+  return db.runTransaction(async tx => {
+    const [currentJob, currentObs, currentStaff, currentConfig, lease] = await Promise.all([tx.get(jobRef), tx.get(obsRef), tx.get(staffRef), tx.get(configRef), tx.get(leaseRef)]);
+    need(hashCaseList(currentJob.data()) === hashCaseList(job) && hashCaseList(currentObs.data()) === hashCaseList(observed) && hashCaseList(currentStaff.data()) === hashCaseList(staff) && hashCaseList(currentConfig.data()) === hashCaseList(config), "MANUAL_REVIEW_CHANGED_DURING_READ");
+    need(!lease.exists || lease.data()?.activeUntil?.toMillis?.() <= Date.now(), "MANUAL_REVIEW_IN_FLIGHT");
+    await beforeReturn();
+    assertExternalIntakeEnabled();
+    return {schema: "LK_CREW_MANUAL_UNCONFIRMED_VIEW_PROPOSAL_V1", companyId, actorUid, jobId: input.jobId, caseId: job.caseId, staffId: observed.staffId, input, display, sourceWritableHash, dependencyHash: snapshot.dependencyHash, observedValuesHash: observed.observedValuesHash, jobHash: hashCaseList(job), observationHash: observed.observationHash, staffHash: hashCaseList(staff), configHash: hashCaseList(config), approvalCreated: false, confirmedFields: null, businessWrites: 0};
+  }, {readOnly: true});
+}
+
+/** Read-only projection for the already-protected application queue. This does
+ * not create an application, infer an owner approval, or project Source again. */
+export async function readCaseListOwnerNameUpReviewForHandoff(companyId: string, actorUid: string, token: Data, input: Data, beforeReturn: () => Promise<void>): Promise<Data> {
+  if (!Object.hasOwn(input, "queueId")) return {...await readCaseListManualNameUpReviewForHandoff(companyId, actorUid, token, input, beforeReturn), origin: "SOURCE_MANUAL"};
+  assertExecutive(token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");
+  need(token.companyId === companyId && token.uid === actorUid && typeof beforeReturn === "function", "OWNER_REVIEW_IDENTITY_REQUIRED");
+  need(Object.keys(input).sort().join("|") === "expectedJobRevision|expectedSourceRevision|jobId|queueId" && ID.test(input.queueId ?? "") && ID.test(input.jobId ?? "") && HASH.test(input.expectedSourceRevision ?? "") && Number.isSafeInteger(input.expectedJobRevision), "OWNER_REVIEW_INPUT_INVALID");
+  assertExternalIntakeEnabled();
+  need((await getProductionOperationalState(companyId)).operational, "GLOBAL_OPERATION_STOPPED");
+  const startedAt = Date.now(), external = require("./case-list-external-transfer") as typeof import("./case-list-external-transfer");
+  const core = require("../src/case-list-external-core.cjs") as {assertOriginal(r: Data, id: string): string; sourceCatalog(r: Data): Data; originalIdentity(r: Data): Data};
+  const queueRef = db.collection("sheetSyncQueue").doc(input.queueId), original = await external.readExternalOriginalForGasHandoff(queueRef, actorUid, token);
+  need(core.assertOriginal(original, input.queueId) === "CREW_APPLICATION" && original.jobId === input.jobId && original.job.revision === input.expectedJobRevision && core.sourceCatalog(original).sourceRevision === input.expectedSourceRevision, "OWNER_REVIEW_ORIGINAL_CHANGED");
+  const job = original.job, staff = original.staff, resolver = await loadResolver(companyId);
+  const snapshot = await readCaseListMonthlySnapshot(companyId, job.caseId, {includeDependencies: true, resolveStaff: resolver});
+  const rows = snapshot.source.rows.filter(row => row.caseId === job.caseId), row = rows[0];
+  need(snapshot.isolated === false && rows.length === 1 && row && row.fullWritable === true && row.cells.length === 65 && snapshot.catalog?.sourceRevision === input.expectedSourceRevision, "OWNER_REVIEW_SOURCE_CHANGED");
+  const writable = (cell: Data) => Object.fromEntries(["userEnteredValue", "note", "userEnteredFormat", "dataValidation", "textFormatRuns", "chipRuns"].filter(key => Object.hasOwn(cell, key)).map(key => [key, cell[key]]));
+  const sourceWritableHash = hashCaseList(row.cells.map(writable)), proof = original.originalSourceRecord.payload;
+  need(HASH.test(snapshot.dependencyHash ?? "") && snapshot.dependencyHash === proof.dependencyHash && sourceWritableHash === hashCaseList(proof.sourceSnapshot ?? proof.expectedSourceAfter), "OWNER_REVIEW_SOURCE_PREIMAGE_CHANGED");
+  need(row.staffIdentityVerified === true && row.staffId === job.assignedStaffId && resolver(job.assignedStaffName)?.staffId === job.assignedStaffId && row.cells[2]?.effectiveValue?.stringValue === job.assignedStaffName && row.cells[0]?.userEnteredValue?.boolValue === false && row.cells[63]?.userEnteredValue?.boolValue === false, "OWNER_REVIEW_STAFF_OR_CANCEL_CHANGED");
+  (require("../src/case-list-assignment-observation.cjs") as {sourcePay(row: unknown, wage: number): unknown}).sourcePay(row, publicPayOffer(job).dailyWageJPY);
+  const textAt = (index: number) => String(row.cells[index]?.effectiveValue?.stringValue ?? row.cells[index]?.userEnteredValue?.stringValue ?? "").trim();
+  const av = row.cells[14]?.effectiveValue ?? row.cells[14]?.userEnteredValue ?? {}, minutes = typeof av.numberValue === "number" ? av.numberValue * 1440 : NaN;
+  const arrival = av.stringValue ?? (minutes >= 0 && minutes < 1440 && Math.abs(minutes - Math.round(minutes)) < 1e-6 ? String(Math.floor(Math.round(minutes) / 60)).padStart(2, "0") + ":" + String(Math.round(minutes) % 60).padStart(2, "0") : "");
+  const offer = publicPayOffer(job), display = {date: job.dateKey, staffName: staff.displayName, sourceStaffName: job.assignedStaffName, client: textAt(10), store: textAt(11), maker: textAt(12), content: textAt(13), arrival, execution: textAt(15), headcount: 1, dateMode: textAt(58), ...offer};
+  need([display.client, display.store, display.maker, display.content, display.arrival, display.execution].every(Boolean) && validDate(display.date), "OWNER_REVIEW_DISPLAY_FIELDS_REQUIRED");
+  const again = await external.readExternalOriginalForGasHandoff(queueRef, actorUid, token);
+  need(core.assertOriginal(again, input.queueId) === "CREW_APPLICATION" && hashCaseList(core.originalIdentity(again)) === hashCaseList(core.originalIdentity(original)), "OWNER_REVIEW_CHANGED_DURING_READ");
+  await beforeReturn();
+  need(Date.now() >= startedAt && Date.now() - startedAt < 60000, "OWNER_REVIEW_READ_EXPIRED");
+  assertExternalIntakeEnabled();
+  return {schema: "LK_CREW_MANUAL_UNCONFIRMED_VIEW_PROPOSAL_V1", origin: "CREW_APPLICATION", companyId, actorUid, jobId: input.jobId, caseId: job.caseId, staffId: job.assignedStaffId, input, display, sourceWritableHash, dependencyHash: snapshot.dependencyHash, observedValuesHash: hashCaseList(row.cells.map(cell => ({userEnteredValue: cell.userEnteredValue ?? {}, effectiveValue: cell.effectiveValue ?? {}}))), jobHash: hashCaseList(job), observationHash: hashCaseList(core.originalIdentity(original)), staffHash: hashCaseList(staff), configHash: hashCaseList(original.config), approvalCreated: false, confirmedFields: null, businessWrites: 0};
+}
+
+export async function prepareCaseListOwnerNameUpReviewForHandoff(companyId: string, actorUid: string, token: Data, input: Data, beforeReturn: () => Promise<void>): Promise<Data> {
+  if (!Object.hasOwn(input, "queueId")) return prepareCaseListManualForHandoff(companyId, actorUid, token, input, beforeReturn);
+  need(input.clientNameUpConfirmed === false && (require("../src/case-list-manual-confirmation.cjs") as {missingFormalManualFields(value: unknown): string[]}).missingFormalManualFields(input.manualConfirmation).length === 0, "OWNER_REVIEW_FORMAL_CONFIRMATION_REQUIRED");
+  const ref = {...input}; delete ref.clientNameUpConfirmed; delete ref.manualConfirmation;
+  const view = await readCaseListOwnerNameUpReviewForHandoff(companyId, actorUid, token, ref, beforeReturn);
+  need(hashCaseList(input.manualConfirmation.payOffer) === hashCaseList({dailyWageJPY: view.display.dailyWageJPY, travelExpenses: view.display.travelExpenses, communicationExpenses: view.display.communicationExpenses}), "OWNER_REVIEW_PAY_CHANGED");
+  return {status: "OWNER_PREPARED_ONLY", sourceWritableHash: view.sourceWritableHash, dependencyHash: view.dependencyHash, observedValuesHash: view.observedValuesHash, businessWrites: 0};
 }

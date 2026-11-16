@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
-import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { onCall, HttpsError, type CallableRequest } from "firebase-functions/v2/https";
 import { onDocumentWritten } from "firebase-functions/v2/firestore";
 import { z } from "zod";
 import { db } from "./firebase";
 import { companyFromClaims, requireAdmin, requestId } from "./utils";
 import { assertProductionOperational } from "./system-safety";
 import { applicationConfirmationIdentity } from "./assignment-preparation-core";
+import { completeExternalExpense, traceExternalExpense, type ExternalExpenseAtomicWriter } from "./case-list-external-expense-completion";
 const caseListPrivate = (): typeof import("./case-list-private-ref") => require("./case-list-private-ref");
+const caseListExternal = (): typeof import("./case-list-external-transfer") => require("./case-list-external-transfer");
+const isExternalExpenseJob = (job: FirebaseFirestore.DocumentData) => Boolean(job.caseListSource && job.assignmentSheetWrite?.externalAck);
 const CASE_LIST_EXPENSE_HOLD = "この案件の経費確定は保留中です。現在の経費は確認できます。";
 import {
   buildExpenseExpected,
@@ -50,6 +53,14 @@ const ManualSelectionSchema = z.object({
 
 const JobSchema = z.object({
   jobId: z.string().min(1),
+});
+const ExpenseTraceSchema = z.object({
+  jobId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/),
+  operationId: z.string().uuid(),
+}).strict();
+const ExpenseStatusSchema = ExpenseTraceSchema.extend({
+  mode: z.literal("confirmation-status"),
+  operationId: ExpenseTraceSchema.shape.operationId.optional(),
 });
 
 const ApplicationConfirmationSchema = JobSchema.extend({
@@ -186,20 +197,36 @@ export const retrySheetWriteIssue = onCall(async (request) => {
   return { retried: true };
 });
 
+// Existing Firebase callable transport; no new endpoint or token handoff to GAS.
+function firebaseExternalOwner<T>(request: any, session: any, operation: (actor: any, beforeCommit: () => Promise<void>) => Promise<T>): Promise<T> {
+  const { withFirebaseOwnerCallable } = require("./case-list-firebase-owner") as typeof import("./case-list-firebase-owner");
+  return withFirebaseOwnerCallable(request, session, operation);
+}
+
 export const acknowledgeSheetWriteIssue = onCall(async (request) => {
   const session = requireAdmin(request);
+  if (typeof request.data?.action === "string" && request.data.action.startsWith("staff-ng-")) {
+    const {handleStaffNgManagement}=require("./staff-ng-management") as typeof import("./staff-ng-management");
+    return handleStaffNgManagement(request,session);
+  }
   const companyId = companyFromClaims(session.token);
+  if (["preview-case-list-gas-send", "confirm-case-list-gas-send", "observe-case-list-gas-send"].includes(request.data?.action)) {
+    const { handleOwnerNameUpReview } = require("./case-list-owner-review-callable") as typeof import("./case-list-owner-review-callable");
+    return handleOwnerNameUpReview(request, session);
+  }
   if (request.data?.action === "select-case-list-manual-gas-monthly") {
     const externalManualSchema = ManualSelectionSchema.extend({ action: z.literal("select-case-list-manual-gas-monthly") });
     const input = externalManualSchema.parse(request.data);
-    await assertProductionOperational(companyId);
-    const monthly: typeof import("./case-list-monthly-worker") = require("./case-list-monthly-worker");
-    const result = await monthly.selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, input, true);
-    const queueRef = db.collection("sheetSyncQueue").doc(String(result.queueId));
-    const queue = (await queueRef.get()).data();
-    const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
-    return external.selectExternalCaseListMonthlyTransfer(queueRef, session.uid, session.token,
-      { reviewKey: queue?.caseListPhase?.continuationHash, clientNameUpConfirmed: true });
+    return firebaseExternalOwner(request, session, async (owner, beforeCommit) => {
+      await assertProductionOperational(companyId);
+      const monthly: typeof import("./case-list-monthly-worker") = require("./case-list-monthly-worker");
+      const result = await monthly.registerCaseListManualForHandoff(companyId, owner.uid, owner, input, beforeCommit);
+      const queueRef = db.collection("sheetSyncQueue").doc(String(result.queueId));
+      const queue = (await queueRef.get()).data();
+      const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
+      return external.selectExternalCaseListMonthlyTransferForHandoff(queueRef, owner.uid, owner,
+        { reviewKey: queue?.caseListPhase?.continuationHash, clientNameUpConfirmed: true }, beforeCommit);
+    });
   }
   if (request.data?.action === "select-case-list-manual-monthly") {
     const manualInput = ManualSelectionSchema.parse(request.data);
@@ -217,16 +244,20 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
   const ref = db.collection("sheetSyncQueue").doc(input.queueId);
   if (input.action === "read-case-list-gas-binding") {
     const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
-    const binding = await external.readExternalCaseListSelectionBinding(ref, session.uid, session.token);
-    return { status: "EXTERNAL_BINDING_READ", queueId: ref.id, binding, sourceWrites: 0, monthlyWrites: 0 };
+    return firebaseExternalOwner(request, session, async (owner) => {
+      const binding = await external.readExternalCaseListSelectionBinding(ref, owner.uid, owner);
+      return { status: "EXTERNAL_BINDING_READ", queueId: ref.id, binding, sourceWrites: 0, monthlyWrites: 0 };
+    });
   }
   if (input.action === "select-case-list-gas-monthly") {
     if (!input.reviewKey || input.clientNameUpConfirmed !== true) throw new HttpsError("invalid-argument", "ネームアップ済みの確認と対象の選択が必要です。");
-    await assertProductionOperational(companyId);
+    return firebaseExternalOwner(request, session, async (owner, beforeCommit) => {
+      await assertProductionOperational(companyId);
     const snap = await ref.get();
     if (!snap.exists || snap.data()?.companyId !== companyId || snap.data()?.operation !== "case_list.assign") throw new HttpsError("not-found", "移行対象が見つかりません。");
     const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
-    return external.selectExternalCaseListMonthlyTransfer(ref, session.uid, session.token, input);
+      return external.selectExternalCaseListMonthlyTransferForHandoff(ref, owner.uid, owner, input, beforeCommit);
+    });
   }
   if (input.action === "select-case-list-monthly") {
     if (!input.reviewKey || input.clientNameUpConfirmed !== true) throw new HttpsError("invalid-argument", "ネームアップ済みの確認と移行対象の選択が必要です。");
@@ -255,10 +286,19 @@ export const acknowledgeSheetWriteIssue = onCall(async (request) => {
       return cancellation.processCaseListSourceCancellation(ref, undefined, { actorUid: session.uid, token: session.token });
     }
     if (snapshot.data()?.operation !== "case_list.assign") throw new HttpsError("failed-precondition", "この依頼は保存結果の再照合に対応していません。");
+    const reconcileExternal = () => firebaseExternalOwner(request, session, (owner, beforeCommit) => {
+        const external: typeof import("./case-list-external-transfer") = require("./case-list-external-transfer");
+        return external.reconcileExternalCaseListMonthlyTransferForHandoff(ref, owner.uid, owner, beforeCommit);
+      });
+    if (data.errorType === "external_transfer_selected" || typeof data.caseListExternalAcceptanceHash === "string") {
+      return reconcileExternal();
+    }
     // The worker rechecks executive identity and current authority. Owner mode
     // only reads Sheets and may settle metadata after exact verified images.
     const worker: typeof import("./case-list-monthly-worker") = require("./case-list-monthly-worker");
-    return worker.reconcileCaseListMonthlyAssignment(ref, session.uid, session.token);
+    // The worker rereads the operation and may discover a concurrent external
+    // selection. That late branch must enter the same Firebase owner guard.
+    return worker.reconcileCaseListMonthlyAssignment(ref, session.uid, session.token, reconcileExternal);
   }
   const auditRef = db.collection("auditLogs").doc();
   await db.runTransaction(async (tx) => {
@@ -345,6 +385,12 @@ export const confirmApplication = onCall(async (request) => {
 export const getExpenseReview = onCall(async (request) => {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
+  if (request.data && Object.hasOwn(request.data, "mode")) {
+    const {jobId,operationId} = ExpenseStatusSchema.parse(request.data);
+    const job = await requireCompanyJob(companyId,jobId);
+    // Recorded operations remain traceable after the job loses its source link.
+    return {jobId,confirmationOperation:await traceExternalExpense(companyId,jobId,job,operationId)};
+  }
   const input = JobSchema.parse(request.data ?? {});
   const [job, draft] = await Promise.all([
     db.collection("jobs").doc(input.jobId).get(),
@@ -360,8 +406,13 @@ export const getExpenseReview = onCall(async (request) => {
   }
 
   const rawJob = job.data()!;
-  const jobData = rawJob.caseListSource ? await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, rawJob) : rawJob;
-  const linkRef = rawJob.caseListSource ? await caseListPrivate().locateCaseListPrivateSheetRow(jobData.sheetRef) : jobData.sheetRef;
+  const externalCase = isExternalExpenseJob(rawJob);
+  const jobData = externalCase
+    ? await caseListExternal().readExternalCaseListExpenses(companyId, input.jobId, rawJob)
+    : rawJob.caseListSource ? await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, rawJob) : rawJob;
+  const linkRef = rawJob.caseListSource && !externalCase
+    ? await caseListPrivate().locateCaseListPrivateSheetRow(jobData.sheetRef)
+    : jobData.sheetRef;
   const currentValues = {
     transportation: numberOrNull(jobData.expenses?.transportation),
     purchase8: numberOrNull(jobData.expenses?.purchase8),
@@ -369,6 +420,12 @@ export const getExpenseReview = onCall(async (request) => {
     netPrintCost: numberOrNull(jobData.expenses?.netPrintCost),
     postageCost: numberOrNull(jobData.expenses?.postageCost),
   };
+  let holdReason = rawJob.caseListSource ? CASE_LIST_EXPENSE_HOLD : expenseMailHoldReason(jobData);
+  if (externalCase && draft.data()?.status === "confirmation_pending") {
+    holdReason = "月別表への反映結果を照合中です。最新の状態は「読込」で確認してください。";
+  } else if (externalCase && draft.data()?.status === "completed") {
+    holdReason = "この経費は月別表への反映を確認済みです。";
+  }
 
   return {
     job: {
@@ -382,9 +439,10 @@ export const getExpenseReview = onCall(async (request) => {
       sheetUrl: buildSheetUrl({ ...jobData, sheetRef: linkRef }),
     },
     currentValues,
-    writeBlockedReason: rawJob.caseListSource ? CASE_LIST_EXPENSE_HOLD : expenseMailHoldReason(jobData),
-    reviewVersion: expenseReviewVersion(companyId, input.jobId, job, draft),
-    ...(rawJob.caseListSource ? { reviewVersion: expenseReviewVersion(companyId, input.jobId, job, draft, jobData) } : {}),
+    writeBlockedReason: holdReason,
+    ...(externalCase && !expenseMailHoldReason(jobData) && (!draft.exists || draft.data()?.status === "draft")
+      ? { draftAllowedWhileHeld: true } : {}),
+    reviewVersion: expenseReviewVersion(companyId, input.jobId, job, draft, rawJob.caseListSource ? jobData : undefined),
     draft: draft.exists ? serializeDocument(draft.data() ?? {}) : null,
   };
 });
@@ -401,13 +459,27 @@ export const saveExpenseReviewDraft = onCall(async (request) => {
   }
 
   const rawJob = await requireCompanyJob(companyId, input.jobId);
-  const job = rawJob.caseListSource ? await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, rawJob) : rawJob;
+  const externalCase = isExternalExpenseJob(rawJob);
+  if (externalCase && input.expectedVersion === undefined) {
+    throw new HttpsError("failed-precondition", "経費確認版がありません。経費を読み直してください。",
+      { reason: "case_list_private_expense_version_required" });
+  }
+  const job = externalCase
+    ? await caseListExternal().readExternalCaseListExpenses(companyId, input.jobId, rawJob)
+    : rawJob.caseListSource ? await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, rawJob) : rawJob;
   const ref = db.collection("expenseReviews").doc(input.jobId);
   await db.runTransaction(async (tx) => {
     const [currentJob, currentReview] = await Promise.all([
       tx.get(db.collection("jobs").doc(input.jobId)), tx.get(ref),
     ]);
-    const privateCurrent = currentJob.data()?.caseListSource ? await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, currentJob.data()!, tx) : undefined;
+    if (externalCase) {
+      if (currentReview.exists && currentReview.data()?.status !== "draft") {
+        throw new HttpsError("failed-precondition", "確定処理中または履歴のある経費です。現在の状態を確認してください。");
+      }
+      await caseListExternal().assertExternalExpenseBinding(companyId, input.jobId, rawJob, job, tx);
+    }
+    const privateCurrent = externalCase ? job : currentJob.data()?.caseListSource
+      ? await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, currentJob.data()!, tx) : undefined;
     if (privateCurrent) {
       assertExpenseWriteContext(companyId, input.jobId, job, currentJob, currentReview, privateCurrent);
       assertExpenseReviewVersion(input.expectedVersion, companyId, input.jobId, currentJob, currentReview, privateCurrent);
@@ -427,7 +499,44 @@ export const saveExpenseReviewDraft = onCall(async (request) => {
   return { saved: true, status: "draft" };
 });
 
-export const completeExpenseReview = onCall(async (request) => {
+/** Only for authenticated server callers. The job must already be scope-checked. */
+export function completeAuthorizedExternalExpense(
+  companyId: string, actorUid: string, job: FirebaseFirestore.DocumentData,
+  input: Pick<z.infer<typeof CompleteSchema>, "jobId" | "note" | "expectedVersion"> & { operationId?: string },
+  values: ReturnType<typeof normalizeExpenseInput>["values"], writer: ExternalExpenseAtomicWriter,
+) {
+  if (!isExternalExpenseJob(job) || job.companyId !== companyId || !input.expectedVersion) {
+    throw new HttpsError("failed-precondition", "外部連携案件と経費確認版を照合できません。");
+  }
+  return completeExternalExpense({
+    companyId, jobId: input.jobId, job, actorUid, operationId: input.operationId, version: input.expectedVersion,
+    values, note: input.note,
+    assertReview(currentJob, review, observation) {
+      assertExpenseWriteContext(companyId, input.jobId, observation, currentJob, review, observation);
+      assertExpenseReviewVersion(input.expectedVersion, companyId, input.jobId, currentJob, review, observation);
+    },
+  }, writer);
+}
+
+export async function readAuthorizedExternalExpense(
+  companyId: string, jobId: string, job: FirebaseFirestore.DocumentData,
+  readObservation = caseListExternal().readExternalCaseListExpenses,
+) {
+  if (!isExternalExpenseJob(job) || job.companyId !== companyId) {
+    throw new HttpsError("failed-precondition", "外部連携案件を照合できません。");
+  }
+  const [currentJob, review] = await Promise.all([
+    db.collection("jobs").doc(jobId).get(), db.collection("expenseReviews").doc(jobId).get(),
+  ]);
+  const observation = await readObservation(companyId, jobId, job);
+  assertExpenseWriteContext(companyId, jobId, observation, currentJob, review, observation);
+  return {
+    currentValues: observation.expenses,
+    reviewVersion: expenseReviewVersion(companyId, jobId, currentJob, review, observation),
+  };
+}
+
+export async function handleCompleteExpenseReview(request: CallableRequest, writer?: ExternalExpenseAtomicWriter) {
   const session = requireAdmin(request);
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
@@ -443,11 +552,31 @@ export const completeExpenseReview = onCall(async (request) => {
 
   const job = await requireCompanyJob(companyId, input.jobId);
   if (job.caseListSource) {
-    // The existing expense writer/finalizer uses public job amounts. Keep this
-    // route held until a private-aware completion path can verify its result.
+    const externalCase = isExternalExpenseJob(job);
+    if (externalCase && input.expectedVersion === undefined) {
+      throw new HttpsError("failed-precondition", "経費確認版がありません。経費を読み直してください。",
+        { reason: "case_list_private_expense_version_required" });
+    }
+    if (externalCase && writer && input.expectedVersion) {
+      if (Object.keys(input.values).length!==Object.keys(parsed.values).length) {
+        throw new HttpsError("invalid-argument","空欄を含め、経費5項目の確認値が必要です。");
+      }
+      return completeAuthorizedExternalExpense(companyId, session.uid, job, input, parsed.values, writer);
+    }
+    // Keep the deployed entry point held until a writer with the shared
+    // concurrency fence is available and its behavior has been verified.
+    const externalObservation = externalCase
+      ? await caseListExternal().readExternalCaseListExpenses(companyId, input.jobId, job) : undefined;
     await db.runTransaction(async tx => {
       const [currentJob, review] = await Promise.all([tx.get(db.collection("jobs").doc(input.jobId)), tx.get(db.collection("expenseReviews").doc(input.jobId))]);
       if (!currentJob.exists || currentJob.data()?.companyId !== companyId) throw new HttpsError("not-found", "案件が見つかりません。");
+      if (externalObservation) {
+        await caseListExternal().assertExternalExpenseBinding(companyId, input.jobId, job, externalObservation, tx);
+        assertExpenseWriteContext(companyId, input.jobId, externalObservation, currentJob, review, externalObservation);
+        assertExpenseReviewVersion(input.expectedVersion, companyId, input.jobId, currentJob, review, externalObservation);
+        caseListExternal().planExternalExpenseConfirmation(externalObservation, parsed.values);
+        return;
+      }
       const currentPrivate = await caseListPrivate().resolveCaseListPrivateFinancialJob(companyId, input.jobId, currentJob.data()!, tx);
       assertExpenseReviewVersion(input.expectedVersion, companyId, input.jobId, currentJob, review, currentPrivate);
     });
@@ -520,7 +649,19 @@ export const completeExpenseReview = onCall(async (request) => {
     queueId: queueRef.id,
     sheetUrl,
   };
-});
+}
+
+export const completeExpenseReview = onCall(request=>handleCompleteExpenseReview(request));
+
+// Server route only. The regular callable is not connected to a writer.
+export async function handleTraceExternalExpense(request: CallableRequest, reader?: Pick<ExternalExpenseAtomicWriter, "readReceipt">) {
+  const session=requireAdmin(request);
+  const companyId=companyFromClaims(session.token);
+  const {jobId,operationId}=ExpenseTraceSchema.parse(request.data??{});
+  const job=await requireCompanyJob(companyId,jobId);
+  if (!isExternalExpenseJob(job)) throw new HttpsError("not-found","対象の経費操作が見つかりません。");
+  return traceExternalExpense(companyId,jobId,job,operationId,reader);
+}
 
 export const getJobSheetLink = onCall(async (request) => {
   const session = requireAdmin(request);
@@ -568,6 +709,7 @@ export const updateExpenseReviewFromQueue = onDocumentWritten(
         typeof latest.companyId !== "string" || !latest.companyId ||
         currentReview?.queueId !== after.id || currentReview.jobId !== latest.jobId ||
         currentReview.companyId !== latest.companyId || currentJob?.companyId !== latest.companyId ||
+        isExternalExpenseJob(currentJob) ||
         (currentReview.staffId ?? null) !== (currentJob.assignedStaffId ?? null) ||
         !["queued", "error", "completed"].includes(String(currentReview.status ?? ""))) return;
       const currentStatus = String(latest.status ?? "");

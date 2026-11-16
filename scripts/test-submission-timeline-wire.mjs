@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {createRequire} from 'node:module';
+import {join} from 'node:path';
 import {runInNewContext} from 'node:vm';
 
 // Exercise the installed client SDK, the actual UI function and the actual
 // callable handler together. Only transport and service boundaries are fake.
 export async function runSubmissionTimelineWireTests(harness) {
-  const dependency=createRequire(new URL('../apps/admin/package.json',import.meta.url));
+  const dependency=createRequire(process.env.LKC_TEST_DEPENDENCY_ROOT
+    ? join(process.env.LKC_TEST_DEPENDENCY_ROOT,'apps/admin/package.json')
+    : new URL('../apps/admin/package.json',import.meta.url));
   const ts=dependency('typescript');
   const appSource=fs.readFileSync(new URL('../apps/admin/src/App.tsx',import.meta.url),'utf8');
   const start=appSource.indexOf('  async function loadSubmissionTimeline(');

@@ -51,6 +51,16 @@ export type StaffTask = {
   metadata?: Record<string, unknown>;
 };
 
+export function preContactIsComplete(job: Pick<TaskJob, "preContact" | "preContactNeedsReview">): boolean {
+  if (job.preContactNeedsReview === true) return false;
+  const { temperature, arrivalTime } = job.preContact ?? {};
+  // Previously imported rows can store the temperature as a decimal string.
+  const numeric = typeof temperature === "string" && /^\d+(?:\.\d+)?$/.test(temperature.trim())
+    ? Number(temperature) : temperature;
+  return typeof numeric === "number" && Number.isFinite(numeric) && numeric >= 34 && numeric <= 42 &&
+    typeof arrivalTime === "string" && /^([01]?\d|2[0-3]):[0-5]\d$/.test(arrivalTime);
+}
+
 export function deriveStaffTasks(input: {
   jobs: TaskJob[];
   resubmissions: OpenResubmission[];
@@ -62,11 +72,7 @@ export function deriveStaffTasks(input: {
     const workStart = tokyoMidnightMs(job.dateKey);
     const preAvailable = workStart - 3 * 24 * 60 * 60 * 1000;
     const preDue = workStart - 9 * 60 * 60 * 1000; // 前日15:00 JST
-    const preComplete = job.preContactNeedsReview !== true && Boolean(
-      job.preContact?.temperature !== undefined &&
-      job.preContact?.temperature !== "" &&
-      job.preContact?.arrivalTime
-    );
+    const preComplete = preContactIsComplete(job);
     const preContactWaitTitle = caseMailPreparationHeld(job) ? "受信内容・勤務条件を確認中です" : job.sourceMissing === true ? "シフトの取込状況を確認してください"
       : job.applicationUnconfirmed === true ? "シフト表の担当確認待ちです"
       : job.assignmentUnresolved === true ? "担当者の照合待ちです" : null;

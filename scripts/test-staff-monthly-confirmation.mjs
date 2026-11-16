@@ -33,27 +33,60 @@ for(const origin of ['application','source-manual']){
 console.log('Staff monthly confirmation lifecycle: PASS (both origins are synthetic display fixtures; manual intake is not implemented by this test)');
 // Render the actual App section so the pending list cannot silently disappear
 // while the pure selector tests still pass.
-const React=await import('react');
-const {renderToStaticMarkup}=await import('react-dom/server');
-const app=readFileSync('apps/staff/src/App.tsx','utf8');
-const start=app.indexOf('{pendingApplications.length>0&&<section');
-const end=app.indexOf('\n        <MonthlyShiftCalendar',start);
-assert.ok(start>0&&end>start);
-const jsx=app.slice(start+1,end).trim().slice(0,-1);
-function renderPending(pendingApplications){
- const ctx={React,pendingApplications,shiftDateLabel:job=>job.dateKey,shiftTextLabel:(value,fallback)=>value||fallback};
- runInNewContext(ts.transpileModule('globalThis.result=('+jsx+');',{compilerOptions:{target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.React}}).outputText,ctx);
- return renderToStaticMarkup(ctx.result);
+const React = await import('react');
+const { renderToStaticMarkup } = await import('react-dom/server');
+const appPath = 'apps/staff/src/App.tsx';
+const app = ts.createSourceFile(appPath, readFileSync(appPath, 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+let panelImport;
+let panel;
+function visit(node) {
+ if (ts.isImportDeclaration(node) && node.importClause?.name?.text === 'PendingAssignmentsPanel') panelImport = node;
+ if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(app) === 'PendingAssignmentsPanel') panel = node;
+ ts.forEachChild(node, visit);
 }
-assert.equal(renderPending([]),'');
-const html=renderPending([{id:'one',dateKey:'2026-11-02',storeName:'<script>private</script>'}]);
+visit(app);
+assert.equal(panelImport?.moduleSpecifier.text, './PendingAssignmentsPanel');
+assert.ok(panel, 'The shifts screen must mount the pending assignments panel');
+const props = new Map(panel.attributes.properties
+ .filter(ts.isJsxAttribute)
+ .map(attribute => [attribute.name.getText(app), attribute.initializer?.getText(app)]));
+assert.equal(props.get('jobs'), '{pendingApplications}');
+assert.match(props.get('onRefresh') ?? '', /refreshBusinessData\(true\)/u);
+
+const panelScope = {
+ React,
+ exports: {},
+ require(name) {
+  if (name === 'react') return React;
+  if (name === './job-list') return scope.exports;
+  assert.fail('Unexpected pending panel dependency ' + name);
+ },
+};
+runInNewContext(ts.transpileModule(readFileSync('apps/staff/src/PendingAssignmentsPanel.tsx', 'utf8'), {
+ compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React },
+}).outputText, panelScope);
+function renderPending(jobs, busy = false) {
+ return renderToStaticMarkup(React.createElement(panelScope.exports.default, {
+  jobs,
+  busy,
+  onRefresh: async () => assert.fail('Rendering must not start a refresh'),
+ }));
+}
+
+assert.equal(renderPending([]), '');
+const application = { id: 'one', dateKey: '2026-11-02', storeName: '<script>private</script>' };
+const html = renderPending([application]);
 assert.ok(html.includes('aria-label="確認待ちの手配"'));
 assert.ok(html.includes('2026-11-02'));
 assert.ok(html.includes('&lt;script&gt;private&lt;/script&gt;'));
-assert.ok(html.includes('管理者へ直接ご連絡'));
-assert.ok(!html.includes('<button'));
-console.log('Actual pending application section: PASS (separate label, escaped business details, direct-contact cancellation, no confirmation action)');
+assert.ok(html.includes('管理者へご連絡'));
+assert.deepEqual(html.match(/<button\b[^>]*>[^<]*<\/button>/gu)?.map(button => button.replace(/<[^>]*>/gu, '')), ['未確認の手配を更新']);
+assert.match(renderPending([application], true), /<button[^>]*\bdisabled=""/u);
+assert.ok(html.includes('応募受付後、勤務枠の確認を待っています。'));
 
-const manualHtml=renderPending([{id:'manual',dateKey:'2026-11-03',storeName:'合成手入力',caseListManualPending:{observationHash:'a'.repeat(64)}}]);
-assert.ok(manualHtml.includes('手入力の手配・確認待ち'));
-assert.ok(!manualHtml.includes('応募受付・確認待ち'));
+const manualHtml = renderPending([{
+ id: 'manual', dateKey: '2026-11-03', storeName: '合成手入力', caseListManualPending: { observationHash: 'a'.repeat(64) },
+}]);
+assert.ok(manualHtml.includes('手入力の手配内容を確認中です。'));
+assert.ok(!manualHtml.includes('応募受付後、勤務枠の確認を待っています。'));
+console.log('Actual pending assignments panel: PASS (shift entry, escaped details, refresh and origin labels)');

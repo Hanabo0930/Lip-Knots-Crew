@@ -3,9 +3,14 @@ import { setup } from "./case-mail-publication-harness.mjs";
 import { clone, companyId } from "./case-mail-test-harness.mjs";
 export async function fixture(){
  const h=await setup();await h.publishNow();
- h.records.set("staffProfiles/staff-1",{companyId,active:true,displayName:"合成スタッフ"});
- h.records.set("staffProfiles/staff-2",{companyId,active:true,displayName:"合成スタッフ2"});
+ h.records.set("staffNgMaintenance/"+companyId,{schema:"LK_STAFF_NG_MAINTENANCE_V1",companyId,state:"OPEN",generation:0});
+ const ng=h.load("./staff-ng"), header=Array(11).fill("");
+ header[10]="NG会社";
+ const observed={sourceRef:{spreadsheetId:"synthetic-staff-master",sheetName:"マスターデータ"},ngCompanyObservation:ng.observeStaffNgCell("マスターデータ",header,[],10)};
+ h.records.set("staffProfiles/staff-1",{companyId,active:true,displayName:"合成スタッフ",ngCompanies:ng.mergeStaffNg([observed],companyId,"staff-1")});
+ h.records.set("staffProfiles/staff-2",{companyId,active:true,displayName:"合成スタッフ2",ngCompanies:ng.mergeStaffNg([observed],companyId,"staff-2")});
  h.staffAuth={uid:"staff-user",token:{companyId,staffId:"staff-1",role:"staff"}};
+ h.records.set("authIdentities/"+h.staffAuth.uid,{companyId,staffId:"staff-1",active:true});
  h.commandApply={jobId:h.jobId,requestId:"request-synthetic-1",expectedJobRevision:h.job().revision};
  h.apply=(data=h.commandApply,auth=h.staffAuth)=>h.load("./jobs").applyToJob({data,auth});
  h.confirm=(revision=h.job().revision)=>h.load("./admin-operations").confirmApplication({auth:h.auth,data:{jobId:h.jobId,expectedRevision:revision}});

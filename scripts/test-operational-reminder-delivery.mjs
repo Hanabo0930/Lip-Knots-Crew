@@ -96,4 +96,291 @@ await test('resubmission producer-consumer paused keeps actual new request and q
  await h.trigger(key.split('/')[1]);await h.tick();assert.equal(h.state.sent.length,0);assert.equal(JSON.stringify([...h.state.records]),before);assert.equal(h.state.records.get('resubmissionRequests/'+request.requestId).status,'open');
 });
 
+
+const createReminderLoadFixture=()=>{
+ const h=setup('2026-09-24T10:45:00+09:00'),queries=[];
+ h.state.onQuery=query=>queries.push(query);
+ const company=(companyId,enabled=true)=>h.state.records.set('notificationSettings/'+companyId,{enabled,importantAnnouncementHour:2});
+ const job=(id,companyId,patch={})=>h.state.records.set('jobs/'+id,{
+  companyId,assignedStaffId:'staff-'+id,dateKey:'2026-09-18',revision:2,status:'assigned',
+  storeName:'Synthetic Store',preContact:{temperature:36.5,arrivalTime:'09:00'},
+  submissionStatus:{report:{completed:false},salesFloor:{completed:true}},...patch,
+ });
+ const run=()=>h.load('./reminder-scheduler').scheduleOperationalReminders();
+ const queues=()=>[...h.state.records].filter(([path])=>path.startsWith('notificationQueue/')).map(([path,data])=>({path,...data}));
+ return {h,queries,company,job,run,queues};
+};
+
+await test('reminder coverage / the twenty-first company is scheduled, disabled company stays excluded',async()=>{
+ const f=createReminderLoadFixture();
+ for(let index=0;index<22;index++){
+  const companyId='synthetic-company-'+String(index).padStart(2,'0');
+  f.company(companyId,index!==21);
+  f.job('company-job-'+index,companyId);
+ }
+ await f.run();
+ assert.equal(f.queues().length,21);
+ assert.equal(f.queues().filter(entry=>entry.companyId==='synthetic-company-20').length,1);
+ assert.equal(f.queues().filter(entry=>entry.companyId==='synthetic-company-21').length,0);
+ const lookups=f.queries.filter(item=>item.name==='notificationSettings');
+ assert.equal(lookups.length,2);
+ assert.equal(lookups[1].after,'synthetic-company-19');
+ assert.equal(f.h.state.sent.length,0);
+});
+
+await test('reminder coverage / same-date page boundaries include the jobs beyond the former 10000 cap',async()=>{
+ const f=createReminderLoadFixture();f.company('synthetic-company');
+ for(let index=0;index<10002;index++){
+  const id='volume-job-'+String(index).padStart(5,'0');
+  f.job(id,'synthetic-company',{sourceMissing:index<10000});
+ }
+ await f.run();
+ const jobs=f.queries.filter(query=>query.name==='jobs');
+ assert.equal(jobs.length,41);
+ assert.equal(jobs.at(-1).after,'volume-job-09999');
+ assert.deepEqual(f.queues().map(item=>item.reminderContext.jobId).sort(),['volume-job-10000','volume-job-10001']);
+ assert.equal(f.h.state.sent.length,0);
+});
+
+await test('reminder coverage / 300 due reports use bounded concurrency and replay without duplicate queue entries',async()=>{
+ const f=createReminderLoadFixture();f.company('synthetic-company');
+ let inFlight=0,peak=0;
+ for(let index=0;index<300;index++)f.job('burst-job-'+index,'synthetic-company');
+ f.h.state.onRead=async path=>{
+  if(!path.startsWith('jobs/'))return;
+  inFlight++;peak=Math.max(peak,inFlight);
+  await new Promise(resolve=>setImmediate(resolve));
+  inFlight--;
+ };
+ await f.run();await f.run();
+ const notifications=f.queues();
+ assert.equal(notifications.length,300);
+ assert.equal(new Set(notifications.map(item=>item.targetStaffId)).size,300);
+ assert.equal(new Set(notifications.map(item=>item.reminderContext.jobId)).size,300);
+ assert.ok(notifications.every(item=>item.category==='submission_reminder'&&item.reminderContext.kind==='report'&&item.quietDeferred===false));
+ assert.equal(peak,8);assert.equal(inFlight,0);
+ assert.equal(f.h.state.sent.length,0);
+});
+
+await test('reminder coverage / a failed job and a foreign company cannot block other due jobs',async()=>{
+ const f=createReminderLoadFixture();f.company('synthetic-company');
+ for(const id of ['broken','next','last'])f.job(id,'synthetic-company');
+ f.job('foreign','foreign-company');
+ f.h.state.suppressExpectedErrors=true;
+ f.h.state.onRead=path=>{if(path==='jobs/broken')throw Error('synthetic job read failure');};
+ await f.run();
+ assert.deepEqual(f.queues().map(item=>item.reminderContext.jobId).sort(),['last','next']);
+ assert.equal(f.h.state.errors.length,1);
+ assert.equal(f.h.state.errors[0][1].jobId,'broken');
+ assert.equal(f.h.state.sent.length,0);
+});
+
+
+function afterDispatchIntent(h, change) {
+ let committed = false;
+ h.state.onAfterCommit = writes => {
+  if (!committed && writes.some(([, value]) => value.dispatchIntent?.operationId)) {
+   committed = true;
+   change();
+  }
+ };
+ return () => assert.equal(committed, true, 'the mutation happened after the dispatch intent committed');
+}
+for (const kind of ['precontact','report','sales-floor','netprint']) {
+ for (const [name, mutate] of mutations.filter(([name]) => name === 'staff' || name === 'complete')) {
+  await test(kind + ' after dispatch intent ' + name, async () => {
+   const f = fixture(kind);
+   await f.schedule();
+   const [q] = f.queues();
+   const checked = afterDispatchIntent(f.h, () => mutate(f.h.state.records.get('jobs/job-a')));
+   await f.h.trigger(q.id);
+   checked();
+   assert.equal(f.h.state.sent.length, 0);
+   assert.equal(f.h.document(q.id).status, 'superseded');
+   assert.equal(f.h.document(q.id).supersededReason, 'reminder_no_longer_current');
+   assert.equal(f.h.document(q.id).dispatchIntent, null);
+   await f.h.trigger(q.id);
+   assert.equal(f.h.state.sent.length, 0);
+  });
+ }
+}
+await test('print partial completion after dispatch intent updates the delivered count', async () => {
+ const f = fixture('netprint');
+ f.job.netPrint.items.push({number:'87654321',printed:false});
+ await f.schedule();
+ const checked = afterDispatchIntent(f.h, () => {
+  f.h.state.records.get('jobs/job-a').netPrint.items[0].printed = true;
+ });
+ await f.h.trigger(f.queues()[0].id);
+ checked();
+ assert.equal(f.h.state.sent.length, 1);
+ assert.equal(f.h.state.sent[0].data.body, '1件の資料をできるだけ早く印刷してください。');
+});
+await test('resubmission submitted after dispatch intent is superseded', async () => {
+ const f = replacementFixture();
+ const {queueId} = await f.enqueue();
+ const checked = afterDispatchIntent(f.h, () => { f.request.status = 'submitted'; });
+ await f.h.trigger(queueId);
+ checked();
+ assert.equal(f.h.state.sent.length, 0);
+ assert.equal(f.h.document(queueId).status, 'superseded');
+ assert.equal(f.h.document(queueId).dispatchIntent, null);
+});
+for (const remaining of [0, 1]) {
+ await test('quiet digest after dispatch intent remaining ' + remaining, async () => {
+  const h = setup('2026-09-13T23:00:00+09:00');
+  const memberQueueIds = [];
+  for (const jobId of ['job-0','job-1']) {
+   h.state.records.set('jobs/' + jobId, {
+    companyId: 'company-a', assignedStaffId: 'staff-a', dateKey: '2026-09-14', revision: 1, status: 'assigned',
+   });
+   const {queueId} = await h.enqueue({
+    category: 'precontact_reminder', dedupeKey: jobId,
+    reminderContext: {version:1,jobId,staffId:'staff-a',dateKey:'2026-09-14',revision:1,kind:'precontact'},
+   });
+   memberQueueIds.push(queueId);
+  }
+  const checked = afterDispatchIntent(h, () => {
+   for (let index = remaining; index < 2; index++) {
+    h.state.records.get('jobs/job-' + index).preContact = {temperature:36.5,arrivalTime:'09:00'};
+   }
+  });
+  h.setTime('2026-09-14T07:00:00+09:00');
+  await h.tick();
+  checked();
+  const digests = [...h.state.records.values()].filter(d => d.category === 'quiet_digest');
+  assert.equal(digests.length, 1);
+  assert.equal(digests[0].status, remaining ? 'completed' : 'superseded');
+  assert.equal(digests[0].dispatchIntent, null);
+  assert.equal(h.state.sent.length, remaining);
+  if (remaining) assert.equal(h.state.sent[0].data.body, '1件のお知らせ・対応事項があります。');
+  assert.ok(memberQueueIds.every(id => h.document(id).status === 'bundled'));
+ });
+}
+
+for (const [field, change] of [
+ ['title', value => { value.title = '別の通知'; }],
+ ['body', value => { value.body = '別の本文'; }],
+ ['route', value => { value.route = '/submissions/wrong-job/report'; }],
+ ['data', value => { value.data = { route: '/wrong' }; }],
+ ['reminder context', value => { value.reminderContext.jobId = 'another-job'; }],
+ ['schedule', (value, h) => { value.deliverAt = h.Timestamp.fromMillis(h.state.now + 60_000); }],
+ ['quiet bypass', value => { value.bypassQuietHours = true; }],
+]) {
+ await test('dispatch queue content changed after intent / ' + field, async () => {
+  const f = fixture('report');
+  await f.schedule();
+  const [{id}] = f.queues();
+  const checked = afterDispatchIntent(f.h, () => change(f.h.document(id), f.h));
+  await f.h.trigger(id);
+  checked();
+  assert.equal(f.h.state.sent.length,0);
+  const record = f.h.document(id);
+  assert.equal(record.status,'superseded');
+  assert.equal(record.supersededReason,'notification_content_changed');
+  assert.equal(record.dispatchIntent,null);
+  assert.equal(record.deliveryVerificationRequired,undefined);
+  await f.h.trigger(id);
+  await f.h.tick();
+  assert.equal(f.h.state.sent.length,0);
+ });
+}
+await test('dispatch queue content unchanged despite map key order',async()=>{
+ const f=fixture('report');
+ await f.schedule();
+ const [{id}]=f.queues();
+ f.h.document(id).data={a:'1',b:'2'};
+ const checked=afterDispatchIntent(f.h,()=>{f.h.document(id).data={b:'2',a:'1'};});
+ await f.h.trigger(id);
+ checked();
+ assert.equal(f.h.state.sent.length,1);
+ assert.equal(f.h.document(id).status,'completed');
+ assert.equal(f.h.state.sent[0].data.a,'1');
+ assert.equal(f.h.state.sent[0].data.b,'2');
+});
+await test('dispatch payload keeps report title, refreshed body, route and category above additional data',async()=>{
+ const f=fixture('netprint');
+ f.job.netPrint.items.push({number:'87654321',printed:false});
+ await f.schedule();
+ const [{id}]=f.queues();
+ f.h.document(id).data={title:'fake title',body:'fake body',category:'fake category',route:'/wrong',extra:'still sent',crewAudienceCompanyId:'wrong-company',crewAudienceStaffId:'wrong-staff',crewAudienceUid:'wrong-uid'};
+ const checked=afterDispatchIntent(f.h,()=>{f.h.state.records.get('jobs/job-a').netPrint.items[0].printed=true;});
+ await f.h.trigger(id);
+ checked();
+ assert.equal(f.h.state.sent.length,1);
+ const sent=f.h.state.sent[0];
+ assert.equal(sent.data.title,'ネットプリントが未印刷です');
+ assert.equal(sent.data.body,'1件の資料をできるだけ早く印刷してください。');
+ assert.equal(sent.data.category,'netprint_unprinted');
+ assert.equal(sent.data.route,'/shifts/job-a/netprint');
+ assert.equal(sent.data.extra,'still sent');
+ assert.equal(sent.data.crewAudienceCompanyId,'company-a');
+ assert.equal(sent.data.crewAudienceStaffId,'staff-a');
+ assert.equal(sent.data.crewAudienceUid,'');
+ assert.equal(sent.webpush.fcmOptions.link,sent.data.route);
+});
+
+
+for (const phase of ["queued", "after-intent", "after-final-check"]) {
+ await test("deadline reminder expires at " + phase, async () => {
+  const f = fixture("report");
+  await f.schedule();
+  const [{id}] = f.queues();
+  const expire = () => f.h.setTime("2026-09-24T11:00:00+09:00");
+  let checked;
+  f.h.setTime("2026-09-24T10:59:59+09:00");
+  if (phase === "queued") expire();
+  else if (phase === "after-intent") checked = afterDispatchIntent(f.h, expire);
+  else {
+   let intent = false, advanced = false;
+   f.h.state.onAfterCommit = writes => {
+    if (writes.some(([, data]) => data.dispatchIntent?.operationId)) intent = true;
+    else if (intent && !advanced && writes.length === 0) { advanced = true; expire(); }
+   };
+   checked = () => assert.ok(advanced, "clock advanced after the final readiness transaction");
+  }
+  await f.h.trigger(id);
+  checked?.();
+  assert.equal(f.h.state.sent.length, 0);
+  assert.equal(f.h.document(id).status, "superseded");
+  assert.equal(f.h.document(id).dispatchIntent ?? null, null);
+ });
+}
+await test("deadline reminder still sends before cutoff with actual time and remaining lifetime", async () => {
+ const f = fixture("sales-floor");
+ await f.schedule();
+ f.h.setTime("2026-09-24T10:58:56+09:00");
+ await f.h.trigger(f.queues()[0].id);
+ assert.equal(f.h.state.sent.length, 1);
+ assert.match(f.h.state.sent[0].data.body, /提出期限は11:00です/);
+ assert.equal(f.h.state.sent[0].webpush.headers.TTL, "64");
+});
+await test("deadline expiry preserves the separate overdue notice", async () => {
+ const f = fixture("report");
+ await f.schedule();
+ const early = f.queues()[0].id;
+ f.h.setTime("2026-09-24T11:00:01+09:00");
+ await f.schedule();
+ await f.h.trigger(early);
+ assert.equal(f.h.state.sent.length, 0);
+ const staffOverdue = f.queues().find(q => q.data.category === "submission_overdue" && q.data.targetStaffId === "staff-a");
+ assert.ok(staffOverdue);
+ await f.h.trigger(staffOverdue.id);
+ assert.equal(f.h.state.sent.length, 1);
+ assert.equal(f.h.state.sent[0].data.category, "submission_overdue");
+ assert.equal(f.h.state.sent[0].webpush.headers.TTL, undefined);
+});
+await test("deadline expiry removes the old reminder from a mixed digest count", async () => {
+ const h = setup("2026-09-23T23:00:00+09:00");
+ h.state.records.set("jobs/report-job", {companyId:"company-a",assignedStaffId:"staff-a",dateKey:"2026-09-18",revision:1,status:"assigned"});
+ h.state.records.set("jobs/precontact-job", {companyId:"company-a",assignedStaffId:"staff-a",dateKey:"2026-09-25",revision:1,status:"assigned"});
+ await h.enqueue({category:"submission_reminder",dedupeKey:"old-deadline",reminderContext:{version:1,kind:"report",jobId:"report-job",staffId:"staff-a",dateKey:"2026-09-18",revision:1}});
+ await h.enqueue({category:"precontact_reminder",dedupeKey:"pending-precontact",reminderContext:{version:1,kind:"precontact",jobId:"precontact-job",staffId:"staff-a",dateKey:"2026-09-25",revision:1}});
+ h.setTime("2026-09-24T11:02:00+09:00");
+ await h.tick();
+ assert.equal(h.state.sent.length, 1);
+ assert.equal(h.state.sent[0].data.category, "quiet_digest");
+ assert.equal(h.state.sent[0].data.body, "1件のお知らせ・対応事項があります。");
+});
+
 const passed=results.filter(r=>r.passed).length;console.log(JSON.stringify({passed,total:results.length,results,scope:'actual scheduler and delivery handlers; synthetic Firestore and FCM only'},null,2));process.exitCode=passed===results.length?0:1;

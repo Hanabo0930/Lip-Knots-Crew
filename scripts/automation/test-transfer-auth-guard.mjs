@@ -29,6 +29,15 @@ for(const change of [
  files=>files['functions/src/submission-transfer-control.ts']=files['functions/src/submission-transfer-control.ts'].replace('from "./system-safety"','from "./other"'),
  files=>files['functions/src/uploads.ts']=files['functions/src/uploads.ts'].replaceAll('if (await submissionTransferPaused(companyId))','if (submissionTransferPaused(companyId))'),
  files=>files['functions/src/uploads.ts']=files['functions/src/uploads.ts'].replace('from "./submission-transfer-control"','from "./other"'),
+ ...[
+  ['parts.length !== 6','parts.length < 6'],
+  ['if (file.storagePath !== path) return;',''],
+  ['if (meta.storagePath !== path) return;','await fileRef.update({status:"security_error"});'],
+ ].map(([before,after])=>files=>{
+  const file='functions/src/uploads.ts';
+  assert.ok(files[file].includes(before));
+  files[file]=files[file].replace(before,after);
+ }),
 ]){
  const result=run(change);assert.equal(result.passed,false);assert.equal(result.exitCode,1);passed++;
 }
@@ -53,7 +62,12 @@ for(const [before,after] of [
  ['staffFromClaims(session.token)','request.data.staffId'],
  ['if (await submissionTransferPaused(companyId)) throw','if (false) throw'],
  ['(input.purpose === "replacement") !== Boolean(input.resubmissionRequestId)','false'],
- ['await db.runTransaction(async (tx) =>','await nonAtomic(async (tx) =>'],
+ ['(readExistingOnly = false) => db.runTransaction(async (tx) =>','(readExistingOnly = false) => nonAtomic(async (tx) =>'],
+ ['input.receiptOnly || readExistingOnly','input.receiptOnly'],
+ ['{ generation: source.generation }','{}'],
+ ['await verifyUploadBytes(version.createReadStream({ decompress: false }), saved.size, saved.contentSha256);',''],
+ ['const latest = await loadReceipt(true);','const latest = await loadReceipt();'],
+ ['if (source) assertStagedReceiptSource(file, source);',''],
  ['job.companyId !== companyId || job.assignedStaffId !== staffId','job.companyId !== companyId'],
  ['job.cancelled === true || job.status === "cancelled"','false'],
  ['job.status !== "assigned"','false'],

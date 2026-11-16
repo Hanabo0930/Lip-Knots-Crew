@@ -14,6 +14,7 @@ import {
 } from "./notification-time";
 
 import type { ReminderKind } from "./operational-reminder";
+import { preContactIsComplete } from "./task-core";
 
 type NotificationSettings = {
   enabled?: boolean;
@@ -60,24 +61,30 @@ export const scheduleOperationalReminders = onSchedule(
   async () => {
     if (notificationDeliveryPaused()) return;
     const now = new Date();
-    const settingsSnap = await db.collection("notificationSettings")
-      .where("enabled", "==", true)
-      .limit(20)
-      .get();
-
-    for (const settingDoc of settingsSnap.docs) {
-      const settings = settingDoc.data() as NotificationSettings;
-      try {
-        await processCompanyReminders(settingDoc.id, settings, now);
-      } catch (error) {
-        console.error("Operational reminder scheduling failed", {
-          companyId: settingDoc.id,
-          error,
-        });
+    const query = db.collection("notificationSettings").where("enabled", "==", true);
+    for await (const page of reminderPages(query, 20)) {
+      for (const settingDoc of page) {
+        const settings = settingDoc.data() as NotificationSettings;
+        try {
+          await processCompanyReminders(settingDoc.id, settings, now);
+        } catch (error) {
+          console.error("Operational reminder scheduling failed", { companyId: settingDoc.id, error });
+        }
       }
     }
   }
 );
+
+async function* reminderPages(query: FirebaseFirestore.Query, pageSize: number) {
+  const limited = query.limit(pageSize);
+  let page = await limited.get();
+  while (!page.empty) {
+    yield page.docs;
+    const last = page.docs.at(-1);
+    if (page.size < pageSize || !last) return;
+    page = await limited.startAfter(last).get();
+  }
+}
 
 async function processCompanyReminders(
   companyId: string,
@@ -89,21 +96,30 @@ async function processCompanyReminders(
   const today = parts.dateKey;
   const from = addTokyoDays(today, -SUBMISSION_BUSINESS_DAY_SEARCH_LIMIT);
   const through = addTokyoDays(today, 60);
-  const jobsSnap = await db.collection("jobs")
+  const jobs = db.collection("jobs")
     .where("companyId", "==", companyId)
     .where("status", "==", "assigned")
     .where("dateKey", ">=", from)
     .where("dateKey", "<=", through)
-    .limit(10000)
-    .get();
+    .orderBy("dateKey", "asc");
 
-  for (const jobDoc of jobsSnap.docs) {
-    const job = jobDoc.data() as JobData;
-    if (!job.assignedStaffId || !job.dateKey || job.cancelled === true || job.sourceMissing === true ||
-        job.applicationUnconfirmed === true || job.assignmentUnresolved === true || caseMailPreparationHeld(job)) continue;
-    await schedulePreContact(companyId, jobDoc.id, job, settings, now);
-    await scheduleSubmissions(companyId, jobDoc.id, job, now);
-    await schedulePrintReminder(companyId, jobDoc.id, job, settings, now);
+  // Limit simultaneous job checks. Each queue reservation still verifies the current job in its own transaction.
+  const parallelJobs = 8;
+  for await (const page of reminderPages(jobs, 250)) {
+    for (let offset = 0; offset < page.length; offset += parallelJobs) {
+      await Promise.all(page.slice(offset, offset + parallelJobs).map(async jobDoc => {
+        const job = jobDoc.data() as JobData;
+        if (!job.assignedStaffId || !job.dateKey || job.cancelled === true || job.sourceMissing === true ||
+            job.applicationUnconfirmed === true || job.assignmentUnresolved === true || caseMailPreparationHeld(job)) return;
+        try {
+          await schedulePreContact(companyId, jobDoc.id, job, settings, now);
+          await scheduleSubmissions(companyId, jobDoc.id, job, now);
+          await schedulePrintReminder(companyId, jobDoc.id, job, settings, now);
+        } catch (error) {
+          console.error("Operational reminder job failed", { companyId, jobId: jobDoc.id, error });
+        }
+      }));
+    }
   }
 
   const announcementHour = settings.importantAnnouncementHour ?? 9;
@@ -120,12 +136,7 @@ async function schedulePreContact(
   now: Date
 ): Promise<void> {
   if (job.sourceMissing === true || job.applicationUnconfirmed === true || job.assignmentUnresolved === true || caseMailPreparationHeld(job)) return;
-  const complete = job.preContactNeedsReview !== true && Boolean(
-    job.preContact?.temperature !== undefined &&
-    job.preContact?.temperature !== "" &&
-    job.preContact?.arrivalTime
-  );
-  if (complete || !job.dateKey || !job.assignedStaffId) return;
+  if (preContactIsComplete(job) || !job.dateKey || !job.assignedStaffId) return;
 
   const today = tokyoParts(now).dateKey;
   const workDate = job.dateKey;
@@ -191,7 +202,7 @@ async function enqueueCurrentPreContact(
         current.assignedStaffId !== expected.assignedStaffId || current.dateKey !== expected.dateKey ||
         !sameReminderRevision(current, expected) ||
         current.sourceMissing === true || current.applicationUnconfirmed === true || current.assignmentUnresolved === true || caseMailPreparationHeld(current)) return;
-    if (current.preContactNeedsReview !== true && current.preContact?.temperature !== undefined && current.preContact.temperature !== "" && current.preContact.arrivalTime) return;
+    if (preContactIsComplete(current)) return;
     // 案件の現在値と予約を同じ取引で確認し、遅延記録だけを先に残さない。
     tx.create(queueRef, {
       ...queueDocumentData(preContactNotificationInput(companyId, jobId, current, slot)),

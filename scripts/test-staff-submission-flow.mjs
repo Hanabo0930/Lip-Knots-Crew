@@ -55,10 +55,16 @@ function section(source, start, end) {
 }
 
 {
- const from=app.indexOf('<div className="task-clear"'),to=app.indexOf('</div></div>',from)+12;assert.ok(from>=0&&to>from);
- const jsx=app.slice(from,to),compiled=ts.transpileModule('const node='+jsx+';', {compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}}).outputText;
- for(const source of ['live','cached','stale']){const ctx={React:{createElement},businessDataSource:source};runInNewContext(compiled+'globalThis.node=node;',ctx);const html=renderToStaticMarkup(ctx.node);assert.equal(html.includes('今日の対応はすべて完了'),source==='live');assert.equal(html.includes('前回確認時点'),source!=='live');if(source!=='live')assert.ok(html.includes('シフト画面で更新'));}
- console.log('Home empty tasks: real JSX distinguishes latest completion from cached/stale emptiness and points to refresh.');
+ const from=app.indexOf('<div className="task-clear"'),end=app.indexOf("</div>)}",from);assert.ok(from>=0&&end>from);
+ const jsx=app.slice(from,end+"</div>".length),compiled=ts.transpileModule("const node="+jsx+";", {compilerOptions:{jsx:ts.JsxEmit.React,target:ts.ScriptTarget.ES2022}}).outputText;
+ for(const source of ["live","cached","stale"]){
+  const ctx={React:{createElement},taskDataSource:source};runInNewContext(compiled+"globalThis.node=node;",ctx);
+  const html=renderToStaticMarkup(ctx.node);
+  assert.equal(html.includes("今日の対応はすべて完了"),source==="live");
+  assert.equal(html.includes("前回確認時点では対応事項はありません"),source==="cached");
+  assert.equal(html.includes("現在の対応事項を確認できません"),source==="stale");
+ }
+ console.log("Home empty tasks: real JSX distinguishes verified, cached and unconfirmed states.");
 }
 
 {
@@ -103,7 +109,7 @@ const scope = {
   myJobs: [{ id: "assigned" }], authLoadVersionRef:{current:0}, navigationVersionRef:{current:0}, isSubmissionActionPending:()=>false, isPending:()=>false, loadTaskJob:async()=>null,
   setMessage: () => events.push("error"), navigate: value => events.push(value),
   setSelectedJob: () => events.push("selected"),
-  openShiftJob: () => events.push("selected"),
+  openShiftJob: (_job,onOpened) => {events.push("selected");onOpened?.();return true;},
   startSubmission: async (type, job, request) => events.push([type, job.id, request]),
 };
 runInNewContext(ts.transpileModule(handler, {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, scope);
@@ -129,6 +135,12 @@ for (const kind of ["precontact", "netprint"]) {
   await scope.openTask({jobId:"assigned",kind});
   assert.deepEqual(events,["selected","shifts"]);
 }
+{
+ const acceptedOpen=scope.openShiftJob;scope.openShiftJob=()=>false;
+ for(const kind of ["precontact","netprint"]){events.length=0;await scope.openTask({jobId:"assigned",kind});assert.deepEqual(events,[],"Declined shift changes must not navigate");}
+ scope.openShiftJob=acceptedOpen;
+}
+
 
 
 {
@@ -136,8 +148,8 @@ for (const kind of ["precontact", "netprint"]) {
  for(const change of ['none','navigation','account'])for(const outcome of ['success','missing','failure']){
   const events=[];let finish;
   const ctx={mailOpen:true,mailPanelVersion:{current:0},setShowMailApplications:value=>ctx.mailOpen=value,myJobs:[],authLoadVersionRef:{current:1},navigationVersionRef:{current:0},isSubmissionActionPending:()=>false,isPending:()=>false,
-   loadTaskJob:()=>new Promise((resolve,reject)=>{finish={resolve,reject};}),setMessage:value=>events.push(['message',value]),openShiftJob:job=>events.push(['selected',job.id]),startSubmission:async()=>{},
-   shiftNotification:{cancel:()=>{}},resubmissionNotification:{cancel:()=>{}},setShowAccountMenu:()=>{},setShowDevices:()=>{},closeDiagnostics:()=>{},setView:value=>events.push(['view',value]),window:{scrollTo:()=>{}},openJobsStatus:'ready'};
+   loadTaskJob:()=>new Promise((resolve,reject)=>{finish={resolve,reject};}),setMessage:value=>events.push(['message',value]),openShiftJob:(job,onOpened)=>{events.push(['selected',job.id]);onOpened?.();return true;},startSubmission:async()=>{},
+   shiftNotification:{cancel:()=>{}},resubmissionNotification:{cancel:()=>{}},submissionNotification:{cancel:()=>{}},setShowAccountMenu:()=>{},setShowDevices:()=>{},closeDiagnostics:()=>{},setView:value=>events.push(['view',value]),window:{scrollTo:()=>{}},openJobsStatus:'ready'};
   runInNewContext(ts.transpileModule(navigation+handler,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);
   const pending=ctx.openTask({jobId:'target',kind:'netprint'});
   if(change==='navigation'){ctx.navigate('contact');assert.equal(ctx.navigationVersionRef.current,1);assert.equal(ctx.mailPanelVersion.current,1);assert.equal(ctx.mailOpen,false);events.length=0;}if(change==='account')ctx.authLoadVersionRef.current++;
@@ -213,8 +225,12 @@ runInNewContext(ts.transpileModule(readFileSync('apps/staff/src/SubmissionHistor
 for(const [status,label] of [['waiting_upload','アップロード待ち'],['processing','Drive転送中'],['paused_global','転送一時停止'],['error','転送エラー'],['security_error','状態の確認が必要です'],['unknown','状態の確認が必要です'],['completed','Drive保存済み']]){
  const output=renderToStaticMarkup(createElement(historyModule.exports.default,{files:[{...previewFile,originalName:'synthetic.png',driveName:'',contentType:'image/png',previewUrl:null,status,purpose:'replacement'}],onRefreshPreview:async()=>null}));
  assert.ok(output.includes(label));assert.ok(output.includes('再送・'));assert.ok(!output.includes('提出済み'));
- assert.equal(output.includes('画像を再読み込み'),status==='completed');assert.equal(output.includes('管理者へ連絡'),status!=='completed');
+ assert.equal(output.includes('画像を表示'),status==='completed');assert.doesNotMatch(output,/プレビューを取得できません/);assert.equal(output.includes('管理者へ連絡'),status!=='completed');
 }
+const demandPdf=renderToStaticMarkup(createElement(historyModule.exports.default,{files:[{...previewFile,contentType:"application/pdf",previewUrl:null,status:"completed",purpose:"initial"}],onRefreshPreview:async()=>{throw Error("Preview must be explicitly requested");}}));
+assert.match(demandPdf,/PDFを表示する準備/);
+assert.doesNotMatch(demandPdf,/情報を確認できません|<a[^>]+href=/);
+
 for(const [driveName,originalName,expected] of [['same.pdf','original.pdf','same.pdf'],['  ','original.pdf','original.pdf'],['','','ファイル名を確認できません']]){
  const files=[1,2].map(id=>({...previewFile,id:String(id),driveName,originalName,contentType:'application/pdf',previewUrl:null,status:'completed',purpose:'initial'}));
  const output=renderToStaticMarkup(createElement(historyModule.exports.default,{files,onRefreshPreview:async()=>null}));
@@ -246,7 +262,7 @@ for(const [driveName,originalName,expected] of [['same.pdf','original.pdf','same
  const start=app.indexOf('<SubmissionHistoryFiles files='),end=app.indexOf('/>',start)+2;assert.ok(start>=0&&end>start);
  const jsx=app.slice(start,end);
  for(const submissionHistory of [[],[{files:[]}],[{files:[{...previewFile,driveName:'history.pdf',originalName:'original.pdf',contentType:'application/pdf',previewUrl:null,status:'completed',purpose:'initial'}]},{files:[]}],[{files:[{...previewFile,driveName:'history.pdf',originalName:'original.pdf',contentType:'application/pdf',previewUrl:null,status:'completed',purpose:'initial'}]}]]){
-  const ctx={exports:{},require:createRequire(import.meta.url),SubmissionHistoryFiles:historyModule.exports.default,submissionHistory,refreshFilePreview:async()=>null};
+  const ctx={exports:{},require:createRequire(import.meta.url),SubmissionHistoryFiles:historyModule.exports.default,submissionHistory,refreshFilePreview:async()=>null,nextSubmissionHistoryCursor:null,isPending:()=>false,submissionEditPending:false,submissionHistoryPageError:"",loadEarlierSubmissionHistory:()=>assert.fail("Rendering must not fetch an earlier page")};
   runInNewContext(ts.transpileModule('export default function History(){return ('+jsx+');}',{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,ctx);
   const html=renderToStaticMarkup(createElement(ctx.exports.default));assert.equal(html.includes('提出履歴はありません。'),submissionHistory.length===0);assert.equal(html.includes('一部のファイル情報を確認できません'),submissionHistory.some(group=>group.files.length===0));assert.equal((html.match(/<article/g)||[]).length,submissionHistory.flatMap(group=>group.files).length);
  }
@@ -296,6 +312,13 @@ for(const [driveName,originalName,expected] of [['same.pdf','original.pdf','same
   runInNewContext(ts.transpileModule('export default function ClientStatus(){return ('+jsx+');}',{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,ctx);const html=renderToStaticMarkup(createElement(ctx.exports.default));if(submissionType==='report')assert.equal(html,'');else{assert.ok(html.includes('直接提出した場合'));assert.ok(html.includes('提出済みを記録'));assert.ok(html.includes('id="client-submission-help"'));assert.ok(html.includes('aria-describedby="client-submission-help"'));}
  }
  console.log('Client submission explanation: sales-floor action describes recording direct submission; report view excludes the unrelated action.');
+}
+for(const [hasEarlier,pending,error] of [[true,false,""],[true,true,""],[false,false,""],[false,false,"fixture error"]]){
+ const markup=renderToStaticMarkup(createElement(historyModule.exports.default,{files:[],onRefreshPreview:async()=>null,pagination:{hasEarlier,pending,error,disabled:false,onLoadEarlier:()=>assert.fail("Rendering must not fetch an earlier page")}}));
+ assert.equal(markup.includes("以前の提出を表示"),hasEarlier&&!pending);
+ assert.equal(markup.includes("以前の提出を読み込み中…"),pending);
+ assert.equal(markup.includes('aria-busy="true"'),pending);
+ assert.equal(markup.includes('role="alert"'),Boolean(error));
 }
 const emptyHistory=renderToStaticMarkup(createElement(historyModule.exports.default,{files:[],onRefreshPreview:async()=>null}));assert.ok(emptyHistory.includes('提出履歴はありません。'));
 console.log('History state rendering passed: 7 transfer states, no preview retry before completion, replacement label and empty history.');

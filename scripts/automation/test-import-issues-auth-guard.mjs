@@ -4,9 +4,10 @@ import {runInNewContext} from 'node:vm';
 const read=p=>fs.readFileSync(new URL('../../'+p,import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const guard=read('scripts/automation/check-function-auth-guards.mjs').replace(/^import .*;\n/gm,'');
 const modules={previewStaffImport:'staff-import',syncStaffDirectoryReadOnly:'staff-import',previewShiftImport:'shift-import',syncShiftSheetsReadOnly:'shift-import',retrySheetWriteIssue:'admin-operations',acknowledgeSheetWriteIssue:'admin-operations'};
-const sources=Object.fromEntries([...new Set([...Object.values(modules),'sheet-reader','case-list-source','case-list-source-core','case-list-monthly-worker','case-list-external-transfer'])].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
+const sources=Object.fromEntries([...new Set([...Object.values(modules),'sheet-reader','case-list-source','case-list-source-core','case-list-monthly-worker','case-list-external-transfer','case-list-firebase-owner'])].map(m=>['functions/src/'+m+'.ts',read('functions/src/'+m+'.ts')]));
 sources['functions/src/case-list-monthly-controller.cjs']=read('functions/src/case-list-monthly-controller.cjs');
 sources['functions/src/case-list-external-core.cjs']=read('functions/src/case-list-external-core.cjs');
+for(const file of ['case-list-owner-review-callable.ts','case-list-owner-context.ts','case-list-owner-authorization.cjs','case-list-approved-sent-access.ts','case-list-gas-sync-runtime.ts'])sources['functions/src/'+file]=read('functions/src/'+file);
 let cases=0;
 function run(name,change){
  const files={...sources};change?.(files);
@@ -116,8 +117,8 @@ for(const [before,after] of [
  ['input.action === "reconcile-case-list"','false'],
  ['snapshot.data()?.companyId !== companyId','false'],
  ['snapshot.data()?.operation !== "case_list.assign"','false'],
- ['reconcileCaseListMonthlyAssignment(ref, session.uid, session.token)','reconcileCaseListMonthlyAssignment(ref, "untrusted-owner", session.token)'],
- ['reconcileCaseListMonthlyAssignment(ref, session.uid, session.token)','runCaseListMonthlyAssignment(ref)'],
+ ['reconcileCaseListMonthlyAssignment(ref, session.uid, session.token, reconcileExternal)','reconcileCaseListMonthlyAssignment(ref, "untrusted-owner", session.token, reconcileExternal)'],
+ ['reconcileCaseListMonthlyAssignment(ref, session.uid, session.token, reconcileExternal)','runCaseListMonthlyAssignment(ref)'],
 ]) reject('acknowledgeSheetWriteIssue',before,after);
 for(const [before,after]of [
  ['assertExecutive(owner.token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");',''],
@@ -207,14 +208,14 @@ for(const [before,after]of [
 // manual schema. These mutations leave the native route intact on purpose.
 for(const [before,after]of [
  ['const input = externalManualSchema.parse(request.data);','const input = request.data;'],
- ['selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, input, true)','selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, input, false)'],
- ['selectCaseListManualMonthlyTransfer(companyId, session.uid, session.token, input, true)','selectCaseListManualMonthlyTransfer(request.data.companyId, session.uid, session.token, input, true)'],
- ['selectExternalCaseListMonthlyTransfer(queueRef, session.uid, session.token,','selectExternalCaseListMonthlyTransfer(queueRef, request.data.uid, session.token,'],
- ['selectExternalCaseListMonthlyTransfer(queueRef, session.uid, session.token,','selectExternalCaseListMonthlyTransfer(queueRef, session.uid, request.data.token,'],
+ ['registerCaseListManualForHandoff(companyId, owner.uid, owner, input, beforeCommit)','registerCaseListManualForHandoff(companyId, owner.uid, owner, input, undefined)'],
+ ['registerCaseListManualForHandoff(companyId, owner.uid, owner, input, beforeCommit)','registerCaseListManualForHandoff(request.data.companyId, owner.uid, owner, input, beforeCommit)'],
+ ['selectExternalCaseListMonthlyTransferForHandoff(queueRef, owner.uid, owner,','selectExternalCaseListMonthlyTransferForHandoff(queueRef, request.data.uid, owner,'],
+ ['selectExternalCaseListMonthlyTransferForHandoff(queueRef, owner.uid, owner,','selectExternalCaseListMonthlyTransferForHandoff(queueRef, owner.uid, request.data.token,'],
  ['{ reviewKey: queue?.caseListPhase?.continuationHash, clientNameUpConfirmed: true }','{ reviewKey: "unreviewed", clientNameUpConfirmed: true }'],
  ['snap.data()?.companyId !== companyId || snap.data()?.operation !== "case_list.assign"','false'],
- ['selectExternalCaseListMonthlyTransfer(ref, session.uid, session.token, input)','selectExternalCaseListMonthlyTransfer(ref, request.data.uid, session.token, input)'],
- ['selectExternalCaseListMonthlyTransfer(ref, session.uid, session.token, input)','selectExternalCaseListMonthlyTransfer(ref, session.uid, request.data.token, input)'],
+ ['selectExternalCaseListMonthlyTransferForHandoff(ref, owner.uid, owner, input, beforeCommit)','selectExternalCaseListMonthlyTransferForHandoff(ref, request.data.uid, owner, input, beforeCommit)'],
+ ['selectExternalCaseListMonthlyTransferForHandoff(ref, owner.uid, owner, input, beforeCommit)','selectExternalCaseListMonthlyTransferForHandoff(ref, owner.uid, request.data.token, input, beforeCommit)'],
 ])reject('acknowledgeSheetWriteIssue',before,after);
 for(const [before,after]of [
  ['assertExecutive(token, process.env.EXECUTIVE_APPROVER_EMAILS ?? "");',''],
@@ -234,8 +235,8 @@ for(const [before,after]of [
 // The new metadata view must not widen legacy actions or become a transfer or
 // a credential-bearing endpoint. Existing mutation cases above remain intact.
 for(const [before,after]of [
- ['readExternalCaseListSelectionBinding(ref, session.uid, session.token)','readExternalCaseListSelectionBinding(ref, request.data.uid, session.token)'],
- ['readExternalCaseListSelectionBinding(ref, session.uid, session.token)','readExternalCaseListSelectionBinding(ref, session.uid, request.data.token)'],
+ ['readExternalCaseListSelectionBinding(ref, owner.uid, owner)','readExternalCaseListSelectionBinding(ref, request.data.uid, owner)'],
+ ['readExternalCaseListSelectionBinding(ref, owner.uid, owner)','readExternalCaseListSelectionBinding(ref, owner.uid, request.data.token)'],
  ['status: "EXTERNAL_BINDING_READ"','status: "EXTERNAL_READBACK_VERIFIED"'],
  ['const binding = await external.readExternalCaseListSelectionBinding','await ref.update({status:"completed"}); const binding = await external.readExternalCaseListSelectionBinding'],
 ])reject('acknowledgeSheetWriteIssue',before,after);
@@ -250,7 +251,7 @@ for(const [before,after]of [
  ['transaction: async () => { throw Error("BINDING_WRITE_FORBIDDEN"); }','transaction: async () => ({})'],
  ['return connection.readSelectionBinding(queueRef.id, uid, token);','return connection.readSelectionBinding(queueRef.id, "untrusted", token);'],
  ['}, { readOnly: true });','}, { readOnly: false });'],
-])rejectIn('acknowledgeSheetWriteIssue','case-list-external-transfer','export async function readExternalCaseListSelectionBinding(','export async function resolveExternalCaseListSheetRef(',before,after);
+])rejectIn('acknowledgeSheetWriteIssue','case-list-external-transfer','export async function readExternalCaseListSelectionBinding(','export async function readExternalCaseListHandoffGateSnapshot(',before,after);
 for(const [before,after]of [
  ['selection.selectedBy===uid && selection.companyId===r.job.companyId','true'],
  ['hash(selection.original)===hash(originalIdentity(r))','true'],
@@ -262,10 +263,108 @@ for(const [before,after]of [
 ])rejectIn('acknowledgeSheetWriteIssue','case-list-external-core.cjs',
  before.startsWith('selection.')||before.startsWith('hash(')?'function pendingSelection(':'async function readSelectionBinding(',
  before.startsWith('selection.')||before.startsWith('hash(')?'function receiptFrom(':'async function select(',before,after);
+// Removing an old guard must stay detectable when its closing brace is indented
+// or commented; an identical check in the neighboring reader cannot stand in.
+{
+ const file='functions/src/case-list-external-transfer.ts',source=sources[file];
+ const from=source.indexOf('export async function readExternalCaseListSelectionBinding(');
+ const to=source.indexOf('export async function readExternalCaseListHandoffGateSnapshot(',from);
+ assert.ok(from>=0&&to>from);
+ const reader=source.slice(from,to),closing='}, { readOnly: true });\n}';
+ assert.ok(reader.includes(closing));
+ for(const ending of ['}, { readOnly: true });\n }','}, { readOnly: true });\n\t}','}, { readOnly: true });\n} // synthetic closing comment']){
+  const altered=reader.replace('assertOwner(uid, token, String(token.companyId ?? ""));','').replace(closing,ending);
+  assert.deepEqual(run('acknowledgeSheetWriteIssue',files=>{files[file]=source.slice(0,from)+altered+source.slice(to);}),{passed:false,exitCode:1},'Old guard deletion with changed closing must fail');cases++;
+ }
+ const normal=reader.replace(closing,'}, { readOnly: true });\n }');
+ assert.deepEqual(run('acknowledgeSheetWriteIssue',files=>{files[file]=source.slice(0,from)+normal+source.slice(to);}),{passed:true,exitCode:0},'Normal reader closing indent is not authority');cases++;
+ const ownerGuard='assertOwner(uid, token, String(token.companyId ?? ""));';
+ for(const wrap of [guard=>'// '+guard,guard=>'/* '+guard+' */']){
+  for(const ending of [closing,'}, { readOnly: true });\n }','}, { readOnly: true });\n\t}','}, { readOnly: true });\n} // synthetic closing comment']){
+   const altered=reader.replace(ownerGuard,wrap(ownerGuard)).replace(closing,ending);
+   assert.deepEqual(run('acknowledgeSheetWriteIssue',files=>{files[file]=source.slice(0,from)+altered+source.slice(to);}),{passed:false,exitCode:1},'Commented-out owner guard must fail independently of closing format');cases++;
+  }
+ }
+ const literal=reader.replace(ownerGuard,'const syntheticCommentText = "https://fixture.invalid/* literal // } */";\n  '+ownerGuard);
+ assert.deepEqual(run('acknowledgeSheetWriteIssue',files=>{files[file]=source.slice(0,from)+literal+source.slice(to);}),{passed:true,exitCode:0},'Quoted URL and comment text remain literals');cases++;
+}
 assert.deepEqual(run('acknowledgeSheetWriteIssue',files=>{for(const p of Object.keys(files))files[p]=files[p].replace(/\r?\n/g,'\r\n');}),{passed:true,exitCode:0},'Current normal sources preserve auth checks with CRLF');cases++;
 reject('acknowledgeSheetWriteIssue','"select-case-list-gas-monthly", "read-case-list-gas-binding"','"select-case-list-gas-monthly", "read-case-list-gas-binding", "unreviewed-extra-action"',{whole:true});
 reject('retrySheetWriteIssue','data.operation === "case_list.assign" || !canManuallyRetrySheetWrite({','!canManuallyRetrySheetWrite({');
 const allowed=JSON.parse(read('config/automation/staging-safety.json')).allowedFunctions;
 assert.ok(Object.keys(modules).every(n=>allowed.includes(n)));assert.ok(!allowed.includes('syncStaffDirectoryScheduled')&&!allowed.includes('syncShiftSheetsScheduled'));cases++;
-console.log(JSON.stringify({importIssuesAuthGuardTests:cases,functions:Object.keys(modules),cloudOperations:false}));
+
+
+
+// The private read-only preparation must retain its exact pre-write fence.
+for (const [before,after] of [
+ ['if (handoff) await handoff.beforeCommit(', 'if (false) await handoff.beforeCommit('],
+ ['handoff?.prepareOnly ? {readOnly: true} : undefined', 'undefined'],
+ ['clientNameUpConfirmed: false,', 'clientNameUpConfirmed: true,'],
+ ['sourceWrites: 0, monthlyWrites: 0, businessRecordsCreated: 0', 'sourceWrites: 0, monthlyWrites: 0, businessRecordsCreated: 1'],
+ ['tx.update(jobRef, nextJob);', 'tx.update(jobRef, nextJob); if (handoff) await handoff.beforeCommit({});'],
+]) rejectIn('acknowledgeSheetWriteIssue','case-list-monthly-worker','export async function selectCaseListManualMonthlyTransfer(','\n/** Each trigger',before,after);
+// A review must retain the exact dependency preimage; the normal fixture is not an auth substitute.
+rejectIn('acknowledgeSheetWriteIssue','case-list-monthly-worker','export async function selectCaseListManualMonthlyTransfer(','export async function processCaseListMonthlyAssignment(','sourceCatalog: snapshot.catalog, dependencyHash: snapshot.dependencyHash, confirmedFields','sourceCatalog: snapshot.catalog, confirmedFields');
+
+// The late worker reread must never bypass the same Firebase owner boundary.
+for(const [before,after]of [
+ ['reconcileCaseListMonthlyAssignment(ref, session.uid, session.token, reconcileExternal)','reconcileCaseListMonthlyAssignment(ref, session.uid, session.token)'],
+ ['const reconcileExternal = () => firebaseExternalOwner(request, session, (owner, beforeCommit) => {','const reconcileExternal = () => unverifiedOwner(request, session, (owner, beforeCommit) => {'],
+ ['reconcileExternalCaseListMonthlyTransferForHandoff(ref, owner.uid, owner, beforeCommit)','reconcileExternalCaseListMonthlyTransfer(ref, owner.uid, owner)'],
+ ['selectExternalCaseListMonthlyTransferForHandoff(ref, owner.uid, owner, input, beforeCommit)','selectExternalCaseListMonthlyTransferForHandoff(ref, owner.uid, owner, input, undefined)'],
+])reject('acknowledgeSheetWriteIssue',before,after);
+reject('acknowledgeSheetWriteIssue','return withFirebaseOwnerCallable(request, session, operation);','return operation(session.token, async () => {});',{whole:true});
+for(const [before,after]of [
+ ['Object.hasOwn(operation ?? {}, "externalSelection")','false'],
+ ['Object.hasOwn(operation ?? {}, "externalAcceptance")','false'],
+ ['operation?.externalManualRequested === true','false'],
+ ['need(typeof reconcileExternal === "function", "EXTERNAL_RECONCILE_AUTHORITY_REQUIRED");',''],
+ ['return reconcileExternal();','return external.reconcileExternalCaseListMonthlyTransfer(queueRef, actorUid, token);'],
+])rejectIn('acknowledgeSheetWriteIssue','case-list-monthly-worker','export async function reconcileCaseListMonthlyAssignment(','export async function retryCaseListMonthlyAssignments(',before,after);
+for(const [before,after]of [
+ ['if (commitGuard) await commitGuard(plan.kind, uid, token, r);',''],
+ ['writeAt - window.readStartedAt <= 60_000','true'],
+ ['return runExternal(queueRef, uid, token, false, undefined, commitGuard);','return runExternal(queueRef, uid, token, false);'],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-external-transfer'});
+for(const [before,after]of [
+ ['auth.verifyIdToken(token, checkRevoked)','auth.verifyIdToken(token, false)'],
+ ['ports.verifyFirebaseIdentity(authorization.slice(7), true)','ports.verifyFirebaseIdentity(authorization.slice(7), false)'],
+ ['policy.projectId === PROJECT && policy.actualProjectId === PROJECT','true'],
+ ['session?.uid === policy.ownerUid','true'],
+ ['claims.aud === PROJECT','true'],
+ ['claims.iss === "https://securetoken.google.com/" + PROJECT','true'],
+ ['seconds(claims.auth_time) && claims.auth_time <= claims.iat','true'],
+ ['user.disabled === false','true'],
+ ['user.tenantId === null','true'],
+ ['links.length === 1 && links[0].uid === subjects[0]','true'],
+ ['user.customClaims?.role === "admin" && user.customClaims.companyId === policy.companyId','true'],
+ ['user.mfaState === "NONE"','true'],
+ ['now - user.observedAt < 30000','true'],
+ ['claims.auth_time * 1000 >= user.validSinceMs','true'],
+ ['const next = await current();','const next = owner;'],
+ ['await beforeCommit();',''],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module:'case-list-firebase-owner'});
+for(const wrap of [s=>'// '+s,s=>'/* '+s+' */']){
+ const file='functions/src/case-list-firebase-owner.ts',source=sources[file],check='need(user.mfaState === "NONE", "FIREBASE_OWNER_MFA_UNVERIFIED_OR_ENROLLED");';
+ assert.ok(source.includes(check));
+ assert.deepEqual(run('acknowledgeSheetWriteIssue',files=>{files[file]=source.replace(check,wrap(check));}),{passed:false,exitCode:1});cases++;
+}
+for(const [module,before,after] of [
+ ['admin-operations','return handleOwnerNameUpReview(request, session);','return unverifiedOwnerReview(request);'],
+ ['case-list-owner-review-callable','createFirebaseOwnerAuthContext(request,session,config,ports.identityOverrides)','request.data.auth'],
+ ['case-list-owner-context','return withFirebaseOwnerCallable(request,session as any,async actor=>actor,overrides.policy,overrides.identity);','return request.data.actor;'],
+ ['case-list-owner-context','const actor=await Core.readVerifiedGoogleAccount(baseAuth,authorization);','const actor=body.actor;'],
+ ['case-list-owner-context',"value?.state==='RESULT_OBSERVED'",'true'],
+ ['case-list-owner-context','Owner.freshActor(actor,now());',''],
+ ['case-list-owner-authorization.cjs','firebaseActors.has(actor)','true'],
+ ['case-list-owner-authorization.cjs','record.principalStateHash===actor.principalStateHash','true'],
+ ['case-list-owner-authorization.cjs','now<record.validUntil','true'],
+ ['case-list-approved-sent-access',"p?.purpose==='NAMEUP_KNOWN_SENT_VERIFICATION_V1'",'true'],
+ ['case-list-approved-sent-access','journal.lease?.epoch===policy.epoch&&journal.lease.expiresAt>now()','true'],
+ ['case-list-approved-sent-access','receipt?.messageId===scope.messageId&&receipt.digest===scope.digest','true'],
+ ['case-list-gas-sync-runtime','requireOwnerAuthorization:true','requireOwnerAuthorization:false'],
+ ['case-list-gas-sync-runtime','access.assertMessageAccess(config,await currentMailActor(actor),scope)','Promise.resolve()'],
+])reject('acknowledgeSheetWriteIssue',before,after,{whole:true,module});
+console.log(JSON.stringify({importIssuesAuthGuardTests:cases,functions:Object.keys(modules),cloudOperations:false,gitMetadataRead:false,scope:'Actual scanner in VM; git source calls are a bounded in-memory source map'}));
 

@@ -4,7 +4,7 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const {stripTypeScriptTypes}=require('node:module');
 class HttpsError extends Error{constructor(code,message){super(message);this.code=code;}}
-const chain=new Proxy(function(){},{get:(_,key)=>key==='parse'?value=>value:()=>chain});
+const chain=new Proxy(function(){},{get:(_,key)=>key==='parse'?value=>value:key==='shape'?{operationId:chain}:()=>chain});
 const records=new Map(),writes=[],workerCalls=[],selectionCalls=[],cancelCalls=[];
 let workerLoads=0,cancelLoads=0,serial=0,selectionError=null,operational=true;
 const snapshot=ref=>({exists:records.has(ref.path),data:()=>records.get(ref.path)});
@@ -14,7 +14,7 @@ const named={
  'node:crypto':require('node:crypto'),'firebase-admin/firestore':{FieldValue:{increment:n=>n,delete:()=>null,serverTimestamp:()=>1},Timestamp:class{}},
  'firebase-functions/v2/https':{HttpsError,onCall:fn=>fn},'firebase-functions/v2/firestore':{onDocumentWritten:()=>()=>{}},zod:{z:chain},'./firebase':{db},
  './utils':{requireAdmin:request=>{if(!request.auth||request.auth.token.role!=='admin')throw new HttpsError('permission-denied','admin required');return request.auth;},companyFromClaims:token=>{if(!token.companyId)throw new HttpsError('permission-denied','company required');return token.companyId;}},
- './system-safety':{assertProductionOperational:async()=>{if(!operational)throw new HttpsError('failed-precondition','stopped');}},'./assignment-preparation-core':{},'./admin-operations-core':{canManuallyRetrySheetWrite:()=>true},
+ './system-safety':{assertProductionOperational:async()=>{if(!operational)throw new HttpsError('failed-precondition','stopped');}},'./assignment-preparation-core':{},'./case-list-external-expense-completion':{'completeExternalExpense':()=>assert.fail('Unrelated fixture reached external expense confirmation'),'traceExternalExpense':()=>assert.fail('Unrelated fixture reached external expense tracing')},'./admin-operations-core':{canManuallyRetrySheetWrite:()=>true},
 };
 const file=path.resolve(__dirname,'../../functions/src/admin-operations.ts');
 let code=stripTypeScriptTypes(fs.readFileSync(file,'utf8'),{mode:'transform'}).replace(/import\s*\{([^}]+)\}\s*from\s*"([^"]+)";/g,(_,items,module)=>`const {${items.replace(/\bas\b/g,':')}}=require(${JSON.stringify(module)});`).replace(/^export /gm,'');

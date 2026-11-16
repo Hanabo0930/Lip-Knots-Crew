@@ -11,6 +11,7 @@ function moduleFile(file,globals={}){
 }
 const access=moduleFile('apps/staff/src/shift-access.ts');
 function part(start,end){const a=app.indexOf(start),b=app.indexOf(end,a);assert(a>=0&&b>a,start);return app.slice(a,b);}
+const deviceDenial=part('  function isDeviceAccessDenied(','  async function logoutRevokedSession(');
 const forget=part('  function forgetInaccessibleShifts(','  async function loadTaskJob(');
 const task=part('  async function loadTaskJob(','  async function fetchTasks(');
 const selected=part('  async function refreshSelectedJob(','  async function requestLogin(');
@@ -29,7 +30,7 @@ function harness(){
   authLoadVersionRef:{current:1},pastShiftVersionRef:{current:1},tasksReadVersionRef:{current:1},mailPanelVersion:{current:0},
   businessRefreshInFlightRef:{current:false},businessDataStatus:'ready',businessRefreshing:false,submissionEditPending:false,openJobsStatus:'idle',
   lastBusinessDataRefreshAt:0,BUSINESS_DATA_REFRESH_INTERVAL_MS:0,performance:{now:()=>1},
-  restoredCachedData:true,sessionVerified:true,restoredScope:{companyId:'company',staffId:'staff'},
+  restoredCachedData:true,sessionVerified:true,restoredScope:{companyId:'company',staffId:'staff'},rememberedScope:null,
   isCurrentAuthLoad:()=>true,isPending:()=>false,run:async(_key,fn)=>fn(),doc:(_db,_collection,id)=>({id}),orderAssignedJobs:jobs=>jobs,
   setMyJobs:value=>state.jobs=typeof value==='function'?value(state.jobs):value,
   setTasks:value=>state.tasks=typeof value==='function'?value(state.tasks):value,
@@ -39,7 +40,7 @@ function harness(){
   setBusinessRefreshing:()=>{},setBusinessRefreshMs:()=>{},setHomeLoadedFromCache:()=>{},setCompanyId:()=>{},setStaffId:()=>{},setHomeDisplayMs:()=>{},
   loadPrimaryBusinessData:async()=>true,refreshOpenJobs:async()=>{},getDocFromServer:async()=>({exists:()=>true,id:'one',data:()=>job})
  };
- vm.runInNewContext(compile(forget+task+selected+refresh+'\nasync function startupFailure(error)'+startupCatch),s);
+ vm.runInNewContext(compile(deviceDenial+forget+task+selected+refresh+'\nasync function startupFailure(error)'+startupCatch),s);
  return {s,state,storage,cache,job,other};
 }
 for(const method of ['loadTaskJob','refreshSelectedJob'])for(const code of ['permission-denied','firestore/permission-denied'])await test(method+' evicts denied shift/detail/task/cache without erasing another shift '+code,async()=>{
@@ -57,7 +58,7 @@ for(const method of ['loadTaskJob','refreshSelectedJob'])await test(method+' off
 for(const method of ['loadTaskJob','refreshSelectedJob'])await test(method+' server missing/cancelled removes old display and persistent snapshot',async()=>{
  for(const mode of ['missing','cancelled']){const h=harness();h.s.getDocFromServer=async()=>({exists:()=>mode!=='missing',id:'one',data:()=>({...h.job,status:'cancelled',cancelled:true})});await h.s[method]('one');assert.deepEqual(Array.from(h.state.jobs,j=>j.id),['other']);assert.equal(h.state.selected,null);assert.equal(h.storage.size,0);}
 });
-for(const code of ['permission-denied','firestore/permission-denied','functions/permission-denied'])await test('Bootstrap does not restore cached successful state after '+code,async()=>{
+for(const code of ['permission-denied','firestore/permission-denied','functions/permission-denied','functions/unauthenticated','unauthenticated'])await test('Bootstrap does not restore cached successful state after '+code,async()=>{
  const h=harness();await h.s.startupFailure({code});assert.equal(h.s.restoredCachedData,false);assert.equal(h.state.jobs.length,0);assert.equal(h.state.tasks.length,0);assert.equal(h.state.selected,null);assert.equal(h.state.status,'error');assert.equal(h.state.source,'none');assert.equal(h.storage.size,0);
 });
 await test('Bootstrap unavailable and old-auth failure preserve the intended recovery behavior',async()=>{

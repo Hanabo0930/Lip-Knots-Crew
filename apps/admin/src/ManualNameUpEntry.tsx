@@ -1,0 +1,15 @@
+import {useEffect,useRef,useState} from 'react';
+import type {SheetWriteIssue} from './AdminSheetIssuePanel';
+import ManualNameUpReview from './ManualNameUpReview';
+import {createManualNameUpAction,type ManualNameUpPorts,type ManualNameUpView,type ManualPayOffer} from './manual-nameup';
+// Explicit injected backend port only. No live endpoint/auth/config is introduced.
+export default function ManualNameUpEntry({issue,ports,busy}:{issue:SheetWriteIssue;ports:ManualNameUpPorts;busy:boolean}){
+ const [view,setView]=useState<ManualNameUpView|null>(null),[offers,setOffers]=useState<ManualPayOffer[]>([]),[sending,setSending]=useState(false),[message,setMessage]=useState(''),[viewSession,setViewSession]=useState('');
+ const key=[ports.sessionKey,issue.jobId,issue.manualObservationHash,issue.manualExpectedJobRevision,issue.manualExpectedSourceRevision].join(':'),epoch=useRef(0),visibleView=viewSession===key?view:null,current=useRef({session:ports.sessionKey?key:'',viewSession,view:visibleView});current.current={session:ports.sessionKey?key:'',viewSession,view:visibleView};
+ const action=useRef<{ports:ManualNameUpPorts;send:ReturnType<typeof createManualNameUpAction>}|null>(null);if(!action.current||action.current.ports!==ports)action.current={ports,send:createManualNameUpAction(ports,()=>current.current)};
+ useEffect(()=>{let active=true;const version=++epoch.current;setView(null);setViewSession('');setOffers([]);setMessage('');setSending(false);
+  if(!ports.sessionKey||issue.operation!=='case_list.manual'||issue.manualSourcePending!==true||issue.canSelectMonthlyTransfer!==true||!issue.manualObservationHash||!issue.manualExpectedSourceRevision||!Number.isSafeInteger(issue.manualExpectedJobRevision)){setMessage('担当と元の受付を確認できるまで保留します。');return;}
+  void ports.load({cases:[{jobId:issue.jobId,observationHash:issue.manualObservationHash,expectedJobRevision:issue.manualExpectedJobRevision!,expectedSourceRevision:issue.manualExpectedSourceRevision}]}).then(result=>{if(!active||epoch.current!==version)return;setView(result);setViewSession(key);setOffers(result.cases.map(c=>({caseId:c.caseId,dailyWageJPY:c.dailyWageJPY,travelExpenses:c.travelExpenses??'',communicationExpenses:c.communicationExpenses??''})));},()=>{if(active&&epoch.current===version)setMessage('元の条件を照合できません。送信せず保留します。');});return()=>{active=false;epoch.current++;};
+ },[key,ports,issue.operation,issue.manualSourcePending,issue.canSelectMonthlyTransfer]);
+ return <ManualNameUpReview view={visibleView} payOffers={offers} busy={busy||sending} message={viewSession===key?message:''} onPayChange={(id,field,value)=>setOffers(items=>items.map(p=>p.caseId===id?{...p,[field]:value}:p))} onSend={(selected,pay)=>{if(busy||sending||!action.current)return;setSending(true);void action.current.send(selected,pay).then(result=>{if(current.current.session===key)setMessage(result.status==='COMPLETED'?'送信・月別反映を照合しました。':result.code==='RESULT_UNKNOWN_DO_NOT_RESEND'?'結果が不明です。再送せず、同じ案件の照合を待ちます。':'送信・反映結果は保留です。同じ案件の記録を確認します。');}).finally(()=>{if(current.current.session===key)setSending(false);});}}/>;
+}

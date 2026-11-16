@@ -1,14 +1,40 @@
 import {useState} from "react";
 import SubmissionPreviewImage, { type PreviewFile } from "./SubmissionPreviewImage";
 
+export type SubmissionFileView = { id:string; submissionId:string; originalName:string; driveName:string; contentType:string; sequence:number|null; purpose:string; status:string; previewUrl:string|null; completedAt:string|null; replacesFileId:string|null };
+export type SubmissionGroup = { id:string; purpose:string; status:string; createdAt:string|null; completedAt:string|null; files:SubmissionFileView[] };
+
+export function readSubmissionHistoryPage(data:unknown){
+  const response=data as {submissions?:SubmissionGroup[];nextCursor?:unknown}|null;
+  const groups=response?.submissions;
+  if(!Array.isArray(groups)||!groups.every(group=>group&&typeof group.id==="string"&&group.id.trim().length>0&&Array.isArray(group.files)&&group.files.every(file=>
+    file&&typeof file.id==="string"&&file.id.trim().length>0&&file.submissionId===group.id&&
+    typeof file.originalName==="string"&&typeof file.driveName==="string"&&typeof file.contentType==="string"&&
+    typeof file.purpose==="string"&&typeof file.status==="string"&&(file.previewUrl===null||typeof file.previewUrl==="string")
+  )))throw new Error("提出履歴の応答を確認できませんでした。");
+  if(new Set(groups.map(group=>group.id)).size!==groups.length||groups.some(group=>new Set(group.files.map(file=>file.id)).size!==group.files.length))throw new Error("提出履歴の識別情報が重複しています。再読み込みしてください。");
+  const nextCursor=response?.nextCursor;
+  if(nextCursor!==undefined&&nextCursor!==null&&
+    (typeof nextCursor!=="string"||nextCursor.includes("/")||nextCursor!==groups.at(-1)?.id))
+    throw new Error("提出履歴の続きの情報を確認できませんでした。");
+  return {groups,nextCursor:nextCursor??null};
+}
+
 type HistoryFile = PreviewFile & { purpose: string; status: string };
 type Props = {
   files: HistoryFile[];
   hasMissingFiles?: boolean;
   onRefreshPreview: (file: PreviewFile) => Promise<string | null>;
+  pagination?: {
+    hasEarlier: boolean;
+    pending: boolean;
+    disabled: boolean;
+    error: string;
+    onLoadEarlier: () => Promise<void>;
+  };
 };
 
-export default function SubmissionHistoryFiles({ files, hasMissingFiles = false, onRefreshPreview }: Props) {
+export default function SubmissionHistoryFiles({ files, hasMissingFiles = false, onRefreshPreview, pagination }: Props) {
   const context=JSON.stringify(files[0]?[files[0].submissionId,files[0].id]:[]);
   const [view,setView]=useState({context,page:0});
   const page=Math.min(view.context===context?view.page:0,Math.max(0,Math.ceil(files.length/20)-1));
@@ -26,11 +52,17 @@ export default function SubmissionHistoryFiles({ files, hasMissingFiles = false,
       : file.status === "error" ? "転送エラー"
       : "状態の確認が必要です";
     return <article key={`${file.submissionId}_${file.id}`} aria-label={`提出履歴 ${page*20+index + 1}件目: ${name}`}>
-      {completed ? <SubmissionPreviewImage file={file} onRefreshPreview={onRefreshPreview}/>
+      {completed ? <SubmissionPreviewImage file={file} onRefreshPreview={onRefreshPreview} onDemand/>
         : <div className="history-preview preview-placeholder"><span>{label}</span></div>}
       <strong>{name}</strong>
       <small>{file.purpose === "replacement" ? "再送・" : ""}{label}</small>
       {!completed && <small>「提出情報を再読み込み」で確認してください。状態が変わらない場合は管理者へ連絡してください。</small>}
     </article>;
-  })}{!files.length && !hasMissingFiles && <div className="empty">提出履歴はありません。</div>}</div></>;
+  })}{!files.length && !hasMissingFiles && <div className="empty">提出履歴はありません。</div>}</div>
+  {pagination?.hasEarlier && <button type="button" className="secondary" onClick={()=>void pagination.onLoadEarlier()}
+    disabled={pagination.disabled||pagination.pending} aria-busy={pagination.pending}>
+    {pagination.pending?"以前の提出を読み込み中…":"以前の提出を表示"}
+  </button>}
+  {pagination?.error && <div className="history-error" role="alert">{pagination.error}</div>}
+  </>;
 }

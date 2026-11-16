@@ -11,10 +11,11 @@ const OLD_WORKER = "processSafeSheetWrite";
 // 明示opt-in処理だけが旧停止判定の前に進むため、その実行依存も固定する。
 // この固定値はソース検査用であり、実行時IAMや本番有効化の承認ではない。
 export const retryWorkerSourcePins = Object.freeze({
+  "functions/src/case-list-assignment-observation.cjs": "2b25a429f7ff4db9260a539d95d43f409a86176a3f9b1def125454b3a5d1f157",
   // Independently reviewed external readback dependencies; defaults stay read-only.
-  "functions/src/case-list-external-core.cjs": "91c8e0024500e66eb24390a2646f9e9f289dcb46ed6bee95d386368feabb1082",
+  "functions/src/case-list-external-core.cjs": "6c9b02ece6825e47c40a2fbf2f6a152ca576780b6004c7d9f05b65093903175f",
   "functions/src/case-list-external-mode.ts": "6d415de924e5fdfc3e44d00e6e6ee098625c453a6dbf0aa0e962828b38526efb",
-  "functions/src/case-list-external-transfer.ts": "20334bc28a4be1f65425fed9adc8c801c9520ef8be02bdb141608cb818a83c10",
+  "functions/src/case-list-external-transfer.ts": "1f1b1abb27c91181388a54a23167cd328a85dc3a2e3ed3bc2541537b6f0313a9",
   "functions/src/case-list-gas-date-formula.ts": "b9e37bf557d63da36740b94b94f338a9a248512b48e97a3b339ff1e8768ce931",
   "functions/src/case-list-gas-planner.cjs": "07035fe0242d79b9d4d8264b0f8bbcc22cfd4e343932a20d40e42336f85c6ca6",
   "functions/src/case-list-gas-proof.ts": "e9f7de3f9983b84c9e8d62d70fa1b81b7a7788b13f0f1b5502a207b9d0f5a082",
@@ -30,12 +31,12 @@ export const retryWorkerSourcePins = Object.freeze({
   "functions/src/case-list-source-cancellation.ts": "85064fe29871716b69eba3e43b2e705c79d5f32d58d95f7659738b80f8497097",
   "functions/src/sheet-write-control.ts": "a57db6a895c42ed58655a42ae67d84754fb679c2f0751d11b5b65edff0387f08",
   "functions/src/index.ts": "b5258e6842732565b671c33c89e43da117baec7e629bf7654d0dccffebbe1dc9",
-  "functions/src/case-list-monthly-worker.ts": "2111880a97ce708efc4533291988f8bf4af3537cfe9e250127097304a1974648",
-  "functions/src/case-list-monthly-reader.ts": "bb0b7beace411107282b3736bf74057e7073044c8a90221aea80f8f81df1861a",
+  "functions/src/case-list-monthly-worker.ts": "68dc802b1b6a416d5dc81b77c0340b23097b21263f17520b24498775c91bfb7c",
+  "functions/src/case-list-monthly-reader.ts": "aac99d78a67fa3fa62ad36333b32e3fe93af12489c3b1e419aef34f4fb310059",
   "functions/src/case-list-source-core.ts": "f57879a56d30d5e36c85c76a3c370e1c06a442d115dab2a423e6cad96874ce69",
   "functions/src/case-list-monthly-controller.cjs": "d2c82e3e01a09bab126a8b58b4842df12e462234e12d5ee4408f3df029660ca4",
   "functions/src/case-list-monthly-adapter.cjs": "2d56999a4bc6b99424c16ebffd15a2c76d7800b69775906b9c365a99be648845",
-  "functions/src/case-list-monthly-compact.cjs": "fc0b67415e64be5f10222266cb51c339e28ac9d9808e3bdd086c1510ac1e3cb5",
+  "functions/src/case-list-monthly-compact.cjs": "f6a04552fed9eb69b8ae44597151202cb41385ae9ba342ac2bb36d0c131ff52a",
   "functions/src/case-list-projection.cjs": "059f39d152981e9e9566c276332f9db7da6442dd99fe3ec12e28c587ff9a3326",
   "functions/src/case-id.ts": "7c03676a32947d8c7a81a8a5b7600c1870ccd2c41b036362bf3e8dd475422d87",
   // Reviewed capture-before-clear and BL-only legacy ACK guard; pure validation, no new I/O.

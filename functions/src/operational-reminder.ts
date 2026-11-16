@@ -1,5 +1,6 @@
 import { caseMailPreparationHeld, type CaseMailPreparation } from "./case-mail-preparation-core";
 import { mailPreparationContext } from "./assignment-preparation-core";
+import { preContactIsComplete } from "./task-core";
 export type ReminderKind = "assignment-receipt" | "precontact" | "report" | "sales-floor" | "netprint" | "netprint-update" | "resubmission";
 export type OperationalReminderContext = {
   version: 1; jobId: string; staffId: string; dateKey: string; revision: number;
@@ -35,7 +36,7 @@ export function operationalReminderIsCurrent(context: OperationalReminderContext
     job.assignmentSheetWrite?.queueId === context.assignmentOperationId && mailPreparationContext(job) === context.assignmentContext;
   if (job.applicationUnconfirmed === true || (job.revision ?? 0) !== context.revision) return false;
   if (context.kind === "resubmission") return true; // 依頼の現在状態は配信処理で別途照合する。
-  if (context.kind === "precontact") return job.preContactNeedsReview === true || !(job.preContact?.temperature !== undefined && job.preContact.temperature !== "" && job.preContact.arrivalTime);
+  if (context.kind === "precontact") return !preContactIsComplete(job);
   if (context.kind === "report") return job.submissionStatus?.report?.completed !== true;
   if (context.kind === "sales-floor") {
     const sales = job.submissionStatus?.salesFloor;

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 
 // Run the actual App handler and the pinned production Push helpers with local mocks only.
-const require=createRequire(new URL('../package.json',import.meta.url));
+const require=createRequire(process.env.LKC_TEST_DEPENDENCY_ROOT ? join(process.env.LKC_TEST_DEPENDENCY_ROOT,'package.json') : new URL('../package.json',import.meta.url));
 const ts=require('typescript');
 const app=readFileSync(new URL('../apps/admin/src/App.tsx',import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const push=readFileSync(new URL('../apps/admin/src/push.ts',import.meta.url),'utf8').replace(/\r\n/g,'\n');
@@ -24,14 +25,14 @@ const pushSource=(push.slice(assertStart,assertEnd)+'\n'+push.slice(enableStart,
 const pushJs=compile(pushSource);
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 function deferred(){let resolve,reject;const promise=new Promise((done,fail)=>{resolve=done;reject=fail;});return{promise,resolve,reject};}
-function scenario({endpoint=null}={}){
+function scenario({endpoint=null,validReceipt=true}={}){
   const permission=deferred(),moduleLoad=deferred(),state={registerCalls:0,testCalls:0,unregisterCalls:0,deleteCalls:0,messages:[]};
   const user={uid:'synthetic-admin'},auth={currentUser:user},authEpoch={current:1};
   const pushScope={
     Notification:{requestPermission:()=>permission.promise,permission:'granted'},
     navigator:{serviceWorker:{},userAgent:'synthetic',platform:'synthetic'},
     getClientMessaging:async()=>({}), waitForPushWorker:async()=>({}),getToken:async()=> 'synthetic-token',deleteToken:async()=>{state.deleteCalls++;},currentPushPermission:()=> 'granted',
-    httpsCallable:(_functions,name)=>async()=>{if(name==='registerPushToken')state.registerCalls++;else if(name==='sendTestPush')state.testCalls++;else if(name==='unregisterPushToken')state.unregisterCalls++;else throw new Error('unexpected mock call');if(endpoint)await endpoint.promise;},
+    httpsCallable:(_functions,name)=>async()=>{if(name==='registerPushToken')state.registerCalls++;else if(name==='sendTestPush')state.testCalls++;else if(name==='unregisterPushToken')state.unregisterCalls++;else throw new Error('unexpected mock call');if(endpoint)await endpoint.promise;return {data:validReceipt?{queueId:'nq_'+'a'.repeat(36)}:{}};},
     Error,Promise,
   };
   runInNewContext(pushJs,pushScope);
@@ -59,12 +60,13 @@ const acknowledged=deferred(),known=scenario({endpoint:acknowledged});
 known.moduleLoad.resolve(known.pushScope);const knownAction=known.appScope.runPushAction('test');await flush();assert.equal(known.state.testCalls,1);
 known.authEpoch.current++;acknowledged.resolve();await knownAction;
 assert.equal(known.appScope.operationLocksRef.current.has('push'),false,'a known successful result must release its lock');
-assert.ok(known.state.messages.some(value=>value.includes('送信完了')),'a known successful result is not silently converted to a failure');
+assert.ok(known.state.messages.some(value=>value.includes('受付を確認')),'the app reports receipt after a known response');
+assert.ok(known.state.messages.every(value=>!value.includes('送信完了')));
 const afterReturn=scenario();
 const originalTest=afterReturn.pushScope.requestTestPush;
 afterReturn.pushScope.requestTestPush=async(...args)=>{await originalTest(...args);afterReturn.authEpoch.current++;};
 afterReturn.moduleLoad.resolve(afterReturn.pushScope);await afterReturn.appScope.runPushAction('test');
-assert.equal(afterReturn.state.testCalls,1);assert.ok(afterReturn.state.messages.some(value=>value.includes('送信完了')),'a transition after helper completion preserves its known result');
+assert.equal(afterReturn.state.testCalls,1);assert.ok(afterReturn.state.messages.some(value=>value.includes('受付を確認')),'a transition after helper completion preserves its known receipt');
 assert.equal(afterReturn.appScope.operationLocksRef.current.has('push'),false);
 const lost=deferred(),unknown=scenario({endpoint:lost});
 unknown.moduleLoad.resolve(unknown.pushScope);const uncertainAction=unknown.appScope.runPushAction('test');await flush();assert.equal(unknown.state.testCalls,1);
@@ -77,4 +79,9 @@ partial.moduleLoad.resolve(partial.pushScope);const disabling=partial.appScope.r
 partial.authEpoch.current++;unregistered.resolve();await disabling;
 assert.equal(partial.state.deleteCalls,0,'a revoked action must not continue with another side effect');
 assert.equal(partial.appScope.operationLocksRef.current.has('push'),true,'partially completed disable remains unresolved');
-console.log(JSON.stringify({status:'PASS',cases:['permission-pending','import-pending','sent-known-success','helper-complete-caller-pending','sent-unknown-no-repeat','partial-disable-no-further-effect'],postChangeMockRegisterCalls:enable.state.registerCalls,postChangeMockTestPushCalls:test.state.testCalls,realNetworkOrNotifications:0}));
+const bad=scenario({validReceipt:false});
+bad.moduleLoad.resolve(bad.pushScope);await bad.appScope.runPushAction('test');await bad.appScope.runPushAction('test');
+assert.equal(bad.state.testCalls,1);
+assert.equal(bad.appScope.operationLocksRef.current.has('push'),true);
+assert.ok(bad.state.messages.some(value=>value.includes('結果を確認できません')));
+console.log(JSON.stringify({status:'PASS',cases:['permission-pending','import-pending','known-receipt','helper-complete-caller-pending','sent-unknown-no-repeat','partial-disable-no-further-effect','malformed-acceptance-no-repeat'],postChangeMockRegisterCalls:enable.state.registerCalls,postChangeMockTestPushCalls:test.state.testCalls,realNetworkOrNotifications:0}));

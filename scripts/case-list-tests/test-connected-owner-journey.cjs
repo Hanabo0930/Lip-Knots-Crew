@@ -59,7 +59,7 @@ function actualModules(h) {
       if(specifier.startsWith('node:')||specifier==='zod')return require(specifier);
       throw Error('Unexpected journey dependency '+specifier);
     };
-    vm.runInNewContext(code,{module,exports:module.exports,require:requireActual,process,Buffer,Date:FixtureDate,console,Intl},{filename});
+    vm.runInNewContext(code,{module,exports:module.exports,require:requireActual,process:{env:{...process.env,DEFAULT_COMPANY_ID:h.f.companyId}},Buffer,Date:FixtureDate,console,Intl},{filename});
     cache.set(name,module.exports);return module.exports;
   }
   return {load};
@@ -82,13 +82,23 @@ async function journey(origin, december, cancelBeforeSelection=false) {
   assert.ok(draft.body.includes(published.storeName));assert.ok(draft.body.includes('10,000'));
   assert.equal(JSON.stringify([...records]),recordsBeforeDraft,'Draft is read-only and uses actual publication ACK output');
   h.restoreAssignmentNative();
+  const reservationNotices=()=>[...records.values()].filter(value=>value.category==='staff_reservation_confirmed');
   if(origin==='application'){
+    records.set('staffNgMaintenance/'+f.companyId,{schema:'LK_STAFF_NG_MAINTENANCE_V1',companyId:f.companyId,state:'OPEN',generation:0});
+    const ng=actual.load('staff-ng'),header=Array(11).fill('');header[10]='NG会社';
+    const observation=ng.observeStaffNgCell('マスターデータ',header,Array(11).fill(''),10);
+    records.get('staffProfiles/'+f.staffId).ngCompanies=ng.mergeStaffNg([{sourceRef:{spreadsheetId:f.book,sheetName:'マスターデータ'},ngCompanyObservation:observation}],f.companyId,f.staffId);
     const request={data:{jobId:f.jobId,requestId:'connected-journey-request',expectedJobRevision:published.revision,expectedSourceRevision:published.caseListSource.sourceRevision},
       auth:{uid:'uid_fixture',token:{role:'staff',companyId:f.companyId,staffId:f.staffId}}};
     await jobs.applyToJob(request);
     const queues=()=>[...records].filter(([,value])=>value.operation==='case_list.assign');
     assert.equal(queues().length,1);
     const assignment=queues()[0];h.adoptQueue(assignment[0].split('/').at(-1));
+    const accepted=publicJob(),today='2026-11-01';
+    assert.equal(accepted.applicationUnconfirmed,true);
+    assert.equal(staffUI.pendingAssignedJobs([accepted],today).length,1);
+    assert.equal(calendar.monthCalendar([accepted],accepted.dateKey.slice(0,7)).jobs.size,0);
+    assert.equal(reservationNotices().length,0);
     const nativeBeforeReplay=H.nativeCalls;await jobs.applyToJob(request);
     assert.equal(queues().length,1);assert.equal(H.nativeCalls,nativeBeforeReplay);
     await h.run();
@@ -105,8 +115,18 @@ async function journey(origin, december, cancelBeforeSelection=false) {
   }
   const pending=publicJob(),month=pending.dateKey.slice(0,7);
   assert.equal(pending.applicationUnconfirmed,true);
-  assert.equal(staffUI.pendingAssignedJobs([pending],'2026-11-01').length,1);
-  assert.equal(calendar.monthCalendar([pending],month).jobs.size,0);
+  const application=origin==='application';
+  assert.equal(staffUI.staffReservationConfirmed(pending),application);
+  assert.equal(staffUI.pendingAssignedJobs([pending],'2026-11-01').length,application?0:1);
+  assert.equal(calendar.monthCalendar([pending],month).jobs.size,application?1:0);
+  assert.equal(pending.assignmentSheetWrite?.nativeAck,undefined);
+  assert.equal(reservationNotices().length,application?1:0);
+  if(application){
+    const [notice]=reservationNotices();
+    assert.equal(notice.targetStaffId,f.staffId);
+    assert.equal(notice.data.jobId,f.jobId);
+    assert.equal(notice.data.staffReservationProofHash,pending.staffReservation.sourceProofHash);
+  }
   assert.equal(h.counts().monthCalls,0);
   await assert.rejects(()=>drafts.generateCaseListRecruitmentDraft(command(),f.companyId,owner));
   if(cancelBeforeSelection){
@@ -160,7 +180,10 @@ async function journey(origin, december, cancelBeforeSelection=false) {
     const result=await worker.selectCaseListManualMonthlyTransfer(f.companyId,'owner_fixture',owner,selection);
     h.adoptQueue(result.queueId);
   }
-  assert.equal(calendar.monthCalendar([publicJob()],month).jobs.size,0,'Selection alone does not confirm a shift');
+  const selected=publicJob();
+  assert.equal(selected.applicationUnconfirmed,true);
+  assert.equal(selected.assignmentSheetWrite?.nativeAck,undefined);
+  assert.equal(calendar.monthCalendar([selected],month).jobs.size,application?1:0,'Selection preserves the existing Source reservation without confirming monthly transfer');
   await h.run();
   const confirmed=publicJob();
   assert.equal(confirmed.assignmentSheetWrite.nativeAck.status,'MONTHLY_READBACK_VERIFIED');
@@ -174,6 +197,7 @@ async function journey(origin, december, cancelBeforeSelection=false) {
   assert.equal(admin.filterJobSearchIndex(admin.buildJobSearchIndex([confirmed]),'','monthly-transferred').length,1);
   const nativeBeforeReplay=H.nativeCalls;
   await h.run();assert.equal(H.nativeCalls,nativeBeforeReplay);
+  assert.equal(reservationNotices().length,application?1:0);
   assert.equal(h.month.rows.filter(row=>row.fixedId===f.a.sourceCaseId).length,1);
   assert.equal(h.cells[60].userEnteredValue.stringValue,f.a.sourceCaseId,'Source history row is retained');
   results.push({origin,month,passed:true,publicationPost:c.batches(),...h.counts()});

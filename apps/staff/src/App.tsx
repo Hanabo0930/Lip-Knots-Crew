@@ -1,27 +1,34 @@
+import PendingAssignmentsPanel from './PendingAssignmentsPanel';
+import {staffShiftVisible,staffReservationConfirmed,type ReservationJob} from './job-list';
 import type {MailApplication} from "./MailApplicationsPanel";
 import {filterOpenJobs} from "./open-job-search";
-import SubmissionImageViewer from "./SubmissionImageViewer";
-import {type ApplicationAttempt,applicationAttemptOwner,loadSavedApplicationAttempts,observeApplicationAttempts,reserveApplicationAttempt,removeSavedApplicationAttempt} from "./application-attempt-store";
+import { SubmissionImageViewer, SubmissionPreviewImage, SubmissionHistoryFiles, SubmissionProcessingRecovery } from "./SubmissionPanelEntries";
+import type { PreviewFile } from "./SubmissionPreviewImage";
+import type { SubmissionGroup, SubmissionFileView } from "./SubmissionHistoryFiles";
+import {type ApplicationAttempt,applicationAttemptOwner,loadSavedApplicationAttempts,observeApplicationAttempts,reserveApplicationAttempt,clearCheckedApplicationAttempt} from "./application-attempt-store";
 import {DeviceStorageError} from "./StartupBoundary";
 import {resubmissionNotificationId,readResubmissionNotification} from "./resubmission-notification";
-import {useShiftNotificationRoute} from "./useShiftNotificationRoute";
+import {submissionNotificationRoute,useShiftNotificationRoute} from "./useShiftNotificationRoute";
+import { staffForegroundNotice } from "./notification-target";
 import PastShiftHistory from "./PastShiftHistoryEntry";
 import { firestorePastShiftReader } from "./past-shift-reader";
 import { isShiftAccessDenied } from "./shift-access";
 import MonthlyShiftCalendar from "./MonthlyShiftCalendarEntry";
 import ShiftJobCards,{shiftDateLabel,shiftTextLabel,shiftPage} from './ShiftJobCards';
+import ShiftRoutePanel from "./ShiftRoutePanelEntry";
 import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
   getIdTokenResult, isSignInWithEmailLink, onAuthStateChanged,
-  signInWithEmailLink, signOut, User,
+  signInWithCustomToken, signInWithEmailLink, signOut, User,
 } from "firebase/auth";
 import { collection, doc, getDocFromServer, getDocs, getDocsFromServer, limit, onSnapshot, orderBy, query, where, startAfter, QueryDocumentSnapshot } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
 const loadUploadStorage=()=>import("./upload-storage");
 const loadSubmissionAttempt=()=>import("./submission-attempt-store");
+const loadSubmissionHistoryFiles=()=>import("./SubmissionHistoryFiles");
 import type { SubmissionAttempt } from "./submission-attempt-store";
 import { auth, authPersistenceReady, db, firebaseConfigured, functions, firebaseApp } from "./firebase";
-import { clearDraft, loadDraft, saveDraft, markDraftSubmitted, getSubmittedDraftReceipt } from "./draft-store";
+import { clearDraft, clearSubmittedDraft, loadDraftState, saveDraft, draftReloadBlocked, markDraftSelectionEdited } from "./draft-store";
 import { submissionDraftKey } from "./submission-draft-key";
 import {
   clearBusinessSnapshot,
@@ -37,9 +44,6 @@ import {
 } from "./push";
 import { formatDiagnosticReport } from "./diagnostic-report";
 import type { DiagnosticReport } from "./diagnostics";
-import SubmissionPreviewImage, { type PreviewFile } from "./SubmissionPreviewImage";
-import SubmissionHistoryFiles from "./SubmissionHistoryFiles";
-import SubmissionProcessingRecovery from "./SubmissionProcessingRecovery";
 import {
   availableOpenJobs,
   hasValidDateKey,
@@ -60,7 +64,7 @@ type SubmissionHistoryStatus = "idle" | "loading" | "ready" | "error";
 type SubmissionType = "report" | "sales_floor";
 type PushAction = "enable" | "disable" | "test" | "status";
 type NetPrintItem = { id: string; number: string; printed?: boolean };
-type Job = {
+type Job = ReservationJob & {
   entryTime?: string;
   caseListManualPending?: {observationHash?:string;sourceRevision?:string;staffId?:string};
   revision?: number; menuConditions?: string[];
@@ -77,8 +81,6 @@ type Job = {
 };
 type StaffTask = { id:string; jobId:string; kind:string; title:string; body:string; priority:"overdue"|"urgent"|"normal"; metadata?:Record<string,unknown>|null };
 type DeviceSession = { id:string; deviceId?:string; uid?:string; label?:string; platform?:string; active?:boolean; lastSeenAt?:string };
-type SubmissionFileView = { id:string; submissionId:string; originalName:string; driveName:string; contentType:string; sequence:number|null; purpose:string; status:string; previewUrl:string|null; completedAt:string|null; replacesFileId:string|null };
-type SubmissionGroup = { id:string; purpose:string; status:string; createdAt:string|null; completedAt:string|null; files:SubmissionFileView[] };
 type ResubmissionDetail = { request:{id:string;jobId:string;type:SubmissionType;scope?:"file"|"submission";reasons:string[];note:string;status:string}; source:SubmissionFileView|null; replacements:SubmissionFileView[] };
 
 const demoDate=new Date();
@@ -107,6 +109,14 @@ function validNetPrintItem(value:unknown):value is NetPrintItem{
 }
 function validNetPrintTarget(items:unknown,item:unknown):boolean{
   return Array.isArray(items)&&validNetPrintItem(item)&&items.filter(value=>value&&typeof value==="object"&&value.id===item.id).length===1;
+}
+function savedPreContactInputs(saved:Job["preContact"]|null|undefined){
+  const {temperature,arrivalTime}=saved??{};
+  const numeric=typeof temperature==="string"&&/^\d+(?:\.\d+)?$/.test(temperature.trim())?Number(temperature):temperature;
+  return {
+    temperature:typeof numeric==="number"&&Number.isFinite(numeric)&&numeric>=34&&numeric<=42?String(numeric):"",
+    arrivalTime:typeof arrivalTime==="string"&&/^([01]?\d|2[0-3]):[0-5]\d$/.test(arrivalTime)?arrivalTime.padStart(5,"0"):"",
+  };
 }
 function preContactReadinessMessage(job:Job):string|null{
   if(caseMailPreparationHeld(job))return "受信内容・勤務条件の変更を確認中です。事前連絡はまだ送信できません。管理者の確認後に「シフトを更新」で状態を確認してください。";
@@ -161,12 +171,8 @@ let lastBusinessDataRefreshAt=0;
 function stagingAdminLoginUrl(){const host=window.location.hostname;return host==="lip-knots-crew-staging.web.app"||host.startsWith("lip-knots-crew-staging--")?STAGING_ADMIN_APP_URL:"";}
 function jobAccent(menuName:unknown){let hash=0;for(const char of typeof menuName==="string"&&menuName.trim()?menuName:"案件")hash=((hash*31)+char.codePointAt(0)!)|0;return JOB_ACCENTS[Math.abs(hash)%JOB_ACCENTS.length]??JOB_ACCENTS[0];}
 function jobKind(menuName:unknown){return typeof menuName==="string"?menuName.replace(/[（(].*$/u,"").trim()||"業務確認中":"業務確認中";}
-function mapDestination(job:Job){return [job.storeName,job.storeAddress].map(value=>shiftTextLabel(value,"")).filter(Boolean).join(" ");}
-function mapsSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapDestination(job))}`;}
-function transitRouteUrl(job:Job){return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(mapDestination(job))}&travelmode=transit`;}
-function stationSearchUrl(job:Job){return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(shiftTextLabel(job.storeNearestStation,""))}`;}
 function submissionSummary(job:Job){const sales=job.submissionStatus?.salesFloor;const salesCompleted=sales?.completed===true||sales?.clientSubmitted===true||sales?.lipKnotsSubmitted===true?true:sales?.completed;const label=(value:unknown)=>value===true?"完了":value===false?"未完了":"未確認";return `売場画像：${label(salesCompleted)} / 報告書：${label(job.submissionStatus?.report?.completed)}`;}
-function prepSummary(job:Job){if(caseMailPreparationHeld(job))return"受信内容・勤務条件を確認中";if(job.preContactNeedsReview===true)return"事前連絡の再確認が必要";if(job.sourceMissing===true)return"取込元の案件を確認中";if(job.applicationUnconfirmed===true)return"シフト表の担当確認待ち";if(job.assignmentUnresolved===true)return"担当者の照合待ち";const items=job.netPrint?.items??[];if(!Array.isArray(items))return"印刷情報を確認できません";const printed=items.filter(item=>validNetPrintTarget(items,item)&&item.printed===true).length;if(typeof job.materialStatus==="string"&&job.materialStatus.trim())return items.length?`${job.materialStatus} / 印刷済み ${printed}/${items.length}件`:job.materialStatus;if(!items.length)return"資料番号待ち";return printed===items.length?`準備完了（${printed}/${items.length}件）`:`準備中（${printed}/${items.length}件印刷済み）`;}
+function prepSummary(job:Job){if(caseMailPreparationHeld(job))return"受信内容・勤務条件を確認中";if(job.preContactNeedsReview===true)return"事前連絡の再確認が必要";if(job.sourceMissing===true)return"取込元の案件を確認中";if(job.applicationUnconfirmed===true)return staffReservationConfirmed(job)?"勤務枠確保済み・手配確認中":"シフト表の担当確認待ち";if(job.assignmentUnresolved===true)return"担当者の照合待ち";const items=job.netPrint?.items??[];if(!Array.isArray(items))return"印刷情報を確認できません";const printed=items.filter(item=>validNetPrintTarget(items,item)&&item.printed===true).length;if(typeof job.materialStatus==="string"&&job.materialStatus.trim())return items.length?`${job.materialStatus} / 印刷済み ${printed}/${items.length}件`:job.materialStatus;if(!items.length)return"資料番号待ち";return printed===items.length?`準備完了（${printed}/${items.length}件）`:`準備中（${printed}/${items.length}件印刷済み）`;}
 function messageTone(value:string){if(/自動で再確認|前回の業務データ|一時的に混み合|一時停止/u.test(value))return"warning";if(/できません|読み込めません|失敗|エラー|拒否|見つかりません|必要です/u.test(value))return"error";if(/受付済み|未確認/u.test(value))return"warning";if(/処理中|確認しています|読み込|送信中|転送中|待って/u.test(value))return"working";return"success";}
 function messageClassName(value:string){return `message ${messageTone(value)}`;}
 function submissionFileContentType(file:File){return file.type.startsWith("image/")||file.type==="application/pdf"?file.type:file.name.toLowerCase().endsWith(".pdf")?"application/pdf":file.type||"application/octet-stream";}
@@ -209,6 +215,8 @@ function completeEmailLinkSignIn(url:string,email:string):Promise<void>{
   return task;
 }
 
+type DraftCleanup={key:string;durable:boolean;attempt?:SubmissionAttempt;selection?:File[];draftCleared?:boolean;unverified?:boolean};
+
 export default function App(){
   const { isPending, run } = useAsyncAction();
   const adminLoginUrl=useMemo(stagingAdminLoginUrl,[]);
@@ -239,26 +247,40 @@ export default function App(){
   const applicationResultButtonRef=useRef<HTMLButtonElement|null>(null);
   const applicationResultFocusRef=useRef<{authVersion:number;navigationVersion:number}|null>(null);
   const [pendingShiftAction,setPendingShiftAction]=useState("");
-  const [myJobs,setMyJobs]=useState<Job[]>(firebaseConfigured?[]:demoJobs); const [tasks,setTasks]=useState<StaffTask[]>(firebaseConfigured?[]:demoTasks);
+  const [myJobs,setMyJobsState]=useState<Job[]>(firebaseConfigured?[]:demoJobs);
+  const myJobsRef=useRef(myJobs);
+  function setMyJobs(update:Job[]|((current:Job[])=>Job[])){
+    const next=typeof update==="function"?update(myJobsRef.current):update;
+    myJobsRef.current=next;
+    setMyJobsState(next);
+  }
+  const [tasks,setTasks]=useState<StaffTask[]>(firebaseConfigured?[]:demoTasks);
   const [selectedJob,setSelectedJob]=useState<Job|null>(firebaseConfigured?null:(demoJobs[0]??null)); const [temperature,setTemperature]=useState(""); const [arrivalTime,setArrivalTime]=useState("");
   const preContactDraftsRef=useRef(new Map<string,{temperature:string;arrivalTime:string}>());
   const preContactTemperatureRef=useRef<HTMLInputElement|null>(null);
   const preContactArrivalRef=useRef<HTMLInputElement|null>(null);
   const [preContactError,setPreContactError]=useState<""|"temperature"|"arrival">("");
+  const registeredPreContact=savedPreContactInputs(selectedJob?.preContact);
   const preContactDraftKey=[user?.uid??"demo",companyId,staffId,selectedJob?.id??"",selectedJob?.dateKey??""].join("|");
   useEffect(()=>{
     setPreContactError("");
     const draft=preContactDraftsRef.current.get(preContactDraftKey);
     if(draft){setTemperature(draft.temperature);setArrivalTime(draft.arrivalTime);return;}
-    setTemperature(typeof selectedJob?.preContact?.temperature==="number"&&Number.isFinite(selectedJob.preContact.temperature)?String(selectedJob.preContact.temperature):"");
-    const savedTime=selectedJob?.preContact?.arrivalTime??"";
-    setArrivalTime(typeof savedTime==="string"&&/^([01]?\d|2[0-3]):[0-5]\d$/.test(savedTime)?savedTime.padStart(5,"0"):"");
+    const saved=savedPreContactInputs(selectedJob?.preContact);
+    setTemperature(saved.temperature);
+    setArrivalTime(saved.arrivalTime);
   },[user?.uid,companyId,staffId,selectedJob?.id,selectedJob?.dateKey,selectedJob?.preContact?.temperature,selectedJob?.preContact?.arrivalTime]);
   const [submissionType,setSubmissionType]=useState<SubmissionType>("report"); const [requestId,setRequestId]=useState("");
-  const [submissionConfirmed,setSubmissionConfirmed]=useState(false);
+  const [confirmedSubmissionContext,setConfirmedSubmissionContext]=useState("");
   const [submissionMessage,setSubmissionMessage]=useState("" );
-  const [draftCleanup,setDraftCleanup]=useState<{key:string;durable:boolean;attempt?:SubmissionAttempt;draftCleared?:boolean;attemptCleared?:boolean;unverified?:boolean}|null>(null);
-  const [files,setFiles]=useState<File[]>([]); const [uploadState,setUploadState]=useState<Record<string,string>>({});
+  const [draftCleanup,setDraftCleanup]=useState<DraftCleanup|null>(null);
+  const [files,setFilesState]=useState<File[]>([]); const [uploadState,setUploadState]=useState<Record<string,string>>({});
+  const submissionFilesRef=useRef(files);
+  function setFiles(update:File[]|((current:File[])=>File[])){
+    const next=typeof update==="function"?update(submissionFilesRef.current):update;
+    submissionFilesRef.current=next;
+    setFilesState(next);
+  }
   const [draftHydrating,setDraftHydrating]=useState(false);
   const [deviceSessionId,setDeviceSessionId]=useState(""); const [devices,setDevices]=useState<DeviceSession[]>([]); const [showDevices,setShowDevices]=useState(false);
   const [deviceListUncertain,setDeviceListUncertain]=useState(false);
@@ -283,9 +305,24 @@ export default function App(){
   useEffect(()=>{if(view==="shifts")shiftHeadingRef.current?.focus({preventScroll:true});},[view]);
   const shiftDetailRef=useRef<HTMLElement>(null);
   useEffect(()=>{if(shiftFocusRequest){shiftDetailRef.current?.focus({preventScroll:true});shiftDetailRef.current?.scrollIntoView({block:'start'});}},[shiftFocusRequest]);
-  function openShiftJob(job:Job){if(job.applicationUnconfirmed===true){setSelectedJob(null);return;}if(splitAssignedJobs([job]).past.length)setShowPastShifts(true);setSelectedJob(job);setShiftFocusRequest(value=>value+1);}
+  function openShiftJob(job:Job,onOpened?:()=>void):Promise<boolean>{
+    const open=(target=job)=>{if(!staffShiftVisible(target))setSelectedJob(null);else{if(splitAssignedJobs([target]).past.length)setShowPastShifts(true);setSelectedJob(target);setShiftFocusRequest(value=>value+1);}onOpened?.();};
+    if(!staffShiftVisible(job)||!submissionFilesRef.current.length||selectedAssignedJob?.id===job.id){open();return Promise.resolve(true);}
+    if(isSubmissionActionPending())return Promise.resolve(false);
+    const authVersion=authLoadVersionRef.current,contextVersion=submissionContextVersionRef.current,navigationVersion=navigationVersionRef.current;
+    const currentTarget=()=>myJobsRef.current.find(row=>row.id===job.id&&staffShiftVisible(row)&&row.status==="assigned"&&row.cancelled!==true&&(!firebaseConfigured||row.companyId===companyId&&row.assignedStaffId===staffId));
+    const isCurrentChange=()=>authVersion===authLoadVersionRef.current&&contextVersion===submissionContextVersionRef.current&&navigationVersion===navigationVersionRef.current&&!!currentTarget();
+    let opened=false;
+    return run("submission-context",async()=>{
+      if(!await discardFilesBeforeContextChange("選択中のファイルを外して提出先を変更しますか？",submissionFilesRef.current,isCurrentChange)||!isCurrentChange())return;
+      open(currentTarget()!);opened=true;
+    },{setMessage:value=>{if(isCurrentChange())showSubmissionMessage(value);}}).then(()=>opened).catch(()=>false);
+  }
   function togglePastShifts(){
-    if(showPastShifts&&selectedJob&&upcomingShifts.length&&pastShifts.some(job=>job.id===selectedJob.id))setSelectedJob(upcomingShifts[0]);
+    if(showPastShifts&&selectedJob&&upcomingShifts.length&&pastShifts.some(job=>job.id===selectedJob.id)){
+      if(submissionFilesRef.current.length){void openShiftJob(upcomingShifts[0],()=>setShowPastShifts(false));return;}
+      setSelectedJob(upcomingShifts[0]);
+    }
     setShowPastShifts(!showPastShifts);
   }
   const [hasMoreUpcomingShifts,setHasMoreUpcomingShifts]=useState(false);
@@ -296,19 +333,43 @@ export default function App(){
   const tasksReadVersionRef=useRef(0);
   const [submissionHistory,setSubmissionHistory]=useState<SubmissionGroup[]>([]);
   const [submissionHistoryStatus,setSubmissionHistoryStatus]=useState<SubmissionHistoryStatus>("idle");
+  const [nextSubmissionHistoryCursor,setNextSubmissionHistoryCursor]=useState<string|null>(null);
+  const [submissionHistoryPageError,setSubmissionHistoryPageError]=useState("");
   const [resubmissionDetail,setResubmissionDetail]=useState<ResubmissionDetail|null>(null);
   const [processingSubmission,setProcessingSubmission]=useState(false);
   const [authResolved,setAuthResolved]=useState(!firebaseConfigured);
+  const [sessionRevoked,setSessionRevoked]=useState(false);
   const [businessDataStatus,setBusinessDataStatus]=useState<BusinessDataStatus>(firebaseConfigured?"idle":"ready");
   const shiftNotification=useShiftNotificationRoute<Job>({
     ready:!firebaseConfigured||!!user&&!!companyId&&!!staffId&&businessDataStatus==="ready",
     scope:[user?.uid??"",companyId,staffId].join("|"),
     load:async id=>firebaseConfigured?loadTaskJob(id):demoJobs.find(job=>job.id===id)??null,
-    onOpen:job=>{openShiftJob(job);navigate("shifts");},
+    onOpen:(job,consume)=>openShiftJob(job,()=>{consume();navigate("shifts");}),
   });
 
 
   const [businessDataSource,setBusinessDataSource]=useState<BusinessDataSource>(firebaseConfigured?"none":"live");
+  const [taskRefreshSource,setTaskRefreshSource]=useState<"live"|"stale"|null>(null);
+  const reservationNoticesRef=useRef<{scope:string;seen:Set<string>}>({scope:'',seen:new Set()});
+  useEffect(()=>{
+    if(!firebaseConfigured||!db||!user||!companyId||!staffId||!acceptedApplicationJobId||acceptedApplicationJobId.includes('/'))return;
+    const authVersion=authLoadVersionRef.current,uid=user.uid,scope=[uid,companyId,staffId].join('|');
+    if(reservationNoticesRef.current.scope!==scope)reservationNoticesRef.current={scope,seen:new Set()};
+    let active=true;
+    const unsubscribe=onSnapshot(doc(db,'jobs',acceptedApplicationJobId),{includeMetadataChanges:true},snapshot=>{
+      if(!active||authLoadVersionRef.current!==authVersion||snapshot.metadata.fromCache||snapshot.metadata.hasPendingWrites)return;
+      const candidate=snapshot.exists()?{...snapshot.data(),id:snapshot.id} as Job:null;
+      if(!candidate||candidate.companyId!==companyId||candidate.assignedStaffId!==staffId||candidate.assignedUid!==uid||candidate.status!=='assigned'||candidate.cancelled===true){
+        setMyJobs(jobs=>jobs.filter(job=>job.id!==acceptedApplicationJobId));return;
+      }
+      setMyJobs(jobs=>orderAssignedJobs([...jobs.filter(job=>job.id!==candidate.id),candidate]));
+      if(!staffReservationConfirmed(candidate))return;
+      const key=candidate.id+'|'+candidate.staffReservation!.sourceProofHash;
+      if(reservationNoticesRef.current.seen.has(key))return;reservationNoticesRef.current.seen.add(key);
+      setMessage('勤務枠を確保しました。カレンダーに予定が入りました。');
+    },()=>{ /* Read failures never release an unverified reservation. The existing refresh remains available. */ });
+    return()=>{active=false;unsubscribe();};
+  },[user?.uid,companyId,staffId,acceptedApplicationJobId]);
   const [businessRefreshing,setBusinessRefreshing]=useState(false);
   const [openJobsStatus,setOpenJobsStatus]=useState<BusinessDataStatus>(firebaseConfigured?"idle":"ready");
   const [homeDisplayMs,setHomeDisplayMs]=useState<number|null>(firebaseConfigured?null:0);
@@ -376,6 +437,11 @@ export default function App(){
   const resubmissionDetailVersionRef=useRef(0);
   const submissionContextVersionRef=useRef(0);
   const previewContextRef=useRef("");
+  const submissionConfirmationContext=JSON.stringify([draftKey,selectedJob?.dateKey??null,selectedJob?.revision??0]);
+  const submissionConfirmationContextRef=useRef(submissionConfirmationContext);
+  submissionConfirmationContextRef.current=submissionConfirmationContext;
+  const submissionConfirmed=confirmedSubmissionContext===submissionConfirmationContext;
+  const setSubmissionConfirmed=(confirmed:boolean)=>setConfirmedSubmissionContext(confirmed?submissionConfirmationContext:"");
   previewContextRef.current=draftKey;
   useEffect(()=>{
     setSubmissionConfirmed(false);
@@ -384,11 +450,13 @@ export default function App(){
     skipNextDraftSaveRef.current=false;
     setDraftHydrating(Boolean(draftKey));
     if(!draftKey)return;
-    const submittedReceipt=getSubmittedDraftReceipt(draftKey);
-    if(submittedReceipt)setDraftCleanup(current=>current?.key===draftKey?current:{key:draftKey,durable:submittedReceipt.durable});
     let active=true;
-    void loadDraft(draftKey).then(draftFiles=>{
+    void loadDraftState(draftKey).then(({files:draftFiles,legacySubmitted})=>{
       if(!active)return;
+      setDraftCleanup(current=>{
+        if(legacySubmitted)return current?.key===draftKey?current:{key:draftKey,durable:true,unverified:true};
+        return current?.key===draftKey&&!current.attempt?null:current;
+      });
       setFiles(draftFiles);
       hydratedDraftKeyRef.current=draftKey;
       skipNextDraftSaveRef.current=true;
@@ -421,13 +489,35 @@ export default function App(){
     },300);
     return()=>{
       active=false;clearTimeout(timer);
-      if(timerPending&&!previewContextRef.current&&authVersion===authLoadVersionRef.current&&pendingFiles.length&&!isPending("submission-context")&&!isPending("submission-files")&&!getSubmittedDraftReceipt(pendingDraftKey)){
+      if(timerPending&&!previewContextRef.current&&authVersion===authLoadVersionRef.current&&pendingFiles.length&&!isPending("submission-context")&&!isPending("submission-files")){
         void saveDraft(pendingDraftKey,pendingFiles).catch(()=>{if(authVersion===authLoadVersionRef.current&&!previewContextRef.current)setMessage("提出対象が見つからず、下書きも保存できませんでした。画面を閉じず、シフトを更新して対象を確認してください。");});
       }
     };
   },[draftKey,draftHydrating,files,draftSavePaused]);
   useEffect(()=>{ if(!pushEnabled)setShowPushActions(false); },[pushEnabled]);
 
+
+  const submissionNotification=useShiftNotificationRoute<{job:Job;type:SubmissionType}>({
+    ready:(!firebaseConfigured||!!user&&!!companyId&&!!staffId&&!sessionRevoked&&businessDataStatus==="ready")&&!draftHydrating&&hydratedDraftKeyRef.current===draftKey,
+    scope:[user?.uid??"",companyId,staffId].join("|"),
+    parse:path=>submissionNotificationRoute(path)?path:null,
+    load:async path=>{
+      const target=submissionNotificationRoute(path);
+      if(!target)return null;
+      const {jobId,type}=target;
+      const job=firebaseConfigured?await loadTaskJob(jobId):demoJobs.find(item=>item.id===jobId);
+      if(!job)return null;
+      const status=job.submissionStatus;
+      const completed=type==="report"?status?.report?.completed===true:
+        status?.salesFloor?.completed===true||status?.salesFloor?.clientSubmitted===true||status?.salesFloor?.lipKnotsSubmitted===true;
+      return completed?null:{job,type};
+    },
+    onOpen:(target,consume)=>{
+      const sameDraft=selectedAssignedJob?.id===target.job.id&&submissionType===target.type&&!requestId;
+      if(!sameDraft&&submissionFilesRef.current.length)return false;
+      return startSubmission(target.type,target.job,"",consume);
+    },
+  });
 
   const resubmissionNotification=useShiftNotificationRoute<{job:Job;type:SubmissionType;requestId:string}>({
     ready:(!firebaseConfigured||!!user&&!!companyId&&!!staffId&&businessDataStatus==="ready")&&!draftHydrating&&hydratedDraftKeyRef.current===draftKey,
@@ -454,19 +544,29 @@ export default function App(){
 
   useEffect(()=>{
     const scope=[user?.uid??"demo",companyId,staffId].join("|")+"|";
-    const preventPreContactExit=(event:BeforeUnloadEvent)=>{
+    const preventPreContactExit=(event:Event)=>{
       const dirty=[...preContactDraftsRef.current].some(([key,draft])=>{
         if(!key.startsWith(scope))return false;
-        const saved=myJobs.find(job=>scope+job.id+"|"+(job.dateKey??"")===key)?.preContact;
-        const savedTime=saved?.arrivalTime??"";
-        const time=typeof savedTime==="string"&&/^([01]?\d|2[0-3]):[0-5]\d$/.test(savedTime)?savedTime.padStart(5,"0"):"";
-        return draft.temperature!==(typeof saved?.temperature==="number"&&Number.isFinite(saved.temperature)?String(saved.temperature):"")||draft.arrivalTime!==time;
+        const saved=savedPreContactInputs(myJobs.find(job=>scope+job.id+"|"+(job.dateKey??"")===key)?.preContact);
+        return draft.temperature!==saved.temperature||draft.arrivalTime!==saved.arrivalTime;
       });
-      if(dirty){event.preventDefault();event.returnValue="";}
+      if(dirty){event.preventDefault();if(event.type==="beforeunload")(event as BeforeUnloadEvent).returnValue="";}
     };
     window.addEventListener("beforeunload",preventPreContactExit);
-    return ()=>window.removeEventListener("beforeunload",preventPreContactExit);
+    window.addEventListener("lkc-pwa-reload",preventPreContactExit);
+    return ()=>{
+      window.removeEventListener("beforeunload",preventPreContactExit);
+      window.removeEventListener("lkc-pwa-reload",preventPreContactExit);
+    };
   },[user?.uid,companyId,staffId,myJobs]);
+
+  useEffect(()=>{
+    const preventUnsafeReload=(event:Event)=>{
+      if(isSubmissionActionPending()||draftReloadBlocked(draftKey,submissionFilesRef.current)||Boolean(draftCleanup&&!draftCleanup.durable))event.preventDefault();
+    };
+    window.addEventListener("lkc-pwa-reload",preventUnsafeReload);
+    return ()=>window.removeEventListener("lkc-pwa-reload",preventUnsafeReload);
+  });
 
   useEffect(()=>{
     const pendingApplicationFocus=applicationResultFocusRef.current;
@@ -519,14 +619,26 @@ export default function App(){
     setShowDevices(false);
     setDeviceListUncertain(false);
     setPendingDeviceId("");setPendingPushAction(null);
+    setDeviceSessionId("");
+    setSessionRevoked(false);
     setUser(current);
     setAuthResolved(true);
     if(firebaseConfigured){
+      setView("home");
+      window.scrollTo({top:0,left:0,behavior:"auto"});
+      setShowAccountMenu(false);
+      setMessage("");
+      setLoginCode("");
+      setSubmissionType("report");
+      setRequestId("");
+      setResubmissionDetail(null);
+      setConfirmedSubmissionContext("");
       setCompanyId(""); setStaffId(""); setOpenJobs([]); setOpenJobQuery(""); setOpenJobPage(0); setMyJobs([]); setTasks([]); setSelectedJob(null);
       setDraftCleanup(null);
-      setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionHistoryStatus("idle"); setSubmissionMessage("");
+      setFiles([]); setUploadState({}); setSubmissionHistory([]); setSubmissionHistoryStatus("idle"); setNextSubmissionHistoryCursor(null); setSubmissionHistoryPageError(""); setSubmissionMessage("");
       setBusinessDataStatus(current?"loading":"idle");
       setBusinessDataSource("none");
+      setTaskRefreshSource(null);
       setBusinessRefreshing(Boolean(current));
       setOpenJobsStatus("idle");
       setHomeDisplayMs(null);
@@ -539,9 +651,10 @@ export default function App(){
       lastPushStatusRefreshAt=0;
       lastBusinessDataRefreshAt=0;
     }
-    if(!current||!functions){setDeviceSessionId("");setBusinessRefreshing(false);return;}
+    if(!current||!functions){setBusinessRefreshing(false);return;}
     let restoredCachedData=false;
     let sessionVerified=false;
+    const rememberedScope=loadLastBusinessScope(current.uid);
     let restoredScope:{companyId:string;staffId:string}|null=null;
     try{
       const restoreCachedBusinessData=(cid:string,sid:string)=>{
@@ -551,7 +664,7 @@ export default function App(){
         setCompanyId(cid); setStaffId(sid);
         setMyJobs(jobs);
         setTasks(snapshot.tasks);
-        setSelectedJob(nextShiftJob(jobs)??jobs.find(job=>job.applicationUnconfirmed!==true)??null);
+        setSelectedJob(nextShiftJob(jobs)??jobs.find(staffShiftVisible)??null);
         setBusinessDataStatus("ready");
         setBusinessDataSource("cached");
         setHomeDisplayMs(Math.round(performance.now()-loadStarted));
@@ -562,42 +675,30 @@ export default function App(){
       const bootstrapPromise=bootstrap();
       // 認証情報の待機中やアカウント切替後の早期失敗も処理済みにする。
       void bootstrapPromise.catch(()=>undefined);
-      const knownScope=loadLastBusinessScope(current.uid);
-      if(knownScope&&restoreCachedBusinessData(knownScope.companyId,knownScope.staffId)){
-        restoredCachedData=true;
-        restoredScope=knownScope;
-      }else if(knownScope){
-        clearBusinessSnapshot(current.uid,knownScope.companyId,knownScope.staffId);
-      }
       const initialToken=await getIdTokenResult(current).catch(()=>null);
       if(!isCurrentAuthLoad())return;
-      const initialCid=staffScopeId(initialToken?.claims.companyId);
-      const initialSid=staffScopeId(initialToken?.claims.staffId);
-      if(!restoredCachedData&&initialCid&&initialSid&&restoreCachedBusinessData(initialCid,initialSid)){
-        restoredCachedData=true;
-        restoredScope={companyId:initialCid,staffId:initialSid};
-      }
       const result=await bootstrapPromise;
       if(!isCurrentAuthLoad())return;
       const refreshToken=bootstrapRefreshToken(result.data);
-      if(refreshToken){await current.getIdToken(true);if(!isCurrentAuthLoad())return;}
-      const token=refreshToken||!initialToken?await getIdTokenResult(current):initialToken;
+      const response=result.data as {role?:unknown;companyId?:unknown;staffId?:unknown};
+      const bootstrapCompany=staffScopeId(response.companyId);
+      const bootstrapStaff=staffScopeId(response.staffId);
+      if(response.role!=="staff"||!bootstrapCompany||!bootstrapStaff)throw new Error("スタッフの所属情報を確認できません。");
+      const tokenMatchesBootstrap=(candidate:typeof initialToken)=>candidate?.claims.role==="staff"&&
+        candidate.claims.companyId===bootstrapCompany&&candidate.claims.staffId===bootstrapStaff;
+      const token=refreshToken||!initialToken||!tokenMatchesBootstrap(initialToken)
+        ?await getIdTokenResult(current,true)
+        :initialToken;
       if(!isCurrentAuthLoad())return;
-      const cid=staffScopeId(token.claims.companyId); const sid=staffScopeId(token.claims.staffId);
-      if(!cid||!sid)throw new Error("スタッフの所属情報を確認できません。");
+      const cid=staffScopeId(token.claims.companyId);
+      const sid=staffScopeId(token.claims.staffId);
+      if(!cid||!sid||!tokenMatchesBootstrap(token))throw new Error("スタッフの所属情報を確認できません。");
       sessionVerified=true;
-      if(restoredScope&&(restoredScope.companyId!==cid||restoredScope.staffId!==sid)){
-        clearBusinessSnapshot(current.uid,restoredScope.companyId,restoredScope.staffId);
-        restoredCachedData=false;
-        restoredScope=null;
-        setMyJobs([]); setTasks([]); setSelectedJob(null);
-        setBusinessDataStatus("loading");
-        setBusinessDataSource("none");
-        setHomeDisplayMs(null);
-        setHomeLoadedFromCache(false);
+      if(rememberedScope&&(rememberedScope.companyId!==cid||rememberedScope.staffId!==sid)){
+        clearBusinessSnapshot(current.uid,rememberedScope.companyId,rememberedScope.staffId);
       }
       setCompanyId(cid); setStaffId(sid);
-      if(!restoredCachedData&&restoreCachedBusinessData(cid,sid)){
+      if(restoreCachedBusinessData(cid,sid)){
         restoredCachedData=true;
         restoredScope={companyId:cid,staffId:sid};
       }
@@ -609,13 +710,14 @@ export default function App(){
       if(!restoredCachedData)setHomeDisplayMs(refreshedInMs);
       setBusinessRefreshMs(refreshedInMs);
       lastBusinessDataRefreshAt=Date.now();
-      void registerCurrentDevice(authLoadVersion).catch(()=>{if(isCurrentAuthLoad())setMessage("端末情報を登録できませんでした。再読み込みしてください。");});
       void refreshOpenJobs(false,cid);
       void refreshPushStatus(true);
     }catch(error){
       if(!isCurrentAuthLoad())return;
-      if(isShiftAccessDenied(error)){
-        forgetInaccessibleShifts(undefined,current.uid,restoredScope?.companyId??"",restoredScope?.staffId??"");
+      if(isDeviceAccessDenied(error)){
+        sessionVerified=false;
+        const scope=restoredScope??rememberedScope;
+        forgetInaccessibleShifts(undefined,current.uid,scope?.companyId??"",scope?.staffId??"");
         restoredCachedData=false;
       }
       if(restoredCachedData&&sessionVerified){
@@ -624,7 +726,8 @@ export default function App(){
         setMessage("最新情報を更新できなかったため、前回の業務データを表示しています。");
       }else{
         if(restoredScope)clearBusinessSnapshot(current.uid,restoredScope.companyId,restoredScope.staffId);
-        setCompanyId(""); setStaffId(""); setMyJobs([]); setTasks([]); setSelectedJob(null);
+        if(!sessionVerified){setCompanyId("");setStaffId("");}
+        setMyJobs([]); setTasks([]); setSelectedJob(null);
         setBusinessDataStatus("error");
         setBusinessDataSource("none");
         setHomeDisplayMs(null);
@@ -652,55 +755,75 @@ export default function App(){
     return()=>{active=false;};
   },[]);
   useEffect(()=>{
-    if(!user||!deviceSessionId||!functions||!db||!auth)return;
-    const activeAuth=auth;
+    if(!user||!companyId||!staffId||!functions||!db||!auth||sessionRevoked)return;
     const activeFunctions=functions;
     const authVersion=authLoadVersionRef.current;
     let stopped=false;
-    let heartbeatPending=false;
-    let revocationPending=false;
-    let revocationCompleted=false;
-    const handleRevoked=async(message:string)=>{
-      if(stopped||authVersion!==authLoadVersionRef.current||revocationPending||revocationCompleted)return;
-      revocationPending=true;
-      setMessage(message);
-      clearBusinessSnapshot(user.uid,companyId,staffId);
-      try{await signOut(activeAuth);revocationCompleted=true;}
-      catch{if(!stopped&&authVersion===authLoadVersionRef.current)setMessage("ログアウトに失敗しました。再読み込みしてください。");}
-      finally{revocationPending=false;}
+    let pending:Promise<boolean>|null=null;
+    let foregroundPending=false;
+    const isCurrent=()=>!stopped&&authVersion===authLoadVersionRef.current;
+    const handleRevoked=async()=>{
+      if(isCurrent())await logoutRevokedSession(authVersion,user.uid,companyId,staffId);
     };
     const heartbeat=async()=>{
-      if(stopped||authVersion!==authLoadVersionRef.current||heartbeatPending||revocationPending||revocationCompleted)return;
-      heartbeatPending=true;
-      try{
-        await httpsCallable(activeFunctions,"heartbeatDeviceSession")({sessionId:deviceSessionId});
-      }catch(error){
-        const code=String((error as {code?:unknown}|null)?.code??"");
-        if(code.endsWith("permission-denied"))await handleRevoked("この端末はログアウトされています。");
-      }finally{heartbeatPending=false;}
+      if(!isCurrent())return false;
+      if(pending)return pending;
+      pending=(async()=>{
+        try{
+          if(deviceSessionId){
+            const response=await httpsCallable(activeFunctions,"heartbeatDeviceSession")({sessionId:deviceSessionId});
+            if((response.data as {active?:unknown}|null)?.active!==true)return false;
+          }else if(!await registerCurrentDevice(authVersion))return false;
+          return isCurrent();
+        }catch(error){
+          if(isDeviceAccessDenied(error))await handleRevoked();
+          return false;
+        }
+      })();
+      try{return await pending;}
+      finally{pending=null;}
     };
-    const stopWatching=watchDeviceSession(deviceSessionId,()=>handleRevoked("この端末はログアウトされました。"));
+    const stopWatching=deviceSessionId?watchDeviceSession(deviceSessionId,handleRevoked):undefined;
     void heartbeat();
     const interval=window.setInterval(()=>void heartbeat(),DEVICE_HEARTBEAT_INTERVAL_MS);
-    const handleVisibility=()=>{if(document.visibilityState==="visible"){void heartbeat();void refreshPushStatus(false);void refreshBusinessData(false);}};
+    const handleVisibility=async()=>{
+      if(!isCurrent()||document.visibilityState!=="visible"||foregroundPending)return;
+      foregroundPending=true;
+      try{
+        if(await heartbeat()&&isCurrent()){
+          void refreshPushStatus(false);
+          void refreshBusinessData(false);
+        }
+      }finally{foregroundPending=false;}
+    };
     document.addEventListener("visibilitychange",handleVisibility);
+    window.addEventListener("online",handleVisibility);
     return()=>{
       stopped=true;
       window.clearInterval(interval);
+      window.removeEventListener("online",handleVisibility);
       document.removeEventListener("visibilitychange",handleVisibility);
       stopWatching?.();
     };
-  },[user,deviceSessionId,companyId,staffId]);
+  },[user,deviceSessionId,companyId,staffId,sessionRevoked]);
   useEffect(()=>{
-    if(!user)return;
+    if(!user||!companyId||!staffId||sessionRevoked)return;
+    const authVersion=authLoadVersionRef.current;
+    const scope={companyId,staffId,uid:user.uid};
     let active=true;
+    const isCurrent=()=>active&&authVersion===authLoadVersionRef.current;
     let unsub:(()=>void)|null=null;
-    void listenForForegroundPush(payload=>{if(active)setMessage(`${payload.data?.title??"Lip Knots Crew"}：${payload.data?.body??"新しいお知らせがあります。"}`);}).then(value=>{
-      if(!active){value?.();return;}
+    void listenForForegroundPush(payload=>{
+      const notice=staffForegroundNotice(payload.data,scope);
+      if(notice===null)return false;
+      setMessage(notice);
+      return true;
+    },isCurrent).then(value=>{
+      if(!isCurrent()){value?.();return;}
       unsub=value;
     }).catch(()=>undefined);
     return()=>{active=false;unsub?.();};
-  },[user]);
+  },[user,companyId,staffId,sessionRevoked]);
   useEffect(()=>{if(tasks.length<=5)setShowAllTasks(false);},[tasks.length]);
   useEffect(()=>{
     if(!message||messageTone(message)!=="success")return;
@@ -717,7 +840,7 @@ export default function App(){
     // 過去の件数が増えても今後のシフトが取得上限から押し出されないようにする。
     const reads=[
       readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("status","==","assigned"),where("dateKey",">=",today),orderBy("dateKey","asc"),limit(301))),
-      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("status","==","assigned"),where("dateKey","<",today),orderBy("dateKey","asc"),limit(51))),
+      readJobs(query(collection(db,"jobs"),where("companyId","==",cid),where("assignedStaffId","==",sid),where("status","==","assigned"),where("dateKey","<",today),orderBy("dateKey","desc"),limit(51))),
       companionRead,
     ] as const;
     await Promise.allSettled(reads);
@@ -813,7 +936,8 @@ export default function App(){
     if(version!==pastShiftVersionRef.current||tasksVersion!==tasksReadVersionRef.current)return false;
     setMyJobs(jobs);
     setTasks(nextTasks);
-    setSelectedJob(current=>jobs.find(job=>job.id===current?.id&&job.applicationUnconfirmed!==true)??nextShiftJob(jobs)??jobs.find(job=>job.applicationUnconfirmed!==true)??null);
+    setTaskRefreshSource(null);
+    setSelectedJob(current=>jobs.find(job=>job.id===current?.id&&staffShiftVisible(job))??(submissionFilesRef.current.length?null:nextShiftJob(jobs)??jobs.find(staffShiftVisible)??null));
     saveBusinessSnapshot(uid,cid,sid,jobs,nextTasks);
     return true;
   }
@@ -885,10 +1009,22 @@ export default function App(){
     try{
       const values=await fetchTasks();
       if(!isCurrent())return false;
-      setTasks(values);return true;
-    }catch(error){if(!isCurrent())return false;throw error;}
+      setTasks(values);
+      setTaskRefreshSource("live");
+      return true;
+    }catch(error){
+      if(!isCurrent())return false;
+      setTaskRefreshSource("stale");
+      if(isShiftAccessDenied(error))forgetInaccessibleShifts();
+      throw error;
+    }
   }
   function showSubmissionMessage(value:string){setMessage(value);setSubmissionMessage(value);}
+
+  async function refreshHomeTasks(){
+    if(!user||!staffId||!companyId||businessRefreshing||isSubmissionActionPending())return;
+    await run(taskRefreshKey,async()=>{await loadTasks();}).catch(()=>undefined);
+  }
 
   async function refreshBusinessData(showFailure:boolean){
     if(businessRefreshInFlightRef.current||submissionEditPending||isPending("apply-action")||businessDataStatus==="loading")return;
@@ -1021,7 +1157,7 @@ export default function App(){
 
   function navigate(next:View){
     navigationVersionRef.current++;
-    shiftNotification.cancel();resubmissionNotification.cancel();
+    shiftNotification.cancel();resubmissionNotification.cancel();submissionNotification.cancel();
     setShowAccountMenu(false);
     setShowDevices(false);
     closeDiagnostics();
@@ -1105,13 +1241,24 @@ export default function App(){
       const activeAuth=auth;
       await authPersistenceReady;
       if(!isCurrentLogin())return;
-      const callable=httpsCallable<{email:string;code:string},{emailActionLink:string}>(functions,"requestStaffLoginLink");
-      const result=await callable({email:normalizedEmail,code});
+      const callable=httpsCallable<{email:string;code:string;deviceId:string},unknown>(functions,"requestStaffLoginLink");
+      const result=await callable({email:normalizedEmail,code,deviceId:currentDeviceId});
       if(!isCurrentLogin())return;
-      const emailActionLink=(result.data as {emailActionLink?:unknown}|null)?.emailActionLink;
-      if(typeof emailActionLink!=="string"||!emailActionLink.trim()||!isSignInWithEmailLink(activeAuth,emailActionLink))throw new Error("ログイン情報を確認できません。");
-
-      await signInWithEmailLink(activeAuth,normalizedEmail,emailActionLink);
+      const data=result.data as {customToken?:unknown;emailActionLink?:unknown}|null;
+      if(!data||typeof data!=="object"||Array.isArray(data))throw new Error("ログイン情報を確認できません。");
+      if(Object.hasOwn(data,"customToken")){
+        if(Object.hasOwn(data,"emailActionLink")||typeof data.customToken!=="string"||
+            !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(data.customToken)){
+          throw new Error("ログイン情報を確認できません。");
+        }
+        await signInWithCustomToken(activeAuth,data.customToken);
+      }else{
+        const emailActionLink=data.emailActionLink;
+        if(typeof emailActionLink!=="string"||!emailActionLink.trim()||!isSignInWithEmailLink(activeAuth,emailActionLink)){
+          throw new Error("ログイン情報を確認できません。");
+        }
+        await signInWithEmailLink(activeAuth,normalizedEmail,emailActionLink);
+      }
       if(!isCurrentLogin())return;
       setLoginCode("");
       setMessage("ログインしました。");
@@ -1126,6 +1273,25 @@ export default function App(){
     if(typeof id!=="string"||!id.trim()||id.includes("/"))throw Error("端末登録の応答を確認できません。再読み込みしてください。");
     setDeviceSessionId(id);return id;
   }
+  function isDeviceAccessDenied(error:unknown){
+    const code=(error as {code?:unknown}|null)?.code;
+    return isShiftAccessDenied(error)||code==="functions/unauthenticated"||code==="unauthenticated";
+  }
+  async function logoutRevokedSession(expectedVersion:number,uid:string,cid:string,sid:string){
+    if(!auth||expectedVersion!==authLoadVersionRef.current)return;
+    const activeAuth=auth;
+    const blockedVersion=++authLoadVersionRef.current;
+    setSessionRevoked(true);
+    setMessage("この端末の利用権限が失効しました。");
+    setDeviceSessionId("");
+    setPendingDeviceId("");
+    setCompanyId("");setStaffId("");
+    forgetInaccessibleShifts(undefined,uid,cid,sid);
+    try{await run("logout",()=>signOut(activeAuth));}
+    catch{
+      if(blockedVersion===authLoadVersionRef.current)setMessage("ログアウトに失敗しました。もう一度お試しください。");
+    }
+  }
   async function logoutCurrentUser(){
     if(user)clearBusinessSnapshot(user.uid,companyId,staffId);
     if(auth)await signOut(auth);
@@ -1137,7 +1303,15 @@ export default function App(){
     const authVersion=authLoadVersionRef.current;
     await run("logout",logoutCurrentUser,{setMessage:()=>{if(authVersion===authLoadVersionRef.current)setMessage("ログアウトできませんでした。もう一度「ログアウト」を押してください。");}}).catch(()=>undefined);
   }
-  function watchDeviceSession(id:string,onRevoked:()=>Promise<void>){ if(!db)return; return onSnapshot(doc(db,"deviceSessions",id),s=>{if(s.exists()&&s.data().active===false)void onRevoked().catch(()=>undefined);}); }
+  function watchDeviceSession(id:string,onRevoked:()=>Promise<void>|undefined){
+    if(!db)return;
+    const revoke=()=>{void onRevoked()?.catch(()=>undefined);};
+    return onSnapshot(doc(db,"deviceSessions",id),{includeMetadataChanges:true},snapshot=>{
+      if(!snapshot.metadata.fromCache&&(!snapshot.exists()||snapshot.data().active!==true))revoke();
+    },error=>{
+      if(isDeviceAccessDenied(error))revoke();
+    });
+  }
 
   function isCurrentDevice(device:DeviceSession){
     if(device.id===deviceSessionId)return true;
@@ -1194,7 +1368,7 @@ export default function App(){
         const result=response?.data as {revoked?:unknown}|null;
         if(!result||Array.isArray(result)||result.revoked!==true)throw new Error("端末ログアウトの受付結果を確認できません。端末一覧を再読込して状態を確認してください。");
         accepted=true;
-        if(currentTarget)await logoutCurrentUser();
+        if(currentTarget&&user)await logoutRevokedSession(authLoadVersion,user.uid,companyId,staffId);
         else await fetchDevices(authLoadVersion);
         if(isCurrentAction())setMessage("端末をログアウトしました。");
       }finally{if(isCurrentAction())setPendingDeviceId("");}
@@ -1248,7 +1422,7 @@ export default function App(){
       if(!functions){setMessage("デモ：実際のテスト通知は送信されません。");return;}
       let test=await submitAndWaitForPushTest(isCurrent);
       if(!isCurrent())return;
-      if(test?.finished&&(test.invalidTokenCount>0||test.failureReason==="invalid_token")){
+      if(test?.finished&&test.deliveryVerificationRequired!==true&&(test.invalidTokenCount>0||test.failureReason==="invalid_token")){
         setMessage("古い通知登録を検出しました。端末を自動で再登録しています…");
         const refreshed=await refreshPushNotifications(functions!,deviceSessionId,isCurrent);
         if(!isCurrent())return;
@@ -1259,6 +1433,8 @@ export default function App(){
       }
       if(!test){
         setMessage("通知の送信結果をまだ確認できません。少し待って、端末に通知が表示されたか確認してください。");
+      }else if(test.deliveryVerificationRequired===true){
+        setMessage("通知サービスから送信結果を確認できません。端末に通知が表示されたか確認してください。");
       }else if(test.status==="completed"&&test.successCount>0){
         setMessage(`通知サービスへの送信に成功しました（対象${test.successCount}台）。端末に表示されたか確認してください。`);
       }else if(test.status==="no_tokens"){
@@ -1318,12 +1494,68 @@ export default function App(){
   }
   function viewMailApplicationShift(jobId:string){
     const job=myJobs.find(item=>item.id===jobId);
-    if(job)openShiftJob(job);
-    navigate("shifts");if(!job)void refreshBusinessData(true);
+    if(job){void openShiftJob(job,()=>navigate("shifts"));return;}
+    navigate("shifts");void refreshBusinessData(true);
+  }
+
+  async function readAcceptedApplicationReceipts(attempts:{jobId:string;requestId:string}[],isCurrent:()=>boolean){
+    const failure=()=>new Error("応募の受付を確認できませんでした。通信状態を確認して、もう一度照会してください。");
+    if(!functions)throw failure();
+    const fetchReceipts=httpsCallable(functions,"getMyTasks");
+    const accepted:typeof attempts=[];
+    for(let start=0;start<attempts.length;start+=20){
+      const batch=attempts.slice(start,start+20);
+      const {data}=await fetchReceipts({applicationReceiptLookup:batch});
+      if(!isCurrent())return null;
+      const rows=(data as {receipts?:unknown}|null)?.receipts;
+      if(!Array.isArray(rows)||rows.length!==batch.length)throw failure();
+      for(const [index,attempt] of batch.entries()){
+        const row=rows[index];
+        if(row?.jobId!==attempt.jobId||row.requestId!==attempt.requestId||
+          (row.status!=="accepted"&&row.status!=="not_observed"))throw failure();
+        if(row.status==="accepted")accepted.push(attempt);
+      }
+    }
+    return accepted;
+  }
+
+  async function clearResolvedApplication(owner:string,jobId:string,requestId:string,isCurrent:()=>boolean){
+    try{
+      if(await clearCheckedApplicationAttempt(owner,jobId,requestId,isCurrent)&&isCurrent()&&
+         applicationAttemptsRef.current.get(jobId)?.requestId===requestId){
+        applicationAttemptsRef.current.delete(jobId);
+      }
+    }catch{ /* 保存記録は次回の照会に残す。 */ }
+  }
+
+  async function checkApplicationReceipts(){
+    if(!firebaseConfigured||!functions||!companyId||!staffId||!user?.uid||
+      isPending("apply-action")||isPending("application-receipts"))return;
+    const authVersion=authLoadVersionRef.current;
+    const isCurrent=()=>authVersion===authLoadVersionRef.current;
+    const owner=applicationAttemptOwner(companyId,staffId,user.uid);
+    const attempts=Array.from(applicationAttemptsRef.current,([jobId,{requestId}])=>({jobId,requestId}));
+    if(!attempts.length)return;
+    try{
+      await run("application-receipts",async()=>{
+        const accepted=await readAcceptedApplicationReceipts(attempts,isCurrent);
+        if(!accepted||!isCurrent())return;
+        for(const {jobId,requestId} of accepted){
+          await clearResolvedApplication(owner,jobId,requestId,isCurrent);
+          if(!isCurrent())return;
+        }
+        refreshApplicationAttempts(value=>value+1);
+        const missing=attempts.length-accepted.length;
+        setMessage(
+          (accepted.length?"応募"+accepted.length+"件の受付を確認しました。「シフトを更新」で現在の担当状況を確認してください。":"")+
+          (missing?"受付を確認できない応募が"+missing+"件あります。応募記録は端末に残しています。通信状態を確認し、結果が分からない場合は管理者へお問い合わせください。":""),
+        );
+      },{setMessage:value=>{if(isCurrent())setMessage(value);}});
+    }catch{ /* run が通信または照会のエラーを表示する。 */ }
   }
 
   async function apply(job:Job){
-    if(isPending("open-jobs-refresh"))return false;
+    if(isPending("open-jobs-refresh")||isPending("application-receipts"))return false;
     let accepted=false;
     const authLoadVersion=authLoadVersionRef.current;
     const navigationVersion=navigationVersionRef.current;
@@ -1332,59 +1564,85 @@ export default function App(){
       await run("apply-action",async()=>{
         setPendingApplicationJobId(job.id);
         try{
-          if(!firebaseConfigured){accepted=true;applicationResultFocusRef.current={authVersion:authLoadVersion,navigationVersion};setAcceptedApplicationJobId(job.id);setMessage("デモ：応募を受け付けました。シフトで担当の確認状況を確認してください。");setOpenJobs(v=>v.filter(x=>x.id!==job.id));setMyJobs(v=>[...v.filter(x=>x.id!==job.id),{...job,status:"assigned",applicationUnconfirmed:true}]);setExpandedOpenJobId("");return;}
+          if(!firebaseConfigured){accepted=true;applicationResultFocusRef.current={authVersion:authLoadVersion,navigationVersion};setAcceptedApplicationJobId(job.id);setMessage("デモ：応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。");setOpenJobs(v=>v.filter(x=>x.id!==job.id));setMyJobs(v=>[...v.filter(x=>x.id!==job.id),{...job,status:"assigned",applicationUnconfirmed:true}]);setExpandedOpenJobId("");return;}
           if(!functions)throw new Error("応募の接続準備を確認できません。画面を再読み込みして、もう一度お試しください。");
           const owner=applicationAttemptOwner(companyId,staffId,user?.uid??"");
-          const attempt=await reserveApplicationAttempt(owner,job.id,()=>applicationAttemptsRef.current.get(job.id)??{requestId:crypto.randomUUID(),startedAt:Date.now(),...(Number.isSafeInteger(job.revision)?{expectedJobRevision:job.revision}:{}),...(job.caseListSource?{expectedSourceRevision:job.caseListSource.sourceRevision}:{}),...(job.mailApplication?{mailApplicationId:job.mailApplication.id,mailApplicationRevision:job.mailApplication.revision}:{})},isCurrentAction);
+          let isNewAttempt=false;
+          const attempt=await reserveApplicationAttempt(owner,job.id,()=>{
+            const pending=applicationAttemptsRef.current.get(job.id);
+            if(pending)return pending;
+            isNewAttempt=true;
+            return {requestId:crypto.randomUUID(),startedAt:Date.now(),...(Number.isSafeInteger(job.revision)?{expectedJobRevision:job.revision}:{}),...(job.caseListSource?{expectedSourceRevision:job.caseListSource.sourceRevision}:{}),...(job.mailApplication?{mailApplicationId:job.mailApplication.id,mailApplicationRevision:job.mailApplication.revision}:{})};
+          },isCurrentAction);
           if(!isCurrentAction()||!attempt)return;
           applicationAttemptsRef.current.set(job.id,attempt);
-          // サーバーの重複防止記録は24時間。期限を超えた再送は自動で新規応募にしない。
-          const attemptAge=Date.now()-attempt.startedAt;
-          if(attemptAge<0)throw new Error("端末の日時が前回の応募時点より前になっています。端末の日時設定を確認し、「シフト」で「シフトを更新」を押して確定状況を確認してください。");
-          if(attemptAge>=23*60*60*1000){
-            throw new Error("前回の応募から時間が経過したため、この画面からの再送を停止しています。「シフト」で「シフトを更新」を押して確定状況を確認し、見つからない場合は管理者に応募結果を確認してください。");
-          }
-          let response;
-          try{response=await httpsCallable(functions,"applyToJob")({jobId:job.id,requestId:attempt.requestId,...(attempt.expectedJobRevision!==undefined?{expectedJobRevision:attempt.expectedJobRevision}:{}),...(attempt.expectedSourceRevision?{expectedSourceRevision:attempt.expectedSourceRevision}:{}),...(attempt.mailApplicationId?{mailApplicationId:attempt.mailApplicationId,mailApplicationRevision:attempt.mailApplicationRevision}:{})});}
-          catch(error){
-            if(isCurrentAction()&&error&&typeof error==="object"&&"code" in error&&error.code==="functions/failed-precondition"&&"details" in error){
-              const detail=error.details;
-              if(detail&&typeof detail==="object"&&"reason" in detail&&detail.reason==="case_list_job_changed"&&
-                  "accepted" in detail&&detail.accepted===false&&"jobId" in detail&&detail.jobId===job.id&&
-                  "requestId" in detail&&detail.requestId===attempt.requestId&&
-                  "expectedJobRevision" in detail&&detail.expectedJobRevision===(attempt.expectedJobRevision??null)&&
-                  "expectedSourceRevision" in detail&&detail.expectedSourceRevision===(attempt.expectedSourceRevision??null)){
-                removeSavedApplicationAttempt(owner,job.id,attempt.requestId);applicationAttemptsRef.current.delete(job.id);
-                throw new Error("募集内容が更新されました。まだ確定していません。「募集案件を更新」で最新の内容を確認してから応募してください。");
-              }
-              if(detail&&typeof detail==="object"&&"reason" in detail&&detail.reason==="case_mail_job_changed"&&
-                  "accepted" in detail&&detail.accepted===false&&"jobId" in detail&&detail.jobId===job.id&&
-                  "requestId" in detail&&detail.requestId===attempt.requestId&&
-                  "expectedJobRevision" in detail&&detail.expectedJobRevision===(attempt.expectedJobRevision??null)){
-                removeSavedApplicationAttempt(owner,job.id,attempt.requestId);applicationAttemptsRef.current.delete(job.id);
-                throw new Error("募集内容が更新されました。まだ確定していません。「募集案件を更新」または「メール応募を更新」で最新の内容を確認してください。");
-              }
-              if(detail&&typeof detail==="object"&&"reason" in detail&&detail.reason==="mail_application_changed"&&
-                  "accepted" in detail&&detail.accepted===false&&"applicationId" in detail&&detail.applicationId===attempt.mailApplicationId&&
-                  "revision" in detail&&detail.revision===attempt.mailApplicationRevision){
-                removeSavedApplicationAttempt(owner,job.id,attempt.requestId);applicationAttemptsRef.current.delete(job.id);
-                throw new Error("応募内容が更新されました。まだ確定していません。「メール応募を更新」で最新の内容を確認してください。");
-              }
+          const confirmed=isNewAttempt?[]:await readAcceptedApplicationReceipts([{jobId:job.id,requestId:attempt.requestId}],isCurrentAction);
+          if(!confirmed||!isCurrentAction())return;
+          if(!confirmed.length){
+            // サーバーの重複防止記録は24時間。期限を超えた再送は自動で新規応募にしない。
+            const attemptAge=Date.now()-attempt.startedAt;
+            if(attemptAge<0)throw new Error("端末の日時が前回の応募時点より前になっています。端末の日時設定を確認し、「シフト」で「シフトを更新」を押して確定状況を確認してください。");
+            if(attemptAge>=23*60*60*1000){
+              throw new Error("前回の応募から時間が経過したため、この画面からの再送を停止しています。「シフト」で「シフトを更新」を押して確定状況を確認し、見つからない場合は管理者に応募結果を確認してください。");
             }
-            throw error;
-          }
-          if(!isCurrentAction())return;
-          const result=response?.data;
-          if(!result||typeof result!=="object"||!("ok" in result)||result.ok!==true||
-             !("jobId" in result)||result.jobId!==job.id||!("assignedAt" in result)||
-             typeof result.assignedAt!=="string"||!Number.isFinite(Date.parse(result.assignedAt))){
-            throw new Error("応募結果を確認できません。もう一度応募を確認するか、「シフト」で確定状況を確認してください。");
+            let response;
+            try{response=await httpsCallable(functions,"applyToJob")({jobId:job.id,requestId:attempt.requestId,...(attempt.expectedJobRevision!==undefined?{expectedJobRevision:attempt.expectedJobRevision}:{}),...(attempt.expectedSourceRevision?{expectedSourceRevision:attempt.expectedSourceRevision}:{}),...(attempt.mailApplicationId?{mailApplicationId:attempt.mailApplicationId,mailApplicationRevision:attempt.mailApplicationRevision}:{})});}
+            catch(error){
+              const closed=error as {code?:unknown;details?:{
+                reason?:unknown;accepted?:unknown;jobId?:unknown;requestId?:unknown;
+                expectedJobRevision?:unknown;expectedSourceRevision?:unknown;
+              }}|null;
+              const details=closed?.details;
+              if(isCurrentAction()&&closed?.code==="functions/already-exists"&&details?.reason==="case_list_slot_taken"&&
+                 details.accepted===false&&details.jobId===job.id&&details.requestId===attempt.requestId&&
+                 attempt.expectedJobRevision!==undefined&&details.expectedJobRevision===attempt.expectedJobRevision&&
+                 attempt.expectedSourceRevision!==undefined&&details.expectedSourceRevision===attempt.expectedSourceRevision){
+                await clearResolvedApplication(owner,job.id,attempt.requestId,isCurrentAction);
+                if(!isCurrentAction())return;
+                if(!applicationAttemptsRef.current.has(job.id)){
+                  setOpenJobs(current=>current.filter(item=>item.id!==job.id));
+                }
+                throw new Error("この募集枠はすでに埋まりました。今回の応募で勤務枠は確保されていません。");
+              }
+              if(isCurrentAction()&&error&&typeof error==="object"&&"code" in error&&error.code==="functions/failed-precondition"&&"details" in error){
+                const detail=error.details;
+                if(detail&&typeof detail==="object"&&"reason" in detail&&detail.reason==="case_list_job_changed"&&
+                    "accepted" in detail&&detail.accepted===false&&"jobId" in detail&&detail.jobId===job.id&&
+                    "requestId" in detail&&detail.requestId===attempt.requestId&&
+                    "expectedJobRevision" in detail&&detail.expectedJobRevision===(attempt.expectedJobRevision??null)&&
+                    "expectedSourceRevision" in detail&&detail.expectedSourceRevision===(attempt.expectedSourceRevision??null)){
+                  await clearResolvedApplication(owner,job.id,attempt.requestId,isCurrentAction);
+                  throw new Error("募集内容が更新されました。まだ確定していません。「募集案件を更新」で最新の内容を確認してから応募してください。");
+                }
+                if(detail&&typeof detail==="object"&&"reason" in detail&&detail.reason==="case_mail_job_changed"&&
+                    "accepted" in detail&&detail.accepted===false&&"jobId" in detail&&detail.jobId===job.id&&
+                    "requestId" in detail&&detail.requestId===attempt.requestId&&
+                    "expectedJobRevision" in detail&&detail.expectedJobRevision===(attempt.expectedJobRevision??null)){
+                  await clearResolvedApplication(owner,job.id,attempt.requestId,isCurrentAction);
+                  throw new Error("募集内容が更新されました。まだ確定していません。「募集案件を更新」または「メール応募を更新」で最新の内容を確認してください。");
+                }
+                if(detail&&typeof detail==="object"&&"reason" in detail&&detail.reason==="mail_application_changed"&&
+                    "accepted" in detail&&detail.accepted===false&&"applicationId" in detail&&detail.applicationId===attempt.mailApplicationId&&
+                    "revision" in detail&&detail.revision===attempt.mailApplicationRevision){
+                  await clearResolvedApplication(owner,job.id,attempt.requestId,isCurrentAction);
+                  throw new Error("応募内容が更新されました。まだ確定していません。「メール応募を更新」で最新の内容を確認してください。");
+                }
+              }
+              throw error;
+            }
+            if(!isCurrentAction())return;
+            const result=response?.data;
+            if(!result||typeof result!=="object"||!("ok" in result)||result.ok!==true||
+               !("jobId" in result)||result.jobId!==job.id||!("assignedAt" in result)||
+               typeof result.assignedAt!=="string"||!Number.isFinite(Date.parse(result.assignedAt))){
+              throw new Error("応募結果を確認できません。もう一度応募を確認するか、「シフト」で確定状況を確認してください。");
+            }
           }
           accepted=true;
-          try{removeSavedApplicationAttempt(owner,job.id,attempt.requestId);}catch{ /* 受付確認済み。保存記録の掃除失敗で再応募扱いには戻さない。 */ }
-          applicationAttemptsRef.current.delete(job.id);
+          await clearResolvedApplication(owner,job.id,attempt.requestId,isCurrentAction);
+          if(!isCurrentAction())return;
           applicationResultFocusRef.current={authVersion:authLoadVersion,navigationVersion};setAcceptedApplicationJobId(job.id);
-          setMessage("応募を受け付けました。シフトで担当の確認状況を確認してください。");
+          setMessage("応募を受け付けました。勤務枠の確認が済むと、カレンダーに予定が表示されます。");
           setOpenJobs(current=>current.filter(item=>item.id!==job.id));
           setExpandedOpenJobId("");
           let assignedShiftLoaded=false;
@@ -1403,9 +1661,9 @@ export default function App(){
     if(!selectedJob||isPending("shift-action")||!preContactDraftsRef.current.has(preContactDraftKey)||!confirm("このシフトの未送信入力を破棄して、登録内容に戻しますか？"))return;
     preContactDraftsRef.current.delete(preContactDraftKey);
     setPreContactError("");
-    setTemperature(typeof selectedJob.preContact?.temperature==="number"&&Number.isFinite(selectedJob.preContact.temperature)?String(selectedJob.preContact.temperature):"");
-    const savedTime=selectedJob.preContact?.arrivalTime??"";
-    setArrivalTime(typeof savedTime==="string"&&/^([01]?\d|2[0-3]):[0-5]\d$/.test(savedTime)?savedTime.padStart(5,"0"):"");
+    const saved=savedPreContactInputs(selectedJob.preContact);
+    setTemperature(saved.temperature);
+    setArrivalTime(saved.arrivalTime);
   }
 
   async function submitPreContact(){
@@ -1551,7 +1809,7 @@ export default function App(){
     }
     if(!isCurrentTask())return;
     if(!job){setMessage("対象の確定シフトを確認できません。シフト画面から案件を選び直してください。");navigate("shifts");return;}
-    if(task.kind==="precontact"||task.kind==="netprint"){openShiftJob(job);navigate("shifts");return;}
+    if(task.kind==="precontact"||task.kind==="netprint"){await openShiftJob(job,()=>navigate("shifts"));return;}
     const requestedType=task.kind==="resubmission"?task.metadata?.type:task.kind;
     const req=task.kind==="resubmission"&&typeof task.metadata?.requestId==="string"?task.metadata.requestId.trim():"";
     if((requestedType!=="report"&&requestedType!=="sales_floor")||(task.kind==="resubmission"&&(!req||req.includes("/")))){
@@ -1601,14 +1859,37 @@ export default function App(){
           return;
         }
         showSubmissionMessage(`Drive転送を処理中です（${data.completedFiles}/${data.totalFiles}件）…`);
-        await sleep(Math.min(delay,Math.max(0,60_000-(Date.now()-started))));
-        delay=Math.min(Math.round(delay*1.5),3000);
+        // 同時に提出した端末からの再照会が同じ時刻に重ならないようにする。
+        const wait=Math.round(delay*(0.75+Math.random()*0.5));
+        await sleep(Math.min(wait,Math.max(0,60_000-(Date.now()-started))));
+        delay=Math.min(Math.round(delay*1.5),6000);
       }
       if(isCurrentProcessing())showSubmissionMessage("完了をまだ確認できていません。「提出情報を再読み込み」で履歴を確認してください。");
     }catch{
       if(isCurrentProcessing())showSubmissionMessage("提出状況を確認できませんでした。提出履歴を再読み込みしてください。");
     }finally{
       if(ownsProcessing())setProcessingSubmission(false);
+    }
+  }
+
+  async function finishSubmittedDraft(
+    target:DraftCleanup,isCurrent:()=>boolean,
+    clearAttempt:typeof import("./submission-attempt-store").clearSubmissionAttempt,
+  ):Promise<{pending:DraftCleanup|null;preserved:boolean}>{
+    let pending=target;
+    try{
+      if(!pending.draftCleared){
+        if(!pending.selection)return {pending:{...pending,unverified:true},preserved:false};
+        const outcome=await clearSubmittedDraft(pending.key,pending.selection,isCurrent);
+        if(!isCurrent())return {pending,preserved:false};
+        // 別の下書きに送信済みのファイルが含まれる場合も、同じ提出IDから照会できるようにする。
+        if(outcome==="preserved")return {pending:null,preserved:true};
+        pending={...pending,durable:true,draftCleared:true,selection:undefined};
+      }
+      if(!isCurrent()||!pending.attempt||!await clearAttempt(pending.attempt,isCurrent))return {pending,preserved:false};
+      return {pending:null,preserved:false};
+    }catch{
+      return {pending,preserved:false};
     }
   }
 
@@ -1621,6 +1902,14 @@ export default function App(){
     if(assignedJob.mailIntakeReviewRequired===true||(assignedJob.mailIntake&&(assignedJob.pendingSourceWrite===true||assignedJob.adminEditSheetWrite?.pending===true))||assignedJob.sourceMissing===true||assignedJob.applicationUnconfirmed===true||assignedJob.assignmentUnresolved===true){showSubmissionMessage("担当や原本の確認が完了していません。選択ファイルは保持しています。「シフトを更新」で状態を確認してください。");return;}
     if(Boolean(requestId&&(resubmissionDetail?.request.id!==requestId||resubmissionDetail.request.jobId!==selectedJob?.id||resubmissionDetail.request.type!==submissionType||resubmissionDetail.request.status!=="open"))){showSubmissionMessage("再提出できる依頼を確認できません。「提出情報を再読み込み」で最新の状態を確認してください。");return;}
     if(requestId&&resubmissionDetail?.request.scope!=="submission"&&files.length!==1){showSubmissionMessage("画像単位の再送は1ファイルだけ選択してください。選択内容を確認してください。");return;}
+    const displayedRevision=selectedJob?.revision??0;
+    if(!selectedJob||!hasValidDateKey(selectedJob)||selectedJob.dateKey!==assignedJob.dateKey||
+        !Number.isSafeInteger(displayedRevision)||displayedRevision<0||displayedRevision!==(assignedJob.revision??0)){
+      setSubmissionConfirmed(false);
+      showSubmissionMessage("表示中の勤務日・版と最新のシフトを照合できません。ファイルを保持しています。「提出情報を再読み込み」で確認してください。");
+      return;
+    }
+    const displayedDateKey=selectedJob.dateKey;
     const typeLabel=submissionType==="report"?"報告書":"売場画像";
     setSubmissionMessage("");
     if(!firebaseConfigured){
@@ -1633,7 +1922,8 @@ export default function App(){
     const activeFunctions=functions;
 
     const authLoadVersion=authLoadVersionRef.current;
-    const isCurrentUpload=()=>authLoadVersion===authLoadVersionRef.current;
+    const isCurrentUpload=()=>authLoadVersion===authLoadVersionRef.current&&
+      submissionConfirmationContextRef.current===submissionConfirmationContext;
     const jobId=assignedJob.id;
     const currentRequestId=requestId;
     const currentType=submissionType;
@@ -1643,19 +1933,32 @@ export default function App(){
         if(!isCurrentUpload())return;
         const activeStorage=getClientStorage();
         const purpose=currentRequestId?"replacement":"additional";
-        const {prepareSubmissionAttempt,clearSubmissionAttempt}=await loadSubmissionAttempt().catch(()=>{throw new Error("再試行の準備機能を読み込めませんでした。選択ファイルは保持しています。通信状態を確認して、もう一度送信してください。");});
-        const attempt=await prepareSubmissionAttempt(draftKey,files,files.map(submissionFileContentType),isCurrentUpload,assignedJob.mailIntake?assignedJob.revision:undefined);
+        const {prepareSubmissionAttempt,clearSubmissionAttempt,isConfirmedSubmissionRejection,readSubmissionUploadReceipt,interruptedUploadStatuses,interruptedUploadError}=await loadSubmissionAttempt().catch(()=>{throw new Error("再試行の準備機能を読み込めませんでした。選択ファイルは保持しています。通信状態を確認して、もう一度送信してください。");});
+        const attempt=await prepareSubmissionAttempt(draftKey,files,files.map(submissionFileContentType),isCurrentUpload,displayedRevision,displayedDateKey);
         if(!isCurrentUpload())return;
+        const expectedDateKey=attempt.expectedDateKey??displayedDateKey,expectedRevision=attempt.expectedRevision??displayedRevision;
+        const matchesDisplayed=expectedDateKey===displayedDateKey&&expectedRevision===displayedRevision;
+        const receiptOnly=attempt.expectedDateKey===undefined||attempt.expectedRevision===undefined||!matchesDisplayed;
+        const request={
+          clientRequestId:attempt.clientRequestId,expectedDateKey,expectedRevision,receiptOnly,
+          jobId,type:currentType,purpose,resubmissionRequestId:currentRequestId||undefined,
+        };
         let r;
-        try { r=await httpsCallable(activeFunctions,"createUploadSession")({clientRequestId:attempt.clientRequestId,...(attempt.expectedRevision!==undefined?{expectedRevision:attempt.expectedRevision}:{}),jobId,type:currentType,purpose,resubmissionRequestId:currentRequestId||undefined,files:files.map((f,index)=>({originalName:f.name,contentType:submissionFileContentType(f),size:f.size,contentSha256:attempt.contentHashes[index]}))}); }
-        catch(error){
-          const details=(error as {details?:{reason?:unknown;accepted?:unknown;clientRequestId?:unknown;expectedRevision?:unknown}})?.details;
-          if(isCurrentUpload()&&details?.reason==="case_mail_submission_changed"&&details.accepted===false&&details.clientRequestId===attempt.clientRequestId&&details.expectedRevision===(attempt.expectedRevision??null))await clearSubmissionAttempt(attempt,isCurrentUpload);
+        try {
+          r=await httpsCallable(activeFunctions,"createUploadSession")({
+            ...request,
+            files:files.map((f,index)=>({originalName:f.name,contentType:submissionFileContentType(f),size:f.size,contentSha256:attempt.contentHashes[index]})),
+          });
+        }catch(error){
+          if(isCurrentUpload()&&isConfirmedSubmissionRejection(error,request)){
+            await clearSubmissionAttempt(attempt,isCurrentUpload);
+            if(isCurrentUpload())setSubmissionConfirmed(false);
+          }
           throw error;
         }
         if(!isCurrentUpload())return;
-        const data=r.data as {submissionId:string;clientRequestId:string;files:{storagePath:string;uploadRequired:boolean}[]};
-        if(!data||data.clientRequestId!==attempt.clientRequestId||typeof data.submissionId!=="string"||!data.submissionId.trim()||!Array.isArray(data.files)||data.files.length!==files.length||data.files.some(target=>!target||typeof target.uploadRequired!=="boolean"||typeof target.storagePath!=="string"||!target.storagePath.trim())||new Set(data.files.map(target=>target.storagePath)).size!==files.length)throw new Error("送信先を正しく準備できませんでした。もう一度お試しください。");
+        const data=await readSubmissionUploadReceipt(r.data,request,matchesDisplayed,files.length,{companyId,staffId,uid:user?.uid});
+        if(!isCurrentUpload())return;
         const uploads=data.files.flatMap((target,index)=>{const file=files[index];return file?[{target,file}]:[];});
         setUploadState(Object.fromEntries(uploads.map(({file})=>[fileStateKey(file),"送信待ち"])));
         try{
@@ -1674,76 +1977,50 @@ export default function App(){
         });
         }catch(error){
           if(!isCurrentUpload())throw error;
-          setUploadState(current=>Object.fromEntries(Object.entries(current).map(([key,status])=>[key,status==="送信済み"?status:status==="送信待ち"?"未送信":"送信未完了"])));
-          throw new Error("送信を完了できませんでした。選択ファイルは保持しています。同じ選択ファイルで再度送信すると、受付済みのファイルを確認し、未送信分から続けます。「提出情報を再読み込み」でも履歴を確認できます。");
+          setUploadState(interruptedUploadStatuses);
+          throw interruptedUploadError();
         }
         if(!isCurrentUpload())return;
-        const durable=markDraftSubmitted(draftKey);
-        const attemptCleared=durable&&await clearSubmissionAttempt(attempt,isCurrentUpload);
+        const cleanup=await finishSubmittedDraft({key:draftKey,durable:false,attempt,selection:files},isCurrentUpload,clearSubmissionAttempt);
         if(!isCurrentUpload())return;
         skipNextDraftSaveRef.current=true;
         setFiles([]);
         setSubmissionConfirmed(false);
-        const cleanupTarget={key:draftKey,durable,attempt,attemptCleared};
-        setDraftCleanup(cleanupTarget);
-        showSubmissionMessage(data.files.every(target=>!target.uploadRequired)
+        setDraftCleanup(cleanup.pending);
+        const notice=data.files.every(target=>!target.uploadRequired)
           ? `${typeLabel}は受付済みです。再アップロードせず、Drive転送の状況を確認しています…`
-          : `${typeLabel}を送信しました。Drive転送を処理中です…`);
+          : `${typeLabel}を送信しました。Drive転送を処理中です…`;
+        showSubmissionMessage(notice+(cleanup.preserved?"保存済みの下書きと提出IDは端末に残しています。":""));
         void pollSubmissionProcessing(jobId,data.submissionId,currentType,currentRequestId);
-        try{
-          if(!attemptCleared)return;
-          await clearDraft(draftKey);
-          if(!isCurrentUpload())return;
-          const receiptCleanup={...cleanupTarget,draftCleared:true};
-          setDraftCleanup(current=>current===cleanupTarget?receiptCleanup:current);
-          if(isCurrentUpload())setDraftCleanup(current=>current===receiptCleanup?null:current);
-        }catch{
-          // 送信済み。端末の後片付け失敗をアップロード失敗として扱わない。
-        }
       },{setMessage:value=>{if(isCurrentUpload())showSubmissionMessage(value);}});
     }catch{return;}
   }
 
   async function retryDraftCleanup(){
     if(!draftCleanup||isPending("draft-cleanup")||isPending("uploadSubmission"))return;
-    let target=draftCleanup;
+    const target=draftCleanup;
     const authVersion=authLoadVersionRef.current;
     const isCurrent=()=>authVersion===authLoadVersionRef.current;
-    const advance=(next:typeof target)=>{
-      const previous=target;
-      setDraftCleanup(current=>current===previous?next:current);
-      target=next;
-    };
     try{
       await run("draft-cleanup",async()=>{
-        // The submitted marker alone cannot bind a saved draft to the files actually sent.
-        if(!target.attempt&&!target.attemptCleared){advance({...target,unverified:true});return;}
-        if(!target.durable){
-          if(!markDraftSubmitted(target.key))return;
-          advance({...target,durable:true});
-        }
-        if(!target.attemptCleared){
-          const {clearSubmissionAttempt}=await loadSubmissionAttempt();
-          if(!isCurrent()||!target.attempt)return;
-          const cleared=await clearSubmissionAttempt(target.attempt,isCurrent);
-          if(!isCurrent()||!cleared)return;
-          advance({...target,attemptCleared:true,unverified:false});
-        }
-        if(!target.draftCleared){
-          await clearDraft(target.key);
-          if(!isCurrent())return;
-        }
-        setDraftCleanup(current=>current===target?null:current);
+        const {clearSubmissionAttempt}=await loadSubmissionAttempt();
+        if(!isCurrent())return;
+        const result=await finishSubmittedDraft(target,isCurrent,clearSubmissionAttempt);
+        if(!isCurrent())return;
+        setDraftCleanup(current=>current===target?result.pending:current);
+        if(result.preserved)showSubmissionMessage("保存済みの下書きと提出IDは端末に残しています。");
       });
-    }catch{
-      if(isCurrent())setDraftCleanup(current=>current===target?{...current,unverified:true}:current);
-    }
+    }catch{ /* 送信せず、後片付けの記録を保持する。 */ }
   }
+
   async function loadSubmissionHistory(jobId:string,type:SubmissionType,authLoadVersion=authLoadVersionRef.current):Promise<boolean>{
     if(authLoadVersion!==authLoadVersionRef.current)return false;
     const version=++submissionHistoryVersionRef.current;
     const contextVersion=submissionContextVersionRef.current;
-    const isCurrent=()=>authLoadVersion===authLoadVersionRef.current&&version===submissionHistoryVersionRef.current&&contextVersion===submissionContextVersionRef.current;
+    const navigationVersion=navigationVersionRef.current;
+    const isCurrent=()=>authLoadVersion===authLoadVersionRef.current&&version===submissionHistoryVersionRef.current&&contextVersion===submissionContextVersionRef.current&&navigationVersion===navigationVersionRef.current;
+    setNextSubmissionHistoryCursor(null);
+    setSubmissionHistoryPageError("");
     setSubmissionHistoryStatus("loading");
     try{
       if(!firebaseConfigured){
@@ -1752,23 +2029,66 @@ export default function App(){
         setSubmissionHistoryStatus("ready");
         return true;
       }
-      if(!functions){setSubmissionHistoryStatus("error");return false;}
-      const r=await httpsCallable(functions,"getSubmissionTimeline")({jobId,type});
+      if(!functions){setSubmissionHistory([]);setSubmissionHistoryStatus("error");return false;}
+      const [r,{readSubmissionHistoryPage}]=await Promise.all([
+        httpsCallable(functions,"getSubmissionTimeline")({jobId,type,previewMode:"on-demand",page:{}}),loadSubmissionHistoryFiles(),
+      ]);
       if(!isCurrent())return false;
-      const groups=(r.data as {submissions?:SubmissionGroup[]}|null)?.submissions;
-      if(!Array.isArray(groups)||!groups.every(group=>group&&typeof group.id==="string"&&group.id.trim().length>0&&Array.isArray(group.files)&&group.files.every(file=>
-        file&&typeof file.id==="string"&&file.id.trim().length>0&&file.submissionId===group.id&&
-        typeof file.originalName==="string"&&typeof file.driveName==="string"&&typeof file.contentType==="string"&&
-        typeof file.purpose==="string"&&typeof file.status==="string"&&(file.previewUrl===null||typeof file.previewUrl==="string")
-      )))throw new Error("提出履歴の応答を確認できませんでした。");
-      if(new Set(groups.map(group=>group.id)).size!==groups.length||groups.some(group=>new Set(group.files.map(file=>file.id)).size!==group.files.length))throw new Error("提出履歴の識別情報が重複しています。再読み込みしてください。");
+      const {groups,nextCursor}=readSubmissionHistoryPage(r.data);
       setSubmissionHistory(groups);
+      setNextSubmissionHistoryCursor(nextCursor);
       setSubmissionHistoryStatus("ready");
       return true;
     }catch(error){
       if(!isCurrent())return false;
+      if(isSubmissionHistoryAccessError(error))setSubmissionHistory([]);
       setSubmissionHistoryStatus("error");
       throw error;
+    }
+  }
+
+  function isSubmissionHistoryAccessError(error:unknown){
+    const code=(error as {code?:string}|null)?.code;
+    return code==="functions/permission-denied"||code==="functions/not-found"||code==="functions/unauthenticated";
+  }
+
+  async function loadEarlierSubmissionHistory(){
+    if(!functions||!selectedAssignedJob||!nextSubmissionHistoryCursor||submissionHistoryStatus!=="ready"||
+      isSubmissionActionPending()||isPending("submission-history-page"))return;
+    const jobId=selectedAssignedJob.id,type=submissionType,afterSubmissionId=nextSubmissionHistoryCursor;
+    const authVersion=authLoadVersionRef.current,contextVersion=submissionContextVersionRef.current;
+    const historyVersion=submissionHistoryVersionRef.current,navigationVersion=navigationVersionRef.current;
+    const isCurrent=()=>authVersion===authLoadVersionRef.current&&contextVersion===submissionContextVersionRef.current&&
+      historyVersion===submissionHistoryVersionRef.current&&navigationVersion===navigationVersionRef.current;
+    const activeFunctions=functions;
+    setSubmissionHistoryPageError("");
+    try{
+      await run("submission-history-page",async()=>{
+        const [r,{readSubmissionHistoryPage}]=await Promise.all([
+          httpsCallable(activeFunctions,"getSubmissionTimeline")({jobId,type,previewMode:"on-demand",page:{afterSubmissionId}}),loadSubmissionHistoryFiles(),
+        ]);
+        if(!isCurrent())return;
+        const {groups,nextCursor}=readSubmissionHistoryPage(r.data);
+        const seen=new Set(submissionHistory.map(group=>group.id));
+        if(groups.some(group=>seen.has(group.id)))throw new Error("提出履歴の続きが重複しています。");
+        setSubmissionHistory(current=>[...current,...groups]);
+        setNextSubmissionHistoryCursor(nextCursor);
+      });
+    }catch(error){
+      if(!isCurrent())return;
+      const code=(error as {code?:string}|null)?.code;
+      if(isSubmissionHistoryAccessError(error)){
+        setSubmissionHistory([]);
+        setNextSubmissionHistoryCursor(null);
+        setSubmissionHistoryStatus("error");
+        return;
+      }
+      if(code==="functions/failed-precondition"){
+        setNextSubmissionHistoryCursor(null);
+        setSubmissionHistoryPageError("履歴の続きが確認できません。「提出情報を再読み込み」で最初のページから読み直してください。");
+        return;
+      }
+      setSubmissionHistoryPageError("以前の提出を読み込めませんでした。もう一度お試しください。");
     }
   }
 
@@ -1899,14 +2219,14 @@ export default function App(){
     }catch{ /* 再読込ボタンを残し、通信復旧後に再試行できるようにする。 */ }
   }
 
-  async function discardFilesBeforeContextChange(prompt:string){
+  async function discardFilesBeforeContextChange(prompt:string,selectedFiles=files,canChange=()=>true){
     const authVersion=authLoadVersionRef.current,contextVersion=submissionContextVersionRef.current,navigationVersion=navigationVersionRef.current;
     const isCurrentChange=()=>authVersion===authLoadVersionRef.current&&contextVersion===submissionContextVersionRef.current&&navigationVersion===navigationVersionRef.current;
 
-    if(!files.length)return true;
+    if(!selectedFiles.length)return true;
     if(!confirm(prompt))return false;
     try{if(draftKey)await clearDraft(draftKey);}catch{if(isCurrentChange())showSubmissionMessage("選択中のファイルを解除できませんでした。もう一度お試しください。");return false;}
-    if(!isCurrentChange())return false;
+    if(!isCurrentChange()||!canChange())return false;
     setFiles([]);
     setUploadState({});
     setSubmissionConfirmed(false);
@@ -1961,7 +2281,7 @@ export default function App(){
     const index=files.findIndex(file=>fileStateKey(file)===targetKey);
     if(index<0)return;
     fileRemoveFocusRef.current={index,authVersion:authLoadVersionRef.current,contextVersion:submissionContextVersionRef.current,navigationVersion:navigationVersionRef.current};
-    setFiles(current=>current.filter(file=>fileStateKey(file)!==targetKey));
+    setFiles(current=>markDraftSelectionEdited(current.filter(file=>fileStateKey(file)!==targetKey)));
     setUploadState(current=>{const next={...current};delete next[targetKey];return next;});
     setSubmissionConfirmed(false);
     setMessage(current=>current===submissionMessage?"":current);
@@ -2016,6 +2336,9 @@ export default function App(){
 
   const nextShift=nextShiftJob(myJobs,businessDate);
   const visibleTasks=showAllTasks?tasks:tasks.slice(0,5);
+  const taskRefreshKey="home-tasks:"+authLoadVersionRef.current;
+  const taskRefreshPending=isPending(taskRefreshKey);
+  const taskDataSource=taskRefreshSource??businessDataSource;
   const title=useMemo(()=>firebaseConfigured?"Lip Knots Crew":"Lip Knots Crew（デモ）",[]);
   const taskSummary=businessDataStatus==="ready"
     ? tasks.length
@@ -2034,7 +2357,8 @@ export default function App(){
       : null;
   const diagnosticSummaryLabel=diagnosticReport?.summary==="pass"?"すべて正常":diagnosticReport?.summary==="warn"?"確認あり":diagnosticReport?"エラーあり":"診断中";
   const acceptedApplicationJob=myJobs.find(job=>job.id===acceptedApplicationJobId);
-  const applicationPending=isPending("apply-action");
+  const receiptLookupPending=isPending("application-receipts");
+  const applicationPending=isPending("apply-action")||receiptLookupPending;
   const openJobsRefreshing=isPending("open-jobs-refresh");
   const openJobPageControls=matchingOpenJobs.length>50?<nav className="shift-page-controls" aria-label="募集案件のページ"><button className="secondary" disabled={openJobPageSlice.current===0||applicationPending||openJobsRefreshing} onClick={()=>moveOpenJobPage(openJobPageSlice.current-1)}>前の50件</button><span role="status">該当{matchingOpenJobs.length}件中 {openJobPageSlice.start+1}〜{Math.min(openJobPageSlice.start+50,matchingOpenJobs.length)}件</span><button className="secondary" disabled={openJobPageSlice.current+1>=openJobPageSlice.totalPages||applicationPending||openJobsRefreshing} onClick={()=>moveOpenJobPage(openJobPageSlice.current+1)}>次の50件</button></nav>:null;
   const shiftActionPending=isPending("shift-action");
@@ -2050,34 +2374,55 @@ export default function App(){
   const previousResubmissionBlockedRef=useRef(resubmissionSendBlocked);
   useEffect(()=>{const newlyBlocked=!previousResubmissionBlockedRef.current&&resubmissionSendBlocked;previousResubmissionBlockedRef.current=resubmissionSendBlocked;if(newlyBlocked&&view==="submit"&&document.activeElement===document.body)submissionPanelRef.current?.focus({preventScroll:true});},[view,resubmissionSendBlocked]);
   const currentMessageTone=messageTone(message);
+  if(firebaseConfigured&&user&&sessionRevoked)return <main className="login-shell"><section className="login-card"><img src="/logo.png" alt=""/><h1>{title}</h1><p role="alert">この端末の利用権限が失効しました。続けるにはログアウトして、もう一度ログインしてください。</p><button type="button" disabled={isPending("logout")} onClick={()=>void requestLogout()}>{isPending("logout")?"ログアウト中…":"ログアウトを再試行"}</button>{message.startsWith("ログアウトに失敗")||message.startsWith("ログアウトできません")?<p role="status">{message}</p>:null}</section></main>;
   if(firebaseConfigured&&(!authResolved||emailLinkPending))return <main className="login-shell"><section className="login-card"><img src="/logo.png" alt=""/><h1>{title}</h1><p role="status" aria-live="polite" aria-atomic="true">ログインを確認しています。<br/>画面を閉じずに、そのままお待ちください。</p><div className="message working" aria-hidden="true">処理中…</div></section></main>;
   if(firebaseConfigured&&!user)return <main className="login-shell"><section className="login-card"><img src="/logo.png" alt=""/><h1>{title}</h1><p>スタッフとして登録済みのメールへ、ログインボタンと6桁の確認コードを送ります。管理者アカウントには確認コードは届きません。{adminLoginUrl&&<><br/><a href={adminLoginUrl}>管理者はAdmin画面からGoogleでログイン</a></>}</p><form onSubmit={e=>{e.preventDefault();void requestLogin();}} aria-busy={loginActionPending}><input ref={loginEmailRef} type="email" aria-label="スタッフのメールアドレス" value={email} onChange={e=>setEmail(e.target.value)} placeholder="スタッフのメールアドレス" autoComplete="email" inputMode="email" autoCapitalize="none" spellCheck={false} required disabled={loginActionPending}/><button type="submit" disabled={loginActionPending}>{isPending("login")?"処理中…":"ログインメールを送る"}</button></form><p id="login-code-help">ホーム画面版では、メールに記載された確認コードを入力してください。確認コードは15分間・1回限り有効です。</p><details><summary>メールが届かない・コードが使えないとき</summary><p>メールアドレスの入力と迷惑メールフォルダーを確認してください。期限が切れた場合は「ログインメールを送る」から送り直してください。短時間に繰り返すと制限されるため、少し待ってから再送してください。</p></details><form onSubmit={e=>{e.preventDefault();void verifyLoginCode();}} aria-busy={loginActionPending}><input value={loginCode} onChange={e=>setLoginCode(e.target.value.normalize("NFKC").replace(/\D/g,"").slice(0,6))} placeholder="6桁の確認コード" inputMode="numeric" autoComplete="one-time-code" aria-label="確認コード" aria-describedby="login-code-help" maxLength={6} onPaste={e=>{e.preventDefault();setLoginCode(e.clipboardData.getData("text").normalize("NFKC").replace(/\D/g,"").slice(0,6));}} disabled={loginActionPending}/><button type="submit" className="secondary" disabled={loginCode.length!==6||loginActionPending}>{isPending("login-code")?"確認中…":"確認コードでログイン"}</button></form>{message&&<div className={messageClassName(message)} role={messageTone(message)==="error"?"alert":"status"}>{message}</div>}</section></main>;
 
   return <main className="app-shell">
     <header><img src="/logo.png" alt=""/><div className="account-copy"><strong>{title}</strong><small>{user?.email??"サンプルスタッフ"}</small></div>{user&&<button ref={accountMenuToggleRef} className="ghost account-menu-toggle" onClick={toggleAccountMenu} aria-expanded={showAccountMenu} aria-controls="account-menu" disabled={isPending("logout")||deviceActionPending}>{showAccountMenu?"閉じる":"メニュー"}</button>}</header>
     {showAccountMenu&&<section id="account-menu" className="panel account-menu-panel"><div className="section-heading"><div><h2>アカウント</h2><p>状態確認・端末管理・ログアウトはこちらです。</p></div></div><div className="account-menu-actions"><button className="secondary" onClick={()=>{setShowAccountMenu(false);void openQuickDiagnostics();}} disabled={isDiagnosticsPending()||isPending("logout")||deviceActionPending} aria-busy={isDiagnosticsPending()}>{isDiagnosticsPending()?"診断中…":"状態確認"}</button><button className="secondary" onClick={()=>{setShowAccountMenu(false);void loadDevices();}} disabled={deviceActionPending||isPending("logout")}>{deviceActionPending?"処理中…":"端末管理"}</button><button className="ghost logout-button" onClick={()=>{if(!deviceActionPending)void requestLogout();}} aria-disabled={isPending("logout")||deviceActionPending} aria-busy={isPending("logout")}>{isPending("logout")?"ログアウト中…":"ログアウト"}</button></div></section>}
-    {draftCleanup&&<section className="panel" role="status"><strong>ファイルの送信は済んでいます</strong><p>端末の下書き・受付記録の後片付けが完了していません。同じファイルを送り直す必要はありません。新しい提出の前に、下のボタンで後片付けを再試行してください。{draftCleanup.unverified&&"元の受付記録の照合または削除を確認できません。確認がとれるまで新しい提出は保留し、提出履歴を確認してください。"}{!draftCleanup.durable&&"端末に送信済みの記録も保存できませんでした。画面を閉じた後は、再送する前に提出履歴を確認してください。"}</p><button className="secondary" onClick={()=>void retryDraftCleanup()} disabled={isPending("draft-cleanup")||isPending("uploadSubmission")} aria-busy={isPending("draft-cleanup")}>{isPending("draft-cleanup")?"確認中…":"端末の後片付けを再試行"}</button></section>}
+    {draftCleanup&&<section className="panel" role="status"><strong>ファイルの送信は済んでいます</strong><p>端末の下書き・受付記録の後片付けが完了していません。同じファイルを送り直す必要はありません。新しい提出の前に、下のボタンで後片付けを再試行してください。{draftCleanup.unverified&&"元の受付記録の照合または削除を確認できません。確認がとれるまで新しい提出は保留し、提出履歴を確認してください。"}{!draftCleanup.durable&&"端末の下書きの後片付けを確認できませんでした。画面を閉じた後は、再送する前に提出履歴を確認してください。"}</p><button className="secondary" onClick={()=>void retryDraftCleanup()} disabled={isPending("draft-cleanup")||isPending("uploadSubmission")} aria-busy={isPending("draft-cleanup")}>{isPending("draft-cleanup")?"確認中…":"端末の後片付けを再試行"}</button></section>}
     {message&&<div className={messageClassName(message)} role={currentMessageTone==="error"?"alert":"status"}><span>{message}</span>{currentMessageTone!=="working"&&<button className="message-dismiss" onClick={()=>setMessage("")} aria-label="お知らせを閉じる">閉じる</button>}</div>}
     {showDevices&&<section className="panel device-panel" aria-busy={deviceActionPending}><div className="section-heading"><div><h2 ref={deviceHeadingRef} tabIndex={-1}>ログイン中の端末</h2><p>使っていない端末はログアウトできます。</p></div><button className="secondary" onClick={()=>void loadDevices()} disabled={deviceActionPending}>再読込</button><button className="ghost" onClick={()=>{setShowDevices(false);accountMenuToggleRef.current?.focus();}} disabled={deviceActionPending}>閉じる</button></div><div className="device-list">{!deviceActionPending&&deviceListUncertain&&<p className="device-list-uncertain" role="status">{devices.length?"端末一覧の更新を確認できません。表示中の情報は前回の内容です。":"端末一覧を確認できません。"}「再読込」で最新の状態を確認してください。</p>}{deviceActionPending&&!pendingDeviceId&&<div className="empty compact" role="status">端末情報を読み込んでいます…</div>}{devices.map((device,index)=><div className="device-row" key={device.id} role="group" aria-label={`端末 ${index+1}件目: ${device.label?.trim()||device.platform?.trim()||"端末"}`}><div><strong>{index+1}. {device.label?.trim()||device.platform?.trim()||"端末"}</strong><small>{isCurrentDevice(device)?"この端末 / ":""}{device.active===true?"利用中":device.active===false?"ログアウト済み":"利用状況未確認"}</small></div><button className="secondary" aria-label={`${index+1}件目の端末をログアウト`} disabled={device.active===false||deviceActionPending} onClick={()=>void revokeDevice(device.id)}>{pendingDeviceId===device.id?"ログアウト中…":"ログアウト"}</button></div>)}{!deviceActionPending&&!devices.length&&<EmptyAction title="端末情報がありません" body="通信状態を確認して、最新の端末情報をもう一度読み込んでください。" action="もう一度読み込む" onAction={()=>void loadDevices()}/>}</div></section>}
     {showDiagnostics&&<section className={`panel diagnostic-panel ${diagnosticReport?.summary??"working"}`} aria-live="polite" aria-busy={isDiagnosticsPending()}><div className="section-heading"><div><h2 ref={diagnosticHeadingRef} tabIndex={-1}>かんたん自動診断</h2><p>結果の文章だけで確認できます。通常はスクリーンショット不要です。</p></div><span className={`diagnostic-summary ${diagnosticReport?.summary??"working"}`}>{diagnosticSummaryLabel}</span></div>{!diagnosticReport?<div className="diagnostic-loading" role="status">ログイン・データ・端末・通知をまとめて確認しています…</div>:<div className="diagnostic-list">{diagnosticReport.checks.map(check=><div className={`diagnostic-row ${check.level}`} key={check.id} role="group" aria-label={`${check.label}: ${check.level==="pass"?"正常":check.level==="warn"?"要確認":"エラー"}`}><span aria-hidden="true">{check.level==="pass"?"✓":check.level==="warn"?"!":"×"}</span><div><strong>{check.label}</strong><small>{check.detail}</small></div></div>)}</div>}{diagnosticReport&&<details className="diagnostic-copy-text"><summary>共有用の文章を表示</summary><p>自動コピーが使えない場合は、下の文章を選択してコピーしてください。</p><textarea aria-label="診断結果の共有用文章" readOnly rows={8} value={formatDiagnosticReport(diagnosticReport)}/></details>}<div className="diagnostic-actions">{diagnosticReport&&<><button onClick={()=>void shareDiagnostics()} disabled={isPending("diagnostic-export:"+authLoadVersionRef.current)}>結果を共有</button><button className="secondary" onClick={()=>void copyDiagnostics()} disabled={isPending("diagnostic-export:"+authLoadVersionRef.current)}>コピー</button></>}<button className="secondary" onClick={()=>void openQuickDiagnostics()} disabled={isDiagnosticsPending()}>{isDiagnosticsPending()?"診断中…":"もう一度診断"}</button><button className="ghost" onClick={()=>{closeDiagnostics();accountMenuToggleRef.current?.focus();}}>閉じる</button></div></section>}
+    {submissionNotification.status!=="idle"&&<section className="panel" role="status">
+      <p>{submissionNotification.status==="loading"?"通知の提出先を確認しています…":submissionNotification.status==="paused"?"提出先の切替を見送りました。選択中のファイルを確認してから再読込できます。":submissionNotification.status==="unavailable"?"提出済みか、通知の対象シフトを確認できません。":"通知の提出先を確認できませんでした。"}</p>
+      <button disabled={submissionNotification.status==="loading"} aria-busy={submissionNotification.status==="loading"} onClick={()=>void submissionNotification.retry()}>通知の提出先を再読込</button>
+      <button className="secondary" onClick={()=>closeNotificationPanel(submissionNotification.cancel)}>閉じる</button>
+    </section>}
     {resubmissionNotification.status!=="idle"&&<section className="panel" role="status"><p>{resubmissionNotification.status==="loading"?"通知の再提出依頼を読み込んでいます…":resubmissionNotification.status==="paused"?"提出先の切替を見送りました。選択中のファイルを確認して、通知の再提出依頼を再読込してください。":resubmissionNotification.status==="unavailable"?"この再提出依頼は終了済み、または対象の確定シフトを確認できません。":"通知の再提出依頼を読み込めませんでした。"}</p><button aria-disabled={resubmissionNotification.status==="loading"} aria-busy={resubmissionNotification.status==="loading"} onClick={()=>{if(resubmissionNotification.status!=="loading")void resubmissionNotification.retry();}}>通知の再提出依頼を再読込</button><button className="secondary" onClick={()=>closeNotificationPanel(resubmissionNotification.cancel)}>閉じる</button></section>}
     {shiftNotification.status!=="idle"&&<section className="panel" role="status"><p>{shiftNotification.status==="loading"?"通知のシフトを読み込んでいます…":shiftNotification.status==="unavailable"?"通知の対象シフトを確認できません。取り消しや担当変更の可能性があります。":"通知のシフトを読み込めませんでした。"}</p><button aria-disabled={shiftNotification.status==="loading"} aria-busy={shiftNotification.status==="loading"} onClick={()=>{if(shiftNotification.status!=="loading")void shiftNotification.retry();}}>通知のシフトを再読込</button><button className="secondary" onClick={()=>closeNotificationPanel(shiftNotification.cancel)}>閉じる</button></section>}
     {view==="home"&&<>
-      <section className="hero-card"><div className="section-heading compact-heading"><h2 ref={homeHeadingRef} tabIndex={-1}>今日やること</h2><span className={`refresh-status ${businessDataSource}`}>{businessRefreshing?"自動更新中…":businessDataSource==="cached"?"前回データ":businessDataSource==="stale"?"更新未確認":businessDataSource==="live"?"最新":"確認中"}</span></div>{businessDataFallback??(tasks.length?<><p>{taskSummary}</p><div className="task-list" id="home-task-list">{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)} disabled={submissionEditPending} aria-busy={isPending("task-job")}>{task.priority!=="normal"&&<small>{task.priority==="overdue"?"期限超過":"優先対応"}</small>}<strong>{task.title}</strong><span>{task.body}</span></button>)}{tasks.length>5&&<button className="secondary task-list-toggle" aria-controls="home-task-list" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}</div></>:<div className="task-clear" role="status"><span aria-hidden="true">✓</span><div><strong>{businessDataSource==="live"?"今日の対応はすべて完了しています":"前回確認時点では対応事項はありません"}</strong><small>{businessDataSource==="live"?"新しい対応が届くと、ここに表示されます。":"最新の状態はシフト画面で更新して確認してください。"}</small></div></div>)}</section>
-      <section><h2>次回シフト</h2>{businessDataFallback??(nextShift?<article className="job shift-job" style={{"--job-accent":jobAccent(nextShift.menuName)} as CSSProperties}><span className="date">{shiftDateLabel(nextShift)}</span><span className="job-kind">{jobKind(nextShift.menuName)}</span><h3>{shiftTextLabel(nextShift.storeName,"店舗確認中")}</h3><p>{shiftTextLabel(nextShift.makerName,"メーカー確認中")} / {shiftTextLabel(nextShift.menuName,"業務確認中")}</p><span className="prep-chip">{prepSummary(nextShift)}</span><button onClick={()=>{openShiftJob(nextShift);navigate("shifts")}}>シフトを開く</button></article>:<div className="home-shift-empty"><strong>{businessDataSource==="live"?"確定シフトはありません":"前回確認時点では確定シフトはありません"}</strong><button className="secondary" onClick={()=>navigate("jobs")}>募集案件を見る</button></div>)}</section>
+      <section className="hero-card" aria-busy={businessRefreshing||taskRefreshPending}>
+        <div className="section-heading compact-heading">
+          <h2 ref={homeHeadingRef} tabIndex={-1}>今日やること</h2>
+          <span role="status" className={`refresh-status ${taskDataSource}`}>{taskRefreshPending?"更新中…":businessRefreshing?"自動更新中…":taskDataSource==="cached"?"前回データ":taskDataSource==="stale"?"更新未確認":taskDataSource==="live"?"最新":"確認中"}</span>
+        </div>
+        {businessDataFallback??(tasks.length?<>
+          <p>{taskSummary}</p>
+          <div className="task-list" id="home-task-list">{visibleTasks.map(task=><button key={task.id} className={`task-card ${task.priority}`} onClick={()=>void openTask(task)} disabled={submissionEditPending||taskDataSource==="stale"||taskRefreshPending} aria-busy={isPending("task-job")}>{task.priority!=="normal"&&<small>{task.priority==="overdue"?"期限超過":"優先対応"}</small>}<strong>{task.title}</strong><span>{task.body}</span></button>)}</div>
+          {tasks.length>5&&<button className="secondary task-list-toggle" aria-controls="home-task-list" aria-expanded={showAllTasks} onClick={()=>setShowAllTasks(value=>!value)}>{showAllTasks?"重要な5件に戻す":`すべて見る（残り${tasks.length-5}件）`}</button>}
+        </>:<div className="task-clear" role="status">
+          <span aria-hidden="true">{taskDataSource==="stale"?"!":"✓"}</span>
+          <div><strong>{taskDataSource==="live"?"今日の対応はすべて完了しています":taskDataSource==="stale"?"現在の対応事項を確認できません":"前回確認時点では対応事項はありません"}</strong>
+          {taskDataSource==="live"&&<small>新しい対応が届くと、ここに表示されます。</small>}</div>
+        </div>)}
+        {!businessDataFallback&&firebaseConfigured&&<p>
+          <button className="secondary" onClick={()=>void refreshHomeTasks()} disabled={businessRefreshing||taskRefreshPending||submissionEditPending}>対応事項を更新</button>
+        </p>}
+      </section>
+      <section><h2>次回シフト</h2>{businessDataFallback??(nextShift?<article className="job shift-job" style={{"--job-accent":jobAccent(nextShift.menuName)} as CSSProperties}><span className="date">{shiftDateLabel(nextShift)}</span><span className="job-kind">{jobKind(nextShift.menuName)}</span><h3>{shiftTextLabel(nextShift.storeName,"店舗確認中")}</h3><p>{shiftTextLabel(nextShift.makerName,"メーカー確認中")} / {shiftTextLabel(nextShift.menuName,"業務確認中")}</p><span className="prep-chip">{prepSummary(nextShift)}</span><button onClick={()=>void openShiftJob(nextShift,()=>navigate("shifts"))}>シフトを開く</button></article>:<div className="home-shift-empty"><strong>{businessDataSource==="live"?"確定シフトはありません":"前回確認時点では確定シフトはありません"}</strong><button className="secondary" onClick={()=>navigate("jobs")}>募集案件を見る</button></div>)}</section>
       <section className={`panel push-panel ${pushEnabled&&!pushStatusUncertain&&currentPushPermission()==="granted"?"enabled":""}`} aria-busy={pushActionPending}><div className="section-heading"><div><h2>プッシュ通知</h2><p>大切な業務通知を受け取ります。</p></div><div className="push-summary-actions"><span role="status" className={pushEnabled&&!pushStatusUncertain&&currentPushPermission()==="granted"?"push-status enabled":"push-status"}>{currentPushPermission()==="denied"?"端末で拒否中":currentPushPermission()==="unsupported"?"通知非対応":pushStatusUncertain?"通知状態未確認":pushEnabled&&currentPushPermission()==="granted"?"通知ON":"通知OFF"}</span>{pushEnabled&&<button className="ghost push-settings-toggle" aria-expanded={showPushActions} aria-controls="push-enabled-actions" onClick={()=>setShowPushActions(value=>!value)} disabled={pushActionPending}>{showPushActions?"閉じる":"設定"}</button>}</div></div>{pushStatusUncertain&&<div><p className="muted">通知の登録状態を確認できません。通信状態を確認して、もう一度お試しください。</p><button className="secondary" onClick={()=>void retryPushStatus()} disabled={pushActionPending} aria-busy={pendingPushAction==="status"}>{pendingPushAction==="status"?"確認中…":"通知状態を再確認"}</button></div>}{currentPushPermission()==="denied"&&<p className="muted">端末・ブラウザーの設定で、このアプリの通知を許可してください。変更後はこの画面を開き直して状態を確認してください。</p>}{currentPushPermission()==="unsupported"&&<p className="muted">この環境ではプッシュ通知を利用できません。ホームの「今日やること」から対応事項を確認してください。</p>}{!pushEnabled?<div className="push-actions"><button onClick={()=>void enablePush()} disabled={pushActionPending}>{pendingPushAction==="enable"?"処理中…":"通知を有効にする"}</button></div>:showPushActions&&<div id="push-enabled-actions" className="push-actions"><button className="secondary" onClick={()=>void requestPushTest()} disabled={pushActionPending}>{pendingPushAction==="test"?"処理中…":"通知テスト"}</button><button className="ghost" onClick={()=>void disablePush()} disabled={pushActionPending}>{pendingPushAction==="disable"?"処理中…":"通知OFF"}</button></div>}</section>
     </>}
-    {view==="jobs"&&<section aria-busy={applicationPending||openJobsRefreshing||openJobsStatus==="loading"}><div className="section-heading"><h2 ref={jobsHeadingRef} tabIndex={-1}>募集中の案件</h2><button className="secondary" onClick={()=>void refreshOpenJobs()} disabled={applicationPending||openJobsRefreshing||openJobsStatus==="loading"} aria-busy={openJobsRefreshing}>{openJobsRefreshing?"更新中…":"募集案件を更新"}</button></div><p><button ref={mailButtonRef} className="secondary" aria-expanded={showMailApplications} aria-controls="mail-applications-panel" onClick={()=>{if(showMailApplications)closeMailApplications();else void openMailApplications();}} disabled={applicationPending}>{showMailApplications?"メール応募を閉じる":"メールからの応募を確認"}</button></p>{showMailApplications&&<div id="mail-applications-panel">{MailPanel?<MailPanel key={[companyId,staffId,user?.uid??"demo"].join("|")} load={loadMailApplications} onApply={applyMailApplication} onViewShift={viewMailApplicationShift} onClose={closeMailApplications} busy={applicationPending||openJobsRefreshing} hasAttempt={jobId=>applicationAttemptsRef.current.has(jobId)} feedback={message}/>:mailPanelError?<div className="empty" role="alert"><p>{mailPanelError}</p><button onClick={()=>void openMailApplications()}>メール応募画面を再読込</button></div>:<p role="status">メール応募画面を読み込んでいます…</p>}</div>}{acceptedApplicationJobId&&<p><button ref={applicationResultButtonRef} className="secondary" disabled={applicationPending} onClick={()=>{if(acceptedApplicationJob)openShiftJob(acceptedApplicationJob);navigate("shifts");if(!acceptedApplicationJob)void refreshBusinessData(true);}}>{acceptedApplicationJob?"応募したシフトを確認":"シフトを更新して応募結果を確認"}</button></p>}{!applicationPending&&Array.from(applicationAttemptsRef.current.keys()).some(id=>!myJobs.some(job=>job.id===id))&&<div className="empty application-unconfirmed" role="status"><p>応募結果が未確認の案件があります。募集一覧から消えていても、シフトで確定状況を確認してください。</p><button className="secondary" onClick={()=>{navigate("shifts");void refreshBusinessData(true);}} disabled={businessRefreshing}>シフトを更新して応募結果を確認</button></div>}{openJobsFallback??<><div className="open-job-search"><label htmlFor="open-job-query">募集案件を探す</label><div className="open-job-search-input"><input id="open-job-query" type="search" value={openJobQuery} onChange={event=>{setOpenJobQuery(event.target.value);setOpenJobPage(0);}} placeholder="日付・店舗・メーカー・地域" disabled={applicationPending} aria-describedby="open-job-search-help"/><button className="secondary" onClick={()=>{setOpenJobQuery("");setOpenJobPage(0);document.getElementById("open-job-query")?.focus();}} disabled={!openJobQuery||applicationPending}>検索を解除</button></div><p id="open-job-search-help">読み込み済みの募集{visibleOpenJobs.length}件から検索します。{hasMoreOpenJobs&&"未読込の案件は含みません。下の「募集案件の続きを読み込む」で追加できます。"}</p><p role="status">{matchingOpenJobs.length}件が該当します。</p></div><div ref={openJobListRef} className="shift-card-list" role="region" tabIndex={-1} aria-label="募集案件の検索結果">{openJobPageControls}<div className="grid">{openJobPageSlice.rows.map(job=>{const expanded=expandedOpenJobId===job.id;return <article className="job open-job" key={job.id} aria-label={`${shiftDateLabel(job)} ${shiftTextLabel(job.storeName,"店舗確認中")}の募集案件`}><span className="date">{shiftDateLabel(job)}</span><h3>{shiftTextLabel(job.storeName,"店舗確認中")}</h3><p>{shiftTextLabel(job.makerName,"メーカー確認中")} / {shiftTextLabel(job.menuName,"業務確認中")}</p>{Boolean(job.menuConditions?.length)&&<p>勤務条件：{job.menuConditions!.join(" / ")}</p>}<p>{typeof job.workTime==="string"&&job.workTime.trim()?job.workTime:"勤務時間は確認中"}</p><strong aria-label="報酬">{jobPayLabel(job.basePay)}</strong>{expanded&&<dl className="job-details" id={`job-details-${job.id}`}><div><dt>実施日</dt><dd>{shiftDateLabel(job)}</dd></div><div><dt>勤務時間</dt><dd>{typeof job.workTime==="string"&&job.workTime.trim()?job.workTime:"確認中"}</dd></div>{job.storeAddress&&<div><dt>店舗住所</dt><dd>{shiftTextLabel(job.storeAddress,"確認中")}</dd></div>}{job.clientName&&<div><dt>依頼元</dt><dd>{shiftTextLabel(job.clientName,"確認中")}</dd></div>}</dl>}{applicationAttemptsRef.current.has(job.id)&&pendingApplicationJobId!==job.id&&<p className="application-unconfirmed" role="status" id={`application-result-${job.id}`}>この案件の応募結果は未確認です。シフトで確定状況を確認するか、下のボタンで応募結果を再確認してください。</p>}<div className="actions"><button className="secondary" aria-expanded={expanded} aria-controls={`job-details-${job.id}`} onClick={()=>setExpandedOpenJobId(current=>current===job.id?"":job.id)}>{expanded?"詳細を閉じる":"詳細を見る"}</button><button onClick={()=>void apply(job)} disabled={applicationPending||openJobsRefreshing} aria-describedby={applicationAttemptsRef.current.has(job.id)&&pendingApplicationJobId!==job.id?`application-result-${job.id}`:undefined}>{pendingApplicationJobId===job.id?"応募中…":applicationAttemptsRef.current.has(job.id)?"応募結果を再確認する":"この案件に応募する"}</button></div></article>})}{!!openJobQuery.trim()&&!matchingOpenJobs.length&&<p className="empty" role="status">読み込み済みの案件に一致するものがありません。検索語を変更するか、検索を解除してください。</p>}{!openJobQuery.trim()&&!visibleOpenJobs.length&&!hasMoreOpenJobs&&<EmptyAction title="現在募集中の案件はありません" body="新しい案件が公開されると、この画面に表示されます。ここからいつでも最新情報を確認できます。" action="最新情報を確認" onAction={()=>void refreshOpenJobs()} secondaryAction="ホームへ戻る" onSecondaryAction={()=>navigate("home")}/>}</div>{openJobPageControls}</div></>}{openJobsStatus==="ready"&&<><p role="status">{openJobsPageMessage}</p>{(hasMoreOpenJobs||openJobsPageMessage)&&<>{hasMoreOpenJobs&&<p>募集案件には続きがあります。100件ずつ追加できます。</p>}<button className="secondary" onClick={()=>{if(hasMoreOpenJobs)void loadMoreOpenJobs();}} disabled={applicationPending||openJobsRefreshing} aria-disabled={!hasMoreOpenJobs||applicationPending||openJobsRefreshing} aria-busy={openJobsRefreshing}>{openJobsRefreshing?"読み込み中…":hasMoreOpenJobs?"募集案件の続きを読み込む":"すべて読み込み済み"}</button></>}</>}</section>}
+    {view==="jobs"&&<section aria-busy={applicationPending||openJobsRefreshing||openJobsStatus==="loading"}><div className="section-heading"><h2 ref={jobsHeadingRef} tabIndex={-1}>募集中の案件</h2><button className="secondary" onClick={()=>void refreshOpenJobs()} disabled={applicationPending||openJobsRefreshing||openJobsStatus==="loading"} aria-busy={openJobsRefreshing}>{openJobsRefreshing?"更新中…":"募集案件を更新"}</button></div><p><button ref={mailButtonRef} className="secondary" aria-expanded={showMailApplications} aria-controls="mail-applications-panel" onClick={()=>{if(showMailApplications)closeMailApplications();else void openMailApplications();}} disabled={applicationPending}>{showMailApplications?"メール応募を閉じる":"メールからの応募を確認"}</button></p>{showMailApplications&&<div id="mail-applications-panel">{MailPanel?<MailPanel key={[companyId,staffId,user?.uid??"demo"].join("|")} load={loadMailApplications} onApply={applyMailApplication} onViewShift={viewMailApplicationShift} onClose={closeMailApplications} busy={applicationPending||openJobsRefreshing} hasAttempt={jobId=>applicationAttemptsRef.current.has(jobId)} feedback={message}/>:mailPanelError?<div className="empty" role="alert"><p>{mailPanelError}</p><button onClick={()=>void openMailApplications()}>メール応募画面を再読込</button></div>:<p role="status">メール応募画面を読み込んでいます…</p>}</div>}{acceptedApplicationJobId&&<p><button ref={applicationResultButtonRef} className="secondary" disabled={applicationPending} onClick={()=>{if(acceptedApplicationJob)void openShiftJob(acceptedApplicationJob,()=>navigate("shifts"));else{navigate("shifts");void refreshBusinessData(true);}}}>{acceptedApplicationJob?"応募したシフトを確認":"シフトを更新して応募結果を確認"}</button></p>}{!applicationPending&&Array.from(applicationAttemptsRef.current.keys()).some(id=>!myJobs.some(job=>job.id===id))&&<div className="empty application-unconfirmed" role="status"><p>応募結果が未確認の案件があります。募集一覧から消えていても、シフトで確定状況を確認してください。</p><button className="secondary" onClick={()=>{navigate("shifts");void refreshBusinessData(true);}} disabled={businessRefreshing}>シフトを更新して応募結果を確認</button></div>}{openJobsFallback??<><div className="open-job-search"><label htmlFor="open-job-query">募集案件を探す</label><div className="open-job-search-input"><input id="open-job-query" type="search" value={openJobQuery} onChange={event=>{setOpenJobQuery(event.target.value);setOpenJobPage(0);}} placeholder="日付・店舗・メーカー・地域" disabled={applicationPending} aria-describedby="open-job-search-help"/><button className="secondary" onClick={()=>{setOpenJobQuery("");setOpenJobPage(0);document.getElementById("open-job-query")?.focus();}} disabled={!openJobQuery||applicationPending}>検索を解除</button></div><p id="open-job-search-help">読み込み済みの募集{visibleOpenJobs.length}件から検索します。{hasMoreOpenJobs&&"未読込の案件は含みません。下の「募集案件の続きを読み込む」で追加できます。"}</p><p role="status">{matchingOpenJobs.length}件が該当します。</p></div><div ref={openJobListRef} className="shift-card-list" role="region" tabIndex={-1} aria-label="募集案件の検索結果">{openJobPageControls}<div className="grid">{openJobPageSlice.rows.map(job=>{const expanded=expandedOpenJobId===job.id;return <article className="job open-job" key={job.id} aria-label={`${shiftDateLabel(job)} ${shiftTextLabel(job.storeName,"店舗確認中")}の募集案件`}><span className="date">{shiftDateLabel(job)}</span><h3>{shiftTextLabel(job.storeName,"店舗確認中")}</h3><p>{shiftTextLabel(job.makerName,"メーカー確認中")} / {shiftTextLabel(job.menuName,"業務確認中")}</p>{Boolean(job.menuConditions?.length)&&<p>勤務条件：{job.menuConditions!.join(" / ")}</p>}<p>{typeof job.workTime==="string"&&job.workTime.trim()?job.workTime:"勤務時間は確認中"}</p><strong aria-label="報酬">{jobPayLabel(job.basePay)}</strong>{expanded&&<dl className="job-details" id={`job-details-${job.id}`}><div><dt>実施日</dt><dd>{shiftDateLabel(job)}</dd></div><div><dt>勤務時間</dt><dd>{typeof job.workTime==="string"&&job.workTime.trim()?job.workTime:"確認中"}</dd></div>{job.storeAddress&&<div><dt>店舗住所</dt><dd>{shiftTextLabel(job.storeAddress,"確認中")}</dd></div>}{job.clientName&&<div><dt>依頼元</dt><dd>{shiftTextLabel(job.clientName,"確認中")}</dd></div>}</dl>}{applicationAttemptsRef.current.has(job.id)&&pendingApplicationJobId!==job.id&&<p className="application-unconfirmed" role="status" id={`application-result-${job.id}`}>この案件の応募結果は未確認です。シフトで確定状況を確認するか、下のボタンで応募結果を再確認してください。</p>}<div className="actions"><button className="secondary" aria-expanded={expanded} aria-controls={`job-details-${job.id}`} onClick={()=>setExpandedOpenJobId(current=>current===job.id?"":job.id)}>{expanded?"詳細を閉じる":"詳細を見る"}</button><button onClick={()=>void apply(job)} disabled={applicationPending||openJobsRefreshing} aria-describedby={applicationAttemptsRef.current.has(job.id)&&pendingApplicationJobId!==job.id?`application-result-${job.id}`:undefined}>{pendingApplicationJobId===job.id?"応募中…":applicationAttemptsRef.current.has(job.id)?"応募結果を再確認する":"この案件に応募する"}</button></div></article>})}{!!openJobQuery.trim()&&!matchingOpenJobs.length&&<p className="empty" role="status">読み込み済みの案件に一致するものがありません。検索語を変更するか、検索を解除してください。</p>}{!openJobQuery.trim()&&!visibleOpenJobs.length&&!hasMoreOpenJobs&&<EmptyAction title="現在募集中の案件はありません" body="新しい案件が公開されると、この画面に表示されます。ここからいつでも最新情報を確認できます。" action="最新情報を確認" onAction={()=>void refreshOpenJobs()} secondaryAction="ホームへ戻る" onSecondaryAction={()=>navigate("home")}/>}</div>{openJobPageControls}</div></>}{openJobsStatus==="ready"&&<><p role="status">{openJobsPageMessage}</p>{(hasMoreOpenJobs||openJobsPageMessage)&&<>{hasMoreOpenJobs&&<p>募集案件には続きがあります。100件ずつ追加できます。</p>}<button className="secondary" onClick={()=>{if(hasMoreOpenJobs)void loadMoreOpenJobs();}} disabled={applicationPending||openJobsRefreshing} aria-disabled={!hasMoreOpenJobs||applicationPending||openJobsRefreshing} aria-busy={openJobsRefreshing}>{openJobsRefreshing?"読み込み中…":hasMoreOpenJobs?"募集案件の続きを読み込む":"すべて読み込み済み"}</button></>}</>}</section>}
     {view==="shifts"&&<section>
       <div className="section-heading"><h2 ref={shiftHeadingRef} tabIndex={-1}>自分のシフト</h2><button className="secondary" onClick={()=>void refreshBusinessData(true)} disabled={businessRefreshing||businessDataStatus==="loading"||submissionEditPending||applicationPending} aria-busy={businessRefreshing}>{businessRefreshing?"更新中…":"シフトを更新"}</button></div>
       <p className="muted">応募結果が分からないときは、更新して日付と店舗を確認してください。表示に続きがある場合は、追加で読み込めます。</p>
+      {firebaseConfigured&&companyId&&staffId&&user?.uid&&applicationAttemptsRef.current.size>0&&
+        <div className="section-heading"><p>この端末に受付確認できていない応募が{applicationAttemptsRef.current.size}件あります。</p>
+          <button className="secondary" onClick={()=>void checkApplicationReceipts()} disabled={applicationPending} aria-busy={receiptLookupPending}>{receiptLookupPending?"照会中…":"応募の受付を確認"}</button></div>}
       {businessDataFallback??<>
-        {pendingApplications.length>0&&<section aria-label="確認待ちの手配" className="panel">
-          <h3>確認待ちの手配（{pendingApplications.length}件）</h3>
-          <p>名前入力・応募を受け付けています。管理者がネームアップ後に対象を選び、月別シフトへの転記と照合が終わるまで、確定シフトには表示されません。</p>
-          <ul>{pendingApplications.map(job=><li key={job.id}>{shiftDateLabel(job)} / {shiftTextLabel(job.storeName,"店舗確認中")} / {job.caseListManualPending?"手入力の手配・確認待ち":"応募受付・確認待ち"}</li>)}</ul>
-          <p className="muted">取消のご希望は管理者へ直接ご連絡ください。</p>
-        </section>}
+        <PendingAssignmentsPanel jobs={pendingApplications} busy={businessRefreshing||businessDataStatus==="loading"||submissionEditPending||applicationPending} onRefresh={()=>refreshBusinessData(true)}/>
         <MonthlyShiftCalendar jobs={myJobs} onSelect={openShiftJob} today={businessDate}/>
         <div className="shift-list-heading"><h3>これからのシフト</h3><span>{upcomingShifts.length}件</span></div>
         {upcomingShifts.length
@@ -2100,7 +2445,7 @@ export default function App(){
               }} accent={jobAccent} kind={jobKind} summary={prepSummary} submissionSummary={submissionSummary}/>}
           </div>}
         </div>
-        {selectedJob&&<section ref={shiftDetailRef} tabIndex={-1} aria-label="選択したシフトの詳細" className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending||submissionContextPending||draftHydrating}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{shiftTextLabel(selectedJob.storeName,"店舗確認中")}</h2><p>{shiftTextLabel(selectedJob.storeAddress,shiftTextLabel(selectedJob.menuName,"業務確認中"))}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><dl className="job-details" aria-label="勤務日時"><div><dt>勤務日</dt><dd>{shiftDateLabel(selectedJob)}</dd></div><div><dt>勤務時間</dt><dd>{typeof selectedJob.workTime==="string"&&selectedJob.workTime.trim()?selectedJob.workTime:"確認中"}</dd></div></dl>{!hasValidDateKey(selectedJob)&&<p className="missing-work-date muted" role="status">勤務日を確認できません。「シフトを更新」で確認し、改善しない場合は管理者に日付を確認してください。</p>}<div className="route-panel"><strong>店舗への行き方</strong><div className="route-actions">{typeof selectedJob.storeAddress==="string"&&selectedJob.storeAddress.trim()&&<button className="secondary" onClick={()=>void copyDisplayText("店舗住所",selectedJob.storeAddress??"")} disabled={isPending("text-copy")}>住所をコピー</button>}{mapDestination(selectedJob)?<><a href={mapsSearchUrl(selectedJob)} target="_blank" rel="noreferrer">地図で店舗を見る</a><a href={transitRouteUrl(selectedJob)} target="_blank" rel="noreferrer">公共交通の経路</a></>:<span>店舗名・住所を確認できません。「シフトを更新」を押してください。</span>}{shiftTextLabel(selectedJob.storeNearestStation,"")&&<a href={stationSearchUrl(selectedJob)} target="_blank" rel="noreferrer">最寄駅：{shiftTextLabel(selectedJob.storeNearestStation,"")}</a>}</div></div>{selectedJob.preContact!=null&&<p className="muted" role="status" aria-label="登録済みの事前連絡">{typeof selectedJob.preContact.temperature==="number"&&Number.isFinite(selectedJob.preContact.temperature)&&selectedJob.preContact.temperature>=34&&selectedJob.preContact.temperature<=42&&typeof selectedJob.preContact.arrivalTime==="string"&&/^([01]?\d|2[0-3]):[0-5]\d$/.test(selectedJob.preContact.arrivalTime)?<>登録内容：体温 {selectedJob.preContact.temperature}℃ / 到着 {selectedJob.preContact.arrivalTime}。</>:"登録済みの事前連絡を確認できません。「シフトを更新」を押し、体温と到着予定時刻を確認してください。"}</p>}{preContactReadinessMessage(selectedJob)&&<p className="precontact-readiness" id="precontact-readiness" role="status">{preContactReadinessMessage(selectedJob)}</p>}{selectedJob.preContactNeedsReview===true&&!preContactReadinessMessage(selectedJob)&&<p role="status">事前連絡を入力し、内容を確認して送信してください。</p>}{selectedJob.preContactNeedsReview!==true&&selectedJob.preContactSyncPending===true&&!preContactReadinessMessage(selectedJob)&&<p role="status">アプリには保存済みです。シフト表への反映は未確認です。</p>}<div className="form-grid"><label>体温<input ref={preContactTemperatureRef} aria-invalid={preContactError==="temperature"} aria-describedby={preContactError==="temperature"?"precontact-input-error":undefined} inputMode="decimal" placeholder="例：36.5" value={temperature} onChange={e=>{if(preContactError==="temperature")setPreContactError("");setTemperature(e.target.value);preContactDraftsRef.current.set(preContactDraftKey,{temperature:e.target.value,arrivalTime});}} disabled={shiftActionPending}/></label><label>到着予定時刻<input ref={preContactArrivalRef} aria-invalid={preContactError==="arrival"} aria-describedby={preContactError==="arrival"?"precontact-input-error":undefined} type="time" value={arrivalTime} onChange={e=>{if(preContactError==="arrival")setPreContactError("");setArrivalTime(e.target.value);preContactDraftsRef.current.set(preContactDraftKey,{temperature,arrivalTime:e.target.value});}} disabled={shiftActionPending}/></label></div>{preContactError&&<p id="precontact-input-error">{preContactError==="temperature"?"体温の入力を確認してください（34〜42℃）。":"到着予定時刻を選んでください（例：09:30）。"}</p>}<button onClick={()=>void submitPreContact()} disabled={shiftActionPending||Boolean(preContactReadinessMessage(selectedJob))} aria-describedby={preContactReadinessMessage(selectedJob)?"precontact-readiness":undefined}>{pendingShiftAction==="preContact"?"送信中…":preContactReadinessMessage(selectedJob)?"事前連絡は確認待ち":"事前連絡を送信"}</button>{preContactDraftsRef.current.has(preContactDraftKey)&&<button className="secondary" disabled={shiftActionPending} onClick={resetPreContactInput}>入力を登録内容に戻す</button>}<hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{caseMailPreparationHeld(selectedJob)?"内容確認後に準備を再開できます。":typeof selectedJob.materialStatus==="string"&&selectedJob.materialStatus.trim()?selectedJob.materialStatus:"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(Array.isArray(selectedJob.netPrint?.items)?selectedJob.netPrint.items:[]).map((item,index)=>validNetPrintTarget(selectedJob.netPrint?.items,item)?<div className="netprint-row" key={item.id} role="group" aria-label={`ネットプリント ${item.number}`}><strong>{item.number}</strong><button className="secondary" onClick={()=>void copyDisplayText("ネットプリント番号 "+item.number,item.number)} disabled={isPending("text-copy")} aria-busy={isPending("text-copy")} aria-label={`ネットプリント番号 ${item.number} をコピー`}>番号をコピー</button><button className={item.printed===true?"secondary":""} aria-disabled={item.printed===true||shiftActionPending||caseMailPreparationHeld(selectedJob)} onClick={()=>{if(!shiftActionPending&&!caseMailPreparationHeld(selectedJob))void markPrinted(item);}}>{item.printed===true?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>:<div className="netprint-row" key={`invalid-${index}`} role="group" aria-label={validNetPrintItem(item)?`更新対象を特定できない印刷情報 ${item.number}`:"番号を確認できない印刷情報"}><strong>{validNetPrintItem(item)?`${item.number}：更新対象を特定できません`:"番号を確認できません"}</strong><span>{validNetPrintItem(item)?"シフトを更新し、改善しない場合は管理者に番号の再登録を依頼してください。":"シフトを更新し、改善しない場合は管理者に確認してください。"}</span></div>)}{(!Array.isArray(selectedJob.netPrint?.items??[])||!(selectedJob.netPrint?.items??[]).length)&&<div className="empty compact">{Array.isArray(selectedJob.netPrint?.items??[])?"ネットプリント番号はまだ届いていません。":"印刷情報を確認できません。「シフトを更新」を押してください。"}</div>}<hr/><p className="muted" aria-label="このシフトの提出状況">{submissionSummary(selectedJob)}</p><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)} disabled={submissionEditPending}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)} disabled={submissionEditPending}>📝 報告書を提出</button></div></section>}
+        {selectedJob&&<section ref={shiftDetailRef} tabIndex={-1} aria-label="選択したシフトの詳細" className="panel shift-detail" style={{"--job-accent":jobAccent(selectedJob.menuName)} as CSSProperties} aria-busy={shiftActionPending||submissionContextPending||draftHydrating}><div className="shift-detail-heading"><div><span className="job-kind">{jobKind(selectedJob.menuName)}</span><h2>{shiftTextLabel(selectedJob.storeName,"店舗確認中")}</h2><p>{shiftTextLabel(selectedJob.menuName,"業務確認中")}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div><dl className="job-details" aria-label="勤務日時"><div><dt>勤務日</dt><dd>{shiftDateLabel(selectedJob)}</dd></div><div><dt>勤務時間</dt><dd>{typeof selectedJob.workTime==="string"&&selectedJob.workTime.trim()?selectedJob.workTime:"確認中"}</dd></div></dl>{!hasValidDateKey(selectedJob)&&<p className="missing-work-date muted" role="status">勤務日を確認できません。「シフトを更新」で確認し、改善しない場合は管理者に日付を確認してください。</p>}<ShiftRoutePanel key={JSON.stringify([user?.uid??"",companyId,staffId,selectedJob.id])} scope={{jobId:selectedJob.id,companyId,staffId}} demo={firebaseConfigured?undefined:selectedJob} copyAddress={address=>void copyDisplayText("店舗住所",address)} copying={isPending("text-copy")} />{selectedJob.preContact!=null&&<p className="muted" role="status" aria-label="登録済みの事前連絡">{registeredPreContact.temperature&&registeredPreContact.arrivalTime?<>{selectedJob.preContactNeedsReview===true?"前回の登録内容":"登録内容"}：体温 {registeredPreContact.temperature}℃ / 到着 {registeredPreContact.arrivalTime}。</>:"登録済みの事前連絡を確認できません。「シフトを更新」を押し、体温と到着予定時刻を確認してください。"}</p>}{preContactReadinessMessage(selectedJob)&&<p className="precontact-readiness" id="precontact-readiness" role="status">{preContactReadinessMessage(selectedJob)}</p>}{selectedJob.preContactNeedsReview===true&&!preContactReadinessMessage(selectedJob)&&<p role="status">事前連絡を入力し、内容を確認して送信してください。</p>}{selectedJob.preContactNeedsReview!==true&&selectedJob.preContactSyncPending===true&&registeredPreContact.temperature&&registeredPreContact.arrivalTime&&!preContactReadinessMessage(selectedJob)&&<p role="status">アプリには保存済みです。シフト表への反映は未確認です。</p>}<div className="form-grid"><label>体温<input ref={preContactTemperatureRef} aria-invalid={preContactError==="temperature"} aria-describedby={preContactError==="temperature"?"precontact-input-error":undefined} inputMode="decimal" placeholder="例：36.5" value={temperature} onChange={e=>{if(preContactError==="temperature")setPreContactError("");setTemperature(e.target.value);preContactDraftsRef.current.set(preContactDraftKey,{temperature:e.target.value,arrivalTime});}} disabled={shiftActionPending}/></label><label>到着予定時刻<input ref={preContactArrivalRef} aria-invalid={preContactError==="arrival"} aria-describedby={preContactError==="arrival"?"precontact-input-error":undefined} type="time" value={arrivalTime} onChange={e=>{if(preContactError==="arrival")setPreContactError("");setArrivalTime(e.target.value);preContactDraftsRef.current.set(preContactDraftKey,{temperature,arrivalTime:e.target.value});}} disabled={shiftActionPending}/></label></div>{preContactError&&<p id="precontact-input-error">{preContactError==="temperature"?"体温の入力を確認してください（34〜42℃）。":"到着予定時刻を選んでください（例：09:30）。"}</p>}<button onClick={()=>void submitPreContact()} disabled={shiftActionPending||Boolean(preContactReadinessMessage(selectedJob))} aria-describedby={preContactReadinessMessage(selectedJob)?"precontact-readiness":undefined}>{pendingShiftAction==="preContact"?"送信中…":preContactReadinessMessage(selectedJob)?"事前連絡は確認待ち":"事前連絡を送信"}</button>{preContactDraftsRef.current.has(preContactDraftKey)&&<button className="secondary" disabled={shiftActionPending} onClick={resetPreContactInput}>入力を登録内容に戻す</button>}<hr/><div className="prep-heading"><div><h3>資料準備状況</h3><p>{caseMailPreparationHeld(selectedJob)?"内容確認後に準備を再開できます。":typeof selectedJob.materialStatus==="string"&&selectedJob.materialStatus.trim()?selectedJob.materialStatus:"ネットプリントの印刷状況から自動表示"}</p></div><span className="prep-chip">{prepSummary(selectedJob)}</span></div>{(Array.isArray(selectedJob.netPrint?.items)?selectedJob.netPrint.items:[]).map((item,index)=>validNetPrintTarget(selectedJob.netPrint?.items,item)?<div className="netprint-row" key={item.id} role="group" aria-label={`ネットプリント ${item.number}`}><strong>{item.number}</strong><button className="secondary" onClick={()=>void copyDisplayText("ネットプリント番号 "+item.number,item.number)} disabled={isPending("text-copy")} aria-busy={isPending("text-copy")} aria-label={`ネットプリント番号 ${item.number} をコピー`}>番号をコピー</button><button className={item.printed===true?"secondary":""} aria-disabled={item.printed===true||shiftActionPending||caseMailPreparationHeld(selectedJob)} onClick={()=>{if(!shiftActionPending&&!caseMailPreparationHeld(selectedJob))void markPrinted(item);}}>{item.printed===true?"印刷済み":pendingShiftAction===`print-${item.id}`?"反映中…":"印刷しました"}</button></div>:<div className="netprint-row" key={`invalid-${index}`} role="group" aria-label={validNetPrintItem(item)?`更新対象を特定できない印刷情報 ${item.number}`:"番号を確認できない印刷情報"}><strong>{validNetPrintItem(item)?`${item.number}：更新対象を特定できません`:"番号を確認できません"}</strong><span>{validNetPrintItem(item)?"シフトを更新し、改善しない場合は管理者に番号の再登録を依頼してください。":"シフトを更新し、改善しない場合は管理者に確認してください。"}</span></div>)}{(!Array.isArray(selectedJob.netPrint?.items??[])||!(selectedJob.netPrint?.items??[]).length)&&<div className="empty compact">{Array.isArray(selectedJob.netPrint?.items??[])?"ネットプリント番号はまだ届いていません。":"印刷情報を確認できません。「シフトを更新」を押してください。"}</div>}<hr/><p className="muted" aria-label="このシフトの提出状況">{submissionSummary(selectedJob)}</p><div className="submission-actions"><button className="sales-floor-button" onClick={()=>void chooseSubmission("sales_floor",selectedJob)} disabled={submissionEditPending}>🖼️ 売場画像を提出</button><button className="report-button" onClick={()=>void chooseSubmission("report",selectedJob)} disabled={submissionEditPending}>📝 報告書を提出</button></div></section>}
       </>}
     </section>}
     {view==="submit"&&!selectedAssignedJob&&<section ref={submissionPanelRef} tabIndex={-1} aria-label="提出画面" className="panel">{businessDataFallback??(myJobs.length?<EmptyAction title="提出するシフトを選んでください" body="提出は、本人に割り当てられた確定シフトからだけ受け付けます。" action="シフトを選ぶ" onAction={()=>navigate("shifts")}/>:<EmptyAction title="提出できる確定シフトはありません" body="シフトが確定すると、売場画像や報告書をここから提出できます。" action="募集中の案件を見る" onAction={()=>navigate("jobs")}/>)}</section>}
@@ -2117,9 +2462,10 @@ export default function App(){
       <div className="upload-box"><span className="submission-step-label">3. 写真・PDFを選ぶ</span><div className="file-picker-actions"><label className="file-picker-button camera">📷 カメラで撮影<input className="file-picker-input" type="file" accept="image/*" capture="environment" disabled={submissionEditPending||resubmissionSendBlocked} onChange={e=>{addSubmissionFiles(Array.from(e.target.files??[]));e.currentTarget.value="";}}/></label><label className="file-picker-button library">🖼️ 写真・PDFを選ぶ<input className="file-picker-input" type="file" multiple={!singleFileResubmission} accept="image/*,.pdf" disabled={submissionEditPending||resubmissionSendBlocked} onChange={e=>{addSubmissionFiles(Array.from(e.target.files??[]));e.currentTarget.value="";}}/></label></div><small>{singleFileResubmission?"再送対象は1ファイルだけ選択してください":`${submissionType==="report"?"報告書":"売場画像"}として最大20件、1件50MB。選択後も追加できます。`}</small></div>
       {files.length>0&&<><div className="file-list-toolbar"><div><strong>選択中：{files.length}件</strong><small>送信前に画像を確認してください</small></div><button className="ghost" onClick={()=>void clearSubmissionFiles()} disabled={submissionEditPending} aria-busy={isPending("submission-files")}>{isPending("submission-files")?"解除中…":"すべて解除"}</button></div><div className="file-list">{files.map((file,index)=><SelectedSubmissionFile key={fileStateKey(file)} file={file} position={index+1} status={uploadState[fileStateKey(file)]??"選択中・未送信"} disabled={submissionEditPending} onRemove={()=>removeSubmissionFile(file)}/>)}</div></>}
       <label className={`submission-confirmation ${submissionType}`}><input type="checkbox" checked={submissionConfirmed} disabled={submissionEditPending||resubmissionSendBlocked} onChange={e=>setSubmissionConfirmed(e.target.checked)}/><span>選択中は「{submissionType==="report"?"報告書":"売場画像"}」です。画像と種類を確認しました。</span></label><p id="submission-send-help" className="muted" role="status">{submissionCleanupPending?"送信済みファイルの端末記録が残っています。「端末の後片付けを再試行」で確認してから、新しい提出へ進んでください。":submissionReadiness?submissionReadiness:resubmissionSendBlocked?"再提出できる依頼を確認できません。「提出情報を再読み込み」で最新の状態を確認してください。":submissionEditPending?"処理が終わるまでお待ちください。":!files.length?"送信する写真・PDFを選んでください。":!submissionConfirmed?"選択したファイルと提出種類を確認し、上の確認欄にチェックしてください。":"送信する準備ができました。下のボタンで送信してください。"}</p><button aria-describedby="submission-send-help" className={submissionType==="report"?"report-button":"sales-floor-button"} onClick={()=>void uploadSubmission()} disabled={!files.length||!submissionConfirmed||submissionEditPending||resubmissionSendBlocked||submissionCleanupPending||Boolean(submissionReadiness)} aria-busy={submissionEditPending}>{processingSubmission?"Drive転送を確認中…":isPending("uploadSubmission")?"送信中…":requestId?(singleFileResubmission?"この画像を再送する":"ファイルを再提出する"):`${submissionType==="report"?"報告書":"売場画像"}を送信する`}</button>{submissionMessage&&<div className={`${messageClassName(submissionMessage)} submission-message`} role={messageTone(submissionMessage)==="error"?"alert":"status"}>{submissionMessage}</div>}
-      <hr/><h3>提出履歴</h3><button className="secondary" onClick={()=>void refreshSubmissionInformation()} disabled={submissionEditPending} aria-busy={isPending("submission-refresh")}>{isPending("submission-refresh")?"再読み込み中…":"提出情報を再読み込み"}</button><SubmissionProcessingRecovery key={draftKey} submissions={submissionHistory} disabled={submissionEditPending||submissionHistoryStatus!=="ready"||!functions} onCheck={recheckSubmissionProcessing}/>{submissionHistoryStatus==="loading"?<div className="history-loading" role="status">提出履歴を読み込んでいます。完了するまでお待ちください。</div>:submissionHistoryStatus==="error"?<div className="empty history-error" role="alert">提出履歴を読み込めませんでした。「提出情報を再読み込み」で再試行してください。</div>:<SubmissionHistoryFiles files={submissionHistory.flatMap(group=>group.files)} hasMissingFiles={submissionHistory.some(group=>!group.files.length)} onRefreshPreview={refreshFilePreview}/>}
+      <hr/><h3>提出履歴</h3><button className="secondary" onClick={()=>void refreshSubmissionInformation()} disabled={submissionEditPending} aria-busy={isPending("submission-refresh")}>{isPending("submission-refresh")?"再読み込み中…":"提出情報を再読み込み"}</button><SubmissionProcessingRecovery key={draftKey} submissions={submissionHistoryStatus==="ready"?submissionHistory:[]} disabled={submissionEditPending||submissionHistoryStatus!=="ready"||!functions} onCheck={recheckSubmissionProcessing}/>{submissionHistoryStatus==="loading"?<div className="history-loading" role="status">提出履歴を読み込んでいます。完了するまでお待ちください。</div>:submissionHistoryStatus==="error"?<div className="empty history-error" role="alert">提出履歴を読み込めませんでした。「提出情報を再読み込み」で再試行してください。</div>:<SubmissionHistoryFiles files={submissionHistory.flatMap(group=>group.files)} hasMissingFiles={submissionHistory.some(group=>!group.files.length)} onRefreshPreview={refreshFilePreview}
+        pagination={{hasEarlier:!!nextSubmissionHistoryCursor,pending:isPending("submission-history-page"),disabled:submissionEditPending,error:submissionHistoryPageError,onLoadEarlier:loadEarlierSubmissionHistory}}/>}
     </section>}
     {view==="contact"&&<section className="panel contact-panel"><h2 ref={contactHeadingRef} tabIndex={-1}>連絡先</h2><p>業務に関する連絡はこちらから行えます。</p><p role="status" aria-label="コピー状態">{isPending("text-copy")?"コピーしています。完了するまでお待ちください。":""}</p><div className="contact-actions"><a className="contact-button" href={`mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(CONTACT_EMAIL_SUBJECT)}`}>メールを送る</a><a className="contact-button" href={`tel:${CONTACT_PHONE}`}>電話をかける</a><a className="contact-button" href={CONTACT_FORM_URL} target="_blank" rel="noreferrer">お問い合わせフォームを開く</a></div><div className="contact-details"><strong>受付：平日 9:00〜18:00</strong><span>電話：<a href={`tel:${CONTACT_PHONE}`}>{CONTACT_PHONE_LABEL}</a></span><span>メール：<a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a></span></div><div className="contact-actions"><button className="secondary" disabled={isPending("text-copy")} onClick={()=>void copyDisplayText("メールアドレス",CONTACT_EMAIL)}>メールアドレスをコピー</button><button className="secondary" disabled={isPending("text-copy")} onClick={()=>void copyDisplayText("電話番号",CONTACT_PHONE_LABEL)}>電話番号をコピー</button></div><details className="contact-copy-text"><summary>連絡先を選択してコピー</summary><p>自動コピーが使えない場合は、下の連絡先を選択してコピーしてください。</p><label>メールアドレス<input aria-label="手動コピー用メールアドレス" readOnly value={CONTACT_EMAIL}/></label><label>電話番号<input aria-label="手動コピー用電話番号" readOnly value={CONTACT_PHONE_LABEL}/></label></details>{selectedAssignedJob?<><h3>連絡するシフト</h3><p>コピー前に日付と店舗を確認してください。</p><textarea aria-label="連絡するシフト" readOnly rows={3} value={contactShiftText}/>{!hasCompleteContactShift(selectedAssignedJob)&&<p className="contact-shift-incomplete" role="status">未確認の項目があります。「別のシフトを選ぶ」からシフト画面を開き、「シフトを更新」で確認してください。改善しない場合は、上の連絡先へ確認できる情報を伝えてください。</p>}<div className="contact-actions"><button className="secondary" disabled={isPending("text-copy")} onClick={()=>void copyDisplayText("シフト情報",contactShiftText)}>シフト情報をコピー</button><button className="secondary" onClick={()=>navigate("shifts")}>別のシフトを選ぶ</button></div></>:<button className="secondary" onClick={()=>navigate("shifts")}>連絡するシフトを選ぶ</button>}</section>}
-    <nav className="bottom-nav">{([['home','🏠','ホーム'],['jobs','📅','案件'],['shifts','📋','シフト'],['submit','📤','提出'],['contact','☎️','連絡']] as [View,string,string][]).map(([id,icon,label])=><button key={id} className={view===id?"active":""} aria-current={view===id?"page":undefined} onClick={()=>navigate(id)}><span>{icon}</span>{label}</button>)}</nav>
+    <nav className="bottom-nav" aria-label="主要メニュー">{([['home','🏠','ホーム'],['jobs','📅','案件'],['shifts','📋','シフト'],['submit','📤','提出'],['contact','☎️','連絡']] as [View,string,string][]).map(([id,icon,label])=><button key={id} className={view===id?"active":""} aria-current={view===id?"page":undefined} onClick={()=>navigate(id)}><span aria-hidden="true">{icon}</span>{label}</button>)}</nav>
   </main>;
 }

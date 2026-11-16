@@ -3,6 +3,7 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { db } from "./firebase";
 import type { OperationalReminderContext } from "./operational-reminder";
 import { applyQuietHours } from "./notification-time";
+import { readStaffDeviceCredential, type StaffDeviceCredential } from "./staff-session";
 
 // 定期生成と送信に同じ停止判定を適用し、設定誤りでも処理を進めない。
 export function notificationDeliveryPaused(): boolean {
@@ -16,7 +17,32 @@ export type NotificationTarget =
   | { targetRole: "admin"; targetStaffId?: never; targetUid?: never }
   | { targetUid: string; targetStaffId?: never; targetRole?: never };
 
+export type StaffPushTestRequest = { staffId: string; authTime: number; deviceCredential?: StaffDeviceCredential };
+export type PushTestRecipient = { uid: string; staff: StaffPushTestRequest | null };
+
+export function isPushTest(category: unknown): boolean {
+  return category === "push_test" || category === "push_test_admin";
+}
+
+export function readPushTestRecipient(record: {
+  category?: unknown; targetUid?: unknown; targetStaffId?: unknown; targetRole?: unknown;
+  data?: { requestedByUid?: unknown }; testRequest?: Partial<StaffPushTestRequest>;
+}): PushTestRecipient | null {
+  const uid = record.targetUid;
+  if (!isPushTest(record.category) || typeof uid !== "string" || !uid.trim() || uid.includes("/") ||
+      uid !== record.data?.requestedByUid || record.targetStaffId !== undefined || record.targetRole !== undefined) return null;
+  if (record.category === "push_test_admin") return record.testRequest === undefined ? { uid, staff: null } : null;
+  const staff = record.testRequest;
+  if (typeof staff?.staffId !== "string" || !staff.staffId.trim() || staff.staffId.includes("/") ||
+      typeof staff.authTime !== "number" || !Number.isSafeInteger(staff.authTime) || staff.authTime < 0 ||
+      staff.authTime > 253402300799) return null;
+  const deviceCredential = readStaffDeviceCredential(staff.deviceCredential);
+  if (staff.deviceCredential !== undefined && !deviceCredential) return null;
+  return { uid, staff: { staffId: staff.staffId, authTime: staff.authTime, ...(deviceCredential ? { deviceCredential } : {}) } };
+}
+
 export type QueueNotificationInput = NotificationTarget & {
+  testRequest?: StaffPushTestRequest;
   companyId: string;
   title: string;
   body: string;
@@ -51,6 +77,7 @@ export async function enqueueNotification(
       category: input.category,
       dedupeKey: input.dedupeKey,
       data: input.data ?? {},
+      ...(input.testRequest ? { testRequest: input.testRequest } : {}),
       ...(input.reminderContext ? { reminderContext: input.reminderContext } : {}),
       status: "queued",
       deliverAt: timing.deliverAt,
@@ -80,6 +107,7 @@ export function queueDocumentData(input: QueueNotificationInput) {
     category: input.category,
     dedupeKey: input.dedupeKey,
     data: input.data ?? {},
+    ...(input.testRequest ? { testRequest: input.testRequest } : {}),
       ...(input.reminderContext ? { reminderContext: input.reminderContext } : {}),
     status: "queued",
     deliverAt: timing.deliverAt,

@@ -1,5 +1,7 @@
+type HandoffCommitGuard = (kind: string, uid: string, token: Data, records: Data) => Promise<void>;
 import { randomUUID, createHash } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { HttpsError } from "firebase-functions/v2/https";
 import { db } from "./firebase";
 import { assertExecutive, hashCaseList, canonical, configuredCaseListSource } from "./case-list-source-core";
 import { cancellationSheetWriteIdentity } from "./sheet-write-core";
@@ -13,8 +15,10 @@ type Data = FirebaseFirestore.DocumentData;
 type Ref = FirebaseFirestore.DocumentReference;
 type Tx = FirebaseFirestore.Transaction;
 const core = require("../src/case-list-external-core.cjs") as {
-  createConnection(services: Data): { select(...args: any[]): Promise<Data>; reconcile(...args: any[]): Promise<Data>; readSelectionBinding(...args: any[]): Promise<Data>; resolvePrivateRef(records: Data): Data };
+  EXPENSE_COLUMNS: Readonly<Record<string, Readonly<{column: string; index: number}>>>;
+  createConnection(services: Data): { select(...args: any[]): Promise<Data>; reconcile(...args: any[]): Promise<Data>; readSelectionBinding(...args: any[]): Promise<Data>; resolvePrivateRef(records: Data): Data; observeAcceptedExpenses(records: Data, snapshot: Data): {sheetRef: Data; expenses: Data; expenseCells: Data}; planAcceptedExpenseChanges(expenses: Data, expenseCells: Data, requested: Data): Data[] };
 };
+export const externalExpenseColumns = core.EXPENSE_COLUMNS;
 const ID = /^[A-Za-z0-9_-]{1,200}$/;
 const LEASE_MS = 120_000;
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -88,7 +92,7 @@ function authority(queueId: string, r: Data) {
 }
 async function previewFor(r: Data) {
   const readStartedAt = Date.now();
-  const snapshot = await readCaseListMonthlySnapshot(r.queue.companyId, r.job.caseId);
+  const snapshot = await readCaseListMonthlySnapshot(r.queue.companyId, r.job.caseId, {includeDependencies: true});
   const row = snapshot.source.rows.find(row => row.caseId === r.job.caseId);
   need(row && row.cells.length === 65, "EXTERNAL_SOURCE_ROW_REQUIRED");
   const title = r.job.dateKey.slice(0, 4) + "." + Number(r.job.dateKey.slice(5, 7));
@@ -99,7 +103,7 @@ async function previewFor(r: Data) {
   const proof = expectedGasTransferProof(r, snapshot, gasMonth);
   const scalar = (c: Data) => { const v = c?.effectiveValue ?? c?.userEnteredValue ?? {}; return v.stringValue ?? v.numberValue ?? v.boolValue ?? ""; };
   // The protected SOURCE_INTENT/SOURCE_MANUAL_OBSERVED is checked separately.
-  return { readStartedAt, observedAt: Date.now(), spreadsheetId: snapshot.spreadsheetId, sourceCells: c, sourceIds: snapshot.source.rows.map(row => row.caseId).filter(Boolean),
+  return { readStartedAt, observedAt: Date.now(), spreadsheetId: snapshot.spreadsheetId, sourceCells: c, sourceFullWritable: row!.fullWritable, sourceKnownColumns: row!.knownColumns, dependencyHash: snapshot.dependencyHash, sourceCatalog: snapshot.catalog, sourceIds: snapshot.source.rows.map(row => row.caseId).filter(Boolean),
     sourceControlA: scalar(c[0]!), sourceControlBL: scalar(c[63]!), caseId: r.job.caseId, staffName: r.job.assignedStaffName,
     dateKey: r.job.dateKey, crewSourceRevision: r.queue.caseListAssignment.sourceRevision,
     gasPreview: { book: snapshot.spreadsheetId, caseId: r.job.caseId, date: r.job.dateKey, sheetId: month[0]!.sheetId,
@@ -109,7 +113,7 @@ async function previewFor(r: Data) {
       producerSchema: "LK_NAMEUP_TRANSFER_V1", nameUpExpected: proof.batchFingerprint } };
 }
 
-async function runExternal(queueRef: Ref, uid: string, token: Data, select: boolean, input?: Data): Promise<Data> {
+async function runExternal(queueRef: Ref, uid: string, token: Data, select: boolean, input?: Data, commitGuard?: HandoffCommitGuard): Promise<Data> {
   const initial = (await queueRef.get()).data();
   need(initial && initial.operation === "case_list.assign", "EXTERNAL_QUEUE_REQUIRED");
   assertOwner(uid, token, initial!.companyId);
@@ -144,12 +148,20 @@ async function runExternal(queueRef: Ref, uid: string, token: Data, select: bool
       readSheets: async (_queue: string, phase: string) => {
         const r = await recordsFor(queueRef); ownLease(r);
         if (phase === "preview") return previewFor(r);
-        return { ...await readArchivedCaseListSnapshot(r.queue.companyId, r.job.caseId), ownerEmail: String(token.email).toLowerCase() };
+        return { ...await readArchivedCaseListSnapshot(r.queue.companyId, r.job.caseId, {includeDependencies: true}), ownerEmail: String(token.email).toLowerCase() };
       },
       transaction: async (_queue: string, fn: (r: Data) => Promise<Data>) => db.runTransaction(async tx => {
         const r = await recordsFor(queueRef, tx); ownLease(r); r.leaseActive = false;
-        need((await getProductionOperationalState(initial!.companyId)).operational, "GLOBAL_OPERATION_STOPPED_BEFORE_EXTERNAL_COMMIT");
-        const plan = await fn(r); ownLease(r);
+        const plan = await fn(r); ownLease(r); if (commitGuard) await commitGuard(plan.kind, uid, token, r);
+        // A concurrent production stop must participate in the same commit.
+        need((await getProductionOperationalState(initial!.companyId, tx)).operational, "GLOBAL_OPERATION_STOPPED_BEFORE_EXTERNAL_COMMIT");
+        ownLease(r);
+        // The injected guard may await resource/authority reads. Its elapsed time
+        // belongs to the original read window; never restamp or exclude it.
+        const writeAt = Date.now(), window = plan.readWindow;
+        need(Number.isFinite(window?.readStartedAt) && Number.isFinite(window?.observedAt) &&
+          window.readStartedAt <= window.observedAt && window.observedAt <= writeAt &&
+          writeAt - window.readStartedAt <= 60_000, "EXTERNAL_READBACK_EXPIRED_BEFORE_WRITE");
         const operationRef = db.collection("caseListMonthlyOperations").doc(sha(r.queue.companyId + "|" + queueRef.id)), now = Timestamp.now();
         if (plan.kind === "SELECT_EXTERNAL") {
           assertExternalIntakeEnabled();
@@ -210,6 +222,30 @@ export async function readExternalCaseListSelectionBinding(queueRef: Ref, uid: s
     return connection.readSelectionBinding(queueRef.id, uid, token);
   }, { readOnly: true });
 }
+
+/** Atomic, read-only extension for the unregistered handoff diagnostic.
+ * Continuation is read only; absence never creates or repairs it.
+ */
+export async function readExternalCaseListHandoffGateSnapshot(queueRef: Ref, uid: string, token: Data): Promise<Data> {
+  assertOwner(uid, token, String(token.companyId ?? ""));
+  need(ID.test(token.companyId ?? "") && ID.test(queueRef.id), "EXTERNAL_BINDING_IDENTITY_INVALID");
+  return db.runTransaction(async tx => {
+    const initial = (await tx.get(queueRef)).data();
+    need(initial && initial.companyId === token.companyId && initial.operation === "case_list.assign", "EXTERNAL_BINDING_QUEUE_REQUIRED");
+    const r = await recordsFor(queueRef, tx);
+    r.leaseActive = r.lease?.activeUntil instanceof Timestamp && r.lease.activeUntil.toMillis() > Date.now();
+    const connection = core.createConnection({
+      authorize: (actor: string, owner: Data) => assertOwner(actor, owner, initial!.companyId),
+      assertAuthority: authority, now: () => Date.now(), gasDigest: hashCaseList,
+      readProtected: async () => r,
+      readSheets: async () => { throw Error("HANDOFF_SHEETS_READ_FORBIDDEN"); },
+      transaction: async () => { throw Error("HANDOFF_WRITE_FORBIDDEN"); },
+    });
+    const binding = await connection.readSelectionBinding(queueRef.id, uid, token);
+    return { binding, continuation: r.operation.gasHandoff ?? null };
+  }, { readOnly: true });
+}
+
 export async function resolveExternalCaseListSheetRef(companyId: string, jobId: string, job: Data, tx?: Tx): Promise<any> {
   need(job.companyId === companyId && ID.test(jobId) && ID.test(job.assignmentSheetWrite?.queueId ?? ""), "EXTERNAL_PRIVATE_IDENTITY_INVALID");
   const r = await recordsFor(db.collection("sheetSyncQueue").doc(job.assignmentSheetWrite.queueId), tx);
@@ -218,6 +254,95 @@ export async function resolveExternalCaseListSheetRef(companyId: string, jobId: 
     gasDigest: hashCaseList, readProtected: async () => r, readSheets: async () => { throw Error("PRIVATE_READER_NETWORK_FORBIDDEN"); },
     transaction: async () => { throw Error("PRIVATE_READER_WRITE_FORBIDDEN"); } });
   return connection.resolvePrivateRef(r);
+}
+
+function externalExpenseConnection() {
+  return core.createConnection({
+    authorize:()=>{},assertAuthority:authority,now:()=>Date.now(),gasDigest:hashCaseList,
+    readProtected:async()=>{throw Error("EXTERNAL_EXPENSE_EXTRA_READ_FORBIDDEN");},
+    readSheets:async()=>{throw Error("EXTERNAL_EXPENSE_EXTRA_READ_FORBIDDEN");},
+    transaction:async()=>{throw Error("EXTERNAL_EXPENSE_WRITE_FORBIDDEN");},
+  });
+}
+
+async function externalExpenseBinding(companyId: string, jobId: string, job: Data, tx: Tx) {
+  need(job.companyId===companyId && ID.test(jobId) && ID.test(job.assignmentSheetWrite?.queueId ?? ""),
+    "EXTERNAL_EXPENSE_IDENTITY_INVALID");
+  const records=await recordsFor(db.collection("sheetSyncQueue").doc(job.assignmentSheetWrite.queueId),tx);
+  need(records.jobId===jobId && records.queue.companyId===companyId &&
+    canonical(normalized(job))===canonical(records.job) &&
+    records.staff.companyId===companyId,"EXTERNAL_EXPENSE_ASSIGNMENT_CHANGED");
+  return {records,ref:externalExpenseConnection().resolvePrivateRef(records)};
+}
+
+function externalExpenseUnverified(): never {
+  throw new HttpsError("failed-precondition","月別の対象行と経費を確認できません。案件を再読込してください。",
+    {reason:"case_list_external_expense_readback_unverified"});
+}
+
+function expenseObservationHash(acceptanceHash: string, jobRevision: number, sheetRef: Data, expenses: Data, expenseCells: Data): string {
+  return hashCaseList({acceptanceHash,jobRevision,sheetRef,expenses,expenseCells});
+}
+
+/** Server-only observation. Sheets I/O stays outside Firestore transactions. */
+export async function readExternalCaseListExpenses(companyId: string, jobId: string, job: Data,
+  getSpreadsheet?: NonNullable<Parameters<typeof readArchivedCaseListSnapshot>[2]>["getSpreadsheet"],
+): Promise<Data> {
+  try {
+    const readBinding=(tx: Tx)=>externalExpenseBinding(companyId,jobId,job,tx);
+    const before=await db.runTransaction(readBinding,{readOnly:true});
+    need(typeof before.ref.spreadsheetId === "string", "EXTERNAL_EXPENSE_BOOK_REQUIRED");
+    const snapshot=await readArchivedCaseListSnapshot(companyId,before.ref.caseId,{expectedSpreadsheetId:before.ref.spreadsheetId,getSpreadsheet});
+    return await db.runTransaction(async tx=>{
+      const current=await readBinding(tx);
+      need(current.records.externalAcceptance.acceptanceHash===before.records.externalAcceptance.acceptanceHash &&
+        Number.isFinite(snapshot.readStartedAt) && Number.isFinite(snapshot.observedAt) &&
+        snapshot.readStartedAt<=snapshot.observedAt && snapshot.observedAt<=Date.now() &&
+        Date.now()-snapshot.readStartedAt<=60_000,"EXTERNAL_EXPENSE_PROOF_EXPIRED_OR_CHANGED");
+      const observed=externalExpenseConnection().observeAcceptedExpenses(current.records,snapshot);
+      const expenseAcceptanceHash=current.records.externalAcceptance.acceptanceHash;
+      const caseListFinancialObservationHash=expenseObservationHash(
+        expenseAcceptanceHash,current.records.job.revision,observed.sheetRef,observed.expenses,observed.expenseCells);
+      return {...job,...observed,caseListFinancialObservationHash,expenseAcceptanceHash,expenseReadStartedAt:snapshot.readStartedAt};
+    },{readOnly:true});
+  } catch {
+    externalExpenseUnverified();
+  }
+}
+
+/** Build a private write comparison without calling Sheets or creating a queue. */
+export function planExternalExpenseConfirmation(observation: Data, requested: Data): Data[] {
+  try {
+    return externalExpenseConnection().planAcceptedExpenseChanges(observation.expenses,observation.expenseCells,requested);
+  } catch (error) {
+    if ((error as { message?: string })?.message==="EXTERNAL_EXPENSE_CELL_PROTECTED") {
+      throw new HttpsError("failed-precondition","変更先に数式または保護が必要な値があります。月別表で確認してください。",
+        {reason:"case_list_external_expense_cell_protected"});
+    }
+    externalExpenseUnverified();
+  }
+}
+
+/** The expected post-write evidence includes all five cells, including unchanged formulas. */
+export function expectedExternalExpenseObservationHash(observation: Data, requested: Data): string {
+  const expenseCells={...observation.expenseCells};
+  for (const [key,amount] of Object.entries(requested)) {
+    if (amount!==observation.expenses[key]) {
+      expenseCells[key]={entered:amount===null?{}:{numberValue:amount},editable:true};
+    }
+  }
+  return expenseObservationHash(observation.expenseAcceptanceHash,observation.revision,observation.sheetRef,requested,expenseCells);
+}
+
+/** Re-check the server-owned binding at commit; do not call Sheets in a transaction. */
+export async function assertExternalExpenseBinding(companyId: string, jobId: string, job: Data, observation: Data, tx: Tx): Promise<void> {
+  try {
+    await externalExpenseBinding(companyId,jobId,job,tx);
+    need(Number.isFinite(observation.expenseReadStartedAt) && Date.now()>=observation.expenseReadStartedAt &&
+      Date.now()-observation.expenseReadStartedAt<=60_000,"EXTERNAL_EXPENSE_OBSERVATION_EXPIRED");
+  } catch {
+    externalExpenseUnverified();
+  }
 }
 
 /** Used only under the existing import lease. This never creates acceptance. */
@@ -242,3 +367,39 @@ export async function assertAcceptedExternalImport(tx: Tx, companyId: string, jo
 }
 
 
+
+/** Unregistered proposal methods: a missing injected guard closes before any lease/write. */
+export function selectExternalCaseListMonthlyTransferForHandoff(queueRef: Ref, uid: string, token: Data, input: Data, commitGuard: HandoffCommitGuard) {
+  need(typeof commitGuard === "function", "HANDOFF_COMMIT_GUARD_REQUIRED"); return runExternal(queueRef, uid, token, true, input, commitGuard);
+}
+export function reconcileExternalCaseListMonthlyTransferForHandoff(queueRef: Ref, uid: string, token: Data, commitGuard: HandoffCommitGuard) {
+  need(typeof commitGuard === "function", "HANDOFF_COMMIT_GUARD_REQUIRED"); return runExternal(queueRef, uid, token, false, undefined, commitGuard);
+}
+
+/** ISOLATED PROPOSAL: existing accepted proof observer, no lease or business write. */
+export async function observeCompletedExternalCaseListTransfer(queueRef: Ref, uid: string, token: Data): Promise<Data> {
+  assertOwner(uid, token, String(token.companyId ?? ""));
+  return db.runTransaction(async tx => {
+    const r = await recordsFor(queueRef, tx);
+    need(r.job.companyId === token.companyId && r.externalSelection?.selectedBy === uid, "COMPLETED_OBSERVATION_REQUIRED");
+    const c = core.createConnection({authorize: () => {}, assertAuthority: authority, now: () => Date.now(), gasDigest: hashCaseList,
+      readProtected: async () => r, readSheets: async () => {throw Error("COMPLETED_SHEETS_READ_FORBIDDEN");}, transaction: async () => {throw Error("COMPLETED_WRITE_FORBIDDEN");}});
+    if (!r.externalAcceptance) { await c.readSelectionBinding(queueRef.id, uid, token); return {status: "EXTERNAL_ACCEPTANCE_NOT_OBSERVED", queueId: queueRef.id}; }
+    c.resolvePrivateRef(r);
+    return {status: "EXTERNAL_ALREADY_ACCEPTED", queueId: queueRef.id, acceptanceHash: r.externalAcceptance.acceptanceHash};
+  }, {readOnly: true});
+}
+
+/** Internal server-only reader. No receipt, lease, metadata or cloud write. */
+export async function readExternalOriginalForGasHandoff(queueRef: Ref, uid: string, token: Data, ownLeaseToken?: string): Promise<Data> {
+  assertOwner(uid, token, String(token.companyId ?? ""));
+  return db.runTransaction(async tx => {
+    const r=await recordsFor(queueRef,tx);
+    need(r.queue.companyId===token.companyId,"HANDOFF_ORIGINAL_COMPANY_CHANGED");
+    const until=r.lease?.activeUntil;
+    if(r.lease)need(until instanceof Timestamp&&typeof r.lease.tokenId==="string","HANDOFF_LEASE_UNVERIFIED");
+    const active=until instanceof Timestamp&&until.toMillis()>Date.now();
+    if(active)need(typeof ownLeaseToken==="string"&&r.lease.tokenId===ownLeaseToken,"HANDOFF_OTHER_COMPANY_LEASE");
+    r.leaseActive=false;authority(queueRef.id,r);return r;
+  },{readOnly:true});
+}

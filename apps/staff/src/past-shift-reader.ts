@@ -17,7 +17,7 @@ export function firestorePastShiftReader<T extends PastShiftRecord>(database: Fi
       const result = await getDocsFromServer(query(collection(database, "jobs"),
         where("companyId", "==", range.companyId), where("assignedStaffId", "==", range.staffId), where("status", "==", "assigned"),
         where("dateKey", ">=", range.start), where("dateKey", "<", range.end),
-        orderBy("dateKey", "asc"), ...(cursor ? [startAfter(cursor)] : []), limit(PAST_SHIFT_PAGE_SIZE + 1)));
+        orderBy("dateKey", "desc"), ...(cursor ? [startAfter(cursor)] : []), limit(PAST_SHIFT_PAGE_SIZE + 1)));
       return result.docs.map(doc => ({ row: { ...doc.data(), id: doc.id } as T, cursor: doc }));
     },
   };

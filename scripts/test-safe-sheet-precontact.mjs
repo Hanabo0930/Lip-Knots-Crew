@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
+import { fileURLToPath } from "node:url";
 const dependency=createRequire(import.meta.url),ts=dependency("typescript");
 const {Timestamp}=dependency("firebase-admin/firestore");
 const {HttpsError}=dependency("firebase-functions/v2/https");
@@ -16,7 +17,8 @@ function harness(environment={LKC_SHEET_WRITE_MODE:"active"},compiled=false){
   [`sheetSyncQueue/${queueId}`,pending()],[`jobs/${jobId}`,job()],
   [`companies/${companyId}/sheetMappings/shift`,{enabled:true,spreadsheetId:sheetId,idColumn:"Q",columns:{temperature:"G",arrivalTime:"H",staffName:"B",workDate:"A"},operations:{"precontact.submit":{values:["temperature","arrivalTime"]}}}]
  ]);
- const h={records,env:{...environment},dbReads:0,dbWrites:0,transactions:0,reads:0,writes:[],authCalls:0,metrics:[],idRows:[["案件ID"],["synthetic-case"]],cells:new Map([["A2",dateKey],["B2","Synthetic Staff"],["G2",""],["H2",""],["Q2","synthetic-case"]]),operational:true,beforeCellRead:null,afterCellRead:null,onWrite:null,onCommit:null,failMetrics:false,failRead:false,failAfterWrite:false,failCompletion:false};
+ records.set("staffNgMaintenance/"+companyId,{schema:"LK_STAFF_NG_MAINTENANCE_V1",companyId,state:"OPEN",generation:0});
+ const h={records,env:{DEFAULT_COMPANY_ID:companyId,...environment},dbReads:0,dbWrites:0,transactions:0,reads:0,writes:[],authCalls:0,metrics:[],idRows:[["案件ID"],["synthetic-case"]],cells:new Map([["A2",dateKey],["B2","Synthetic Staff"],["G2",""],["H2",""],["Q2","synthetic-case"]]),operational:true,beforeCellRead:null,afterCellRead:null,onWrite:null,onCommit:null,failMetrics:false,failRead:false,failAfterWrite:false,failCompletion:false};
  let serial=0;
  const snapshot=ref=>{const value=clone(records.get(ref.path));return {id:ref.id,ref,exists:records.has(ref.path),data:()=>clone(value)};};
  const apply=items=>{h.dbWrites+=items.length;for(const item of items){const old=records.get(item.ref.path)||{},next=item.merge?{...old}:{};
@@ -42,6 +44,10 @@ function harness(environment={LKC_SHEET_WRITE_MODE:"active"},compiled=false){
  const modules=new Map();
  const boundaries={
   "./firebase":{db},"node:crypto":crypto,
+  "./case-list-external-expense-completion":{
+   completeExternalExpense:()=>assert.fail("Legacy worker fixture entered the external expense writer"),
+   traceExternalExpense:()=>assert.fail("Legacy worker fixture entered the external expense trace"),
+  },
   // CaseList has its own actual-worker suite. Legacy fixtures must not enter
   // that writer or load its SDK dependencies. Its retry has no work only when
   // these records contain neither a CaseList queue nor an explicit opt-in.
@@ -52,6 +58,7 @@ function harness(environment={LKC_SHEET_WRITE_MODE:"active"},compiled=false){
   "./case-list-monthly-worker":{
    processCaseListMonthlyAssignment:async()=>assert.fail("Legacy fixture entered the CaseList worker"),
    retryCaseListMonthlyAssignments:async()=>{
+    if(h.caseListRetry) return h.caseListRetry();
     assert.ok(![...records].some(([path,value])=>path.startsWith("sheetSyncQueue/")&&value.operation==="case_list.assign"),"Legacy fixture contains a CaseList queue");
     assert.ok(![...records].some(([path,value])=>path.startsWith("sheetImportConfigs/")&&value.caseListAssignmentsEnabled===true),"Legacy fixture enables CaseList assignments");
    }
@@ -64,7 +71,7 @@ function harness(environment={LKC_SHEET_WRITE_MODE:"active"},compiled=false){
   "./production-metrics":{incrementProductionMetrics:async(...args)=>{if(h.failMetrics)throw Error("synthetic metrics unavailable");h.metrics.push(args);}},
   googleapis:{google:{auth:{GoogleAuth:class{constructor(){h.authCalls++;}}},sheets:()=>sheets}}
  };
- function load(name){if(Object.hasOwn(boundaries,name))return boundaries[name];if(["../src/case-list-projection.cjs","../src/case-list-monthly-controller.cjs"].includes(name))return dependency(new URL("../functions/src/"+name.split("/").at(-1),import.meta.url).pathname);assert.ok(["./case-list-publication-state","./case-list-source-cancellation","./case-list-source-core","./case-mail-resolution-core","./case-mail-preparation-core","./submission-status","./submission-integrity","./submission-deadline-policy","./safe-sheet-writes","./sheet-write-control","./sheet-write-core","./cancellation-history-retention-core","./shift-parser","./case-id","./admin-operations","./admin-operations-core","./utils","./jobs","./analytics","./analytics-core","./notification-core","./notification-time","./japan-business-day","./netprint","./netprint-state-core", "./assignment-preparation-core", "./admin-edit-state-core", "./job-management-core", "./job-management", "./automation-intake", "./automation-recruitment-core", "./automation-bridge-core", "./case-mail-publication", "./case-mail-publication-core", "./job-group-creation", "./case-mail-job-creation", "./native-job-creation", "./case-mail-collision", "./case-mail-draft-review"].includes(name),"Unexpected import "+name);if(modules.has(name))return modules.get(name);const exports={};modules.set(name,exports);const source=fs.readFileSync(new URL("../functions/"+(compiled?"lib/":"src/")+name.slice(2)+(compiled?".js":".ts"),import.meta.url),"utf8");runInNewContext(compiled?source:ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports,require:load,Date,process:{env:h.env},console:{warn(){},error(){}}});return exports;}
+ function load(name){if(Object.hasOwn(boundaries,name))return boundaries[name];if(["../src/case-list-projection.cjs","../src/case-list-monthly-controller.cjs","../src/private-ng/capacity.cjs"].includes(name))return dependency(fileURLToPath(new URL("../functions/src/"+name.slice("../src/".length),import.meta.url)));assert.ok(["./case-list-publication-state","./case-list-source-cancellation","./case-list-source-core","./case-mail-resolution-core","./case-mail-preparation-core","./submission-status","./submission-integrity","./submission-deadline-policy","./safe-sheet-writes","./sheet-write-control","./sheet-write-core","./cancellation-history-retention-core","./shift-parser","./case-id","./admin-operations","./admin-operations-core","./utils","./staff-ng","./staff-session","./staff-ng-maintenance","./jobs","./analytics","./analytics-core","./notification-core","./notification-time","./japan-business-day","./netprint","./netprint-state-core", "./assignment-preparation-core", "./admin-edit-state-core", "./job-management-core", "./job-management", "./automation-intake", "./automation-recruitment-core", "./automation-bridge-core", "./case-mail-publication", "./case-mail-publication-core", "./job-group-creation", "./case-mail-job-creation", "./native-job-creation", "./case-mail-collision", "./case-mail-draft-review"].includes(name),"Unexpected import "+name);if(modules.has(name))return modules.get(name);const exports={};modules.set(name,exports);const source=fs.readFileSync(new URL("../functions/"+(compiled?"lib/":"src/")+name.slice(2)+(compiled?".js":".ts"),import.meta.url),"utf8");runInNewContext(compiled?source:ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports,require:load,Date,process:{env:h.env},console:{warn(){},error(){}}});return exports;}
  const worker=load("./safe-sheet-writes"),admin=load("./admin-operations"),qref=ref(`sheetSyncQueue/${queueId}`);
  return Object.assign(h,{rawEvent:event=>worker.processSafeSheetWrite(event),core:(module,name,...args)=>load(module)[name](...args),admin:(name,data={},auth={uid:"synthetic-admin",token:{companyId,role:"admin"}})=>admin[name]({auth,data}),queue:()=>records.get(qref.path),job:()=>records.get(`jobs/${jobId}`),mapping:()=>records.get(`companies/${companyId}/sheetMappings/shift`),run:async eventQueue=>worker.processSafeSheetWrite({data:{after:eventQueue?{...snapshot(qref),data:()=>clone(eventQueue)}:snapshot(qref)}}),call:(module,name,data,auth={uid:"synthetic-admin",token:{companyId,role:"admin"}})=>load(module)[name]({auth,data}),queueResult:async id=>admin.updateExpenseReviewFromQueue({data:{after:snapshot(ref(`sheetSyncQueue/${id}`))}}),runQueue:async id=>worker.processSafeSheetWrite({data:{after:snapshot(ref(`sheetSyncQueue/${id}`))}}),retry:()=>worker.retrySafeSheetWrites()});
 }
@@ -78,6 +85,49 @@ for(const compiled of [false,true]){
  await test(`legacy CaseList boundary ${compiled?"compiled":"source"} refuses new operation`,async()=>{const h=harness({},compiled);h.queue().operation="case_list.assign";const before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);await assert.rejects(()=>h.retry(),/Legacy fixture contains a CaseList queue/);assertPauseUnchanged(h,before,cells);});
  await test(`legacy CaseList boundary ${compiled?"compiled":"source"} refuses explicit optin`,async()=>{const h=harness({},compiled);h.records.set(`sheetImportConfigs/${companyId}`,{companyId,caseListAssignmentsEnabled:true});const before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);await assert.rejects(()=>h.retry(),/Legacy fixture enables CaseList assignments/);assertPauseUnchanged(h,before,cells);});
  await test(`legacy CaseList boundary ${compiled?"compiled":"source"} process fails closed`,async()=>{const h=harness({},compiled),before=JSON.stringify([...h.records]),cells=JSON.stringify([...h.cells]);await assert.rejects(()=>h.core("./case-list-monthly-worker","processCaseListMonthlyAssignment",{}),/Legacy fixture entered the CaseList worker/);assertPauseUnchanged(h,before,cells);});
+}
+for(const compiled of [false,true]){
+ const variant=compiled?"compiled":"source";
+ await test("exclusive monthly recovery "+variant+" leaves waits and expiry with the dedicated worker",async()=>{
+  const h=harness(undefined,compiled);
+  let dedicated=0;h.caseListRetry=async()=>{dedicated++;};
+  const foreign=[
+   ["monthly-retry", {status:"retry_wait",errorType:"case_list_prewrite_busy",caseListMonthlyReason:"CASE_LIST_PREWRITE_BUSY",writeVerificationRequired:false}],
+   ["monthly-proof", {status:"retry_wait",errorType:"verification_required",writeVerificationRequired:true}],
+   ["monthly-expired", {status:"processing",claimToken:"monthly-lease",attempts:3}],
+  ];
+  for(const [id,fields] of foreign)h.records.set("sheetSyncQueue/"+id,{...pending(),operation:"case_list.assign",retryAt:Timestamp.fromMillis(0),...fields});
+  const previous=foreign.map(([id])=>clone(h.records.get("sheetSyncQueue/"+id)));
+  Object.assign(h.queue(),{status:"retry_wait",retryAt:Timestamp.fromMillis(0)});
+  await h.retry();
+  assert.equal(dedicated,1);assert.equal(h.queue().status,"pending");
+  assert.deepEqual(foreign.map(([id])=>h.records.get("sheetSyncQueue/"+id)),previous);
+  assert.equal(h.dbWrites,1);assert.equal(h.writes.length,0);
+ });
+ for(const [status,next] of [["retry_wait","pending"],["processing","blocked"]]){
+  await test("exclusive monthly recovery "+variant+" rechecks ownership during "+status,async()=>{
+   const h=harness(undefined,compiled);h.caseListRetry=async()=>{};
+   Object.assign(h.queue(),{status,retryAt:Timestamp.fromMillis(0),claimToken:"monthly-lease"});
+   let replacement;
+   h.onCommit=writes=>{
+    if(!replacement&&writes.some(write=>write.data.status===next)){
+     replacement={...h.queue(),operation:"case_list.assign",caseListMonthlyReason:"CASE_LIST_PREWRITE_BUSY"};
+     h.records.set("sheetSyncQueue/"+queueId,replacement);
+    }
+   };
+   await h.retry();
+   assert(replacement);assert.deepEqual(h.queue(),replacement);
+   assert.equal(h.dbWrites,0);assert.equal(h.writes.length,0);
+  });
+ }
+ await test("exclusive monthly recovery "+variant+" stale legacy event cannot claim a monthly operation",async()=>{
+  const h=harness(undefined,compiled),event=pending();
+  Object.assign(h.queue(),{operation:"case_list.assign"});
+  const previous=clone(h.queue());
+  await h.run(event);
+  assert.deepEqual(h.queue(),previous);
+  assert.equal(h.dbWrites,0);assert.equal(h.writes.length,0);assert.deepEqual(h.metrics,[]);
+ });
 }
 // 実際の2入口をTS・build済みJSで呼び、キュー・DB・Sheets・計測の副作用を確認する。
 const pauseModes=[undefined,"paused","invalid","","ACTIVE"," active","active "];
@@ -241,7 +291,7 @@ await test("actual admin panel hides retry for unknown write",async()=>{
  const h=harness();h.failAfterWrite=true;await h.run();const issues=(await h.admin("getSheetWriteIssues")).issues;
  // Render the actual panel, manual review and read-only entry. Only the
  // Firebase configuration boundary is synthetic; no product UI is replaced.
- const modules={"./AdminSheetIssuePanel":"AdminSheetIssuePanel.tsx","./ManualSourceTransferReview":"ManualSourceTransferReview.tsx","./manual-source-transfer":"manual-source-transfer.ts","./SheetWriteReviewEntry":"SheetWriteReviewEntry.tsx","./sheet-write-review":"sheet-write-review.ts"},cache=new Map();
+ const modules={"./ManualNameUpEntry":"ManualNameUpEntry.tsx","./ManualNameUpReview":"ManualNameUpReview.tsx","./manual-nameup":"manual-nameup.ts","./AdminSheetIssuePanel":"AdminSheetIssuePanel.tsx","./ManualSourceTransferReview":"ManualSourceTransferReview.tsx","./manual-source-transfer":"manual-source-transfer.ts","./SheetWriteReviewEntry":"SheetWriteReviewEntry.tsx","./sheet-write-review":"sheet-write-review.ts"},cache=new Map();
  function loadPanel(name){
   if(cache.has(name))return cache.get(name);
   assert.ok(Object.hasOwn(modules,name),"Unreviewed admin fixture module: "+name);
@@ -267,7 +317,7 @@ await test("actual admin panel hides retry for unknown write",async()=>{
  assert.ok(!heldCaseList.includes(">再試行</button>"));assert.ok(!heldCaseList.includes(">保存結果を再照合</button>"));assert.ok(!heldCaseList.includes(">確認メモを記録</button>"));
  const manual=render([{...issues[0],operation:"case_list.manual",manualSourcePending:true,manualTransferPending:true,canSelectMonthlyTransfer:false,canRetry:true}]);
  assert.ok(manual.includes("シート手入力案件の移行確認"));assert.ok(manual.includes("照合が終わるまで保留"));assert.ok(!manual.includes(">再試行</button>"));assert.ok(!manual.includes(">確認メモを記録</button>"));assert.ok(!manual.includes(">保存結果を再照合</button>"));
- for(const name of ["./ManualSourceTransferReview","./manual-source-transfer","./SheetWriteReviewEntry","./sheet-write-review"])assert.ok(cache.has(name),"actual admin module loaded: "+name);
+ for(const name of ["./ManualNameUpEntry","./ManualNameUpReview","./manual-nameup","./ManualSourceTransferReview","./manual-source-transfer","./SheetWriteReviewEntry","./sheet-write-review"])assert.ok(cache.has(name),"actual admin module loaded: "+name);
 });
 async function expenseHarness(){
  const h=harness();
@@ -392,8 +442,14 @@ for(const [name,change]of [
 ])await test("cancellation rejects changed "+name,async()=>{const h=cancellationHarness(),id=await h.cancel();change(h,id);await h.runQueue(id);assert.equal(h.q(id).status,"blocked");assert.equal(h.writes.length,0);});
 await test("same-millisecond cancellation intents use unique keys",async()=>{const previous=Timestamp.now;Timestamp.now=()=>Timestamp.fromMillis(1789219000000);try{const h=cancellationHarness(),first=await h.cancel("first"),second=await h.cancel("second");assert.notEqual(h.q(first).idempotencyKey,h.q(second).idempotencyKey);assert.equal(h.job().cancellationSheetWrite.queueId,second);}finally{Timestamp.now=previous;}});
 await test("repeated identical cancellation does not create another intent",async()=>{const h=cancellationHarness(),first=await h.cancel("same"),second=await h.cancel("same");assert.equal(second,first);assert.equal(h.job().cancellationSheetWrite.queueId,first);});
+function setSyntheticStaffIdentity(h){
+ h.records.set("staffProfiles/"+staffId,{companyId,displayName:"Synthetic Staff",active:true});
+ h.records.set("authIdentities/synthetic-user",{companyId,staffId,active:true});
+}
 async function printedHarness(){
- const h=harness();h.job().netPrint={items:[{id:"printed-item",position:1,number:"12345678",version:1,printed:false}]};
+ const h=harness();
+ setSyntheticStaffIdentity(h);
+ h.job().netPrint={items:[{id:"printed-item",position:1,number:"12345678",version:1,printed:false}]};
  Object.assign(h.mapping().columns,{netPrint1:"Z",netPrint2:"AA",netPrint3:"AB"});
  h.mapping().operations["netprint.printed"]={values:[],styles:["netPrint1","netPrint2","netPrint3"]};
  h.mapping().operations["netprint.update"]={values:["netPrint1","netPrint2","netPrint3"],styles:["netPrint1","netPrint2","netPrint3"]};
@@ -453,7 +509,9 @@ await test("partial print reconfirmation retains ownership review",async()=>{con
 await test("failed reconfirmation retains old pending review atomically",async()=>{const h=await printedHarness();h.job().netPrint.needsPrintReview=true;h.job().netPrint.items[0].printed=false;h.onCommit=writes=>{if(writes.some(write=>Object.hasOwn(write.data,"netPrint.items")))throw Error("synthetic print save failure");};await assert.rejects(h.call("./netprint","markNetPrintPrinted",{jobId,itemId:"printed-item",dateKey},{uid:"synthetic-user",token:{companyId,role:"staff",staffId}}));assert.equal(h.job().netPrint.needsPrintReview,true);assert.equal(h.job().netPrint.items[0].printed,false);});
 async function assignmentHarness(profile={},compiled=false){
  const h=harness({LKC_SHEET_WRITE_MODE:"active"},compiled);h.records.delete(`sheetSyncQueue/${queueId}`);Object.assign(h.job(),{status:'open',assignedStaffId:null,assignedStaffName:null,publishable:true,preContact:null});
- h.records.set(`staffProfiles/${staffId}`,{companyId,active:true,displayName:'Synthetic Staff',...profile});
+ const ngHeader=Array(11).fill('');ngHeader[10]='NG会社';
+ const ngCompanies=h.core('./staff-ng','mergeStaffNg',[{sourceRef:{spreadsheetId:'synthetic-staff-master',sheetName:'マスターデータ'},ngCompanyObservation:h.core('./staff-ng','observeStaffNgCell','マスターデータ',ngHeader,Array(11).fill(''),10)}],companyId,staffId);
+ h.records.set(`staffProfiles/${staffId}`,{companyId,active:true,displayName:'Synthetic Staff',ngCompanies,...profile});
  h.mapping().operations['job.assign']={values:['staffName']};h.cells.set('B2','');
  h.apply=(requestId='synthetic-request-0001')=>h.call('./jobs','applyToJob',{jobId,requestId},{uid:'synthetic-user',token:{companyId,role:'staff',staffId}});
  return h;
@@ -568,7 +626,9 @@ await test('base pay changes increment imported review revision',async()=>{const
 for(const revision of [-1,'0',0.5,Number.MAX_SAFE_INTEGER])for(const action of ['cancel','legacyCancel','restore'])await test('invalid assignment revision '+revision+' prevents '+action,async()=>{const h=cancellationHarness();if(action==='restore')await h.cancel();h.job().revision=revision;const before=JSON.stringify([...h.records]);await assert.rejects(h[action](),{code:'failed-precondition'});assert.equal(JSON.stringify([...h.records]),before);});
 
 function submissionHarness(){
- const h=harness();h.records.delete('sheetSyncQueue/'+queueId);
+ const h=harness();
+ setSyntheticStaffIdentity(h);
+ h.records.delete('sheetSyncQueue/'+queueId);
  Object.assign(h.mapping().columns,{reportSubmitted:'I',salesFloorSubmitted:'J'});
  Object.assign(h.mapping().operations,{'submission.report':{values:['reportSubmitted']},'submission.sales_floor':{values:['salesFloorSubmitted']}});
  h.cells.set('I2','');h.cells.set('J2','');h.job().revision=1;let receipt=0;

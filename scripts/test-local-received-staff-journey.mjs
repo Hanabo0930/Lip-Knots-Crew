@@ -86,7 +86,8 @@ async function assignedFixture(nativeKind){
  }else await h.start();
  await h.run();await h.import();assert.deepEqual((await h.publishCurrent()).updated,[h.job.id]);
  h.staff=[0,1].map(i=>({uid:h.companyId+'-uid-'+i,token:{role:'staff',companyId:h.companyId,staffId:h.companyId+'-staff-'+i}}));
- for(const [i,user] of h.staff.entries())await db.doc('staffProfiles/'+user.token.staffId).set({companyId:h.companyId,active:true,displayName:'Synthetic Staff '+i});
+ const ng=require('../functions/lib/staff-ng.js'),ngHeader=Array(11).fill('');ngHeader[10]='NG会社';
+ for(const [i,user] of h.staff.entries()){const staffId=user.token.staffId,ngCompanies=ng.mergeStaffNg([{sourceRef:{spreadsheetId:'synthetic-staff-master',sheetName:'マスターデータ'},ngCompanyObservation:ng.observeStaffNgCell('マスターデータ',ngHeader,Array(11).fill(''),10)}],h.companyId,staffId);await db.doc('staffProfiles/'+staffId).set({companyId:h.companyId,active:true,displayName:'Synthetic Staff '+i,ngCompanies});}
  h.publishedRevision=(await h.job.get()).data().revision;
  h.apply=(i=0,requestId='synthetic-apply-request')=>jobs.applyToJob.run({auth:h.staff[i],data:{jobId:h.job.id,requestId,expectedJobRevision:h.publishedRevision}});return h;
 }

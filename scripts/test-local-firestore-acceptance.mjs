@@ -63,7 +63,8 @@ async function fixture(count=1) {
   const companyId='synthetic-sdk-'+(++sequence),sheetId='synthetic-sheet-'+sequence;
   const staff=[0,1].map(i=>({uid:companyId+'-uid-'+i,token:{role:'staff',companyId,staffId:companyId+'-staff-'+i}}));
   const manager={uid:companyId+'-admin',token:{role:'admin',companyId}};
-  for(const [i,user] of staff.entries())await db.doc('staffProfiles/'+user.token.staffId).set({companyId,active:true,displayName:'Synthetic Staff '+i});
+ const ng=load('staff-ng'),ngHeader=Array(11).fill('');ngHeader[10]='NG会社';
+ for(const [i,user] of staff.entries()){const staffId=user.token.staffId,ngCompanies=ng.mergeStaffNg([{sourceRef:{spreadsheetId:'synthetic-staff-master',sheetName:'マスターデータ'},ngCompanyObservation:ng.observeStaffNgCell('マスターデータ',ngHeader,Array(11).fill(''),10)}],companyId,staffId);await db.doc('staffProfiles/'+staffId).set({companyId:companyId,active:true,displayName:'Synthetic Staff '+i,ngCompanies});}
   const month=tomorrow.slice(0,4)+'.'+Number(tomorrow.slice(5,7));
   const rows=Array.from({length:count},(_,i)=>{
     const row=Array(55).fill('');Object.assign(row,{0:tomorrow,1:'',5:'Not assignment',9:'Synthetic Client',10:'Synthetic Store '+i,11:'Synthetic Maker',12:'Synthetic Menu',14:'10:00-18:00',16:'sdk-case-'+i});return row;

@@ -1,7 +1,10 @@
 import { db } from "./firebase";
+import type { sheets_v4 } from "googleapis";
 import { createReadOnlySheetsClient } from "./sheet-reader";
 import { HttpsError } from "firebase-functions/v2/https";
 import { configuredCaseListSource, hashCaseList, inspectCaseList, type Cell } from "./case-list-source-core";
+
+type ArchivedSpreadsheetGet = (request: sheets_v4.Params$Resource$Spreadsheets$Get) => Promise<{ data: sheets_v4.Schema$Spreadsheet }>;
 
 type StaffIdentity = { staffId: string; identityVerified: boolean };
 type Options = { includeDependencies?: boolean; resolveStaff?: (name: string) => StaffIdentity | null };
@@ -111,28 +114,41 @@ export async function readGasTransferMonthPlan(snapshot: CompactSnapshot, dateKe
 
 /** Read-only external-origin reconciliation. Unlike the native reader this
  * proves Source absence; native callers retain their original strict path. */
-export async function readArchivedCaseListSnapshot(companyId: string, caseId: string) {
+export async function readArchivedCaseListSnapshot(companyId: string, caseId: string, options: Options & { expectedSpreadsheetId?: string; getSpreadsheet?: ArchivedSpreadsheetGet } = {}) {
   if (!companyId || companyId.includes("/") || !/^LKCASE_[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(caseId)) stopped("ARCHIVED_REQUEST_INVALID");
   const config = (await db.collection("sheetImportConfigs").doc(companyId).get()).data();
   if (!config || config.companyId !== companyId || config.caseListEnabled !== true) stopped("ARCHIVED_CONFIG_DISABLED");
-  const spreadsheetId = configuredCaseListSource(config.spreadsheetId).spreadsheetId, sheets = await createReadOnlySheetsClient();
+  const spreadsheetId = checked(() => configuredCaseListSource(config.spreadsheetId).spreadsheetId);
+  if (options.expectedSpreadsheetId !== undefined && spreadsheetId !== options.expectedSpreadsheetId) stopped("ARCHIVED_BOOK_SCOPE_CHANGED");
+  let getSpreadsheet = options.getSpreadsheet;
+  if (!getSpreadsheet) {
+    const { spreadsheets } = await createReadOnlySheetsClient();
+    getSpreadsheet = request => spreadsheets.get(request);
+  }
+  const readSpreadsheet = getSpreadsheet;
   const readStartedAt = Date.now();
-  const metadata = (await sheets.spreadsheets.get({ spreadsheetId, fields: METADATA_FIELDS })).data;
+  const metadata = (await readSpreadsheet({ spreadsheetId, fields: METADATA_FIELDS })).data;
   if (metadata.spreadsheetId !== spreadsheetId) stopped("ARCHIVED_BOOK_MISMATCH");
   const read = async (ranges: string[]) => {
     const request = { spreadsheetId, ranges, includeGridData: true, fields: cellFields([...compact.FULL_FIELDS, "effectiveFormat"]) };
-    const response = (await sheets.spreadsheets.get(request)).data;
+    const response = (await readSpreadsheet(request)).data;
     return { request, response };
   };
   const indexRequest = { spreadsheetId, ranges: checked(() => compact.createIndexRanges(metadata)), includeGridData: true, fields: cellFields(compact.VALUE_FIELDS) };
-  const indexRead = { request: indexRequest, response: (await sheets.spreadsheets.get(indexRequest)).data };
+  const indexRead = { request: indexRequest, response: (await readSpreadsheet(indexRequest)).data };
   const archive = compact as unknown as {
     inspectArchivedCompactIndex(input: unknown): { fullRanges: string[] };
     createArchivedCompactSnapshot(input: unknown): Record<string, any>;
   };
   const plan = checked(() => archive.inspectArchivedCompactIndex({ metadata, indexReads: [indexRead], caseId }));
   const fullRead = await read(plan.fullRanges);
-  const snapshot = checked(() => archive.createArchivedCompactSnapshot({ metadata, indexReads: [indexRead], fullReads: [fullRead], caseId }));
+  const dependencyEvidence: Record<string, unknown>[] = [];
+  if (options.includeDependencies === true) for (const plan of checked(() => compact.createDependencyPlans(metadata))) {
+    const request = { spreadsheetId, ranges: [plan.range], includeGridData: true, fields: cellFields(compact.VALUE_FIELDS) };
+    const response = (await readSpreadsheet(request)).data;
+    dependencyEvidence.push(checked(() => compact.createDependencyEvidence({metadata, reads: [{request, response}], title: plan.title})));
+  }
+  const snapshot = checked(() => archive.createArchivedCompactSnapshot({ metadata, indexReads: [indexRead], fullReads: [fullRead], caseId, includeDependencies: options.includeDependencies === true, dependencyEvidence }));
   return { ...snapshot, readStartedAt, observedAt: Date.now() };
 }
 

@@ -9,9 +9,9 @@ const start=source.indexOf('  async function fetchDevices('),end=source.indexOf(
 assert.ok(start>=0&&end>start);
 function setup(){
  const state={calls:[],messages:[],logouts:0,confirmations:0,devices:[{id:'current',active:true},{id:'other',active:true}]};
- const ctx={Error,authLoadVersionRef:{current:1},firebaseConfigured:true,functions:{},deviceSessionId:'current',devices:state.devices,isCurrentDevice:d=>d.id==='current',deviceLabel:()=> 'demo',
+ const ctx={Error,user:{uid:'user'},companyId:'company',staffId:'staff',authLoadVersionRef:{current:1},firebaseConfigured:true,functions:{},deviceSessionId:'current',devices:state.devices,isCurrentDevice:d=>d.id==='current',deviceLabel:()=> 'demo',
  setDeviceListUncertain:value=>state.uncertain=value,confirm:()=>{state.confirmations++;return true;},setPendingDeviceId:v=>state.pending=v,setDevices:v=>state.devices=typeof v==='function'?v(state.devices):v,setMessage:v=>state.messages.push(v),setShowAccountMenu:()=>{},setShowDiagnostics:()=>{},closeDiagnostics:()=>{},setShowDevices:()=>{},
- logoutCurrentUser:async()=>{state.logouts++;if(state.logoutFailure)throw Error('signout offline');},httpsCallable:(_f,name)=>input=>new Promise((resolve,reject)=>state.calls.push({name,input,resolve,reject}))};
+ logoutRevokedSession:async()=>{state.logouts++;if(state.logoutFailure)throw Error('signout offline');},httpsCallable:(_f,name)=>input=>new Promise((resolve,reject)=>state.calls.push({name,input,resolve,reject}))};
  const hook={exports:{},require:()=>({useCallback:f=>f,useRef:value=>({current:value}),useState:initial=>[initial(),()=>{}]})};
  runInNewContext(ts.transpileModule(fs.readFileSync('apps/staff/src/useAsyncAction.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,hook);
  Object.assign(ctx,hook.exports.useAsyncAction());runInNewContext(ts.transpileModule(source.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);return{ctx,state};

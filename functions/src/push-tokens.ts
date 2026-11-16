@@ -8,7 +8,8 @@ import {
   requireAuth,
   staffFromClaims,
 } from "./utils";
-import { enqueueNotification } from "./notification-core";
+import { enqueueNotification, readPushTestRecipient, type StaffPushTestRequest } from "./notification-core";
+import { readActiveStaffProfile, readStaffDeviceCredential, type StaffDeviceCredential } from "./staff-session";
 import { assertProductionOperational } from "./system-safety";
 import { assertDeviceAuthentication } from "./device-authentication";
 import {
@@ -51,6 +52,7 @@ export const registerPushToken = onCall(async (request) => {
   }
 
   const staffId = role === "staff" ? staffFromClaims(session.token) : null;
+  const credential = staffId ? readStaffDeviceCredential(session.token) : null;
   if (staffId && (!input.deviceSessionId.trim() || /[\/\\\u0000-\u001f\u007f]/.test(input.deviceSessionId))) {
     throw new HttpsError("permission-denied", "端末登録を確認できません。再読み込みしてください。");
   }
@@ -58,19 +60,8 @@ export const registerPushToken = onCall(async (request) => {
   const ref = db.collection("pushTokens").doc(tokenHash);
   await db.runTransaction(async (tx) => {
     if (staffId) {
-      const [profile, device] = await Promise.all([
-        tx.get(db.collection("staffProfiles").doc(staffId)),
-        tx.get(db.collection("deviceSessions").doc(input.deviceSessionId)),
-      ]);
-      if (!profile.exists || profile.data()?.active !== true || profile.data()?.companyId !== companyId) {
-        throw new HttpsError("permission-denied", "利用停止中です。");
-      }
-      const registered = device.data();
-      if (!device.exists || registered?.active !== true || registered.companyId !== companyId
-        || registered.staffId !== staffId || registered.uid !== session.uid) {
-        throw new HttpsError("permission-denied", "端末登録を確認できません。再ログインしてください。");
-      }
-      assertDeviceAuthentication(registered, session.token.auth_time);
+      await readActiveStaffProfile(tx, companyId, staffId, session.uid, session.token.auth_time, { deviceClaims: session.token });
+      await verifyPushDevice(tx, companyId, staffId, session.uid, session.token.auth_time, input.deviceSessionId, credential);
     }
     tx.set(ref, {
       companyId,
@@ -80,6 +71,9 @@ export const registerPushToken = onCall(async (request) => {
       token: input.token,
       tokenHash,
       deviceSessionId: input.deviceSessionId,
+      crewDeviceSession: credential?.crewDeviceSession ?? null,
+      crewDeviceGeneration: credential?.crewDeviceGeneration ?? null,
+      registeredAuthTime: credential ? session.token.auth_time : null,
       permission: input.permission,
       userAgent: input.userAgent,
       platform: input.platform,
@@ -104,11 +98,16 @@ export const unregisterPushToken = onCall(async (request) => {
     throw new HttpsError("permission-denied", "通知情報が一致しません。");
   }
   const staffId = role === "staff" ? staffFromClaims(session.token) : null;
+  const credential = staffId ? readStaffDeviceCredential(session.token) : null;
   return db.runTransaction(async (tx) => {
+    if (staffId) {
+      await readActiveStaffProfile(tx, companyId, staffId, session.uid, session.token.auth_time, { deviceClaims: session.token });
+      if (credential) await verifyPushDevice(tx, companyId, staffId, session.uid, session.token.auth_time, credential.crewDeviceSession, credential);
+    }
     const snap = await tx.get(ref);
     if (!snap.exists) return { removed: true };
     if (snap.data()?.uid !== session.uid || snap.data()?.companyId !== companyId
-      || snap.data()?.role !== role || (role === "staff" && snap.data()?.staffId !== staffId)) {
+      || snap.data()?.role !== role || (role === "staff" && (snap.data()?.staffId !== staffId || !pushDeviceMatches(snap.data(), credential)))) {
       throw new HttpsError("permission-denied", "通知情報が一致しません。");
     }
     if (snap.data()?.active === false) return { removed: true };
@@ -130,11 +129,12 @@ export const getPushStatus = onCall(async (request) => {
     throw new HttpsError("permission-denied", "通知状態を確認できません。");
   }
   const staffId = role === "staff" ? staffFromClaims(session.token) : null;
+  const credential = staffId ? readStaffDeviceCredential(session.token) : null;
   if (staffId) {
-    const profile = await db.collection("staffProfiles").doc(staffId).get();
-    if (!profile.exists || profile.data()?.companyId !== companyId || profile.data()?.active !== true) {
-      throw new HttpsError("permission-denied", "通知状態を確認できません。");
-    }
+    await db.runTransaction(async tx => {
+      await readActiveStaffProfile(tx, companyId, staffId, session.uid, session.token.auth_time, { deviceClaims: session.token });
+      if (credential) await verifyPushDevice(tx, companyId, staffId, session.uid, session.token.auth_time, credential.crewDeviceSession, credential);
+    }, { readOnly: true });
   }
   const base = db.collection("pushTokens")
     .where("companyId", "==", companyId)
@@ -149,7 +149,7 @@ export const getPushStatus = onCall(async (request) => {
     const page = await query.get();
     for (const doc of page.docs) {
       const current = doc.data();
-      if (current.role === role && (role !== "staff" || current.staffId === staffId)) {
+      if (current.role === role && (role !== "staff" || (current.staffId === staffId && pushDeviceMatches(current, credential)))) {
         visible.push(doc);
         if (visible.length === 20) break;
       }
@@ -168,6 +168,7 @@ export const getPushStatus = onCall(async (request) => {
       failureCount: number;
       invalidTokenCount: number;
       failureReason: PushFailureReason;
+      deliveryVerificationRequired?: true;
     };
   } = {
     enabled: visible.length > 0,
@@ -185,16 +186,15 @@ export const getPushStatus = onCall(async (request) => {
     throw new HttpsError("not-found", "通知テストを確認できません。");
   }
   const data = queue.data() ?? {};
-  if (
-    data.companyId !== companyId ||
-    data.data?.requestedByUid !== session.uid ||
-    (role === "staff"
-      ? data.category !== "push_test" || data.targetStaffId !== staffId
-      : data.category !== "push_test_admin" || data.targetRole !== "admin")
-  ) {
+  const target = readPushTestRecipient(data);
+  const categoryMatches = data.category === (role === "staff" ? "push_test" : "push_test_admin");
+  const targetMatches = target ? target.uid === session.uid && (target.staff?.staffId ?? null) === staffId &&
+      pushDeviceMatches(target.staff?.deviceCredential, credential)
+    : !credential && data.targetUid === undefined && (role === "staff" ? data.targetStaffId === staffId : data.targetRole === "admin");
+  if (data.companyId !== companyId || data.data?.requestedByUid !== session.uid || !categoryMatches || !targetMatches) {
     throw new HttpsError("permission-denied", "通知テストを確認できません。");
   }
-  const status = String(data.status ?? "queued");
+  const status = data.status === "superseded" ? "error" : String(data.status ?? "queued");
   response.test = {
     queueId: input.queueId,
     status,
@@ -203,6 +203,7 @@ export const getPushStatus = onCall(async (request) => {
     failureCount: Number(data.failureCount ?? 0),
     invalidTokenCount: Number(data.invalidTokenCount ?? 0),
     failureReason: normalizePushFailureReason(data.failureReason),
+    ...(data.deliveryVerificationRequired === true ? { deliveryVerificationRequired: true } : {}),
   };
   return response;
 });
@@ -211,37 +212,59 @@ export const sendTestPush = onCall(async (request) => {
   const session = requireAuth(request);
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
-  const role = String(session.token.role ?? "");
-  let result: { queued: boolean; queueId: string };
-  if (role === "staff") {
-    result = await enqueueNotification({
-      companyId,
-      targetStaffId: staffFromClaims(session.token),
-      title: "通知テスト",
-      body: "Lip Knots Crewから通知を受け取れます。",
-      route: "/",
-      category: "push_test",
-      dedupeKey: `${session.uid}_${Date.now()}`,
-      bypassQuietHours: true,
-      data: { requestedByUid: session.uid },
-    });
-  } else if (role === "admin") {
-    result = await enqueueNotification({
-      companyId,
-      targetRole: "admin",
-      title: "管理者通知テスト",
-      body: "Lip Knots Crewの管理通知を受け取れます。",
-      route: "/",
-      category: "push_test_admin",
-      dedupeKey: `${session.uid}_${Date.now()}`,
-      bypassQuietHours: true,
-      data: { requestedByUid: session.uid },
-    });
-  } else {
+  const role = session.token.role;
+  if (role !== "staff" && role !== "admin") {
     throw new HttpsError("permission-denied", "通知テストを実行できません。");
   }
-  return result;
+  let testRequest: StaffPushTestRequest | undefined;
+  if (role === "staff") {
+    const staffId = staffFromClaims(session.token);
+    const authTime = session.token.auth_time;
+    if (typeof authTime !== "number" || !Number.isSafeInteger(authTime) ||
+        authTime < 0 || authTime > 253402300799) {
+      throw new HttpsError("permission-denied", "ログイン状態を確認してください。");
+    }
+    const credential = readStaffDeviceCredential(session.token);
+    await db.runTransaction(async tx => {
+      await readActiveStaffProfile(tx, companyId, staffId, session.uid, authTime, { requireIdentity: true, deviceClaims: session.token });
+      if (credential) await verifyPushDevice(tx, companyId, staffId, session.uid, authTime, credential.crewDeviceSession, credential);
+    }, { readOnly: true });
+    testRequest = { staffId, authTime, ...(credential ? { deviceCredential: credential } : {}) };
+  }
+  return enqueueNotification({
+    companyId,
+    targetUid: session.uid,
+    title: role === "staff" ? "通知テスト" : "管理者通知テスト",
+    body: role === "staff" ? "Lip Knots Crewから通知を受け取れます。" : "Lip Knots Crewの管理通知を受け取れます。",
+    route: "/",
+    category: role === "staff" ? "push_test" : "push_test_admin",
+    dedupeKey: [session.uid, ...(testRequest?.deviceCredential ? [testRequest.deviceCredential.crewDeviceSession] : []), Date.now()].join("_"),
+    bypassQuietHours: true,
+    data: { requestedByUid: session.uid },
+    ...(testRequest ? { testRequest } : {}),
+  });
 });
+
+function pushDeviceMatches(
+  record: FirebaseFirestore.DocumentData | undefined, credential: StaffDeviceCredential | null,
+): boolean {
+  if (!credential) return record?.crewDeviceSession == null && record?.crewDeviceGeneration == null;
+  return record?.crewDeviceSession === credential.crewDeviceSession &&
+    record.crewDeviceGeneration === credential.crewDeviceGeneration;
+}
+
+async function verifyPushDevice(
+  tx: Pick<FirebaseFirestore.Transaction, "get">, companyId: string, staffId: string, uid: string,
+  authTime: unknown, deviceSessionId: string, credential: StaffDeviceCredential | null,
+): Promise<void> {
+  const fail = () => new HttpsError("permission-denied", "端末登録を確認できません。再ログインしてください。");
+  if (credential && (deviceSessionId !== credential.crewDeviceSession || typeof authTime !== "number" ||
+      !Number.isSafeInteger(authTime) || authTime < 0 || authTime > 253402300799)) throw fail();
+  const registered = (await tx.get(db.collection("deviceSessions").doc(deviceSessionId))).data();
+  if (registered?.active !== true || registered.companyId !== companyId || registered.staffId !== staffId ||
+      registered.uid !== uid || (credential && registered.credentialGeneration !== credential.crewDeviceGeneration)) throw fail();
+  assertDeviceAuthentication(registered, authTime);
+}
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");

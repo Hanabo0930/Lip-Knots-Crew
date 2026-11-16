@@ -25,10 +25,13 @@ const sdk = {
     const { constraints } = query;
     let result = records.filter(row => constraints.filter(c => c.kind === "where").every(c =>
       c.op === "==" ? row[c.field] === c.value : c.op === ">=" ? row[c.field] >= c.value : row[c.field] < c.value));
-    assert.deepEqual(constraints.find(c => c.kind === "order"), { kind: "order", field: "dateKey", direction: "asc" });
-    result.sort(compare);
+    const order = constraints.find(c => c.kind === "order");
+    assert.equal(order.field, "dateKey");
+    assert.ok(["asc", "desc"].includes(order.direction));
+    const direction = order.direction === "desc" ? -1 : 1;
+    result.sort((a,b) => direction * compare(a,b));
     const after = constraints.find(c => c.kind === "after");
-    if (after) result = result.filter(row => compare(row, after.cursor.data()) > 0);
+    if (after) result = result.filter(row => direction * compare(row, after.cursor.data()) > 0);
     return { docs: result.slice(0, constraints.find(c => c.kind === "limit").count).map(doc) };
   },
 };
@@ -98,7 +101,7 @@ await test("Year constraints and owner predicates reach the actual query adapter
   assert.equal(JSON.stringify(x.state().years), "[2026,2025]");
   assert.equal(JSON.stringify(x.state().rows.map(r => r.id)), '["c"]');
   x.control.selectYear(2025); await tick();
-  assert.equal(JSON.stringify(x.state().rows.map(r => r.id)), '["a","b"]');
+  assert.equal(JSON.stringify(x.state().rows.map(r => r.id)), '["b","a"]');
   for (const q of queries) {
     assert.ok(q.constraints.some(c => c.field === "companyId" && c.op === "==" && c.value === scope.companyId));
     assert.ok(q.constraints.some(c => c.field === "assignedStaffId" && c.op === "==" && c.value === scope.staffId));
@@ -135,6 +138,56 @@ await test("Selected year changing during discovery uses the latest context and 
   assert.equal(invalid.state().year, 2026);
   assert.ok(!invalid.state().years.includes(1999));
 });
+await test("Newest stored work dates appear first without changing the year lookup", async () => {
+  records = [
+    ...Array.from({length: 65}, (_, i) => row("older-" + String(i).padStart(2,"0"), "2026-01-06")),
+    row("recent-a","2026-09-28"), row("recent-z","2026-09-28"),
+    row("last-year","2025-12-31"), row("today",scope.today), row("newer-other","2026-09-29",{assignedStaffId:"someone-else"}),
+  ];
+  const x=instance(); await x.control.initialize();
+  assert.deepEqual(Array.from(x.state().years),[2026,2025]);
+  assert.deepEqual(Array.from(x.state().rows.slice(0,3),item=>item.id),["recent-z","recent-a","older-64"]);
+  assert.match(html(x.state()),/新しい勤務日から読み込みます/);
+  assert.deepEqual(queries.map(q=>q.constraints.find(c=>c.kind==="order").direction),["asc","desc"]);
+  x.control.loadMore(); await tick();
+  assert.equal(x.state().rows.length,67);
+  assert.equal(new Set(x.state().rows.map(item=>item.id)).size,67);
+  assert.equal(x.state().rows.at(-1).id,"older-00");
+  assert.equal(x.state().hasMore,false);
+  const indexes=JSON.parse(readFileSync(resolve(root,"firestore.indexes.json"),"utf8"));
+  for(const direction of ["ASCENDING","DESCENDING"]){
+    assert.ok(indexes.indexes.some(index=>index.collectionGroup==="jobs" && index.queryScope==="COLLECTION" &&
+      JSON.stringify(index.fields)===JSON.stringify([
+        {fieldPath:"companyId",order:"ASCENDING"},{fieldPath:"assignedStaffId",order:"ASCENDING"},
+        {fieldPath:"status",order:"ASCENDING"},{fieldPath:"dateKey",order:direction},
+      ])),direction+" scoped shift index must be defined");
+  }
+});
+await test("Newest initial shift read returns recent past and retains upcoming work",async()=>{
+  records=[
+    ...Array.from({length:85},(_,i)=>row("old-"+String(i).padStart(2,"0"),"2025-12-30")),
+    row("recent","2026-09-30"),row("today",scope.today),row("future","2026-10-04"),
+    row("other-company","2026-09-30",{companyId:"another-company"}),
+    row("other-person","2026-09-30",{assignedStaffId:"other-staff"}),
+  ];
+  const source=readFileSync(resolve(root,"apps/staff/src/App.tsx"),"utf8");
+  const start=source.indexOf("  async function fetchMyJobs("),end=source.indexOf("  async function loadMoreUpcomingShifts(",start);
+  assert.ok(start>=0&&end>start);
+  const ctx={...sdk,...load("apps/staff/src/job-list.ts"),staffId:scope.staffId,companyId:scope.companyId,db:{},
+    localDateKey:()=>scope.today,getDocs:()=>assert.fail("this test requires server reads"),
+    pastShiftVersionRef:{current:0},authLoadVersionRef:{current:1},upcomingShiftCursorRef:{current:null},pastShiftDateRef:{current:""},
+    setHasMoreUpcomingShifts:()=>{},setUpcomingShiftMessage:()=>{}};
+  runInNewContext(ts.transpileModule(source.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,ctx);
+  const jobs=Array.from(await ctx.fetchMyJobs(scope.staffId,scope.companyId,true));
+  assert.equal(jobs.length,52);
+  assert.ok(jobs.some(job=>job.id==="recent"));
+  assert.ok(jobs.some(job=>job.id==="today"));
+  assert.ok(jobs.some(job=>job.id==="future"));
+  assert.ok(!jobs.some(job=>job.id==="old-00" || job.id.startsWith("other-")));
+  assert.deepEqual(queries.map(q=>q.constraints.find(c=>c.kind==="order").direction),["asc","desc"]);
+  assert.deepEqual(queries.map(q=>q.constraints.find(c=>c.kind==="limit").count),[301,51]);
+});
+
 await test("Same-date cursor paging, double-click exclusion and loaded-page navigation", async () => {
   records = Array.from({ length: 121 }, (_, i) => row("row-" + String(i).padStart(3, "0"), "2026-01-01"));
   const x = instance(); await x.control.initialize();
@@ -147,30 +200,30 @@ await test("Same-date cursor paging, double-click exclusion and loaded-page navi
   x.control.loadMore(); await tick();
   assert.equal(x.state().rows.length, 121); assert.equal(x.state().hasMore, false);
   assert.equal(new Set(x.state().rows.map(r => r.id)).size, 121);
-  assert.equal(shiftPage(x.state().rows, 0).rows[0].id, "row-000");
-  assert.equal(shiftPage(x.state().rows, 1).rows[0].id, "row-050");
+  assert.equal(shiftPage(x.state().rows, 0).rows[0].id, "row-120");
+  assert.equal(shiftPage(x.state().rows, 1).rows[0].id, "row-070");
   assert.equal(shiftPage(x.state().rows, 2).rows.length, 21);
   assert.match(html(x.state(), 1), /前の50件/); assert.match(html(x.state(), 1), /次の50件/);
 });
 await test("Mixed-case same-date identifiers preserve Firestore cursor order", async () => {
   records = ["A", "Z", "_", "a", "z"].map(id => row(id, "2026-01-01"));
   const x = instance(); await x.control.initialize();
-  assert.equal(JSON.stringify(x.state().rows.map(r => r.id)), '["A","Z","_","a","z"]');
+  assert.equal(JSON.stringify(x.state().rows.map(r => r.id)), '["z","a","_","Z","A"]');
 });
 await test("Cancelled rows advance the raw cursor without falsely declaring an empty year", async () => {
-  records = Array.from({ length: 51 }, (_, i) => row("row-" + String(i).padStart(3, "0"), "2026-01-01", { cancelled: i < 50 }));
+  records = Array.from({ length: 51 }, (_, i) => row("row-" + String(i).padStart(3, "0"), "2026-01-01", { cancelled: i > 0 }));
   const x = instance(); await x.control.initialize();
   assert.equal(x.state().rows.length, 0); assert.equal(x.state().hasMore, true);
   assert.match(html(x.state()), /この読込範囲/);
   x.control.loadMore(); await tick();
-  assert.equal(x.state().rows[0].id, "row-050"); assert.equal(x.state().hasMore, false);
+  assert.equal(x.state().rows[0].id, "row-000"); assert.equal(x.state().hasMore, false);
 });
 await test("Pending applications advance history cursor without appearing as confirmed", async () => {
-  records = Array.from({ length: 51 }, (_, i) => row("pending-" + String(i).padStart(3, "0"), "2026-01-01", { applicationUnconfirmed: i < 50 }));
+  records = Array.from({ length: 51 }, (_, i) => row("pending-" + String(i).padStart(3, "0"), "2026-01-01", { applicationUnconfirmed: i > 0 }));
   const x = instance(); await x.control.initialize();
   assert.equal(x.state().rows.length, 0); assert.equal(x.state().hasMore, true);
   x.control.loadMore(); await tick();
-  assert.equal(x.state().rows[0].id, "pending-050"); assert.equal(x.state().hasMore, false);
+  assert.equal(x.state().rows[0].id, "pending-000"); assert.equal(x.state().hasMore, false);
 });
 await test("Year switching ignores old responses and same-year duplicate requests", async () => {
   records = [row("old", "2025-01-01"), row("new", "2026-01-01")];

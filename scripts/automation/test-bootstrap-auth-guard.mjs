@@ -6,7 +6,13 @@ for(const [before,after]of [
  ['requireAuth(request)','unverified(request)'],['requireAdmin(request)','unverified(request)'],['!user.emailVerified','!user.verifiedElsewhere'],['admins.includes(email)','true'],['companyFromClaims(session.token)','input.companyId'],
  ['index.active !== true','!index.active'],['typeof value !== "string"','false'],['!value.trim()','false'],['/[\\/\\\\\\u0000-\\u001f\\u007f]/.test(value)','false'],
  ['!profileSnap.exists','false'],['profileSnap.data()?.active !== true','false'],['profileSnap.data()?.companyId !== index.companyId','false'],
- ['.doc(emailHash(email))','.doc(input.emailHash)'],['.doc(index.staffId)','.doc(input.staffId)'],['companyId: index.companyId','companyId: input.companyId'],['staffId: index.staffId','staffId: input.staffId'],
+ ['.doc(normalizedEmailHash)','.doc(input.emailHash)'],['.doc(index.staffId)','.doc(input.staffId)'],['companyId: index.companyId','companyId: input.companyId'],['staffId: index.staffId','staffId: input.staffId'],
+ ['const claims = await db.runTransaction(async (tx) => {','const claims = await unsafeWrite(async (tx) => {'],
+ ['.doc(session.uid);','.doc(input.uid);'],['tx.get(identityRef)','identityRef.get()'],
+ ['identity.staffId !== index.staffId','false'],['identity?.companyId !== index.companyId','false'],
+ ['active !== false || revokedAt == null','false'],['authTime < revokedAt.seconds','false'],
+ ['revokedAt.nanoseconds > 0','false'],['!(revokedAt instanceof Timestamp)','false'],
+ ['tx.set(identityRef,','db.set(identityRef,'],['tx.set(profileRef,','db.set(profileRef,'],
  ['auth.setCustomUserClaims(session.uid, claims)','auth.setCustomUserClaims(input.uid, claims)'],['companyId: defaultCompanyId.value()','companyId: input.companyId'],
  ]){assert.ok(source.includes(before),'target absent '+before);assert.deepEqual(run(source.replace(before,after)),{passed:false,exitCode:1},before);cases++;}
 console.log(JSON.stringify({bootstrapGuardTests:cases,functions:['bootstrapSession'],cloudOperations:false}));

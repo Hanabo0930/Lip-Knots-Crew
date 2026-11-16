@@ -1,3 +1,4 @@
+import {observeStaffNgCell,mergeStaffNg} from "./staff-ng";
 import {
   createStaffId,
   isValidEmail,
@@ -69,6 +70,7 @@ export function parseStaffSheet(
       rank: cellText(row, config.columns.rank) || "A",
       evaluationTags: splitTags(cellText(row, config.columns.evaluationTags)),
       evaluationMemo: cellText(row, config.columns.evaluationMemo),
+      ngCompanyObservation: observeStaffNgCell(sheetName, values[headerRow-1]??[], row, columnLetterToIndex(config.readRangeEndColumn)),
       sourceRef: {
         spreadsheetId,
         sheetName,
@@ -178,6 +180,7 @@ export function mergeStaffRows(rows: ParsedStaffRow[]): {
       rank,
       evaluationTags,
       evaluationMemo,
+      ngCompanies: mergeStaffNg(group,first.companyId,first.staffId),
       sourceRefs: group.map((row) => row.sourceRef),
       conflictWarnings,
     });

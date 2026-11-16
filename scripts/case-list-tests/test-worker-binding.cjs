@@ -3,22 +3,63 @@
 // Uses Node built-in TypeScript syntax stripping; it performs no cloud calls.
 // This is not a TypeScript semantic build or a real Firebase/Google acceptance.
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict'),crypto=require('node:crypto');
-const {stripTypeScriptTypes}=require('node:module');
+const ts=require('typescript');
 const src=path.resolve(__dirname,'../../functions/src');
+// Original sheet observations belong to this synthetic schedule; lease timing still uses the test clock.
+const sourceObservedAt='2026-11-01T00:00:00.000Z';
 const {buildWorkerCompactSnapshot}=require('./worker-compact-fixture.cjs');
 const sha=s=>crypto.createHash('sha256').update(s).digest('hex');
 class Stamp{constructor(ms){this.ms=ms;}toMillis(){return this.ms;}toDate(){return new Date(this.ms);}static now(){return new Stamp(Date.now());}static fromMillis(ms){return new Stamp(ms);}static fromDate(date){return Stamp.fromMillis(date.getTime());}}
 const DELETE={delete:true},FieldValue={serverTimestamp:()=>Stamp.now(),delete:()=>DELETE,increment:n=>({__increment:n})};
 function copy(x){if(x instanceof Stamp)return new Stamp(x.ms);if(Array.isArray(x))return x.map(copy);if(x&&typeof x==='object')return Object.fromEntries(Object.entries(x).map(([k,v])=>[k,copy(v)]));return x;}
-let clockOffset=0;class Clock extends Date{static now(){return Date.now()+clockOffset;}}
+let clockOffset=0;class Clock extends Date{
+  constructor(...args){super(...(args.length?args:[sourceObservedAt]));}
+  static now(){return Date.now()+clockOffset;}
+}
 let operational=true,nativeCalls=0,documents=new Map(),writes=0,readerProvider=null,nativeHandler=null,txTail=Promise.resolve(),afterCommit=null,generated=0;
 const documentReads=[],documentWrites=[];
 class Doc{constructor(p){this.path=p;this.id=p.split('/').pop();}async get(){documentReads.push(this.path);const data=documents.get(this.path);return {exists:data!==undefined,ref:this,id:this.id,data:()=>copy(data)};}collection(n){return new Query(this.path+'/'+n);}}
 class Query{constructor(p,filters=[],max=Infinity,after=null){this.path=p;this.filters=filters;this.max=max;this.after=after;}doc(id){return new Doc(this.path+'/'+(id??('generated_fixture_'+(++generated))));}where(k,op,v){assert.equal(op,'==');return new Query(this.path,[...this.filters,[k,v]],this.max,this.after);}limit(n){return new Query(this.path,this.filters,n,this.after);}orderBy(field){assert.equal(field,'__name__');return this;}startAfter(id){return new Query(this.path,this.filters,this.max,id);}async get(){documentReads.push(this.path+'/*');const found=[...documents].filter(([p,v])=>p.startsWith(this.path+'/')&&!p.slice(this.path.length+1).includes('/')&&this.filters.every(([k,w])=>v[k]===w)&&(!this.after||p.split('/').pop()>this.after)).sort(([a],[b])=>a<b?-1:a>b?1:0).slice(0,this.max);const docs=found.map(([p,data])=>({id:p.split('/').pop(),ref:new Doc(p),data:()=>copy(data)}));return {docs,size:docs.length};}}
 
-const db={collection:n=>new Query(n),runTransaction:async fn=>{const previous=txTail;let release;txTail=new Promise(r=>release=r);await previous;try{const pending=[];const tx={get:r=>r.get(),set:(r,v,o)=>pending.push(['set',r,v,o]),update:(r,v)=>pending.push(['set',r,v,{merge:true}]),create:(r,v)=>{assert(!documents.has(r.path));pending.push(['set',r,v,{}]);},delete:r=>pending.push(['delete',r])};const out=await fn(tx);for(const [kind,r,v,o]of pending){writes++;documentWrites.push(r.path);if(kind==='delete'){documents.delete(r.path);continue;}const data=o?.merge?copy(documents.get(r.path)||{}):{};for(const [k,val]of Object.entries(v)){if(val===DELETE)delete data[k];else if(val?.__increment!==undefined)data[k]=Number(data[k]??0)+val.__increment;else data[k]=copy(val);}documents.set(r.path,data);}if(afterCommit)afterCommit();return out;}finally{release();}}};
+let productionControlEnabled=false,concurrentStopAtCommit=null,controlConflicts=0;
+function productionControl(companyId,emergencyLock=false,generation=1){
+  productionControlEnabled=true;
+  documents.set("productionControls/"+companyId,{productionEnabled:true,emergencyLock,generation});
+}
+const db={collection:n=>new Query(n),async runTransaction(fn){
+ const previous=txTail;let release;txTail=new Promise(r=>release=r);await previous;
+ try{
+  for(let retry=0;retry<3;retry++){
+   const pending=[],controlReads=new Map();
+   const tx={
+    async get(r){
+     const snap=await r.get();
+     if(r.path.startsWith("productionControls/"))controlReads.set(r.path,JSON.stringify(snap.data()));
+     return snap;
+    },
+    set:(r,v,o)=>pending.push(["set",r,v,o]),update:(r,v)=>pending.push(["set",r,v,{merge:true}]),
+    create:(r,v)=>{assert(!documents.has(r.path));pending.push(["set",r,v,{}]);},delete:r=>pending.push(["delete",r])
+   };
+   const out=await fn(tx);
+   if(concurrentStopAtCommit&&pending.some(([,ref,value])=>ref.path===concurrentStopAtCommit.path&&concurrentStopAtCommit.matches(value))){
+    const {companyId}=concurrentStopAtCommit;concurrentStopAtCommit=null;
+    productionControl(companyId,true,2);
+   }
+   if([...controlReads].some(([ref,snapshot])=>JSON.stringify(documents.get(ref))!==snapshot)){controlConflicts++;continue;}
+   for(const [kind,r,v,o]of pending){
+    writes++;documentWrites.push(r.path);if(kind==="delete"){documents.delete(r.path);continue;}
+    const data=o?.merge?copy(documents.get(r.path)||{}):{};
+    for(const [k,val]of Object.entries(v)){if(val===DELETE)delete data[k];else if(val?.__increment!==undefined)data[k]=Number(data[k]??0)+val.__increment;else data[k]=copy(val);}
+    documents.set(r.path,data);
+   }
+   if(afterCommit)afterCommit();
+   return out;
+  }
+  throw Error("SYNTHETIC_RETRY_LIMIT");
+ }finally{release();}
+}};
 const cache=new Map();
-function load(name){const file=path.join(src,name+'.ts');if(cache.has(file))return cache.get(file);const source=fs.readFileSync(file,'utf8');const exports=[...source.matchAll(/^export\s+(?:async\s+)?(?:function|const|class)\s+(\w+)/gm)].map(m=>m[1]);let js=stripTypeScriptTypes(source,{mode:'transform'});js=js.replace(/^import\s+\{([^}]+)\}\s+from\s+"([^"]+)";?$/gm,(_,names,module)=>'const {'+names+'} = require('+JSON.stringify(module)+');').replace(/^export\s+/gm,'');js+='\nmodule.exports={'+exports.join(',')+'};';const context={Buffer,process,Error,Date:Clock,module:{exports:{}},console,require:specifier=>{
+function load(name){const file=path.join(src,name+'.ts');if(cache.has(file))return cache.get(file);const source=fs.readFileSync(file,'utf8');const exports=[...source.matchAll(/^export\s+(?:async\s+)?(?:function|const|class)\s+(\w+)/gm)].map(m=>m[1]);const js=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;const context={Buffer,process:name==='system-safety'?{env:{APP_ENVIRONMENT:'production'}}:process,Error,Date:Clock,module:{exports:{}},console,require:specifier=>{
   if(specifier==='node:crypto')return require(specifier);
   if(specifier==='firebase-functions/v2/https')return {onCall:(...args)=>args.at(-1),HttpsError:class extends Error{constructor(code,message){super(message);this.code=code;}}};
   if(specifier==='firebase-admin/firestore')return {Timestamp:Stamp,FieldValue,FieldPath:{documentId:()=>"__name__"}};
@@ -29,16 +70,25 @@ function load(name){const file=path.join(src,name+'.ts');if(cache.has(file))retu
   if(specifier==='./automation-intake')return {readMailApplicationForAssignment:async()=>assert.fail('Cancellation fixture cannot read mail applications')};
   if(specifier==='./case-mail-publication')return {readMailPublication:async()=>assert.fail('Cancellation fixture cannot read mail publication')};
   if(specifier==='./case-list-source')return {requireCaseListExecutive:token=>load('case-list-source-core').assertExecutive(token,process.env.EXECUTIVE_APPROVER_EMAILS||''),readCaseListPublication:async()=>assert.fail('Cancellation fixture cannot approve CaseList publication')};
-  if(specifier==='./system-safety')return {getProductionOperationalState:async()=>({operational}),assertProductionOperational:async()=>{if(!operational)throw Object.assign(new Error('stopped'),{code:'failed-precondition'});}};
+  if(specifier==='./system-safety')return {getProductionOperationalState:async(companyId,reader)=>productionControlEnabled?load('system-safety').getProductionOperationalState(companyId,reader):{operational},assertProductionOperational:async()=>{if(!operational)throw Object.assign(new Error('stopped'),{code:'failed-precondition'});}};
   if(specifier==='./case-list-monthly-reader')return {readCaseListMonthlySnapshot:async(...args)=>{if(!readerProvider)throw Error('NOT_USED_IN_GUARD_TEST');return readerProvider(...args);}};
   if(specifier.endsWith('.cjs'))return require(path.resolve(path.dirname(file),specifier));
   if(specifier.startsWith('./'))return load(specifier.slice(2));
   throw Error('Unexpected import '+specifier);
-}};vm.runInNewContext(js,context,{filename:file});cache.set(file,context.module.exports);return context.module.exports;}
+}};context.exports=context.module.exports;vm.runInNewContext(js,context,{filename:file});cache.set(file,context.module.exports);return context.module.exports;}
 const manualCore=load('case-list-manual-origin-core');
 const helper=load('case-list-source-core'),caseId=load('case-id'),sheet=load('sheet-write-core'),worker=load('case-list-monthly-worker');
 process.env.EXECUTIVE_APPROVER_EMAILS='owner@example.invalid';
-const results=[];async function test(name,fn){await fn();results.push({name,passed:true});}
+const results=[],onlyRecoveryStop=process.argv.includes("--recovery-stop-only");
+const stopPrefix="emergency stop during monthly recovery / ";
+async function test(name,fn){
+  if(onlyRecoveryStop&&!name.startsWith(stopPrefix))return;
+  try{await fn();results.push({name,passed:true});}
+  catch(error){
+    if(!onlyRecoveryStop)throw error;
+    results.push({name,passed:false,error:error.message});
+  }
+}
 // Pass the worker's actual public ACK through the real frontend selectors.
 const uiCache=new Map();
 function loadUiModel(relative){
@@ -66,7 +116,7 @@ function fixture(){
 function guard(f){return worker.assertCaseListMonthlyAuthority(f.queueId,f.queue,f.job,f.staff,f.lock,f.config,f.approval);}
 function ackFixture(f){const post={...copy(f.pre),rowRevision:sha('after-row')};post.sourceRevision=helper.hashCaseList({schema:'LK_CASE_LIST_AUTHORITY_REVISION_V1',caseId:f.a.sourceCaseId,rowRevision:post.rowRevision,ledgerRevision:post.ledgerRevision});const ack={schema:'LK_CASE_LIST_MONTHLY_ACK_V1',status:'MONTHLY_READBACK_VERIFIED',spreadsheetId:f.book,operationId:f.queueId,queueId:f.queueId,companyId:f.companyId,jobId:f.jobId,sourceCaseId:f.a.sourceCaseId,preCatalog:f.pre,postCatalog:post,preMonthlyContentHash:f.a.preMonthlyContentHash,postMonthlyContentHash:sha('post6w'),assignedJobRevision:5,staffId:f.staffId,staffName:f.staffName,dateKey:f.a.dateKey,target:{sheetId:11,title:'2026.11',fixedId:f.a.sourceCaseId,rowHint:50,readbackHash:sha('target6w')},financialReadbackHash:sha('fee33'),preserveSource:true};const nativeAssignment={schema:f.a.schema,authority:'CREW_QUEUE',queueId:f.queueId,operationId:f.queueId,companyId:f.companyId,jobId:f.jobId,caseId:f.a.sourceCaseId,staffId:f.staffId,staffName:f.staffName,dateKey:f.a.dateKey,assignedJobRevision:5,preCatalog:{rowRevision:f.pre.rowRevision,ledgerRevision:f.pre.ledgerRevision,sourceRevision:f.pre.sourceRevision},preMonthlyContentHash:f.a.preMonthlyContentHash,publicPayOffer:f.pay};const payload={stage:'ACCEPTED',operationId:f.queueId,caseId:f.a.sourceCaseId,spreadsheetId:f.book,sourceContentHash:ack.postMonthlyContentHash,destinationContentHash:ack.target.readbackHash,assignmentHash:helper.hashCaseList(nativeAssignment),ack};const intent={schema:'LK_MONTHLY_INTENT_V5',stage:'INTENT',spreadsheetId:f.book,operationId:f.queueId,caseId:f.a.sourceCaseId,fixedId:f.a.sourceCaseId,sourceContentHash:ack.postMonthlyContentHash,postMonthlyContentHash:ack.postMonthlyContentHash,preMonthlyContentHash:ack.preMonthlyContentHash,preCatalog:ack.preCatalog,postCatalog:ack.postCatalog,assignmentHash:payload.assignmentHash,month:{title:ack.target.title,sheetId:ack.target.sheetId,width:55},mapped:{idColumn:55,idCell:{userEnteredValue:{stringValue:f.a.sourceCaseId}},business:Array.from({length:54},()=>({}))},createdAt:123};intent.planHash=helper.hashCaseList({...intent,createdAt:0});payload.planHash=intent.planHash;const accepted={companyId:f.companyId,queueId:f.queueId,payload,payloadHash:helper.hashCaseList(payload)},intentDocument={companyId:f.companyId,queueId:f.queueId,payload:intent,payloadHash:helper.hashCaseList(intent)};return {ack,accepted,intentDocument};}
 function rehashDocuments(x){const intent=x.intentDocument.payload,without={...intent,createdAt:0};delete without.planHash;intent.planHash=helper.hashCaseList(without);x.accepted.payload.planHash=intent.planHash;x.intentDocument.payloadHash=helper.hashCaseList(intent);x.accepted.payloadHash=helper.hashCaseList(x.accepted.payload);}
-function reset(){clockOffset=0;afterCommit=null;generated=0;documentReads.length=0;documentWrites.length=0;documents=new Map();writes=0;operational=true;nativeCalls=0;readerProvider=null;nativeHandler=null;txTail=Promise.resolve();}
+function reset(){productionControlEnabled=false;concurrentStopAtCommit=null;controlConflicts=0;clockOffset=0;afterCommit=null;generated=0;documentReads.length=0;documentWrites.length=0;documents=new Map();writes=0;operational=true;nativeCalls=0;readerProvider=null;nativeHandler=null;txTail=Promise.resolve();}
 function seedRetry(f,patch={}){reset();documents.set('sheetSyncQueue/'+f.queueId,{...copy(f.queue),status:'retry_wait',errorType:'case_list_prewrite_busy',caseListMonthlyReason:'CASE_LIST_PREWRITE_BUSY',writeVerificationRequired:false,retryAt:Stamp.fromMillis(Date.now()-1000),...patch});documents.set('sheetImportConfigs/'+f.companyId,copy(f.config));}
 function syntheticFinanceFixture(){
   const cells=Array.from({length:65},()=>({}));
@@ -89,7 +139,7 @@ function journey(options={}){
   const ledgerHeader=helper.LEDGER_HEADERS.map(stringValue=>({userEnteredValue:{stringValue},effectiveValue:{stringValue}})),record=Array.from({length:25},()=>({}));
   for(const [i,stringValue]of [[0,f.a.sourceCaseId],[8,'未手配'],[19,JSON.stringify({schema:'LK_HISTORY_CORE_SNAPSHOT_V1',caseId:f.a.sourceCaseId,monthly:null})]])record[i]={userEnteredValue:{stringValue},effectiveValue:{stringValue}};
   const ledger=[[],[],ledgerHeader,record];
-  function catalog(){return helper.inspectCaseList([header,cells],ledger,new Date().toISOString(),f.book).jobs.find(j=>j.caseId===f.a.sourceCaseId).source;}
+  function catalog(){return helper.inspectCaseList([header,cells],ledger,sourceObservedAt,f.book).jobs.find(j=>j.caseId===f.a.sourceCaseId).source;}
   const current=catalog();f.pre=current;f.job.caseListSource=helper.publicCaseListSource(current);Object.assign(f.a,{sourceRowRevision:current.rowRevision,sourceLedgerRevision:current.ledgerRevision,sourceRevision:current.sourceRevision,preMonthlyContentHash:helper.caseListMonthlyContentHash(cells)});f.job.assignmentSheetWrite.sourceRevision=current.sourceRevision;f.job.caseListPublication.sourceRevision=current.sourceRevision;f.approval.expectedSourceRevision=current.sourceRevision;
   documents.set('sheetSyncQueue/'+f.queueId,copy(f.queue));documents.set('sheetImportConfigs/'+f.companyId,copy(f.config));documents.set('jobs/'+f.jobId,copy(f.job));documents.set('staffProfiles/'+f.staffId,copy(f.staff));documents.set('staffProfiles/other_staff',{companyId:f.companyId,displayName:'架空別担当',active:true});documents.set('staffDayLocks/'+f.companyId+'_'+f.staffId+'_'+f.a.dateKey,copy(f.lock));documents.set('caseListApprovals/'+f.jobId,copy(f.approval));
   const other=Array.from({length:width},()=>({}));other[0]=copy(cells[1]);other[1]={userEnteredValue:{stringValue:'架空別担当'},effectiveValue:{stringValue:'架空別担当'}};other[9]={userEnteredValue:{stringValue:'OTHER_CLIENT'}};other[13]={userEnteredValue:{stringValue:'9:30'}};other[width-1]={userEnteredValue:{stringValue:'OTHER_MONTHLY_FIXED_ID'}};
@@ -114,7 +164,7 @@ function journey(options={}){
     cells[2]={userEnteredValue:{stringValue:options.manualName??f.staffName},effectiveValue:{stringValue:options.manualName??f.staffName}};
     cells[6].effectiveValue={stringValue:cells[2].userEnteredValue.stringValue};
     cells[62]={userEnteredValue:{stringValue:JSON.stringify({schema:'LKCM1_CASE_META_V1',publicEligible:true,headcountConfirmed:true})},effectiveValue:{stringValue:JSON.stringify({schema:'LKCM1_CASE_META_V1',publicEligible:true,headcountConfirmed:true})}};
-    const entry=helper.inspectCaseList([header,cells],ledger,new Date().toISOString(),f.book).jobs[0];
+    const entry=helper.inspectCaseList([header,cells],ledger,sourceObservedAt,f.book).jobs[0];
     const job={...entry.fields,companyId:f.companyId,caseId:f.a.sourceCaseId,caseListSource:helper.publicCaseListSource(entry.source),revision:4,status:'draft',assignedStaffId:null,assignedStaffName:'',applicationUnconfirmed:false,basePay:null,publishable:false,recruitmentStopped:true};
     documents.set('jobs/'+f.jobId,job);
     const profiles=new Map([[f.staffId,documents.get('staffProfiles/'+f.staffId)]]),resolver=worker.buildCaseListStaffResolver([...profiles].map(([id,data])=>({id,data})));
@@ -210,6 +260,62 @@ async function main(){
   await test('expired in-flight operation is held without requeue or native call',async()=>{const f=fixture();seedRetry(f,{status:'processing'});await worker.retryCaseListMonthlyAssignments();assert.equal(documents.get('sheetSyncQueue/'+f.queueId).status,'blocked');assert.equal(nativeCalls,0);});
   await test('disabled new retry leaves all queue states unchanged',async()=>{const f=fixture();seedRetry(f);documents.get('sheetImportConfigs/'+f.companyId).caseListAssignmentsEnabled=false;await worker.retryCaseListMonthlyAssignments();assert.equal(writes,0);});
   await test('global stop preserves safe busy waiting state',async()=>{const f=fixture();seedRetry(f);operational=false;await worker.retryCaseListMonthlyAssignments();assert.equal(writes,0);});
+  for(const stage of ["retry_wait","processing","ready"])await test(stopPrefix+"scheduler preserves "+stage,async()=>{
+    const h=journey(),{companyId}=h.f,queuePath=h.queueRef.path;
+    if(stage==="ready")await h.step();
+    else seedRetry(h.f,{status:stage});
+    const before=copy(documents.get(queuePath)),priorWrites=documentWrites.filter(ref=>ref===queuePath).length;
+    productionControl(companyId);
+    concurrentStopAtCommit={companyId,path:queuePath,matches:value=>value?.status==="pending"||value?.status==="blocked"||!!value?.caseListWakeNonce};
+    await worker.retryCaseListMonthlyAssignments();
+    assert.deepEqual(documents.get(queuePath),before,"a stop-first scheduler commit must preserve the queue");
+    assert.equal(controlConflicts,1);
+    assert.equal(documentWrites.filter(ref=>ref===queuePath).length,priorWrites);
+    assert.equal(nativeCalls,0);
+    productionControl(companyId,false,3);
+    await worker.retryCaseListMonthlyAssignments();
+    const current=documents.get(queuePath);
+    assert.equal(current.status,stage==="processing"?"blocked":"pending");
+    if(stage==="processing")assert.equal(current.writeVerificationRequired,true);
+    if(stage==="ready"){assert(current.caseListWakeNonce);assert.equal(current.caseListPhase.nonce,before.caseListPhase.nonce);}
+    assert.equal(nativeCalls,0);
+  });
+  for(const busy of [false,true])await test(stopPrefix+(busy?"leaves a contending request pending":"does not claim a pending request"),async()=>{
+    const h=journey(),{companyId,queueId}=h.f,queuePath=h.queueRef.path;
+    const operation="caseListMonthlyOperations/"+sha(companyId+"|"+queueId),lease="caseListSyncLocks/"+companyId;
+    if(busy)documents.set(lease,{tokenId:"synthetic_competing_lease",activeUntil:Stamp.fromMillis(Date.now()+60_000)});
+    const before=copy(documents.get(queuePath)),priorLease=copy(documents.get(lease));
+    productionControl(companyId);
+    concurrentStopAtCommit={companyId,path:queuePath,matches:value=>value?.status===(busy?"retry_wait":"processing")};
+    await h.step();
+    assert.deepEqual(documents.get(queuePath),before,"a stop-first worker commit must preserve the queue");
+    assert.equal(controlConflicts,1);
+    assert.deepEqual(documents.get(lease),priorLease);
+    assert(!documents.has(operation));
+    assert.equal(nativeCalls,0);
+  });
+  await test(stopPrefix+"reconciles the same native receipt after stop just before ACK",async()=>{
+    const h=journey(),{companyId,jobId,queueId}=h.f;
+    const operation="caseListMonthlyOperations/"+sha(companyId+"|"+queueId);
+    productionControl(companyId);
+    concurrentStopAtCommit={companyId,path:h.queueRef.path,matches:value=>value?.status==="completed"};
+    await h.completeSelected();
+    assert.equal(documents.get(h.queueRef.path).status,"blocked","an ACK cannot commit after the stop");
+    assert.equal(controlConflicts,1);
+    assert.equal(documents.get(h.queueRef.path).writeVerificationRequired,true);
+    assert.equal(documents.get("jobs/"+jobId).applicationUnconfirmed,true);
+    assert(!documents.has("caseListSheetRefs/"+jobId));
+    assert.deepEqual(h.counts(),{sourceCalls:1,monthCalls:1});
+    const recorded=copy(documents.get(operation+"/events/ACCEPTED"));assert(recorded);
+    productionControl(companyId,false,3);
+    const result=await h.reconcile();
+    assert(["MONTHLY_READBACK_VERIFIED","NO_OP_ALREADY_ACCEPTED"].includes(result.status),JSON.stringify(result));
+    assert.equal(documents.get(h.queueRef.path).status,"completed");
+    assert.equal(documents.get(operation).queueId,queueId);
+    assert.equal(documents.get("jobs/"+jobId).applicationUnconfirmed,false);
+    assert.deepEqual(documents.get(operation+"/events/ACCEPTED"),recorded);
+    assert.deepEqual(h.counts(),{sourceCalls:1,monthCalls:1});
+  });
   await test('old paused backlog never participates in narrow retry',async()=>{const f=fixture();seedRetry(f);documents.clear();documents.set('sheetSyncQueue/old',{operation:'job.assign',status:'retry_wait',retryAt:Stamp.fromMillis(0)});await worker.retryCaseListMonthlyAssignments();assert.equal(writes,0);});
   await test('name entry stops at visible owner selection wait before any monthly intent',async()=>{const h=journey();await h.run();const q=documents.get(h.queueRef.path),events='caseListMonthlyOperations/'+sha(h.f.companyId+'|'+h.f.queueId)+'/events/';assert.equal(q.status,'blocked');assert.equal(q.errorType,'owner_transfer_required');assert.equal(q.caseListPhase.phase,'MONTHLY_PREPARE');assert(documents.has(events+'SOURCE_PROJECTED'));assert(!documents.has(events+'INTENT'));assert(!documents.has(events+'MONTHLY_WRITE_STARTED'));assert.equal(h.cells[2].userEnteredValue.stringValue,h.f.staffName);assert.equal(h.cells[0].userEnteredValue.boolValue,false);assert.equal(documents.get('jobs/'+h.f.jobId).applicationUnconfirmed,true);await worker.retryCaseListMonthlyAssignments();await h.run();assert.deepEqual(h.counts(),{sourceCalls:1,monthCalls:0});});
   await test('selection without client name-up confirmation cannot release',async()=>{const h=journey();await h.run();const before=writes;await assert.rejects(()=>h.confirmNameUpAndSelect(false),/OWNER_TRANSFER_CONFIRMATION_REQUIRED/);assert.equal(writes,before);assert.deepEqual(h.counts(),{sourceCalls:1,monthCalls:0});});
@@ -297,7 +403,9 @@ async function main(){
     ['MonthlyIntent source full65','INTENT',p=>{p.sourceSnapshot[10]={userEnteredValue:{stringValue:'INCONSISTENT_SNAPSHOT'}};}]
   ];
   for(const [name,stage,mutate]of recoveryProofMutants)await test('owner recovery rejects freshly rehashed inconsistent '+name,async()=>{const h=journey({monthAckLoss:true});await h.completeSelected();const event=documents.get('caseListMonthlyOperations/'+sha(h.f.companyId+'|'+h.f.queueId)+'/events/'+stage);mutate(event.payload);if(stage==='SOURCE_INTENT'){const normalized={...event.payload,createdAt:0};delete normalized.intentHash;event.payload.intentHash=helper.hashCaseList(normalized);}if(stage==='INTENT'){const normalized={...event.payload,createdAt:0};delete normalized.planHash;event.payload.planHash=helper.hashCaseList(normalized);}event.payloadHash=helper.hashCaseList(event.payload);const before=nativeCalls,result=await h.reconcile();assert.equal(result.status,'HELD',name+':'+JSON.stringify(result));assert.equal(nativeCalls,before);assert.equal(documents.get('jobs/'+h.f.jobId).applicationUnconfirmed,true);assert.equal(documents.get(h.queueRef.path).status,'blocked');});
-  console.log(JSON.stringify({schema:'LK_CASE_LIST_MONTHLY_WORKER_BINDING_LOCAL_TESTS_V1',tests:results.length,passed:true,typescriptSyntaxStripped:true,typescriptSemanticBuild:false,fullySyntheticFixture:true,privateHistoricalData:false,firestoreAndGoogleAreMocks:true,externalWrites:0,results},null,2));
+  const passed=results.every(result=>result.passed);
+  if(!passed)process.exitCode=1;
+  console.log(JSON.stringify({schema:'LK_CASE_LIST_MONTHLY_WORKER_BINDING_LOCAL_TESTS_V1',tests:results.length,passed,typescriptTranspiled:true,typescriptSemanticBuild:false,fullySyntheticFixture:true,privateHistoricalData:false,firestoreAndGoogleAreMocks:true,externalWrites:0,results},null,2));
 }
-module.exports={journey,load,loadUiModel,copy,Stamp,FieldValue,db,Doc,get documents(){return documents},setNativeHandler(fn){nativeHandler=fn},get nativeCalls(){return nativeCalls},setAfterCommit(fn){afterCommit=fn},advanceClock(ms){clockOffset+=ms},get documentReads(){return documentReads},get documentWrites(){return documentWrites},clearAccessLog(){documentReads.length=0;documentWrites.length=0}};
+module.exports={journey,load,loadUiModel,sourceObservedAt,copy,Stamp,FieldValue,db,Doc,get documents(){return documents},setNativeHandler(fn){nativeHandler=fn},get nativeCalls(){return nativeCalls},setAfterCommit(fn){afterCommit=fn},advanceClock(ms){clockOffset+=ms},get documentReads(){return documentReads},get documentWrites(){return documentWrites},clearAccessLog(){documentReads.length=0;documentWrites.length=0}};
 if(require.main===module)main().catch(e=>{console.error(e);process.exitCode=1;});

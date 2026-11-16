@@ -7,6 +7,7 @@ import { companyFromClaims, requireAdmin, requireAuth, staffFromClaims } from ".
 import { hashText } from "./case-id";
 import { cancellationSheetWriteIdentity as netPrintWriteIdentity } from "./sheet-write-core";
 import { assertProductionOperational } from "./system-safety";
+import { readActiveStaffProfile } from "./staff-session";
 
 import { caseMailPreparationHeld } from "./case-mail-preparation-core";
 import { caseMailSubmissionContext, assertCaseMailSubmissionRevision } from "./submission-integrity";
@@ -113,6 +114,7 @@ export const updateNetPrintNumbers = onCall(async (request) => {
 
 export const markNetPrintPrinted = onCall(async (request) => {
   const session = requireAuth(request);
+  if (session.token.role !== "staff") throw new HttpsError("permission-denied", "スタッフ権限が必要です。");
   const companyId = companyFromClaims(session.token);
   await assertProductionOperational(companyId);
   const staffId = staffFromClaims(session.token);
@@ -121,6 +123,7 @@ export const markNetPrintPrinted = onCall(async (request) => {
 
   const queueRef = db.collection("sheetSyncQueue").doc();
   await db.runTransaction(async (tx) => {
+    await readActiveStaffProfile(tx, companyId, staffId, session.uid, session.token.auth_time, { requireIdentity: true, deviceClaims: session.token });
     const snap = await tx.get(jobRef);
     if (!snap.exists) throw new HttpsError("not-found", "案件が見つかりません。");
     const job = snap.data() as Record<string, unknown>;

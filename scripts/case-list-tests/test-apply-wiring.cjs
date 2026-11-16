@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
-const {stripTypeScriptTypes}=require('node:module');
+const ts=require('typescript');
 const clone=value=>value instanceof Timestamp?value:Array.isArray(value)?value.map(clone):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,clone(v)])):value;
 class Timestamp{constructor(ms){this.ms=ms;}static now(){return new Timestamp(Date.parse('2026-10-27T00:00:00Z'));}static fromMillis(ms){return new Timestamp(ms);}toMillis(){return this.ms;}toDate(){return new Date(this.ms);}}
 class HttpsError extends Error{constructor(code,message,details){super(message);this.code=code;this.details=details;}}
@@ -29,16 +29,30 @@ function setup(caseList=true){
   './cancellation-history-retention-core':{assertAcknowledgedCancellationCanChange:()=>{}},
   './case-list-source':{readCaseListPublication:async(tx,company,id,job,revision,hash)=>{sourceReads++;if(sourceChanged||revision!==job.revision||hash!==source.sourceRevision)throw new HttpsError('failed-precondition','source changed');return {source,preMonthlyContentHash:'d'.repeat(64),candidate:{},approval:{}};}},
  };
- const filename=path.join(__dirname,'../../functions/src/jobs.ts');
- let code=stripTypeScriptTypes(fs.readFileSync(filename,'utf8'),{mode:'transform'});
- code=code.replace(/import\s*\{([^}]+)\}\s*from\s*"([^"]+)";/g,(_,bindings,name)=>`const {${bindings}}=require(${JSON.stringify(name)});`).replace(/^export /gm,'');
- const context={require:n=>{if(!modules[n])throw Error('unexpected module '+n);return modules[n];},module:{exports:{}},Date,console};
- vm.runInNewContext(code+'\nmodule.exports={applyToJob};',context,{filename});
+ const src=path.resolve(__dirname,'../../functions/src'), cache=new Map();
+ function load(name){
+  if(Object.hasOwn(modules,name))return modules[name];
+  if(name.startsWith('node:')||name.endsWith('.cjs'))return require(name.startsWith('node:')?name:path.resolve(src,name));
+  if(!name.startsWith('./'))throw Error('unexpected module '+name);
+  if(cache.has(name))return cache.get(name);
+  const filename=path.join(src,name.slice(2)+'.ts'),module={exports:{}};
+  cache.set(name,module.exports);
+  const js=ts.transpileModule(fs.readFileSync(filename,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+  vm.runInNewContext(js,{require:load,module,exports:module.exports,process:{env:{DEFAULT_COMPANY_ID:companyId}},Date,console},{filename});
+  return module.exports;
+ }
+ const api=load('./jobs'),ng=load('./staff-ng');
+ records.set('staffNgMaintenance/'+companyId,{schema:'LK_STAFF_NG_MAINTENANCE_V1',companyId,state:'OPEN',generation:0});
  records.set('jobs/'+jobId,{companyId,caseId:source.caseId,dateKey:'2026-11-20',workDate:'2026-11-20',storeName:'合成店舗',revision:3,status:'open',publishable:true,sourceReady:true,...(caseList?{caseListSource:source}:{})});
- records.set('staffProfiles/'+staffId,{companyId,active:true,displayName:'合成スタッフ1'});records.set('staffProfiles/staff-2',{companyId,active:true,displayName:'合成スタッフ2'});
+ const header=Array(11).fill('');header[10]='NG会社';
+ const observation=ng.observeStaffNgCell('マスターデータ',header,Array(11).fill(''),10);
+ for(const [staffId,displayName]of [['staff-1','合成スタッフ1'],['staff-2','合成スタッフ2']]){
+  const ngCompanies=ng.mergeStaffNg([{sourceRef:{spreadsheetId:'synthetic-staff-book',sheetName:'マスターデータ'},ngCompanyObservation:observation}],companyId,staffId);
+  records.set('staffProfiles/'+staffId,{companyId,active:true,displayName,ngCompanies});
+ }
  const command={jobId,requestId:'synthetic-request-1',expectedJobRevision:3,...(caseList?{expectedSourceRevision:source.sourceRevision}:{})};
  const auth={uid:'user-1',token:{companyId,staffId,role:'staff'}};
- return {records,commits,command,auth,source,jobId,companyId,staffId,sourceReads:()=>sourceReads,changeSource:()=>{sourceChanged=true;},apply:(data=command,user=auth)=>context.module.exports.applyToJob({data,auth:user}),queues:()=>[...records].filter(([k])=>k.startsWith('sheetSyncQueue/')).map(([key,data])=>({key,...data})),job:()=>records.get('jobs/'+jobId)};
+ return {records,commits,command,auth,source,jobId,companyId,staffId,sourceReads:()=>sourceReads,changeSource:()=>{sourceChanged=true;},apply:(data=command,user=auth)=>api.applyToJob({data,auth:user}),queues:()=>[...records].filter(([k])=>k.startsWith('sheetSyncQueue/')).map(([key,data])=>({key,...data})),job:()=>records.get('jobs/'+jobId)};
 }
 const results=[];async function test(name,fn){await fn();results.push({name,passed:true});}
 (async()=>{

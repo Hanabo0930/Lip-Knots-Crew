@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 const require = createRequire(import.meta.url), ts = require('typescript');
 const { Timestamp } = require('firebase-admin/firestore'), { HttpsError } = require('firebase-functions/v2/https');
@@ -32,7 +33,9 @@ function setup(mode = 'removed') {
  }}}};
  const boundaries={'node:crypto':crypto,zod:require('zod'),'firebase-admin/firestore':{Timestamp,FieldValue:{serverTimestamp:()=>Timestamp.now()}},'firebase-functions/v2/https':{HttpsError,onCall:(...args)=>args.at(-1)},'firebase-functions/v2/scheduler':{onSchedule:(_o,fn)=>fn},'./firebase':{db,auth:{revokeRefreshTokens:async uid=>{await state.onRevoke?.(uid);state.revoked.push(uid);}}},googleapis:{google:{auth:{GoogleAuth:class {}},sheets:()=>sheets}}};
  const modules={};
- const load=name=>{if(boundaries[name])return boundaries[name];assert.ok(['./system-safety','./staff-import','./staff-parser','./staff-identity','./case-id','./utils','./sheet-reader'].includes(name),name);if(modules[name])return modules[name];const exports={};modules[name]=exports;runInNewContext(compile(fs.readFileSync('functions/src/'+name.slice(2)+'.ts','utf8')),{exports,require:load,process:{env:{get APP_ENVIRONMENT(){return state.environment;}}},console});return exports;};
+ // Legacy import and retry are exercised for a company outside the dedicated NG maintenance rollout.
+ const defaultCompanyId="maintenance-fixture-company";
+ const load=name=>{if(Object.hasOwn(boundaries,name))return boundaries[name];if(['../src/case-list-projection.cjs','../src/private-ng/capacity.cjs'].includes(name))return require(fileURLToPath(new URL('../functions/src/'+name.slice('../src/'.length),import.meta.url)));assert.ok(['./system-safety','./staff-import','./staff-parser','./staff-identity','./staff-ng','./staff-ng-maintenance','./case-list-source-core','./case-id','./utils','./sheet-reader'].includes(name),name);if(modules[name])return modules[name];const exports={};modules[name]=exports;runInNewContext(compile(fs.readFileSync('functions/src/'+name.slice(2)+'.ts','utf8')),{exports,require:load,process:{env:{get APP_ENVIRONMENT(){return state.environment;},DEFAULT_COMPANY_ID:defaultCompanyId}},console});return exports;};
  const config={companyId:'company-a',enabled:true,scheduleEnabled:false,spreadsheetId:'synthetic-spreadsheet',activeSheets:['fixture'],excludedSheets:[],sheetAreas:{},headerRow:1,dataStartRow:2,markMissingInactive:true,revokeRemovedEmailSessions:true,columns:{displayName:'A',email:'B',manualInactive:'C'}};
  state.records.set('staffImportConfigs/company-a',config);
  state.records.set('productionControls/company-a',{productionEnabled:true,emergencyLock:false});
@@ -251,7 +254,7 @@ for(const kind of ['header-only','empty-spacer','lowercase-columns','data-after-
  const h=setup(),config=h.state.records.get('staffImportConfigs/company-a');
  if(kind==='header-only')h.state.rows=[['name','email']];
  if(kind==='empty-spacer'){h.state.rows=[['name','email']];h.state.descriptors=[{title:'fixture',rowCount:10}];config.dataStartRow=5;}
- if(kind==='lowercase-columns'){config.columns={displayName:' a ',email:' b ',phone:' '};config.readRangeEndColumn='B';}
+ if(kind==='lowercase-columns'){config.columns={displayName:' a ',email:' b ',phone:' '};config.readRangeEndColumn='K';}
  if(kind==='data-after-spacer'){h.state.rows=[['name','email'],[],['合成スタッフ','keep@example.invalid']];config.dataStartRow=3;}
  const result=await h.run();assert.equal(result.totals.profiles,kind==='header-only'||kind==='empty-spacer'?0:1);cases++;
 }

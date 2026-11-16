@@ -4,6 +4,7 @@
 // No native ACK or source/monthly writer is created here.
 const crypto = require('node:crypto');
 const Native = require('./case-list-monthly-controller.cjs');
+const observed = require('./case-list-assignment-observation.cjs');
 const FEE = [...Array.from({length:26},(_,i)=>i+18),...Array.from({length:7},(_,i)=>i+47)];
 const canonical = value => value === null || ['string','boolean','number'].includes(typeof value)
  ? JSON.stringify(value) : Array.isArray(value) ? '['+value.map(canonical).join(',')+']'
@@ -14,6 +15,11 @@ const isoDate = value => typeof value==='number' && Number.isInteger(value) ? ne
 const need = (ok,code) => { if(!ok) throw new Error(code); };
 const SCHEMA='LK_CREW_EXTERNAL_TRANSFER_SELECTION_V1';
 const ACCEPTED='LK_CREW_EXTERNAL_TRANSFER_ACCEPTANCE_V1';
+const EXPENSE_COLUMNS=Object.freeze({
+ transportation:Object.freeze({column:'AK',index:36}),purchase8:Object.freeze({column:'AL',index:37}),
+ purchase10:Object.freeze({column:'AM',index:38}),netPrintCost:Object.freeze({column:'AO',index:40}),
+ postageCost:Object.freeze({column:'AP',index:41}),
+});
 const queueIdentity = q => ({companyId:q.companyId,jobId:q.jobId,operation:q.operation,dateKey:q.dateKey,
  actorUid:q.actorUid,actorStaffId:q.actorStaffId,idempotencyKey:q.idempotencyKey,
  updates:q.updates,expected:q.expected,styles:q.styles??{},caseListAssignment:q.caseListAssignment});
@@ -60,6 +66,15 @@ function assertOriginal(r,queueId) {
    original.createdAt===q.createdAt && hash(original.assignment)===hash(a),'APPLICATION_ORIGINAL_RECEIPT_MISMATCH');
  }
  return manual?'SOURCE_MANUAL':'CREW_APPLICATION';
+}
+function sourceCatalog(r) {
+ const record=r.originalSourceRecord,payload=record?.payload,manual=r.queue.caseListAssignment?.origin==='SOURCE_MANUAL';
+ need(record?.companyId===r.job.companyId&&record.queueId===r.queueId&&record.payloadHash===hash(payload)&&payload.operationId===r.queueId&&payload.caseId===r.job.caseId,'SOURCE_REVISION_PROOF_REQUIRED');
+ const projected=r.events?.SOURCE_PROJECTED,p=projected?.payload;
+ if(!manual)need(projected?.companyId===r.job.companyId&&projected.queueId===r.queueId&&projected.payloadHash===hash(p)&&p.stage==='SOURCE_PROJECTED'&&p.operationId===r.queueId&&p.caseId===r.job.caseId&&p.intentHash===payload.intentHash,'SOURCE_PROJECTED_REVISION_REQUIRED');
+ const catalog=manual?payload.postCatalog:p.postCatalog;
+ need(catalog?.caseId===r.job.caseId&&catalog.spreadsheetId===r.config.spreadsheetId&&/^[a-f0-9]{64}$/.test(catalog.sourceRevision??''),'SOURCE_CATALOG_REQUIRED');
+ return clone(catalog);
 }
 function originalIdentity(r) {
  return {queueHash:hash(queueIdentity(r.queue)),jobHash:hash(jobIdentity(r.job)),
@@ -152,9 +167,10 @@ function createConnection(s) {
    [55,56].includes(preview.width),'GAS_PREVIEW_REQUIRED');
   need(/^[a-f0-9]{64}$/.test(preview.approvedProof??'') && /^[a-f0-9]{64}$/.test(preview.checkedProof??''),'EXTERNAL_EXPECTED_GAS_PROOF_REQUIRED');
   need(preview.producerSchema==='LK_NAMEUP_TRANSFER_V1'&&/^[a-f0-9]{64}$/.test(preview.nameUpExpected??''),'EXTERNAL_NAMEUP_FINGERPRINT_REQUIRED');
-  need(cells.every(c=>c&&typeof c==='object'&&!c.$unknown),'SOURCE_FULL_ROW_REQUIRED');
-  const expectedMapped=Native.mapSource(cells,r.job.caseId,preview.width),expectedFees=FEE.map(i=>cellValue(cells[i+1]));
-  need(expectedFees.every(v=>typeof v==='number'&&Number.isFinite(v)),'SOURCE_FINANCIAL_VALUES_REQUIRED');
+  const sourceValues=observed.sourcePay({cells,fullWritable:snapshot.sourceFullWritable,knownColumns:snapshot.sourceKnownColumns},r.job.publicPayOffer.dailyWageJPY);
+  observed.dependency(payload.dependencyHash,snapshot.dependencyHash);
+  need(canonical(snapshot.sourceCatalog)===canonical(sourceCatalog(r)),'SOURCE_OBSERVED_REVISION_CHANGED');
+  const expectedMapped=Native.mapSource(cells,r.job.caseId,preview.width),expectedFees=FEE.map(i=>sourceValues[i+1]);
   const gasSourceHash=hash(cells.map(c=>[c.userEnteredValue??{},c.effectiveValue??{},c.userEnteredFormat??{},c.note??'',c.dataValidation??{},c.textFormatRuns??[],c.chipRuns??[]]));
   need(preview.sourceHash===gasSourceHash && !preview.groupId && !preview.groupHash,'EXTERNAL_SINGLE_CASE_PREIMAGE_REQUIRED');
   const body={schema:SCHEMA,companyId:r.job.companyId,jobId:r.jobId,queueId,caseId:r.job.caseId,
@@ -165,7 +181,7 @@ function createConnection(s) {
    assertOriginal(current,queueId);s.assertAuthority(queueId,current);
    need(s.now()-snapshot.readStartedAt<=60_000,'GAS_PREVIEW_EXPIRED_BEFORE_COMMIT');
    need(hash(originalIdentity(current))===hash(body.original) && !current.externalSelection,'SELECTION_CHANGED');
-   return {kind:'SELECT_EXTERNAL',selection,queuePatch:{status:'blocked',errorType:'external_transfer_selected'}};
+   return {kind:'SELECT_EXTERNAL',readWindow:{readStartedAt:snapshot.readStartedAt,observedAt:snapshot.observedAt},selection,queuePatch:{status:'blocked',errorType:'external_transfer_selected'}};
   });
  }
  async function reconcile(queueId,uid,token) {
@@ -177,6 +193,7 @@ function createConnection(s) {
   }
   const {origin,selection}=pendingSelection(before,queueId,uid);
   const snap=await s.readSheets(queueId,'archive'),p=selection.gasPreview;
+  observed.dependency(before.originalSourceRecord?.payload?.dependencyHash,snap.dependencyHash);
   need(snap.readStartedAt<=snap.observedAt && snap.observedAt<=s.now() &&
    s.now()-snap.readStartedAt<=60_000,'READBACK_NOT_CURRENT');
   need(snap.sourceIndex?.startRow===2 && snap.sourceIndex.rowCount>=1 &&
@@ -221,15 +238,13 @@ function createConnection(s) {
   need(hits.length===1 && hits[0].id===p.caseId && hits[0].month.sheetId===p.sheetId &&
    hits[0].month.title===p.date.slice(0,4)+'.'+Number(p.date.slice(5,7)) &&
    hits[0].month.width===p.width && hits[0].row>=2,'MONTH_ID_NOT_UNIQUE');
-  const hit=hits[0],cells=hit.month.rows.find(r=>r.row===hit.row)?.cells;
-  need(Array.isArray(cells) && cells.length===p.width,'MONTH_ROW_NOT_OBSERVED');
-  const value=c=>{const v=c?.effectiveValue??c?.userEnteredValue??{};need(!v.errorValue,'MONTH_FORMULA_ERROR');return v.stringValue??v.numberValue??v.boolValue??'';};
-  const values=cells.map(value),j=before.job;
+  const hit=hits[0],rowEvidence=hit.month.rows.find(r=>r.row===hit.row),cells=rowEvidence?.cells;
+  const values=observed.observeRow(rowEvidence,p.width),j=before.job;
   need(values.at(-1)===p.caseId && isoDate(values[0])===p.date && values[1]===j.assignedStaffName &&
    [9,10,11,12,13,14].every((n,i)=>values[n]===[j.clientName,j.storeName,j.makerName,j.menuName,j.entryTime,j.workTime][i]),
    'MONTH_BUSINESS_MISMATCH');
   need([values[27],values[28]].every(v=>typeof v==='number'&&Number.isFinite(v)&&v>=0) &&
-   values[27]+values[28]===j.publicPayOffer.dailyWageJPY,'MONTH_PUBLIC_PAY_MISMATCH');
+   values[27]+values[28]===j.publicPayOffer.dailyWageJPY && values[35]===j.publicPayOffer.dailyWageJPY,'MONTH_PUBLIC_PAY_MISMATCH');
   const writable=c=>Object.fromEntries(['userEnteredValue','note','userEnteredFormat','dataValidation','textFormatRuns','chipRuns'].filter(k=>Object.hasOwn(c,k)).map(k=>[k,c[k]]));
   for(let i=0;i<54;i++)if(![8,17].includes(i))need(canonical(writable(cells[i]))===canonical(selection.expectedMapped.business[i]),'PROTECTED_EXPECTED_MONTH_CONTENT_MISMATCH');
   need(canonical(FEE.map(i=>values[i]))===canonical(selection.expectedFees),'PROTECTED_EXPECTED_FINANCIAL_MISMATCH');
@@ -268,7 +283,7 @@ function createConnection(s) {
     current.queue.errorType==='external_transfer_selected' && !current.externalAcceptance,'RECONCILIATION_CHANGED');
    need(s.now()-snap.readStartedAt<=60_000 && snap.observedAt<=s.now(),'READBACK_EXPIRED_BEFORE_COMMIT');
    const {spreadsheetId:privateBook,...publicRef}=acceptance.target;
-   return {kind:'ACCEPT_EXTERNAL',acceptance,privateRef:acceptance.target,
+   return {kind:'ACCEPT_EXTERNAL',readWindow:{readStartedAt:snap.readStartedAt,observedAt:snap.observedAt},acceptance,privateRef:acceptance.target,
     jobPatch:{applicationUnconfirmed:false,sourceMissing:false,sourceReady:true,publishable:false,recruitmentStopped:true,
      sheetRef:publicRef,assignmentSheetWrite:{...current.job.assignmentSheetWrite,pending:false,
       externalAck:{schema:ACCEPTED,acceptanceHash:acceptance.acceptanceHash}}},
@@ -301,7 +316,7 @@ function createConnection(s) {
    hash(records.privateRef)===hash(a.target),'EXTERNAL_PRIVATE_PROOF_MISMATCH');
   return clone(a.target);
  }
- function validateAcceptedSnapshot(records,snap) {
+ function acceptedMonth(records,snap) {
   const ref=resolvePrivateRef(records),a=records.externalAcceptance;
   need(snap.spreadsheetId===ref.spreadsheetId && snap.sourceIndex?.cells.length===snap.sourceIndex.rowCount-1 &&
    snap.sourceIds.every(id=>id.toLowerCase()!==ref.caseId.toLowerCase()),'EXTERNAL_ACCEPTED_SOURCE_REAPPEARED');
@@ -313,14 +328,61 @@ function createConnection(s) {
    row[10]==='月別転記済' && row[17]===false,'EXTERNAL_ACCEPTED_LEDGER_CHANGED');
   const targets=snap.months.flatMap(m=>m.idIndex.flatMap((id,i)=>id?.toLowerCase()===ref.caseId.toLowerCase()?[{m,row:i+1,id}]:[]));
   need(targets.length===1 && targets[0].id===ref.caseId && targets[0].m.sheetId===ref.sheetId,'EXTERNAL_ACCEPTED_MONTH_AMBIGUOUS');
-  const target=targets[0],cells=target.m.rows.find(r=>r.row===target.row)?.cells;
+  const target=targets[0],rowEvidence=target.m.rows.find(r=>r.row===target.row),cells=rowEvidence?.cells;
   const value=c=>{const v=c?.effectiveValue??c?.userEnteredValue??{};need(!v.errorValue,'EXTERNAL_ACCEPTED_FORMULA_ERROR');return v.stringValue??v.numberValue??v.boolValue??'';};
   need(cells && isoDate(value(cells[0]))===a.dateKey && value(cells[1])===records.job.assignedStaffName,'EXTERNAL_ACCEPTED_ASSIGNMENT_CHANGED');
   const writable=c=>Object.fromEntries(['userEnteredValue','note','userEnteredFormat','dataValidation','textFormatRuns','chipRuns'].filter(k=>Object.hasOwn(c,k)).map(k=>[k,c[k]]));
   for(const i of [0,1,9,10,11,12,13,14])need(canonical(writable(cells[i]))===canonical(records.externalSelection.expectedMapped.business[i]),'EXTERNAL_ACCEPTED_BUSINESS_CHANGED');
-  return {externalAcceptanceHash:a.acceptanceHash,sourceReadStartedAtMs:snap.readStartedAt,observedAt:snap.observedAt};
+  return {ref,target,rowEvidence};
  }
- return Object.freeze({select,reconcile,readSelectionBinding,resolvePrivateRef,validateAcceptedSnapshot});
+ function validateAcceptedSnapshot(records,snap) {
+  acceptedMonth(records,snap);
+  return {externalAcceptanceHash:records.externalAcceptance.acceptanceHash,sourceReadStartedAtMs:snap.readStartedAt,observedAt:snap.observedAt};
+ }
+
+ // Use the established monthly layout and reject conflicting configured columns.
+ function observeAcceptedExpenses(records,snap) {
+  const {ref,target,rowEvidence}=acceptedMonth(records,snap);
+  const width=ref.caseIdColumn==='BD'?56:55;
+  need(target.m.title===ref.sheetName && target.m.width===width &&
+   Number.isSafeInteger(target.row) && target.row>=2 && target.row<=target.m.rowCount &&
+   rowEvidence?.fixedId===ref.caseId,'EXTERNAL_EXPENSE_MONTH_ROW_CHANGED');
+  need(rowEvidence.fullWritable===true && Array.isArray(rowEvidence.knownColumns) &&
+   Array.isArray(rowEvidence.cells) && rowEvidence.cells.length===width,
+   'EXTERNAL_EXPENSE_ROW_NOT_OBSERVED');
+  const expenses={},expenseCells={};
+  for(const [key,{column,index}] of Object.entries(EXPENSE_COLUMNS)){
+   const configured=records.config.columns?.[key];
+   need(configured===undefined || configured===column,'EXTERNAL_EXPENSE_COLUMN_MISMATCH');
+   need(rowEvidence.knownColumns.includes(index) && Object.hasOwn(rowEvidence.cells,index),
+    'EXTERNAL_EXPENSE_CELL_NOT_OBSERVED');
+   const cell=rowEvidence.cells[index],amount=observed.scalar(cell);
+   need(amount==='' || (typeof amount==='number' && Number.isFinite(amount) && amount>=0 && amount<=10_000_000),
+    'EXTERNAL_EXPENSE_AMOUNT_INVALID');
+   expenses[key]=amount===''?null:amount;
+   const entered=cell.userEnteredValue??{};
+   expenseCells[key]={
+    entered:clone(entered),
+    editable:amount===''?Object.keys(entered).length===0 && Object.keys(cell.effectiveValue??{}).length===0:
+     Object.hasOwn(entered,'numberValue') && entered.numberValue===amount,
+   };
+  }
+  return {sheetRef:{...ref,currentRow:target.row},expenses,expenseCells};
+ }
+ function planAcceptedExpenseChanges(expenses,expenseCells,requested) {
+  const changes=[];
+  for(const [key,{column,index}] of Object.entries(EXPENSE_COLUMNS)){
+   need(Object.hasOwn(expenses,key) && Object.hasOwn(expenseCells,key),'EXTERNAL_EXPENSE_CELL_NOT_OBSERVED');
+   const amount=requested[key];
+   need(amount===null || (typeof amount==='number' && Number.isFinite(amount) && amount>=0 && amount<=10_000_000),
+    'EXTERNAL_EXPENSE_AMOUNT_INVALID');
+   if(amount===expenses[key]) continue;
+   need(expenseCells[key].editable===true,'EXTERNAL_EXPENSE_CELL_PROTECTED');
+   changes.push({column,index,expected:expenseCells[key].entered,value:amount===null?{}:{numberValue:amount}});
+  }
+  return changes;
+ }
+ return Object.freeze({select,reconcile,readSelectionBinding,resolvePrivateRef,validateAcceptedSnapshot,observeAcceptedExpenses,planAcceptedExpenseChanges});
 }
 function assertNameUpSelection(selection,receipt,snapshot,now) {
  const part=receipt.selection,context=part.nameUp,p=selection.gasPreview;
@@ -357,5 +419,5 @@ function assertOperationalDefaults(selection,receipt,cells,row,expectedDateFormu
  expectedMaterial.userEnteredFormat={...format,backgroundColorStyle:{rgbColor:{red:244/255,green:162/255,blue:97/255}}};
  need(canonical(writable(material))===canonical(expectedMaterial),'TRANSFER_MATERIAL_WRITABLE_MISMATCH');
 }
-module.exports=Object.freeze({createConnection,hash,canonical});
+module.exports=Object.freeze({createConnection,hash,canonical,assertOriginal,originalIdentity,sourceCatalog,EXPENSE_COLUMNS});
 

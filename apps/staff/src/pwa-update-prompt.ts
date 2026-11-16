@@ -20,7 +20,13 @@ export function showUpdatePrompt(registration?:ServiceWorkerRegistration,active=
 async function applyUpdate(current:PromptState){
   if(current.busy||current.reloading)return;
   current.busy=true;current.button.setAttribute("aria-disabled","true");current.button.textContent="更新を準備中…";current.error.textContent="";
+  const updateBlocked=()=>{
+    if(window.dispatchEvent(new Event("lkc-pwa-reload",{cancelable:true})))return false;
+    current.error.textContent="未保存の入力や処理中の提出があります。作業を終えてから更新してください。";
+    return true;
+  };
   try{
+    if(updateBlocked())return;
     const waiting=current.registration?.waiting;
     if(waiting){
       await new Promise<void>((resolve,reject)=>{
@@ -30,6 +36,8 @@ async function applyUpdate(current:PromptState){
         catch(error){window.clearTimeout(timer);current.pending=undefined;reject(error);}
       });
     }else if(!current.active){throw new Error("worker not ready");}
+    // 新版の準備を待つ間に始めた入力や送信も保護する。
+    if(updateBlocked())return;
     current.reloading=true;current.button.textContent="画面を更新中…";
     // beforeunloadで更新を取り消した場合も、同じボタンから再試行できるようにする。
     window.setTimeout(()=>{current.reloading=false;current.button.removeAttribute("aria-disabled");current.button.textContent="画面を更新";},1500);

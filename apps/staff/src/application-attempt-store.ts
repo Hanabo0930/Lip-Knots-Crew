@@ -55,6 +55,16 @@ export async function reserveApplicationAttempt(owner:string,jobId:string,create
  });
 }
 
+export async function clearCheckedApplicationAttempt(owner:string,jobId:string,requestId:string,isCurrent:()=>boolean):Promise<boolean>{
+ const lockName=recordKey(owner,jobId);
+ if(!navigator.locks)return false;
+ return navigator.locks.request(lockName,{mode:"exclusive",ifAvailable:true},lock=>{
+  if(!lock||!isCurrent())return false;
+  removeSavedApplicationAttempt(owner,jobId,requestId);
+  return true;
+ });
+}
+
 export function observeApplicationAttempts(owner:string,onChange:(attempts:Map<string,ApplicationAttempt>)=>void,onError:()=>void):()=>void{
  let active=true;
  const refresh=()=>{if(!active)return;try{onChange(loadSavedApplicationAttempts(owner));}catch{onError();}};

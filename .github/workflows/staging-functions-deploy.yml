@@ -33,6 +33,14 @@ on:
           - paused
           - acceptance
         default: preserve
+      gas_sync_mode:
+        description: caseListGasSync only; private OFF or read-only readiness, never business
+        required: true
+        type: choice
+        options:
+          - off
+          - read-only
+        default: off
       confirmation:
         description: Type the confirmation required by the selected operation
         required: true
@@ -272,6 +280,18 @@ jobs:
           LKC_FUNCTIONS: ${{ inputs.functions }}
           LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
         run: node scripts/automation/materialize-staging-transfer-mode.mjs
+      - name: Materialize private GAS sync readiness settings
+        if: inputs.operation == 'deploy' && inputs.functions == 'caseListGasSync'
+        working-directory: guardrails
+        env:
+          LKC_SOURCE_REF: ${{ inputs.source_ref }}
+          LKC_FUNCTIONS: ${{ inputs.functions }}
+          LKC_CONFIRMATION: ${{ inputs.confirmation }}
+          LKC_SOURCE_DIRECTORY: ${{ github.workspace }}/source
+          LKC_GAS_SYNC_REQUESTED_MODE: ${{ inputs.gas_sync_mode }}
+          LKC_GAS_SYNC_PUBLIC_INVOKER: "false"
+          LKC_GAS_SYNC_AUDIENCE: ${{ vars.LKC_GAS_HANDOFF_AUDIENCE }}
+        run: node scripts/automation/staging-gas-sync-readiness.mjs --materialize
       - name: Deploy only the explicit Functions allowlist
         working-directory: guardrails
         env:

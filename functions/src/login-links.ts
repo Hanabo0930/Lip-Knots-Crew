@@ -1,9 +1,12 @@
 import { randomBytes, randomInt, createHash } from "node:crypto";
+import type { UserRecord } from "firebase-admin/auth";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { defineString } from "firebase-functions/params";
 import { onCall, onRequest, HttpsError } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { z } from "zod";
 import { auth, db } from "./firebase";
+import { hashText } from "./case-id";
 import {
   gmailServiceAccountJson,
   mailFrom,
@@ -24,8 +27,10 @@ const RequestLoginSchema = z.object({
   email: z.string().email().max(254),
   continueUrl: z.string().url().max(2048).optional(),
   code: z.string().regex(/^\d{6}$/).optional(),
+  deviceId: z.string().regex(/^[A-Za-z0-9_-]{12,120}$/).optional(),
 });
 
+const adminEmails = defineString("ADMIN_EMAILS", { default: "info@lipknots.com" });
 const LOGIN_CODE_TTL_MS = 15 * 60 * 1000;
 
 function isLoginDocumentId(value: unknown): value is string {
@@ -96,7 +101,7 @@ export const requestStaffLoginLink = onCall(
 
     const email = normalizeEmail(input.data.email);
     if (input.data.code) {
-      return redeemStaffLoginCode(email, input.data.code);
+      return redeemStaffLoginCode(email, input.data.code, input.data.deviceId);
     }
     const continueUrl = resolveStaffLoginContinueUrl(input.data.continueUrl);
     await enforceLoginRateLimit(email);
@@ -139,7 +144,152 @@ export const requestStaffLoginLink = onCall(
   }
 );
 
-async function redeemStaffLoginCode(email: string, code: string) {
+
+type InitialStaffEnrollment = {
+  companyId: string;
+  staffId: string;
+  emailKey: string;
+  uid: string;
+};
+
+const enrollmentDenied = () => new HttpsError("permission-denied", "初回ログインの登録を確認できません。");
+const enrollmentUnavailable = () => new HttpsError("unavailable", "ログインの準備ができませんでした。確認コードをもう一度入力してください。");
+
+function hasNoLinkedLogin(profile: FirebaseFirestore.DocumentData): boolean {
+  return profile.authUids === undefined || (Array.isArray(profile.authUids) && profile.authUids.length === 0);
+}
+
+function checkInitialProfile(profile: FirebaseFirestore.DocumentData, email: string): void {
+  if (profile.deviceBoundAuthRequired !== true || !hasNoLinkedLogin(profile) ||
+      !Array.isArray(profile.emails) || !profile.emails.some(value =>
+        typeof value === "string" && normalizeEmail(value) === email) ||
+      adminEmails.value().split(",").map(normalizeEmail).includes(email)) throw enrollmentDenied();
+}
+
+function pendingEnrollmentMatches(pending: FirebaseFirestore.DocumentData, enrollment: InitialStaffEnrollment): boolean {
+  return pending.status === "pending" && pending.companyId === enrollment.companyId &&
+    pending.staffId === enrollment.staffId && pending.emailKey === enrollment.emailKey && pending.uid === enrollment.uid;
+}
+
+async function findEnrollmentAccount(email: string): Promise<UserRecord | null> {
+  try {
+    return await auth.getUserByEmail(email);
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === "auth/user-not-found") return null;
+    throw enrollmentUnavailable();
+  }
+}
+
+async function prepareInitialLoginAccount(email: string, enrollment: InitialStaffEnrollment): Promise<UserRecord> {
+  let user = await findEnrollmentAccount(email);
+  if (!user) {
+    try {
+      user = await auth.createUser({ uid: enrollment.uid, email, emailVerified: true });
+    } catch {
+      // 応答断や別リクエストとの競合時は、同じUIDが保存されたか読み戻す。
+      user = await findEnrollmentAccount(email);
+      if (!user) throw enrollmentUnavailable();
+    }
+  }
+  if (user.uid !== enrollment.uid || user.providerData.length !== 0 ||
+      Object.keys(user.customClaims ?? {}).length !== 0) throw enrollmentDenied();
+  return user;
+}
+
+
+async function prepareBoundLogin(
+  email: string, companyId: string, staffId: string, deviceId: string | undefined, codeCreatedAt: unknown, enrollment: InitialStaffEnrollment | null,
+) {
+  const denied = () => new HttpsError("permission-denied", "端末のログインを確認できません。新しい確認コードを取得してください。");
+  if (!deviceId || !(codeCreatedAt instanceof Timestamp)) throw denied();
+  let user;
+  if (enrollment) {
+    user = await prepareInitialLoginAccount(email, enrollment);
+  } else {
+    try { user = await auth.getUserByEmail(email); }
+    catch { throw denied(); }
+  }
+  if (user.disabled || !user.emailVerified || !isLoginDocumentId(user.uid) ||
+      normalizeEmail(user.email ?? "") !== email || user.customClaims?.role === "admin") throw denied();
+  const validSince = user.tokensValidAfterTime ? Date.parse(user.tokensValidAfterTime) : -Infinity;
+  if (Number.isNaN(validSince) || codeCreatedAt.toMillis() <= validSince) throw denied();
+  const uid = user.uid;
+  const sessionId = "device_" + hashText(companyId + "|" + staffId + "|" + uid + "|" + deviceId, 28);
+  const generation = randomBytes(24).toString("hex");
+  const claims = {
+    role: "staff", companyId, staffId, crewDeviceSession: sessionId, crewDeviceGeneration: generation,
+  };
+  let customToken: string;
+  try { customToken = await auth.createCustomToken(uid, claims); }
+  catch { throw new HttpsError("unavailable", "ログインの準備ができませんでした。確認コードをもう一度入力してください。"); }
+  return { uid, sessionId, generation, deviceId, customToken, codeCreatedAt };
+}
+
+async function stageBoundLogin(
+  tx: FirebaseFirestore.Transaction, companyId: string, staffId: string, emailKey: string,
+  profile: FirebaseFirestore.DocumentData, binding: Awaited<ReturnType<typeof prepareBoundLogin>>,
+  email: string, enrollment: InitialStaffEnrollment | null,
+) {
+  const denied = () => new HttpsError("permission-denied", "端末と本人のひも付けを確認できません。");
+  const { uid, sessionId, generation, deviceId } = binding;
+  const identityRef = db.collection("authIdentities").doc(uid);
+  const deviceRef = db.collection("deviceSessions").doc(sessionId);
+  const [identity, device] = await Promise.all([tx.get(identityRef), tx.get(deviceRef)]);
+  if (enrollment) {
+    checkInitialProfile(profile, email);
+    const enrollmentRef = db.collection("staffLoginEnrollments").doc(staffId);
+    const pending = (await tx.get(enrollmentRef)).data();
+    if (uid !== enrollment.uid || identity.exists || device.exists || !pending ||
+        !pendingEnrollmentMatches(pending, enrollment)) throw enrollmentDenied();
+    tx.set(identityRef, {
+      companyId, staffId, email, emailHash: emailKey, active: true, lastLoginAt: FieldValue.serverTimestamp(),
+      deviceCredentials: { [sessionId]: generation },
+    });
+    tx.update(db.collection("staffProfiles").doc(staffId), {
+      authUids: [uid], lastLoginAt: FieldValue.serverTimestamp(),
+    });
+    tx.update(enrollmentRef, { status: "linked", linkedAt: FieldValue.serverTimestamp() });
+  } else {
+    if (!Array.isArray(profile.authUids) || !profile.authUids.includes(uid)) throw denied();
+    stageKnownLogin(tx, identityRef, identity.data(), device.data(), companyId, staffId, emailKey, binding);
+  }
+  tx.set(deviceRef, {
+    companyId, staffId, uid, deviceId, active: true, credentialGeneration: generation,
+    updatedAt: FieldValue.serverTimestamp(), lastSeenAt: FieldValue.serverTimestamp(),
+    ...(device.exists ? {} : { createdAt: FieldValue.serverTimestamp() }),
+  }, { merge: true });
+}
+
+function stageKnownLogin(
+  tx: FirebaseFirestore.Transaction, identityRef: FirebaseFirestore.DocumentReference,
+  linked: FirebaseFirestore.DocumentData | undefined, previous: FirebaseFirestore.DocumentData | undefined,
+  companyId: string, staffId: string, emailKey: string, binding: Awaited<ReturnType<typeof prepareBoundLogin>>,
+): void {
+  const denied = () => new HttpsError("permission-denied", "端末と本人のひも付けを確認できません。");
+  const { uid, sessionId, generation, deviceId, codeCreatedAt } = binding;
+  if (!linked || linked.companyId !== companyId || linked.staffId !== staffId || linked.emailHash !== emailKey) throw denied();
+  const cutoff = linked.revokedAt;
+  if ((linked.active !== true && !(linked.active === false && cutoff instanceof Timestamp)) ||
+      (cutoff != null && (!(cutoff instanceof Timestamp) || codeCreatedAt.toMillis() <= cutoff.toMillis()))) throw denied();
+  const credentials = linked.deviceCredentials ?? {};
+  if (typeof credentials !== "object" || Array.isArray(credentials) ||
+      (previous && (previous.companyId !== companyId || previous.staffId !== staffId ||
+        previous.uid !== uid || previous.deviceId !== deviceId)) ||
+      (!previous && Object.hasOwn(credentials, sessionId)) ||
+      (previous && Object.hasOwn(credentials, sessionId) &&
+        credentials[sessionId] !== previous.credentialGeneration &&
+        !(previous.active === false && credentials[sessionId] === null)) ||
+      (previous && Object.hasOwn(previous, "credentialGeneration") && !Object.hasOwn(credentials, sessionId))) throw denied();
+  const activeCredentials = linked.active === false
+    ? Object.fromEntries(Object.keys(credentials).map(id => [id, null]))
+    : credentials;
+  tx.update(identityRef, {
+    active: true, lastLoginAt: FieldValue.serverTimestamp(),
+    deviceCredentials: { ...activeCredentials, [sessionId]: generation },
+  });
+}
+
+async function redeemStaffLoginCode(email: string, code: string, deviceId?: string) {
   await enforceLoginCodeAttemptRateLimit(email);
   const loginStateRef = db.collection("loginLinkRateLimits").doc(emailHash(email));
   const initialSnap = await loginStateRef.get();
@@ -149,6 +299,7 @@ async function redeemStaffLoginCode(email: string, code: string) {
     loginCodeStaffId?: string;
     loginCodeGatewayTokenHash?: string;
     loginCodeExpiresAt?: Timestamp;
+    loginCodeCreatedAt?: Timestamp;
     loginCodeActive?: boolean;
   } | undefined;
 
@@ -170,7 +321,9 @@ async function redeemStaffLoginCode(email: string, code: string) {
   const profileRef = db.collection("staffProfiles").doc(initial.loginCodeStaffId);
   const gatewayRef = db.collection("loginGatewayTokens").doc(initial.loginCodeGatewayTokenHash);
 
-  const emailActionLink = await db.runTransaction(async (tx) => {
+  const scope = (await profileRef.get()).data();
+  const boundRequired = scope?.deviceBoundAuthRequired === true;
+  const readContext = async (tx: Pick<FirebaseFirestore.Transaction, "get">) => {
     const stateSnap = await tx.get(loginStateRef);
     const state = stateSnap.data() as {
       loginCodeHash?: string;
@@ -178,6 +331,7 @@ async function redeemStaffLoginCode(email: string, code: string) {
       loginCodeStaffId?: string;
       loginCodeGatewayTokenHash?: string;
       loginCodeExpiresAt?: Timestamp;
+      loginCodeCreatedAt?: Timestamp;
       loginCodeActive?: boolean;
     } | undefined;
     const indexSnap = await tx.get(indexRef);
@@ -226,6 +380,56 @@ async function redeemStaffLoginCode(email: string, code: string) {
       throw new HttpsError("invalid-argument", "確認コードが正しくないか、期限が切れています。");
     }
 
+    const profile = profileSnap.data()!;
+    if ((profile.deviceBoundAuthRequired === true) !== boundRequired ||
+        (boundRequired && (!(state.loginCodeCreatedAt instanceof Timestamp) ||
+          !(initial.loginCodeCreatedAt instanceof Timestamp) || !state.loginCodeCreatedAt.isEqual(initial.loginCodeCreatedAt)))) {
+      throw new HttpsError("invalid-argument", "ログイン状態が変わりました。新しい確認コードを取得してください。");
+    }
+    const enabledAt = profile.deviceBoundAuthEnabledAt;
+    if (boundRequired && enabledAt !== undefined && (!(enabledAt instanceof Timestamp) ||
+        !(state.loginCodeCreatedAt instanceof Timestamp) || state.loginCodeCreatedAt.toMillis() <= enabledAt.toMillis())) {
+      throw new HttpsError("invalid-argument", "切替後に発行された確認コードを入力してください。");
+    }
+    return { profile, gateway };
+  };
+
+  let enrollment: InitialStaffEnrollment | null = null;
+  if (boundRequired && scope && hasNoLinkedLogin(scope)) {
+    if (!deviceId || !(initial.loginCodeCreatedAt instanceof Timestamp)) throw enrollmentDenied();
+    const companyId = initial.loginCodeCompanyId, staffId = initial.loginCodeStaffId;
+    const emailKey = emailHash(email);
+    const uid = "crew_staff_" + sha256(JSON.stringify([companyId, staffId, emailKey]));
+    const proposed = { companyId, staffId, emailKey, uid };
+    const enrollmentRef = db.collection("staffLoginEnrollments").doc(staffId);
+    await db.runTransaction(async tx => {
+      const { profile } = await readContext(tx);
+      checkInitialProfile(profile, email);
+      const [reserved, identity] = await Promise.all([
+        tx.get(enrollmentRef),
+        tx.get(db.collection("authIdentities").doc(uid)),
+      ]);
+      const pending = reserved.data();
+      if (identity.exists || (pending && !pendingEnrollmentMatches(pending, proposed))) throw enrollmentDenied();
+      if (!reserved.exists) {
+        tx.set(enrollmentRef, { ...proposed, status: "pending", createdAt: FieldValue.serverTimestamp() });
+      }
+    });
+    await assertProductionOperational(companyId);
+    enrollment = proposed;
+  }
+
+  const binding = boundRequired
+    ? await prepareBoundLogin(email, initial.loginCodeCompanyId, initial.loginCodeStaffId, deviceId, initial.loginCodeCreatedAt, enrollment)
+    : null;
+  const result = await db.runTransaction(async tx => {
+    const { profile, gateway } = await readContext(tx);
+    if (enrollment && !(await getProductionOperationalState(enrollment.companyId, tx)).operational) {
+      throw new HttpsError("failed-precondition", "現在はログインを完了できません。");
+    }
+    if (binding) {
+      await stageBoundLogin(tx, initial.loginCodeCompanyId!, initial.loginCodeStaffId!, emailHash(email), profile, binding, email, enrollment);
+    }
     tx.set(loginStateRef, {
       loginCodeActive: false,
       loginCodeUsedAt: FieldValue.serverTimestamp(),
@@ -236,10 +440,10 @@ async function redeemStaffLoginCode(email: string, code: string) {
       redemptionSource: "pwa_code",
     }, { merge: true });
 
-    return gateway.actionLink;
+    return binding ? { customToken: binding.customToken } : { emailActionLink: gateway.actionLink };
   });
 
-  return { emailActionLink };
+  return result;
 }
 
 export const getLoginInviteCandidates = onCall(async (request) => {
@@ -483,9 +687,14 @@ export const loginGateway = onRequest(async (request, response) => {
           !profileSnap.exists || profile?.active !== true || profile.companyId !== data.companyId) {
         throw new HttpsError("permission-denied", "このログインリンクを利用できません。");
       }
+      if (profile.deviceBoundAuthRequired === true) return null;
       tx.set(snap.ref, { openedAt: FieldValue.serverTimestamp(), openCount: FieldValue.increment(1) }, { merge: true });
       return current.actionLink!;
     });
+    if (actionLink === null) {
+      renderError(response, "スタッフアプリに戻り、メールに記載された6桁の確認コードを入力してください。");
+      return;
+    }
     response.redirect(302, actionLink);
   } catch (error) {
     if(metricCompanyId)await incrementProductionMetrics(metricCompanyId,{authenticationFailures:1},"login_gateway_error");
@@ -614,6 +823,11 @@ async function sendLoginLink(input: {
   ]);
 
   const gatewayUrl = `${gatewayBase}?token=${encodeURIComponent(rawToken)}`;
+  const codeOnly = profile.deviceBoundAuthRequired === true;
+  const codeInstructions = codeOnly
+    ? "Lip Knots Crewのログイン画面に戻り、次の確認コードを入力してください。スマートフォン、iPad、PCで同じ手順です。"
+    : "iPhoneのホーム画面版では、アプリへ戻って次の確認コードを入力してください。";
+  const codeExpiry = "確認コードは15分間・1回限り有効です。";
   const intro = input.introText.trim()
     ? `<p style="white-space:pre-wrap">${escapeHtml(input.introText)}</p>`
     : "";
@@ -625,13 +839,13 @@ async function sendLoginLink(input: {
       <div style="border:1px solid #eadfe2;border-radius:20px;padding:24px;background:#fff9fb">
         <p>${escapeHtml(input.displayName)}さん</p>
         ${intro}
-        <p>SafariやPCでは、下のボタンを押すだけでログインできます。</p>
+        ${codeOnly ? "" : `<p>SafariやPCでは、下のボタンを押すだけでログインできます。</p>
         <p style="text-align:center;margin:28px 0">
           <a href="${escapeHtml(gatewayUrl)}" style="display:inline-block;background:#c97f98;color:white;text-decoration:none;font-weight:800;padding:14px 24px;border-radius:14px">Lip Knots Crewにログイン</a>
-        </p>
-        <p>iPhoneのホーム画面版では、アプリへ戻って次の確認コードを入力してください。</p>
+        </p>`}
+        <p>${codeInstructions}</p>
         <p style="text-align:center;font-size:32px;font-weight:900;letter-spacing:8px;color:#3f332c;margin:20px 0">${loginCode}</p>
-        <p style="font-size:12px;color:#806f68">確認コードは15分間・1回限り有効です。ログインボタンは1時間有効です。心当たりがない場合は使用しないでください。</p>
+        <p style="font-size:12px;color:#806f68">${codeExpiry}${codeOnly ? "" : "ログインボタンは1時間有効です。"}心当たりがない場合は使用しないでください。</p>
       </div>
     </div>
   `;
@@ -640,13 +854,11 @@ async function sendLoginLink(input: {
     "",
     input.introText,
     "",
-    "SafariやPCでは、下のURLを開くとLip Knots Crewへログインできます。",
-    gatewayUrl,
-    "",
-    "iPhoneのホーム画面版では、アプリへ戻って次の確認コードを入力してください。",
+    ...(codeOnly ? [] : ["SafariやPCでは、下のURLを開くとLip Knots Crewへログインできます。", gatewayUrl]),
+    codeInstructions,
     loginCode,
     "",
-    "確認コードは15分間・1回限り有効です。ログインURLは1時間有効です。",
+    codeOnly ? codeExpiry : codeExpiry + "ログインURLは1時間有効です。",
   ].filter((line) => line !== "").join("\n");
 
   const deliveryRef = db.collection("loginInviteDeliveries").doc();

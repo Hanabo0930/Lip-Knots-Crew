@@ -31,6 +31,7 @@ export {
   revokeAllMyDevices,
   getStaffDevices,
   adminRevokeStaffDevices,
+  adminStaffDeviceAuthentication,
 } from "./devices";
 export {
   registerPushToken,
@@ -139,6 +140,7 @@ export {
   duplicateAdminJob,
   updateJobPublication,
   publishScheduledJobs,
+  adminEditCaseListLocation,
   adminEditJobInputs,
   generateJobExport,
 } from "./job-management";
@@ -192,3 +194,6 @@ export { confirmCaseMailReview } from "./case-mail-resolution";
 export { receiveCaseMailMessage, receiveCaseMailMessages } from "./case-mail-receive";
 
 export { confirmCaseMailDraftReview } from "./case-mail-draft-review";
+
+// Dedicated GAS bridge remains OFF/private unless explicitly adopted and configured.
+export { caseListGasSync } from "./case-list-gas-sync-entry";

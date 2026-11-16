@@ -27,7 +27,7 @@ vm.runInNewContext(compile(functions(manualSource,['manualOwnerReviewCanProceed'
 const modules=new Map();
 function module(relative){
  if(modules.has(relative))return modules.get(relative);
- const exports={},context={exports,require:name=>{
+ const exports={},context={exports,React,require:name=>{
   if(name==='react')return React;
   if(name==='./job-list')return module('apps/staff/src/job-list.ts');
   assert.fail('Unexpected test dependency: '+name);
@@ -36,13 +36,12 @@ function module(relative){
  modules.set(relative,exports);return exports;
 }
 const list=module('apps/staff/src/job-list.ts'),calendar=module('apps/staff/src/monthly-shift-calendar.ts');
+scope.staffReservationConfirmed=list.staffReservationConfirmed;
 scope.shiftDateLabel=module('apps/staff/src/ShiftJobCards.tsx').shiftDateLabel;
 scope.shiftTextLabel=(v,f)=>typeof v==='string'&&v.trim()?v.trim():f;
-const start=app.indexOf('{pendingApplications.length>0&&<section aria-label="確認待ちの手配"');
-const end=app.indexOf('</section>}',start);
-assert.ok(start>=0&&end>start,'Use the actual pending-assignment section');
-const jsx=app.slice(app.indexOf('<section',start),end+'</section>'.length);
-vm.runInNewContext(compile('globalThis.pendingSection=(pendingApplications)=>('+jsx+');'),scope);
+const Panel=module('apps/staff/src/PendingAssignmentsPanel.tsx').default;
+assert(app.includes('<PendingAssignmentsPanel jobs={pendingApplications}'),'App must render actual production component');
+scope.pendingSection=jobs=>React.createElement(Panel,{jobs,busy:false,onRefresh:async()=>{}});
 
 const observation={holdReasons:['OWNER_APPROVAL_REQUIRED'],staffId:'synthetic-staff',canonicalStaffName:'合成担当',sourceStaffName:'合成担当',
  dateKey:'2026-11-20',observationHash:'a'.repeat(64),source:{sourceRevision:'b'.repeat(64)}};
@@ -71,8 +70,7 @@ test('manual preparation summary remains pending without an application claim',(
 });
 test('pending JSX distinguishes manual name input from an actual application',()=>{
  const html=renderToStaticMarkup(scope.pendingSection([manual,application]));
- assert.match(html,/手入力の手配・確認待ち/);assert.match(html,/応募受付・確認待ち/);
- assert.match(html,/ネームアップ後に対象を選び/);assert.match(html,/転記と照合が終わるまで/);
+ assert(html.includes(list.pendingAssignmentReason(manual)));assert(html.includes(list.pendingAssignmentReason(application)));assert.notEqual(list.pendingAssignmentReason(manual),list.pendingAssignmentReason(application));assert(html.includes('<button'));assert.equal((html.match(/<li>/g)||[]).length,2);
 });
 for(const [origin,job] of [['manual',manual],['application',application]]){
  test(origin+' stays outside confirmed list and calendar while awaiting ACK',()=>{

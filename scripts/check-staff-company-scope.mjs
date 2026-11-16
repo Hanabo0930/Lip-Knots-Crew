@@ -30,7 +30,7 @@ assert.match(
 );
 
 assert.match(source,/const sid=staffScopeId\(token\.claims\.staffId\)/u,"Staff ID must use the same verified-scope validation.");
-assert.match(source,/if\(!cid\|\|!sid\)throw new Error/u,"Invalid scope must stop startup before its data load.");
+assert.match(source,/if\(!cid\|\|!sid\|\|!tokenMatchesBootstrap\(token\)\)throw new Error/u,"Invalid or mismatched scope must stop startup before its data load.");
 const helper=source.match(/function staffScopeId\([^\n]+/u)?.[0];
 assert.ok(helper,"Actual scope validator must be available.");
 const scope={};runInNewContext(ts.transpileModule(helper,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,scope);

@@ -1,4 +1,4 @@
-import { projectListIncludesProject, sanitizeCommandResult, sha256, stableJson } from "./production-deploy-core.mjs";
+import { failedDeploymentResultKeys, projectListIncludesProject, sanitizeCommandResult, sha256, stableJson } from "./production-deploy-core.mjs";
 
 export const rollbackAcknowledgementKeys = ["emergencyLockConfirmed", "incidentOwnerAssigned", "acceptanceEvidencePreserved", "knownGoodBundleVerified", "hostingSourcesVerified", "rulesRedeployLimitationAccepted"];
 const projectPattern = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/u;
@@ -34,9 +34,7 @@ export function validateRollbackRequest(request, config) {
 export function buildProductionRollbackPlan({ config, request, trigger, bundleInspection, deploymentEvidence }) {
   const errors = [...validateRollbackConfig(config), ...validateRollbackRequest(request, config)];
   if (trigger?.schemaVersion !== 1 || trigger?.releaseId !== config.releaseId || trigger?.projectId !== config.projectId || !Array.isArray(trigger?.failedCheckKeys) || !trigger.failedCheckKeys.length || !shaPattern.test(String(trigger?.acceptanceLedgerFingerprint ?? "")) || !shaPattern.test(String(trigger?.acceptancePlanFingerprint ?? "")) || !shaPattern.test(String(trigger?.deploymentPlanFingerprint ?? ""))) errors.push("rollbackTrigger");
-  const deploymentResults = new Map((deploymentEvidence?.results ?? []).map((item) => [item?.key, item]));
-  const requiredDeploymentResults = ["project_access", "rules_and_storage", "functions", "hosting", "functions_inventory", "hosting_inventory", "staff_https", "admin_https"];
-  if (deploymentEvidence?.schemaVersion !== 1 || deploymentEvidence?.status !== "succeeded" || deploymentEvidence?.releaseId !== config.releaseId || deploymentEvidence?.projectId !== config.projectId || !emailPattern.test(String(deploymentEvidence?.approvedByEmail ?? "")) || !shaPattern.test(String(deploymentEvidence?.planFingerprint ?? "")) || trigger?.deploymentPlanFingerprint !== deploymentEvidence?.planFingerprint || requiredDeploymentResults.some((key) => Number(deploymentResults.get(key)?.code) !== 0)) errors.push("deploymentEvidence");
+  if (deploymentEvidence?.schemaVersion !== 1 || deploymentEvidence?.status !== "succeeded" || deploymentEvidence?.releaseId !== config.releaseId || deploymentEvidence?.projectId !== config.projectId || !emailPattern.test(String(deploymentEvidence?.approvedByEmail ?? "")) || !shaPattern.test(String(deploymentEvidence?.planFingerprint ?? "")) || trigger?.deploymentPlanFingerprint !== deploymentEvidence?.planFingerprint || failedDeploymentResultKeys(deploymentEvidence).length) errors.push("deploymentEvidence");
   if (!bundleInspection?.valid || bundleInspection?.releaseId !== request?.knownGoodReleaseId || bundleInspection?.projectId !== config.projectId || !shaPattern.test(String(bundleInspection?.fingerprint ?? ""))) errors.push("knownGoodBundle");
   if (errors.length) throw new Error([...new Set(errors)].join(" / "));
   const projectId = config.projectId;

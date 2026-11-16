@@ -2,6 +2,7 @@ import type { MessagePayload } from "firebase/messaging";
 const loadMessagingSdk=()=>import("firebase/messaging");
 import { Functions, httpsCallable } from "firebase/functions";
 import { getClientMessaging } from "./firebase";
+import { staffSystemNotification } from "./notification-target";
 
 async function waitForPushWorker():Promise<ServiceWorkerRegistration>{
   let timer:ReturnType<typeof setTimeout>|undefined;
@@ -24,6 +25,7 @@ export type PushTestStatus = {
   successCount: number;
   failureCount: number;
   invalidTokenCount: number;
+  deliveryVerificationRequired?: boolean;
   failureReason:
     | "none"
     | "invalid_token"
@@ -194,38 +196,31 @@ export async function loadTestPushStatus(
   if(test==null)return null;
   if(typeof test!=="object"||Array.isArray(test)||test.queueId!==queueId||typeof test.status!=="string"||!test.status.trim()||typeof test.finished!=="boolean"||
     [test.successCount,test.failureCount,test.invalidTokenCount].some(value=>!Number.isSafeInteger(value)||value<0)||
+    (test.deliveryVerificationRequired!==undefined&&typeof test.deliveryVerificationRequired!=="boolean")||
+    (test.deliveryVerificationRequired===true&&test.status!=="error")||
     !["none","invalid_token","sender_mismatch","service_auth","rate_limited","temporary","unknown"].includes(test.failureReason)||
     test.finished!==["completed","partial","no_tokens","error","paused_global"].includes(test.status))throw new Error("通知テストの処理結果を確認できません。もう一度お試しください。");
   return test;
 }
 
 export async function listenForForegroundPush(
-  handler: (payload: MessagePayload) => void
+  handler: (payload: MessagePayload) => boolean,
+  isCurrent: () => boolean,
 ): Promise<(() => void) | null> {
   const messaging = await getClientMessaging();
-  if(!messaging)return null;
-  const {onMessage}=await loadMessagingSdk();
+  if (!messaging || !isCurrent()) return null;
+  const { onMessage } = await loadMessagingSdk();
+  if (!isCurrent()) return null;
   return onMessage(messaging, (payload) => {
-    void showForegroundSystemNotification(payload).catch(() => undefined);
-    handler(payload);
+    if (!isCurrent() || !handler(payload)) return;
+    void showForegroundSystemNotification(payload, isCurrent).catch(() => undefined);
   });
 }
 
-async function showForegroundSystemNotification(
-  payload: MessagePayload
-): Promise<void> {
-  if (
-    currentPushPermission() !== "granted" ||
-    !("serviceWorker" in navigator)
-  ) return;
-
-  const data = payload.data ?? {};
+async function showForegroundSystemNotification(payload: MessagePayload, isCurrent: () => boolean): Promise<void> {
+  if (currentPushPermission() !== "granted" || !("serviceWorker" in navigator)) return;
   const registration = await waitForPushWorker();
-  await registration.showNotification(data.title || "Lip Knots Crew", {
-    body: data.body || "新しいお知らせがあります。",
-    icon: "/logo.png",
-    badge: "/logo.png",
-    tag: data.category || "lkc-notification",
-    data: { route: data.route || "/" },
-  });
+  if (!isCurrent()) return;
+  const { title, options } = staffSystemNotification(payload.data);
+  await registration.showNotification(title, options);
 }

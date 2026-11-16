@@ -94,6 +94,10 @@ function createDependencyEvidence(input){
   }
   return {schema:'LK_MONTHLY_DEPENDENCY_EVIDENCE_V1',spreadsheetId:metadata.spreadsheetId,...d,fields:VALUE_FIELDS,rowHashes,requestHash:hash(input.reads.map(read=>read.request))};
 }
+function dependencyHashFromEvidence(metadata,dependencyBounds,evidence){
+  need(dependencyBounds.length===evidence.length,'COMPACT_DEPENDENCY_EVIDENCE_INCOMPLETE');
+  return dependencyBounds.length?hash({schema:'LK_MONTHLY_DEPENDENCY_VALUES_V1',sheets:dependencyBounds.map(d=>{const found=evidence.filter(e=>e.title===d.title);need(found.length===1,'COMPACT_DEPENDENCY_EVIDENCE_DUPLICATE');const e=found[0];need(e.schema==='LK_MONTHLY_DEPENDENCY_EVIDENCE_V1'&&e.spreadsheetId===metadata.spreadsheetId&&e.sheetId===d.sheetId&&e.rowCount===d.rowCount&&e.columnCount===d.columnCount&&canonical(e.fields)===canonical(VALUE_FIELDS)&&Array.isArray(e.rowHashes)&&e.rowHashes.length===d.rowCount&&e.rowHashes.every(h=>/^[a-f0-9]{64}$/.test(h))&&/^[a-f0-9]{64}$/.test(e.requestHash),'COMPACT_DEPENDENCY_EVIDENCE_INVALID');return {...d,rowHashes:e.rowHashes};})}):hash(null);
+}
 function createCompactSnapshot(input){const p=prepare(input.metadata,input.indexReads,input.caseId),{metadata,b,states}=p;const fullAllowed=[{...b.source,r0:p.sourceRow,r1:p.sourceRow+1,c0:0,c1:65},...p.destinations.map(d=>({...d,r0:d.row,r1:d.row+1,c0:0,c1:d.columnCount}))];need(Array.isArray(input.fullReads)&&input.fullReads.length,'COMPACT_FULL_READ_REQUIRED');for(const read of input.fullReads)applyRead(metadata,read,fullAllowed,states,true);
   const dependencyBounds=input.includeDependencies===true?dependencyBindings(metadata):[];
   const valueAllowed=[...(p.ledgerRow===null?[]:[{...b.ledger,r0:p.ledgerRow,r1:p.ledgerRow+1,c0:0,c1:25}])];need(Array.isArray(input.valueReads),'COMPACT_SELECTED_LEDGER_READ_REQUIRED');for(const read of input.valueReads)applyRead(metadata,read,valueAllowed,states,false);
@@ -102,8 +106,7 @@ function createCompactSnapshot(input){const p=prepare(input.metadata,input.index
   const resolveStaff=typeof input.resolveStaff==='function'?input.resolveStaff:()=>null;
   function rows(s,idColumn,nameColumn){return s.rows.slice(1).map((cells,i)=>({row:i+2,cells,knownColumns:knownColumns(s,i+1),fullWritable:s.full.has(i+1),...(idColumn===60?{caseId:text(cells[idColumn])}:{fixedId:text(cells[idColumn])}),...identity(text(cells[nameColumn]),resolveStaff)}));}
   const months=b.months.map(m=>{const s=states.get(m.sheetId);return {...m,headers:s.rows[0].map(text),rows:rows(s,m.columnCount-1,1),isolated:false};});
-  const evidence=input.dependencyEvidence||[];need(dependencyBounds.length===evidence.length,'COMPACT_DEPENDENCY_EVIDENCE_INCOMPLETE');
-  const dependencyHash=dependencyBounds.length?hash({schema:'LK_MONTHLY_DEPENDENCY_VALUES_V1',sheets:dependencyBounds.map(d=>{const found=evidence.filter(e=>e.title===d.title);need(found.length===1,'COMPACT_DEPENDENCY_EVIDENCE_DUPLICATE');const e=found[0];need(e.schema==='LK_MONTHLY_DEPENDENCY_EVIDENCE_V1'&&e.spreadsheetId===metadata.spreadsheetId&&e.sheetId===d.sheetId&&e.rowCount===d.rowCount&&e.columnCount===d.columnCount&&canonical(e.fields)===canonical(VALUE_FIELDS)&&Array.isArray(e.rowHashes)&&e.rowHashes.length===d.rowCount&&e.rowHashes.every(h=>/^[a-f0-9]{64}$/.test(h))&&/^[a-f0-9]{64}$/.test(e.requestHash),'COMPACT_DEPENDENCY_EVIDENCE_INVALID');return {...d,rowHashes:e.rowHashes};})}):hash(null);
+  const dependencyHash=dependencyHashFromEvidence(metadata,dependencyBounds,input.dependencyEvidence||[]);
   return {spreadsheetId:metadata.spreadsheetId,isolated:false,source:{...b.source,headers:selectedSource.rows[0].map(text),rows:rows(selectedSource,60,2)},months,dependencyHash,catalog,
     coverage:{schema:'LK_MONTHLY_COMPACT_COVERAGE_V1',unknownCell:'$unknown:true',source:{...b.source,headersComplete:true,indexReadComplete:true,structuralColumns:SOURCE_COLUMNS,selectedCaseId:p.caseId},ledger:{...b.ledger,headerRow:3,headersComplete:true,indexReadComplete:true,structuralColumns:[0],selectedCaseId:p.caseId,selectedRow:p.ledgerRow===null?null:p.ledgerRow+1,selectedRecordPresent:p.ledgerRow!==null,selectedRowReadComplete:p.ledgerRow!==null,absenceProven:p.ledgerRow===null},months:b.months.map(m=>({...m,headersComplete:true,indexReadComplete:true,structuralColumns:[0,1,9,10,11,12,13,14,m.columnCount-1]}))},
     ledger:{...b.ledger,headerRow:3,headers:selectedLedger.rows[2].map(text),rows:selectedLedger.rows.slice(3).map((cells,i)=>({row:i+4,caseId:text(cells[0]),cells,knownColumns:knownColumns(selectedLedger,i+3),fullValues:i+3===p.ledgerRow}))},rawRows:[selectedSource.rows[0],sourceCells],rawLedgerRows:[[],[],selectedLedger.rows[2],...(ledgerCells?[ledgerCells]:[])],selectedRows:{source:p.sourceRow+1,ledger:p.ledgerRow===null?null:p.ledgerRow+1,destinations:p.destinations.map(d=>({sheetId:d.sheetId,row:d.row+1}))}};
@@ -138,7 +141,8 @@ function createArchivedCompactSnapshot(input){
  });
  const ledgerIds=ledger.rows.slice(3).map(row=>text(row[0]));
  need(ledgerIds.filter(id=>id.toLowerCase()===p.caseId.toLowerCase()).length===1,'ARCHIVED_LEDGER_NOT_UNIQUE');
- return {spreadsheetId:metadata.spreadsheetId,caseId:p.caseId,
+  return {spreadsheetId:metadata.spreadsheetId,caseId:p.caseId,
+   ...(input.includeDependencies===true?{dependencyHash:dependencyHashFromEvidence(metadata,dependencyBindings(metadata),input.dependencyEvidence||[])}:{}),
   sourceIndex:{startRow:2,rowCount:b.source.rowCount,cells:source.rows.slice(1).map(row=>text(row[60]))},
   sourceIds:source.rows.slice(1).map(row=>text(row[60])).filter(Boolean),
   ledgerIndex:{startRow:4,rowCount:b.ledger.rowCount,cells:ledgerIds},
@@ -146,4 +150,4 @@ function createArchivedCompactSnapshot(input){
   monthInventory:months.map(({sheetId,title,width,rowCount})=>({sheetId,title,width,rowCount})),months};
 }
 
-module.exports={inspectArchivedCompactIndex,createArchivedCompactSnapshot,createDependencyPlans,createDependencyEvidence,UNKNOWN,VALUE_FIELDS,FULL_FIELDS,SOURCE_COLUMNS,LEDGER_HEADERS,DEPENDENCIES,canonical,createIndexRanges,createDependencyRanges,inspectCompactIndex,createCompactSnapshot};
+module.exports={dependencyHashFromEvidence,inspectArchivedCompactIndex,createArchivedCompactSnapshot,createDependencyPlans,createDependencyEvidence,UNKNOWN,VALUE_FIELDS,FULL_FIELDS,SOURCE_COLUMNS,LEDGER_HEADERS,DEPENDENCIES,canonical,createIndexRanges,createDependencyRanges,inspectCompactIndex,createCompactSnapshot};

@@ -97,6 +97,12 @@ export function validatePlan(plan) {
     if (new Set(functions).size !== functions.length) throw new Error("FUNCTION_LIST_HAS_DUPLICATES");
     const rejected = functions.filter((name) => !safetyConfig.allowedFunctions.includes(name));
     if (rejected.length) throw new Error(`FUNCTIONS_NOT_ALLOWED:${rejected.join(",")}`);
+    // This export has a private, non-business deployment scope only.
+    if (functions.includes("caseListGasSync")) {
+      if (sourceRef !== "main" || functions.length !== 1) throw new Error("GAS_SYNC_MAIN_SINGLE_TARGET_REQUIRED");
+      if (plan.confirmation !== safetyConfig.confirmations.gasSyncReadiness) throw new Error("GAS_SYNC_READINESS_CONFIRMATION_REJECTED");
+      return { mode, project, region, sourceRef, functions };
+    }
     // 定期workerは専用の確認語・main・単独指定でだけ停止復旧を許可する。
     if (functions.includes("retrySafeSheetWrites")) {
       if (sourceRef !== "main" || functions.length !== 1) throw new Error("RETRY_RECOVERY_MAIN_SINGLE_TARGET_REQUIRED");

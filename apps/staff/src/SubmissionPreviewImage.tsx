@@ -15,6 +15,7 @@ type Props = {
   file: PreviewFile;
   onRefreshPreview: (file: PreviewFile) => Promise<string | null>;
   className?: string;
+  onDemand?: boolean;
 };
 
 export default function SubmissionPreviewImage(props: Props) {
@@ -23,8 +24,8 @@ export default function SubmissionPreviewImage(props: Props) {
   return <SubmissionPreviewContent key={JSON.stringify([file.submissionId, file.id, file.previewUrl, file.contentType])} {...props}/>;
 }
 
-function SubmissionPreviewContent({ file, onRefreshPreview, className = "history-preview" }: Props) {
-  const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">(file.previewUrl ? "loading" : "error");
+function SubmissionPreviewContent({ file, onRefreshPreview, className = "history-preview", onDemand = false }: Props) {
+  const [loadState, setLoadState] = useState<"idle" | "loading" | "loaded" | "error">(file.previewUrl ? "loading" : onDemand ? "idle" : "error");
   const [src, setSrc] = useState<string | null>(file.previewUrl);
   const [refreshing, setRefreshing] = useState(false);
   const refreshVersion = useRef(0);
@@ -46,7 +47,7 @@ function SubmissionPreviewContent({ file, onRefreshPreview, className = "history
 
   const previewLabel = "提出ファイルのプレビュー: " + (file.driveName?.trim() || file.originalName?.trim() || "ファイル名確認中");
 
-  if(file.contentType==="application/pdf")return <PdfFilePreview key={JSON.stringify([file.submissionId,file.id])} url={file.previewUrl} name={file.driveName||file.originalName||"報告書PDF"} onRefresh={()=>onRefreshPreview(file)}/>;
+  if(file.contentType==="application/pdf")return <PdfFilePreview key={JSON.stringify([file.submissionId,file.id])} url={file.previewUrl} onDemand={onDemand} name={file.driveName||file.originalName||"報告書PDF"} onRefresh={()=>onRefreshPreview(file)}/>;
   if (!file.contentType.startsWith("image/")) {
     return (
       <div ref={previewContainerRef} tabIndex={-1} role="group" aria-label={previewLabel} className={className}>
@@ -84,9 +85,9 @@ function SubmissionPreviewContent({ file, onRefreshPreview, className = "history
   if (!src) {
     return (
       <div ref={previewContainerRef} tabIndex={-1} role="group" aria-label={previewLabel} className={`${className} preview-placeholder`} aria-busy={refreshing}>
-        <span role="status">{refreshing ? "画像を確認しています…" : "プレビューを取得できません"}</span>
+        {loadState !== "idle" && <span role="status">{refreshing ? "画像を確認しています…" : "プレビューを取得できません"}</span>}
         <button type="button" className="secondary" disabled={refreshing} onClick={() => void retryPreview()}>
-          {refreshing ? "再取得中…" : "画像を再読み込み"}
+          {refreshing ? "取得中…" : loadState === "idle" ? "画像を表示" : "画像を再読み込み"}
         </button>
       </div>
     );

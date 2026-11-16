@@ -1,4 +1,6 @@
+import type {StaffNgObservation,StaffNgCompanies} from './staff-ng';
 export type StaffColumnConfig = {
+  ngCompanies?: 'K';
   displayName: string;
   homePrefecture?: string;
   nearestStation?: string;
@@ -47,6 +49,7 @@ export type ParsedStaffRow = {
   rank: string;
   evaluationTags: string[];
   evaluationMemo: string;
+  ngCompanyObservation?: StaffNgObservation;
   sourceRef: {
     spreadsheetId: string;
     sheetName: string;
@@ -57,6 +60,7 @@ export type ParsedStaffRow = {
 };
 
 export type MergedStaffProfile = {
+  ngCompanies?: StaffNgCompanies;
   companyId: string;
   staffId: string;
   displayName: string;

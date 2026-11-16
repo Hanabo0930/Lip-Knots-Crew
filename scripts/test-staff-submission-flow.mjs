@@ -804,16 +804,20 @@ try {
     const file=new File(['retained'],'retained.pdf',{type:'application/pdf',lastModified:1234});
     await saveDraft(key,[file]);
     const outcomes=[];
-    for(const [method,operation] of [
-      ['put',()=>saveDraft(key,[new File(['replacement'],'replacement.pdf')])],
-      ['delete',()=>clearDraft(key)],
-      ['get',()=>loadDraft(key)],
+    for(const [name,method,operation] of [
+      ['save','put',()=>saveDraft(key,[new File(['replacement'],'replacement.pdf')])],
+      ['clear','put',()=>clearDraft(key)],
+      ['load','get',()=>loadDraft(key)],
     ]){
       const original=IDBObjectStore.prototype[method];
-      let timer;
+      let timer, abortRequested=false;
       IDBObjectStore.prototype[method]=function(...args){
         const request=original.apply(this,args);
-        request.addEventListener('success',()=>request.transaction.abort(),{once:true});
+        request.addEventListener('success',()=>{
+          if(abortRequested)return;
+          abortRequested=true;
+          request.transaction.abort();
+        },{once:true});
         return request;
       };
       try{
@@ -821,7 +825,7 @@ try {
           operation().then(()=>'unexpected-success',error=>error?.name),
           new Promise(resolve=>{timer=setTimeout(()=>resolve('timeout'),2000);}),
         ]);
-        if(outcome!=='AbortError')throw new Error(`${method}: expected AbortError, got ${outcome}`);
+        if(outcome!=='AbortError')throw new Error(`${name}: expected AbortError, got ${outcome}`);
         outcomes.push(outcome);
       }finally{
         clearTimeout(timer);
@@ -840,31 +844,34 @@ try {
   const submittedDraft=await page.evaluate(async()=>{
     const store=await import('/src/draft-store.ts');
     const key='browser-submitted-cleanup';
-    await store.saveDraft(key,[new File(['sent'],'sent.pdf')]);
-    const durable=store.markDraftSubmitted(key);
-    const original=IDBObjectStore.prototype.delete;
-    IDBObjectStore.prototype.delete=function(...args){
+    const sent=[new File(['sent'],'sent.pdf')];
+    await store.saveDraft(key,sent);
+    const original=IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put=function(...args){
       const request=original.apply(this,args);
       request.addEventListener('success',()=>request.transaction.abort(),{once:true});
       return request;
     };
-    let failed=false;
-    try{await store.clearDraft(key);}catch{failed=true;}finally{IDBObjectStore.prototype.delete=original;}
-    const current=(await store.loadDraft(key)).length;
-    // 新しいモジュールはメモリ状態を共有せず、永続した送信済み印だけで復元を抑止する。
+    let failure;
+    try{await store.clearSubmittedDraft(key,sent,()=>true);}catch(error){failure=error.name;}finally{IDBObjectStore.prototype.put=original;}
     const fresh=await import('/src/draft-store.ts?submitted-reload');
-    const restored=(await fresh.loadDraft(key)).length;
-    const recoverable=fresh.getSubmittedDraftReceipt(key)?.durable===true;
-    let staleSaveRejected=false;
-    try{await store.saveDraft(key,[new File(['sent'],'sent.pdf')]);}catch{staleSaveRejected=true;}
-    await store.clearDraft(key);
-    await store.saveDraft(key,[new File(['new'],'new.pdf')]);
-    const [next]=await store.loadDraft(key);
+    const [retained]=await fresh.loadDraft(key);
+    const retainedBody=await retained.text();
+    const retry=await store.clearSubmittedDraft(key,sent,()=>true);
+    await store.saveDraft(key,sent);
+    const afterRetry=(await fresh.loadDraft(key)).length;
+
+    const older=[new File(['older'],'older.pdf')];
+    await store.saveDraft(key,older);
+    await fresh.saveDraft(key,[new File(['new'],'new.pdf')]);
+    const competing=await store.clearSubmittedDraft(key,older,()=>true);
+    await store.saveDraft(key,older);
+    const [next]=await fresh.loadDraft(key);
     const nextBody=await next.text();
     await store.clearDraft(key);
-    return {durable,failed,current,restored,recoverable,staleSaveRejected,nextBody};
+    return {failure,retainedBody,retry,afterRetry,competing,nextBody};
   });
-  assert.deepEqual(submittedDraft,{durable:true,failed:true,current:0,restored:0,recoverable:true,staleSaveRejected:true,nextBody:'new'});
+  assert.deepEqual(submittedDraft,{failure:'AbortError',retainedBody:'sent',retry:'cleared',afterRetry:0,competing:'preserved',nextBody:'new'});
   const largeDraft=await page.evaluate(async()=>{
     const {saveDraft,loadDraft,clearDraft}=await import('/src/draft-store.ts');
     const key='browser-50mb-draft';
@@ -903,7 +910,7 @@ try {
     await page.getByRole("button",{name:"🖼️ 売場画像を提出",exact:true}).click();
     await page.getByRole("heading",{name:"売場画像を提出",exact:true}).waitFor();
     assert.equal(await page.getByRole('region',{name:'提出画面',exact:true}).evaluate(node=>document.activeElement===node),true,'Selected shift submission focuses its panel.');
-    await page.getByRole("button",{name:"画像を再読み込み",exact:true}).waitFor();
+    await page.getByRole("article",{name:/^提出履歴 1件目:/}).getByRole("button",{name:"画像を表示",exact:true}).waitFor();
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,`Submission overflows at ${width}px`);
     if(output)await page.screenshot({path:resolve(output,`staff-submission-${width}.png`),fullPage:true});
     await page.locator(".bottom-nav").getByRole("button",{name:"ホーム"}).click();
@@ -921,9 +928,15 @@ try {
   await page.addStyleTag({content:':root { font-size:32px; }'});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,'Enlarged submission text must not overflow at 320px');
   await page.emulateMedia({reducedMotion:'reduce'});
-  const reloadButton=page.getByRole('button',{name:'画像を再読み込み',exact:true});
+  const demoHistoryCard=page.getByRole('article',{name:/^提出履歴 1件目:/});
+  const showImage=demoHistoryCard.getByRole('button',{name:'画像を表示',exact:true});
+  const reloadButton=demoHistoryCard.getByRole('button',{name:'画像を再読み込み',exact:true});
+  await showImage.focus();
+  assert.equal(await showImage.evaluate(element=>element===document.activeElement),true);
+  await page.keyboard.press('Enter');
+  await reloadButton.waitFor();
+  assert.match(await demoHistoryCard.getByRole('status').innerText(),/プレビューを取得できません/);
   await reloadButton.focus();
-  assert.equal(await reloadButton.evaluate(element=>element===document.activeElement),true);
   await page.keyboard.press('Enter');
   await reloadButton.waitFor();
   assert.equal(await reloadButton.isEnabled(),true);

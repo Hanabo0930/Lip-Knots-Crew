@@ -93,7 +93,7 @@ function harness() {
   };
   function load(name) {
     if (Object.hasOwn(boundaries, name)) return boundaries[name];
-    if (["../src/private-ng/capacity.cjs", "../src/case-list-projection.cjs"].includes(name)) {
+    if (["../src/private-ng/capacity.cjs", "../src/case-list-projection.cjs", "../src/case-list-monthly-compact.cjs"].includes(name)) {
       return require(fileURLToPath(new URL("../functions/" + name.slice(3), import.meta.url)));
     }
     if (/^\.\.\/case-mail-runtime\/(preview|adapter|provider)\.cjs$/.test(name)) return require(fileURLToPath(new URL("../functions/" + name.slice(3), import.meta.url)));

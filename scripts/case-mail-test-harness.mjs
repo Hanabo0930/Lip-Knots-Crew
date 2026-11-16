@@ -93,7 +93,25 @@ function harness() {
   };
   function load(name) {
     if (Object.hasOwn(boundaries, name)) return boundaries[name];
-    if (["../src/private-ng/capacity.cjs", "../src/case-list-projection.cjs", "../src/case-list-monthly-compact.cjs"].includes(name)) {
+    // Load only the local runtime modules reached by the synthetic assignment and review fixtures.
+    if ([
+      "../src/case-list-assignment-observation.cjs",
+      "../src/case-list-external-core.cjs",
+      "../src/case-list-gas-formal-ticket.cjs",
+      "../src/case-list-gas-handoff-core.cjs",
+      "../src/case-list-gas-planner.cjs",
+      "../src/case-list-manual-confirmation.cjs",
+      "../src/case-list-manual-review-store.cjs",
+      "../src/case-list-monthly-adapter.cjs",
+      "../src/case-list-monthly-compact.cjs",
+      "../src/case-list-monthly-controller.cjs",
+      "../src/case-list-owner-authorization.cjs",
+      "../src/case-list-projection.cjs",
+      "../src/private-ng/capacity.cjs",
+      "../src/private-ng/compose-runtime.cjs",
+      "../src/private-ng/crew-wiring.cjs",
+      "../src/private-ng/models.cjs",
+    ].includes(name)) {
       return require(fileURLToPath(new URL("../functions/" + name.slice(3), import.meta.url)));
     }
     if (/^\.\.\/case-mail-runtime\/(preview|adapter|provider)\.cjs$/.test(name)) return require(fileURLToPath(new URL("../functions/" + name.slice(3), import.meta.url)));

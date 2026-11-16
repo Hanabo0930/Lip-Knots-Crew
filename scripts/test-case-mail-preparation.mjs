@@ -94,6 +94,9 @@ for(const held of [true,false])await test("事前連絡の再確認"+(held?"保�
  n.state.records.set("notificationSettings/"+companyId,{enabled:true,importantAnnouncementHour:2});
  await n.load("./reminder-scheduler").scheduleOperationalReminders();
  const queued=[...n.state.records].filter(([k])=>k.startsWith("notificationQueue/"));assert.equal(queued.length,held?0:1);
+ const profilePath="staffProfiles/"+h.staffAuth.token.staffId,identityPath="authIdentities/"+h.staffAuth.uid;
+ n.state.records.set(profilePath,clone(h.records.get(profilePath)));
+ n.state.records.set(identityPath,clone(h.records.get(identityPath)));
  const tasks=(await n.load("./staff-tasks").getMyTasks({auth:h.staffAuth,data:{}})).tasks;
  const task=tasks.find(t=>t.kind==="precontact");assert.ok(task);assert.equal(task.title,held?"受信内容・勤務条件を確認中です":"事前連絡を送ってください");
  if(held){assert.equal(task.dueAtMs,null);assert.equal(task.priority,"normal");assert.equal(tasks.length,1);}

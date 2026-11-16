@@ -89,8 +89,8 @@ export async function loadDraftState(key: string): Promise<{ files: File[]; lega
       const transaction = db.transaction(STORE, "readonly");
       const store = transaction.objectStore(STORE);
       const active = store.get(currentKey), previous = store.get(key);
+      // 要求のエラーが先に伝わることがあるため、取引の完了か中断を待つ。
       transaction.oncomplete = () => resolve([active.result, previous.result]);
-      transaction.onerror = () => reject(transaction.error);
       transaction.onabort = () => reject(transaction.error ?? new DOMException("下書きの読み込みが中断されました。", "AbortError"));
     });
   } finally {
@@ -142,7 +142,6 @@ export async function clearSubmittedDraft(
       result = await new Promise<"cleared" | "preserved">((resolve, reject) => {
         const transaction = db.transaction(STORE, "readwrite");
         transaction.onabort = () => reject(transaction.error ?? new DOMException("下書きの照合が中断されました。", "AbortError"));
-        transaction.onerror = () => reject(transaction.error);
         const store = transaction.objectStore(STORE);
         let outcome: "cleared" | "preserved" = "preserved";
         transaction.oncomplete = () => resolve(outcome);
@@ -184,7 +183,6 @@ function tx(db: IDBDatabase, mode: IDBTransactionMode, action: (store: IDBObject
     const transaction = db.transaction(STORE, mode);
     action(transaction.objectStore(STORE));
     transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
     transaction.onabort = () => reject(transaction.error ?? new DOMException("下書きの保存処理が中断されました。", "AbortError"));
   });
 }

@@ -366,16 +366,24 @@ export async function restorePaused(api, report = console.log, tuned = false) {
   for (const name of scope.functions) {
     try {
       const current = (await readPair())[name];
-      checkedImage(current, name, mode(current), restoreImage);
-      if (mode(current) === 'paused') continue;
+      uploadAcceptanceImage(current, name, mode(current), restoreImage);
+      if (mode(current) === 'paused') {
+        if (!tuned) continue;
+        const {additions, mask} = loadCapacityPatch(current, name, 'paused');
+        const currentConfig = current.fn.serviceConfig;
+        if (!mask || Object.entries(additions).every(([key, value]) => currentConfig[key] === value)) continue;
+      }
       await api.update(name, current, 'paused');
-      checkedImage((await readPair())[name], name, 'paused', restoreImage);
+      uploadAcceptanceImage((await readPair())[name], name, 'paused', restoreImage);
     } catch (error) {
       report('UPLOAD_ACCEPTANCE_RESTORE_RECHECK=' + name + ':' + safeError(error));
     }
   }
-  const paused = images(await readPair(), true, restoreImage);
+  const current = await readPair();
+  images(current, true, {requireHash: false});
   report('UPLOAD_ACCEPTANCE_BOTH_PAUSED=VERIFIED');
+  const paused = images(current, true, restoreImage);
+  if (tuned) report('UPLOAD_ACCEPTANCE_ORIGINAL_CAPACITY=VERIFIED');
   return paused;
 }
 

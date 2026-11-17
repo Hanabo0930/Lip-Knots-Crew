@@ -30,10 +30,18 @@ export function normalizeLoadCapacity(image, name, mode) {
 
 export function loadCapacityPatch(before, name, next) {
   const config = before.fn.serviceConfig;
-  const current = loadCapacity(name, config.environmentVariables[transfer]);
   const target = loadCapacity(name, next);
-  expect(config.availableMemory === current.memory && config.maxInstanceRequestConcurrency === current.concurrency,
-    'UPLOAD_ACCEPTANCE_LOAD_CAPACITY_MISMATCH');
+  const mode = config.environmentVariables[transfer];
+  const current = loadCapacity(name, mode);
+  if (next === 'acceptance') {
+    expect(mode === 'paused' && config.availableMemory === current.memory
+      && config.maxInstanceRequestConcurrency === current.concurrency, 'UPLOAD_ACCEPTANCE_LOAD_CAPACITY_MISMATCH');
+  } else if (![original.memory, capacity[name].memory].includes(config.availableMemory)
+    || ![original.concurrency, capacity[name].concurrency].includes(config.maxInstanceRequestConcurrency)) {
+    // Stop intake even if a provider returns an unexpected capacity setting.
+    // A recovery write never replaces capacity outside the approved profiles.
+    return {additions: {}, mask: ''};
+  }
   return {
     additions: {availableMemory: target.memory, maxInstanceRequestConcurrency: target.concurrency},
     mask: ',serviceConfig.availableMemory,serviceConfig.maxInstanceRequestConcurrency',

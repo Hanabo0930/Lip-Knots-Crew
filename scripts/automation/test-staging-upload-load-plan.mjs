@@ -59,6 +59,9 @@ test('STAGING tuned capacity changes only memory and concurrency and restores ve
   const drift = image('acceptance');
   drift.fn.serviceConfig.availableCpu = '2';
   assert.throws(() => normalizeLoadCapacity(drift, name, 'acceptance'), /CAPACITY_MISMATCH/);
+  const unexpected = image('acceptance');
+  unexpected.fn.serviceConfig.availableMemory = '2Gi';
+  assert.deepEqual(loadCapacityPatch(unexpected, name, 'paused'), {additions: {}, mask: ''});
 });
 
 const firestore = fields => ({fields: Object.fromEntries(Object.entries(fields).map(([name, value]) => [name,

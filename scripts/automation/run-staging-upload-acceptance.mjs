@@ -7,7 +7,7 @@ import {validatePlan} from './validate-staging-scope.mjs';
 import {authenticatedUploadRefreshAPI, uploadRefreshReader} from './run-upload-source-refresh.mjs';
 import {UPLOAD_REFRESH_SCOPE as scope, assertUploadRefreshBeforeImages, assertUploadAcceptanceChange,
   uploadAcceptanceImage, uploadExactEventFilterValue} from './upload-source-refresh-contract.mjs';
-import {project, bucket, company, caseId, uid, staffId, jobId, driveRoot, submissionId, files,
+import {project, bucket, company, caseId, uid, staffId, jobId, driveRoot, submissionId, files, issuedNonce,
   ruleFilename, rulesFor, modeVariable, sourceArchiveSha256, sourceArchiveBytes} from './staging-upload-acceptance-manifest.mjs';
 
 const repository = 'Hanabo0930/Lip-Knots-Crew';
@@ -209,7 +209,7 @@ async function verifyCompleted(api) {
     && scalar(parent, 'totalFiles') === files.length && scalar(parent, 'completedFiles') === files.length
     && report?.completed?.booleanValue === true
     && files.every((file, i) => scalar(saved[i], 'status') === 'completed'
-      && scalar(saved[i], 'completionCounted') === true && scalar(saved[i], 'storagePath') === file.storagePath
+      && scalar(saved[i], 'completionCounted') === true && issuedNonce(file, scalar(saved[i], 'storagePath'))
       && scalar(saved[i], 'contentSha256') === file.contentSha256 && typeof scalar(saved[i], 'verifiedUploadBytes') === 'string'
       && typeof scalar(saved[i], 'driveFileId') === 'string')
     && new Set(saved.map(doc => scalar(doc, 'driveFileId'))).size === files.length,

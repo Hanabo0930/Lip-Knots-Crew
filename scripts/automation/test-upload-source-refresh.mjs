@@ -17,7 +17,7 @@ import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUpload
   uploadRefreshStorageTriggerSummary, uploadRefreshPreflightSummary} from './run-upload-source-refresh.mjs';
 import {validatePlan} from './validate-staging-scope.mjs';
 import {validateContext as validateAcceptance, runWindow, restorePaused} from './run-staging-upload-acceptance.mjs';
-import {files as acceptanceFiles, modeVariable, rulesFor, sourceArchiveSha256} from './staging-upload-acceptance-manifest.mjs';
+import {files as acceptanceFiles, issuedNonce, modeVariable, rulesFor, sourceArchiveSha256} from './staging-upload-acceptance-manifest.mjs';
 const copy = value => structuredClone(value), prefix = `projects/${S.project}/locations/${S.region}`;
 const privateValue = 'synthetic-private-value-do-not-publish';
 const emptyPolicy = () => ({etag: 'synthetic-policy-etag', version: 1, bindings: []});
@@ -100,9 +100,14 @@ test('upload acceptance Storage policy pins both paths, claims and content with 
   assert.ok(rules.includes('request.auth.token.crewStagingCase == "CREW-STAGING-20261116-01"'));
   assert.ok(rules.includes('request.time < timestamp.value(' + Date.parse(acceptanceEnv.LKC_ACCEPTANCE_EXPIRY) + ')'));
   for (const file of acceptanceFiles) {
-    assert.ok(rules.includes(JSON.stringify(file.storagePath)));
+    assert.ok(rules.includes(JSON.stringify(file.pathPrefix)));
+    assert.ok(rules.includes('request.auth.token.' + file.nonceClaim));
     assert.ok(rules.includes(JSON.stringify(file.contentSha256)));
     assert.equal(file.size, Buffer.from(file.data, 'base64').length);
+    const issued = '9a'.repeat(16);
+    assert.equal(issuedNonce(file, file.pathPrefix + issued + '-' + file.originalName), issued);
+    assert.equal(issuedNonce(file, file.pathPrefix + file.originalName), undefined);
+    assert.equal(issuedNonce(file, file.pathPrefix + issued + '-other.png'), undefined);
   }
   assert.throws(() => rulesFor('2026-11-17T00:50:00.000Z; true'));
 });

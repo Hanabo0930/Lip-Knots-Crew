@@ -22,19 +22,31 @@ export const files = Object.freeze(['synthetic-report-1.png', 'synthetic-report-
   const bytes = Buffer.from(image, 'base64');
   const fileId = 'file_' + sha(submissionId + '|' + index).slice(0, 32);
   return Object.freeze({originalName, contentType: 'image/png', size: bytes.length, contentSha256: sha(bytes),
-    fileId, storagePath: ['staging', company, uid, submissionId, fileId, originalName].join('/'), data: image});
+    fileId, nonceClaim: 'crewUploadNonce' + index,
+    pathPrefix: ['staging', company, uid, submissionId, fileId, ''].join('/'), data: image});
 }));
+
+export function issuedNonce(file, path) {
+  if (typeof path !== 'string' || !path.startsWith(file.pathPrefix)) return undefined;
+  const name = path.slice(file.pathPrefix.length);
+  const match = /^([a-f0-9]{32})-/.exec(name);
+  return match && name.slice(match[0].length) === file.originalName ? match[1] : undefined;
+}
 
 export function rulesFor(expiry) {
   const valid = typeof expiry === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.000Z$/.test(expiry)
     && Number.isFinite(Date.parse(expiry)) && new Date(expiry).toISOString() === expiry;
   if (!valid) throw Error('UPLOAD_ACCEPTANCE_EXPIRY_INVALID');
-  const matches = files.map(file => [
-    '(objectPath == ' + JSON.stringify(file.storagePath),
-    ' && request.resource.size == ' + file.size,
-    ' && request.resource.contentType == ' + JSON.stringify(file.contentType),
-    ' && request.resource.metadata.lkcContentSha256 == ' + JSON.stringify(file.contentSha256) + ')',
-  ].join('')).join(' ||\n          ');
+  const matches = files.map(file => {
+    const nonce = 'request.auth.token.' + file.nonceClaim;
+    return [
+      '(' + nonce + ' is string && ' + nonce + '.matches("[a-f0-9]{32}")',
+      ' && objectPath == ' + JSON.stringify(file.pathPrefix) + ' + ' + nonce + ' + ' + JSON.stringify('-' + file.originalName),
+      ' && request.resource.size == ' + file.size,
+      ' && request.resource.contentType == ' + JSON.stringify(file.contentType),
+      ' && request.resource.metadata.lkcContentSha256 == ' + JSON.stringify(file.contentSha256) + ')',
+    ].join('');
+  }).join(' ||\n          ');
   return [
     "rules_version = '2';",
     'service firebase.storage {',

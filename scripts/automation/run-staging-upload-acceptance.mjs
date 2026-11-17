@@ -25,6 +25,8 @@ const maxWindow = 4 * 60_000;
 
 export function validateContext(env, action) {
   const opening = env.LKC_TRANSFER_MODE_REQUESTED === 'acceptance';
+  // GitHub serializes the existing unquoted YAML choice `off` as `false`.
+  const gasDisabled = ['off', 'false'].includes(env.LKC_GAS_SYNC_MODE);
   validatePlan({mode: 'functions-upload-acceptance', project: env.LKC_PROJECT_ID, region: env.LKC_REGION,
     sourceRef: env.LKC_SOURCE_REF, functions: env.LKC_FUNCTIONS, confirmation: env.LKC_CONFIRMATION});
   requireCheck(env.GITHUB_REPOSITORY === repository && env.GITHUB_REF === 'refs/heads/main'
@@ -33,7 +35,7 @@ export function validateContext(env, action) {
     && ['guard', 'upload-acceptance'].includes(env.GITHUB_JOB)
     && /^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? '') && env.LKC_OPERATION === 'upload-acceptance-mode'
     && !env.LKC_UPLOAD_WRITE_CONFIRMATION && !env.LKC_UPLOAD_PRIVACY_CONFIRMATION
-    && env.LKC_GAS_SYNC_MODE === 'off', 'UPLOAD_ACCEPTANCE_PROTECTED_CONTEXT_REQUIRED');
+    && gasDisabled, 'UPLOAD_ACCEPTANCE_PROTECTED_CONTEXT_REQUIRED');
   requireCheck(opening ? env.LKC_CONFIRMATION === 'TEST_LKC_STAGING_ONE_SYNTHETIC_UPLOAD_CASE'
     : env.LKC_TRANSFER_MODE_REQUESTED === 'paused' && !env.LKC_ACCEPTANCE_EXPIRY
       && env.LKC_CONFIRMATION === 'RESTORE_LKC_STAGING_UPLOAD_PAUSED',

@@ -80,12 +80,14 @@ const acceptanceEnv = {
 };
 test('upload acceptance scope is confined to the exact protected main workflow and explicit action', () => {
   assert.equal(validateAcceptance(acceptanceEnv, 'run'), true);
+  assert.equal(validateAcceptance({...acceptanceEnv, LKC_GAS_SYNC_MODE: 'false'}, 'run'), true);
   for (const override of [
     {GITHUB_REF: 'refs/heads/other'}, {GITHUB_RUN_ATTEMPT: '2'}, {GITHUB_JOB: 'deploy'},
     {LKC_VERIFIED_SOURCE_SHA: 'b'.repeat(40)}, {LKC_SOURCE_REF: 'automation/other'},
     {LKC_FUNCTIONS: S.functions[0]}, {LKC_FUNCTIONS: S.functions.join(',') + ',other'},
     {LKC_PROJECT_ID: 'production'}, {LKC_REGION: 'us-central1'}, {LKC_TRANSFER_MODE_REQUESTED: 'active'},
-    {LKC_UPLOAD_WRITE_CONFIRMATION: 'any'}, {LKC_GAS_SYNC_MODE: 'read-only'}, {LKC_ACCEPTANCE_EXPIRY: '2026-02-30T00:50:00.000Z'},
+    {LKC_UPLOAD_WRITE_CONFIRMATION: 'any'}, {LKC_GAS_SYNC_MODE: 'read-only'}, {LKC_GAS_SYNC_MODE: 'true'},
+    {LKC_ACCEPTANCE_EXPIRY: '2026-02-30T00:50:00.000Z'},
   ]) assert.throws(() => validateAcceptance({...acceptanceEnv, ...override}, 'run'));
   assert.equal(validateAcceptance({...acceptanceEnv, LKC_TRANSFER_MODE_REQUESTED: 'paused', LKC_ACCEPTANCE_EXPIRY: '',
     LKC_CONFIRMATION: 'RESTORE_LKC_STAGING_UPLOAD_PAUSED'}, 'run'), false);

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import './test-upload-backup-permissions.mjs';
 import './test-upload-http-failure-summary.mjs';
+import './test-staging-upload-load-plan.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -81,6 +82,7 @@ const acceptanceEnv = {
 test('upload acceptance scope is confined to the exact protected main workflow and explicit action', () => {
   assert.equal(validateAcceptance(acceptanceEnv, 'run'), true);
   assert.equal(validateAcceptance({...acceptanceEnv, LKC_GAS_SYNC_MODE: 'false'}, 'run'), true);
+  assert.equal(validateAcceptance({...acceptanceEnv, LKC_CONFIRMATION: 'TEST_LKC_STAGING_UPLOAD_LOAD_50_100_300'}, 'run'), true);
   for (const override of [
     {GITHUB_REF: 'refs/heads/other'}, {GITHUB_RUN_ATTEMPT: '2'}, {GITHUB_JOB: 'deploy'},
     {LKC_VERIFIED_SOURCE_SHA: 'b'.repeat(40)}, {LKC_SOURCE_REF: 'automation/other'},

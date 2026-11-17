@@ -9,6 +9,8 @@ import {UPLOAD_REFRESH_SCOPE as scope, assertUploadRefreshBeforeImages, assertUp
   uploadAcceptanceImage, uploadExactEventFilterValue} from './upload-source-refresh-contract.mjs';
 import {project, bucket, company, caseId, uid, staffId, jobId, driveRoot, submissionId, files, issuedNonce,
   ruleFilename, rulesFor, modeVariable, sourceArchiveSha256, sourceArchiveBytes} from './staging-upload-acceptance-manifest.mjs';
+import {loadConfirmation, loadId, loadRules, loadWindowMs, clients, phases, phasePlan, progressPath,
+  getStageDocuments, submissionPaths, assertCompletedWave} from './staging-upload-load-plan.mjs';
 
 const repository = 'Hanabo0930/Lip-Knots-Crew';
 const prefix = 'projects/' + project + '/locations/' + scope.region;
@@ -37,11 +39,11 @@ export function validateContext(env, action) {
     && /^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? '') && env.LKC_OPERATION === 'upload-acceptance-mode'
     && !env.LKC_UPLOAD_WRITE_CONFIRMATION && !env.LKC_UPLOAD_PRIVACY_CONFIRMATION
     && gasDisabled, 'UPLOAD_ACCEPTANCE_PROTECTED_CONTEXT_REQUIRED');
-  requireCheck(opening ? env.LKC_CONFIRMATION === 'TEST_LKC_STAGING_ONE_SYNTHETIC_UPLOAD_CASE'
+  requireCheck(opening ? ['TEST_LKC_STAGING_ONE_SYNTHETIC_UPLOAD_CASE', loadConfirmation].includes(env.LKC_CONFIRMATION)
     : env.LKC_TRANSFER_MODE_REQUESTED === 'paused' && !env.LKC_ACCEPTANCE_EXPIRY
       && env.LKC_CONFIRMATION === 'RESTORE_LKC_STAGING_UPLOAD_PAUSED',
     'UPLOAD_ACCEPTANCE_CONFIRMATION_REJECTED');
-  if (opening) rulesFor(env.LKC_ACCEPTANCE_EXPIRY);
+  if (opening) (env.LKC_CONFIRMATION === loadConfirmation ? loadRules : rulesFor)(env.LKC_ACCEPTANCE_EXPIRY);
   requireCheck(action === 'validate' || (env.GITHUB_JOB === 'upload-acceptance'
     && env.LKC_VERIFIED_SOURCE_SHA === env.GITHUB_SHA && ['run', 'recover'].includes(action)),
   'UPLOAD_ACCEPTANCE_EXECUTION_CONTEXT_REQUIRED');
@@ -133,18 +135,19 @@ function cloud(token) {
   return {...reader, readPair, json, update, doc: path => json(firestore + '/' + path, {absent: true})};
 }
 
-async function companyRows(api, collection) {
+async function companyRows(api, collection, limit = 16, selected = []) {
   const found = await api.json(firestore + ':runQuery', {method: 'POST', body: {structuredQuery: {
     from: [{collectionId: collection}], where: {fieldFilter: {field: {fieldPath: 'companyId'},
-      op: 'EQUAL', value: {stringValue: company}}}, limit: 16,
+      op: 'EQUAL', value: {stringValue: company}}}, limit,
+    ...(selected.length ? {select: {fields: selected.map(fieldPath => ({fieldPath}))}} : {}),
   }}});
   const rows = found.flatMap(row => row.document ? [row.document] : []);
-  requireCheck(rows.length < 16, 'UPLOAD_ACCEPTANCE_FIXTURE_QUERY_LIMIT');
+  requireCheck(rows.length < limit, 'UPLOAD_ACCEPTANCE_FIXTURE_QUERY_LIMIT');
   return rows;
 }
 
-async function verifyRules(api, expiry) {
-  const expected = rulesFor(expiry);
+async function verifyRules(api, expiry, ruleTemplate = rulesFor) {
+  const expected = ruleTemplate(expiry);
   requireCheck(Date.now() + 45_000 < Date.parse(expiry) && Date.parse(expiry) - Date.now() <= 45 * 60_000,
     'UPLOAD_ACCEPTANCE_EXPIRY_OUTSIDE_WINDOW');
   const current = await api.json(rulesAPI + release);
@@ -154,6 +157,86 @@ async function verifyRules(api, expiry) {
   requireCheck(rules.name === current.rulesetName && rules.source?.files?.length === 1
     && rules.source.files[0].name === ruleFilename && rules.source.files[0].content === expected,
     'UPLOAD_ACCEPTANCE_RULE_SOURCE_MISMATCH');
+}
+
+async function verifyLoadFixture(api) {
+  const activeFields = ['active', 'staffId', 'loadRun', 'revokedAt', 'submissionUploadGrants', 'deviceBoundAuthRequired'];
+  const [identities, profiles, jobs, previous, drive, mapping, progress] = await Promise.all([
+    companyRows(api, 'authIdentities', 401, activeFields), companyRows(api, 'staffProfiles', 401, activeFields),
+    companyRows(api, 'jobs', 401, ['status', 'cancelled', 'assignedStaffId', 'dateKey', 'caseId', 'loadRun',
+      'revision', 'mailIntake', 'sourceMissing', 'applicationUnconfirmed', 'assignmentUnresolved', 'clientName']),
+    companyRows(api, 'submissions', 501, ['status']), api.doc('companies/' + company + '/settings/drive'),
+    api.doc('companies/' + company + '/sheetMappings/shift'), api.doc(progressPath),
+  ]);
+  const active = rows => new Map(rows.filter(doc => scalar(doc, 'active') === true).map(doc => [docId(doc), doc]));
+  const staff = active(profiles), linked = active(identities);
+  const byJob = new Map();
+  for (const job of jobs) {
+    const assignee = scalar(job, 'assignedStaffId');
+    if (!staff.has(assignee) || scalar(job, 'status') !== 'assigned' || scalar(job, 'cancelled') === true) continue;
+    requireCheck(!byJob.has(assignee), 'UPLOAD_ACCEPTANCE_LOAD_DUPLICATE_ASSIGNMENT');
+    byJob.set(assignee, job);
+  }
+  const ids = new Set(phases.flatMap(phase => phasePlan(phase).map(plan => plan.submissionId)));
+  requireCheck(staff.size === clients.length && linked.size === clients.length && byJob.size === clients.length
+    && previous.every(doc => scalar(doc, 'status') === 'completed' && !ids.has(docId(doc)))
+    && scalar(drive, 'rootFolderId') === driveRoot
+    && (!mapping || (scalar(mapping, 'enabled') === false && !scalar(mapping, 'spreadsheetId')))
+    && scalar(progress, 'loadRun') === loadId && scalar(progress, 'state') === 'ready',
+  'UPLOAD_ACCEPTANCE_LOAD_FIXTURE_MISMATCH');
+  const dateKey = scalar(progress, 'dateKey');
+  requireCheck(/^\d{4}-\d\d-\d\d$/.test(dateKey ?? ''), 'UPLOAD_ACCEPTANCE_LOAD_FIXTURE_MISMATCH');
+  for (const client of clients) {
+    const identity = linked.get(client.uid), profile = staff.get(client.staffId), job = byJob.get(client.staffId);
+    requireCheck([identity, profile, job].every(doc => scalar(doc, 'loadRun') === loadId)
+      && scalar(identity, 'staffId') === client.staffId && !identity.fields?.revokedAt && !identity.fields?.submissionUploadGrants
+      && scalar(profile, 'deviceBoundAuthRequired') !== true && docId(job) === client.jobId
+      && scalar(job, 'caseId') === loadId + '-' + client.number && scalar(job, 'dateKey') === dateKey
+      && scalar(job, 'clientName') === loadId && scalar(job, 'revision') === 0 && !job.fields?.mailIntake
+      && !['sourceMissing', 'applicationUnconfirmed', 'assignmentUnresolved'].some(key => scalar(job, key) === true),
+    'UPLOAD_ACCEPTANCE_LOAD_FIXTURE_MISMATCH');
+  }
+  await Promise.all(Array.from({length: 3}, async (_, i) => {
+    const group = clients.slice(i * 100, (i + 1) * 100);
+    const list = await api.json(authLookup, {method: 'POST', body: {localId: group.map(client => client.uid)}});
+    const accounts = new Map((list.users ?? []).map(account => [account.localId, account]));
+    requireCheck(accounts.size === group.length && group.every(client => {
+      const account = accounts.get(client.uid);
+      return account?.email === client.email && !account.disabled
+        && isDeepStrictEqual(JSON.parse(account.customAttributes ?? '{}'), client.claims);
+    }), 'UPLOAD_ACCEPTANCE_LOAD_ACCOUNT_MISMATCH');
+  }));
+  await verifySheetWorkers(api);
+}
+
+async function verifySheetWorkers(api) {
+  const workers = await Promise.all(['processSafeSheetWrite', 'retrySafeSheetWrites']
+    .map(name => api.json(functionsAPI + functionRef(name), {absent: true})));
+  for (const worker of workers) {
+    if (!worker) continue;
+    const env = worker.serviceConfig?.environmentVariables;
+    requireCheck(worker.state === 'ACTIVE' && env?.APP_ENVIRONMENT === 'staging'
+      && [undefined, 'paused'].includes(env.LKC_SHEET_WRITE_MODE), 'UPLOAD_ACCEPTANCE_SHEET_WORKER_NOT_PAUSED');
+  }
+}
+
+async function waitForLoad(api, expiry) {
+  const deadline = Math.min(Date.now() + loadWindowMs, Date.parse(expiry) - 45_000);
+  while (Date.now() < deadline) {
+    const marker = await api.doc(progressPath);
+    requireCheck(scalar(marker, 'loadRun') === loadId, 'UPLOAD_ACCEPTANCE_LOAD_PROGRESS_MISMATCH');
+    const state = scalar(marker, 'state');
+    if (state === 'done') {
+      requireCheck(scalar(marker, 'completed') === 450, 'UPLOAD_ACCEPTANCE_LOAD_PROGRESS_MISMATCH');
+      const plan = phases.flatMap(phasePlan);
+      const docs = await getStageDocuments(api.json, submissionPaths(plan, true));
+      requireCheck(assertCompletedWave(plan, docs).size === 450, 'UPLOAD_ACCEPTANCE_LOAD_COMPLETION_MISMATCH');
+      return;
+    }
+    requireCheck(state !== 'stopped', 'UPLOAD_ACCEPTANCE_LOAD_STOPPED');
+    await delay(5000);
+  }
+  throw Error('UPLOAD_ACCEPTANCE_LOAD_TIMEOUT');
 }
 
 async function verifyFixture(api) {
@@ -287,18 +370,21 @@ async function main() {
     return;
   }
   const expiry = env.LKC_ACCEPTANCE_EXPIRY;
+  const isLoad = env.LKC_CONFIRMATION === loadConfirmation;
+  const ruleTemplate = isLoad ? loadRules : rulesFor;
   await runWindow(api, {
     async preflight(before) {
       assertUploadRefreshBeforeImages(before, await api.readBucket());
       requireCheck(uploadExactEventFilterValue(before.finalizeStagedUpload.fn.eventTrigger?.eventFilters, 'bucket') === bucket,
       'UPLOAD_ACCEPTANCE_SOURCE_OR_BUCKET_NOT_APPROVED');
-      requireCheck(Date.parse(expiry) - Date.now() >= 9 * 60_000, 'UPLOAD_ACCEPTANCE_EXPIRY_TOO_SOON');
-      await Promise.all([verifyRules(api, expiry), verifyFixture(api)]);
+      requireCheck(Date.parse(expiry) - Date.now() >= (isLoad ? 22 : 9) * 60_000, 'UPLOAD_ACCEPTANCE_EXPIRY_TOO_SOON');
+      await Promise.all([verifyRules(api, expiry, ruleTemplate), isLoad ? verifyLoadFixture(api) : verifyFixture(api)]);
     },
     async waitForReceipt() {
-      await verifyRules(api, expiry);
+      await verifyRules(api, expiry, ruleTemplate);
       const deadline = Math.min(Date.now() + maxWindow, Date.parse(expiry) - 30_000);
       console.log('UPLOAD_ACCEPTANCE_WINDOW=READY');
+      if (isLoad) return waitForLoad(api, expiry);
       while (Date.now() < deadline) {
         if (await verifyCompleted(api)) return;
         await delay(3000);
@@ -307,7 +393,7 @@ async function main() {
     },
     mark() { writeFileSync(marker, 'started\n', {mode: 0o600, flag: 'wx'}); },
   });
-  console.log('UPLOAD_ACCEPTANCE_ONE_CASE=PASS');
+  console.log(isLoad ? 'UPLOAD_ACCEPTANCE_LOAD_450=PASS' : 'UPLOAD_ACCEPTANCE_ONE_CASE=PASS');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

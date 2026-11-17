@@ -17,7 +17,7 @@ import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUpload
   uploadRefreshStorageTriggerSummary, uploadRefreshPreflightSummary} from './run-upload-source-refresh.mjs';
 import {validatePlan} from './validate-staging-scope.mjs';
 import {validateContext as validateAcceptance, runWindow, restorePaused} from './run-staging-upload-acceptance.mjs';
-import {files as acceptanceFiles, modeVariable, rulesFor} from './staging-upload-acceptance-manifest.mjs';
+import {files as acceptanceFiles, issuedNonce, modeVariable, rulesFor, sourceArchiveSha256} from './staging-upload-acceptance-manifest.mjs';
 const copy = value => structuredClone(value), prefix = `projects/${S.project}/locations/${S.region}`;
 const privateValue = 'synthetic-private-value-do-not-publish';
 const emptyPolicy = () => ({etag: 'synthetic-policy-etag', version: 1, bindings: []});
@@ -100,15 +100,28 @@ test('upload acceptance Storage policy pins both paths, claims and content with 
   assert.ok(rules.includes('request.auth.token.crewStagingCase == "CREW-STAGING-20261116-01"'));
   assert.ok(rules.includes('request.time < timestamp.value(' + Date.parse(acceptanceEnv.LKC_ACCEPTANCE_EXPIRY) + ')'));
   for (const file of acceptanceFiles) {
-    assert.ok(rules.includes(JSON.stringify(file.storagePath)));
+    assert.ok(rules.includes(JSON.stringify(file.pathPrefix)));
+    assert.ok(rules.includes('request.auth.token.' + file.nonceClaim));
     assert.ok(rules.includes(JSON.stringify(file.contentSha256)));
     assert.equal(file.size, Buffer.from(file.data, 'base64').length);
+    const issued = '9a'.repeat(16);
+    assert.equal(issuedNonce(file, file.pathPrefix + issued + '-' + file.originalName), issued);
+    assert.equal(issuedNonce(file, file.pathPrefix + file.originalName), undefined);
+    assert.equal(issuedNonce(file, file.pathPrefix + issued + '-other.png'), undefined);
   }
   assert.throws(() => rulesFor('2026-11-17T00:50:00.000Z; true'));
 });
 
-function acceptanceSimulation({failAfterOpen, drift} = {}) {
+function acceptanceSimulation({failAfterOpen, drift, sourceDrift} = {}) {
   const pair = fixture().before;
+  for (const name of S.functions) {
+    const record = pair[name];
+    const canonical = name + '/function-source.zip';
+    record.fn.buildConfig.source.storageSource.object = canonical;
+    record.fn.buildConfig.sourceProvenance.resolvedStorageSource.object = canonical;
+    record.object.name = canonical;
+    record.sourceArchiveSha256 = sourceArchiveSha256;
+  }
   const writes = [];
   return {pair, writes, api: {
     readPair: async () => copy(pair),
@@ -117,7 +130,12 @@ function acceptanceSimulation({failAfterOpen, drift} = {}) {
       writes.push([name, next]);
       pair[name].fn.serviceConfig.environmentVariables[modeVariable] = next;
       pair[name].service.spec.template.spec.containers[0].env.find(item => item.name === modeVariable).value = next;
+      const generation = String(17 + writes.length);
+      pair[name].fn.buildConfig.source.storageSource.generation = generation;
+      pair[name].fn.buildConfig.sourceProvenance.resolvedStorageSource.generation = generation;
+      pair[name].object.generation = generation;
       if (drift && next === 'acceptance') pair[name].fn.serviceConfig.availableMemory = '1Gi';
+      if (sourceDrift && next === 'acceptance') pair[name].sourceArchiveSha256 = 'f'.repeat(64);
       if (failAfterOpen === name && next === 'acceptance') throw Error('UPLOAD_ACCEPTANCE_OPERATION_PENDING');
     },
   }};
@@ -130,7 +148,11 @@ test('opens finalizer first, closes callable first, verifies both paused, and pr
   }}), true);
   assert.deepEqual(writes, [['finalizeStagedUpload', 'acceptance'], ['createUploadSession', 'acceptance'],
     ['createUploadSession', 'paused'], ['finalizeStagedUpload', 'paused']]);
-  assert.deepEqual(pair, baseline);
+  for (const name of S.functions) {
+    assert.deepEqual(pair[name].fn.serviceConfig, baseline[name].fn.serviceConfig);
+    assert.equal(pair[name].sourceArchiveSha256, baseline[name].sourceArchiveSha256);
+    assert.notEqual(pair[name].object.generation, baseline[name].object.generation);
+  }
 });
 test('failed preflight performs no writes, and a partial or ambiguous activation is closed', async () => {
   const blocked = acceptanceSimulation();
@@ -147,6 +169,11 @@ test('a failed receipt or unrelated configuration drift closes the window and pr
       drift ? /CONFIGURATION_CHANGED/ : /timeout/);
     assert.ok(Object.values(stopped.pair).every(item => item.fn.serviceConfig.environmentVariables[modeVariable] === 'paused'));
   }
+});
+test('a changed source archive closes the window even when the canonical generation has changed', async () => {
+  const {api, pair} = acceptanceSimulation({sourceDrift: true});
+  await assert.rejects(runWindow(api, acceptanceCallbacks), /UPLOAD_ACCEPTANCE_SOURCE_CHANGED/);
+  assert.ok(Object.values(pair).every(item => item.fn.serviceConfig.environmentVariables[modeVariable] === 'paused'));
 });
 test('standalone restore is idempotent with both services paused, and rejects mismatched live traffic', async () => {
   const {api, pair, writes} = acceptanceSimulation();

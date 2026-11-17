@@ -17,7 +17,7 @@ import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUpload
   uploadRefreshCloudOwner, enforceUploadBackupPrivacy, UPLOAD_BACKUP_PRIVACY_CONFIRMATION,
   uploadRefreshStorageTriggerSummary, uploadRefreshPreflightSummary} from './run-upload-source-refresh.mjs';
 import {validatePlan} from './validate-staging-scope.mjs';
-import {validateContext as validateAcceptance, runWindow, restorePaused} from './run-staging-upload-acceptance.mjs';
+import {validateContext as validateAcceptance, runWindow, restorePaused, companyRows} from './run-staging-upload-acceptance.mjs';
 import {files as acceptanceFiles, issuedNonce, modeVariable, rulesFor, sourceArchiveSha256} from './staging-upload-acceptance-manifest.mjs';
 const copy = value => structuredClone(value), prefix = `projects/${S.project}/locations/${S.region}`;
 const privateValue = 'synthetic-private-value-do-not-publish';
@@ -79,6 +79,38 @@ const acceptanceEnv = {
   LKC_OPERATION: 'upload-acceptance-mode', LKC_TRANSFER_MODE_REQUESTED: 'acceptance',
   LKC_ACCEPTANCE_EXPIRY: '2026-11-17T00:50:00.000Z', LKC_GAS_SYNC_MODE: 'off',
 };
+test('upload acceptance reads all 602 jobs in bounded pages at one snapshot', async () => {
+  const names = Array.from({length: 602}, (_, index) =>
+    'projects/' + S.project + '/databases/(default)/documents/jobs/job-' + String(index).padStart(3, '0'));
+  let readTime;
+  const requests = [];
+  const rows = await companyRows({async json(url, {method, body}) {
+    assert.match(url, /\/documents:runQuery$/);
+    assert.equal(method, 'POST');
+    const query = body.structuredQuery;
+    assert.equal(query.where.fieldFilter.field.fieldPath, 'companyId');
+    assert.deepEqual(query.orderBy, [{field: {fieldPath: '__name__'}, direction: 'ASCENDING'}]);
+    assert.deepEqual(query.select, {fields: [{fieldPath: 'status'}]});
+    readTime ??= body.readTime;
+    assert.equal(body.readTime, readTime);
+    assert.ok(Number.isFinite(Date.parse(readTime)));
+    const start = requests.length ? requests.length * 100 : 0;
+    if (start) assert.deepEqual(query.startAt, {values: [{referenceValue: names[start - 1]}], before: false});
+    else assert.equal(query.startAt, undefined);
+    requests.push(query.limit);
+    const page = names.slice(start, start + query.limit).map(name => ({document: {name, padding: 'x'.repeat(850)}}));
+    assert.ok(Buffer.byteLength(JSON.stringify(page)) < 512 * 1024);
+    return page;
+  }}, 'jobs', 651, ['status']);
+  assert.deepEqual(rows.map(row => row.name), names);
+  assert.deepEqual(requests, [100, 100, 100, 100, 100, 100, 51]);
+});
+test('upload acceptance rejects a repeated cursor or reaching the fixture record cap', async () => {
+  const name = index => 'projects/' + S.project + '/databases/(default)/documents/jobs/job-' + index;
+  const firstPage = Array.from({length: 100}, (_, index) => ({document: {name: name(index)}}));
+  await assert.rejects(companyRows({json: async () => firstPage}, 'jobs', 651), /FIXTURE_QUERY_SCOPE/);
+  await assert.rejects(companyRows({json: async () => firstPage}, 'jobs', 100), /FIXTURE_QUERY_LIMIT/);
+});
 test('upload acceptance scope is confined to the exact protected main workflow and explicit action', () => {
   assert.equal(validateAcceptance(acceptanceEnv, 'run'), true);
   assert.equal(validateAcceptance({...acceptanceEnv, LKC_GAS_SYNC_MODE: 'false'}, 'run'), true);

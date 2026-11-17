@@ -140,15 +140,37 @@ function cloud(token, tuned = false) {
   return {...reader, readPair, json, update, doc: path => json(firestore + '/' + path, {absent: true})};
 }
 
-async function companyRows(api, collection, limit = 16, selected = []) {
-  const found = await api.json(firestore + ':runQuery', {method: 'POST', body: {structuredQuery: {
+export async function companyRows(api, collection, limit = 16, selected = []) {
+  const query = {
     from: [{collectionId: collection}], where: {fieldFilter: {field: {fieldPath: 'companyId'},
-      op: 'EQUAL', value: {stringValue: company}}}, limit,
+      op: 'EQUAL', value: {stringValue: company}}},
+    orderBy: [{field: {fieldPath: '__name__'}, direction: 'ASCENDING'}],
     ...(selected.length ? {select: {fields: selected.map(fieldPath => ({fieldPath}))}} : {}),
-  }}});
-  const rows = found.flatMap(row => row.document ? [row.document] : []);
-  requireCheck(rows.length < limit, 'UPLOAD_ACCEPTANCE_FIXTURE_QUERY_LIMIT');
-  return rows;
+  };
+  const documentPrefix = 'projects/' + project + '/databases/(default)/documents/' + collection + '/';
+  const readTime = new Date(Date.now() - 2000).toISOString();
+  const rows = [], seen = new Set();
+  let cursor;
+  while (rows.length < limit) {
+    const pageSize = Math.min(100, limit - rows.length);
+    const found = await api.json(firestore + ':runQuery', {method: 'POST', body: {
+      readTime,
+      structuredQuery: {...query, limit: pageSize,
+        ...(cursor ? {startAt: {values: [{referenceValue: cursor}], before: false}} : {})},
+    }});
+    const page = found.flatMap(row => row.document ? [row.document] : []);
+    requireCheck(page.length <= pageSize && rows.length + page.length < limit, 'UPLOAD_ACCEPTANCE_FIXTURE_QUERY_LIMIT');
+    for (const document of page) {
+      const name = document?.name;
+      requireCheck(typeof name === 'string' && name.startsWith(documentPrefix)
+        && /^[^/]+$/.test(name.slice(documentPrefix.length)) && !seen.has(name), 'UPLOAD_ACCEPTANCE_FIXTURE_QUERY_SCOPE');
+      seen.add(name);
+      rows.push(document);
+    }
+    if (page.length < pageSize) return rows;
+    cursor = page.at(-1).name;
+  }
+  throw Error('UPLOAD_ACCEPTANCE_FIXTURE_QUERY_LIMIT');
 }
 
 async function verifyRules(api, expiry, ruleTemplate = rulesFor) {

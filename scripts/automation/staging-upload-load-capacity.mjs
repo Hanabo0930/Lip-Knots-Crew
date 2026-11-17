@@ -33,17 +33,19 @@ export function loadCapacityPatch(before, name, next) {
   const target = loadCapacity(name, next);
   const mode = config.environmentVariables[transfer];
   const current = loadCapacity(name, mode);
+  const cpuPinned = String(config.availableCpu) === '1';
   if (next === 'acceptance') {
-    expect(mode === 'paused' && config.availableMemory === current.memory
+    expect(cpuPinned && mode === 'paused' && config.availableMemory === current.memory
       && config.maxInstanceRequestConcurrency === current.concurrency, 'UPLOAD_ACCEPTANCE_LOAD_CAPACITY_MISMATCH');
-  } else if (![original.memory, capacity[name].memory].includes(config.availableMemory)
+  } else if (!cpuPinned || ![original.memory, capacity[name].memory].includes(config.availableMemory)
     || ![original.concurrency, capacity[name].concurrency].includes(config.maxInstanceRequestConcurrency)) {
     // Stop intake even if a provider returns an unexpected capacity setting.
     // A recovery write never replaces capacity outside the approved profiles.
     return {additions: {}, mask: ''};
   }
   return {
-    additions: {availableMemory: target.memory, maxInstanceRequestConcurrency: target.concurrency},
-    mask: ',serviceConfig.availableMemory,serviceConfig.maxInstanceRequestConcurrency',
+    // Repeat the verified CPU value so the Functions API cannot infer fractional CPU.
+    additions: {availableCpu: '1', availableMemory: target.memory, maxInstanceRequestConcurrency: target.concurrency},
+    mask: ',serviceConfig.availableCpu,serviceConfig.availableMemory,serviceConfig.maxInstanceRequestConcurrency',
   };
 }

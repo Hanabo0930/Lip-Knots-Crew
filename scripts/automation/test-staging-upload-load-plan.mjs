@@ -38,7 +38,7 @@ test('STAGING tuned retry reuses accounts but disjoins job, staff and receipt au
   assert.ok(rules.includes('"-b-profile"') && rules.includes('CREW-STAGING-LOAD-20261117-B'));
 });
 
-test('STAGING tuned capacity changes only memory and concurrency and restores verified defaults', () => {
+test('STAGING tuned capacity preserves 1 vCPU during activation and restoration', () => {
   const name = 'finalizeStagedUpload';
   const image = mode => {
     const {memory, concurrency} = loadCapacity(name, mode);
@@ -49,16 +49,22 @@ test('STAGING tuned capacity changes only memory and concurrency and restores ve
     }}}}};
   };
   assert.deepEqual(loadCapacityPatch(image('paused'), name, 'acceptance').additions,
-    {availableMemory: '1Gi', maxInstanceRequestConcurrency: 8});
+    {availableCpu: '1', availableMemory: '1Gi', maxInstanceRequestConcurrency: 8});
+  const mask = ',serviceConfig.availableCpu,serviceConfig.availableMemory,serviceConfig.maxInstanceRequestConcurrency';
+  assert.equal(loadCapacityPatch(image('paused'), name, 'acceptance').mask, mask);
   const restore = loadCapacityPatch(image('acceptance'), name, 'paused');
-  assert.deepEqual(restore.additions, {availableMemory: '256Mi', maxInstanceRequestConcurrency: 80});
-  assert.equal(restore.mask, ',serviceConfig.availableMemory,serviceConfig.maxInstanceRequestConcurrency');
+  assert.deepEqual(restore.additions, {availableCpu: '1', availableMemory: '256Mi', maxInstanceRequestConcurrency: 80});
+  assert.equal(restore.mask, mask);
   const after = normalizeLoadCapacity(image('acceptance'), name, 'acceptance');
   assert.equal(after.fn.serviceConfig.availableMemory, '256Mi');
   assert.equal(after.service.spec.template.spec.containerConcurrency, 80);
   const drift = image('acceptance');
   drift.fn.serviceConfig.availableCpu = '2';
   assert.throws(() => normalizeLoadCapacity(drift, name, 'acceptance'), /CAPACITY_MISMATCH/);
+  assert.deepEqual(loadCapacityPatch(drift, name, 'paused'), {additions: {}, mask: ''});
+  const fractionalCpu = image('paused');
+  fractionalCpu.fn.serviceConfig.availableCpu = '0.5';
+  assert.throws(() => loadCapacityPatch(fractionalCpu, name, 'acceptance'), /CAPACITY_MISMATCH/);
   const unexpected = image('acceptance');
   unexpected.fn.serviceConfig.availableMemory = '2Gi';
   assert.deepEqual(loadCapacityPatch(unexpected, name, 'paused'), {additions: {}, mask: ''});

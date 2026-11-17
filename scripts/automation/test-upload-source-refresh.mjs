@@ -83,6 +83,9 @@ test('upload acceptance scope is confined to the exact protected main workflow a
   assert.equal(validateAcceptance(acceptanceEnv, 'run'), true);
   assert.equal(validateAcceptance({...acceptanceEnv, LKC_GAS_SYNC_MODE: 'false'}, 'run'), true);
   assert.equal(validateAcceptance({...acceptanceEnv, LKC_CONFIRMATION: 'TEST_LKC_STAGING_UPLOAD_LOAD_50_100_300'}, 'run'), true);
+  assert.equal(validateAcceptance({...acceptanceEnv, LKC_CONFIRMATION: 'TEST_LKC_STAGING_UPLOAD_LOAD_TUNED_50_100_300'}, 'run'), true);
+  assert.equal(validateAcceptance({...acceptanceEnv, LKC_TRANSFER_MODE_REQUESTED: 'paused', LKC_ACCEPTANCE_EXPIRY: '',
+    LKC_CONFIRMATION: 'RESTORE_LKC_STAGING_TUNED_UPLOAD_PAUSED'}, 'run'), false);
   for (const override of [
     {GITHUB_REF: 'refs/heads/other'}, {GITHUB_RUN_ATTEMPT: '2'}, {GITHUB_JOB: 'deploy'},
     {LKC_VERIFIED_SOURCE_SHA: 'b'.repeat(40)}, {LKC_SOURCE_REF: 'automation/other'},

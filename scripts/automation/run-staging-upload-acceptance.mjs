@@ -9,8 +9,9 @@ import {UPLOAD_REFRESH_SCOPE as scope, assertUploadRefreshBeforeImages, assertUp
   uploadAcceptanceImage, uploadExactEventFilterValue} from './upload-source-refresh-contract.mjs';
 import {project, bucket, company, caseId, uid, staffId, jobId, driveRoot, submissionId, files, issuedNonce,
   ruleFilename, rulesFor, modeVariable, sourceArchiveSha256, sourceArchiveBytes} from './staging-upload-acceptance-manifest.mjs';
-import {loadConfirmation, loadId, loadRules, loadWindowMs, clients, phases, phasePlan, progressPath,
+import {loadConfirmation, tunedConfirmation, tunedRestoreConfirmation, loadId, tunedLoadId, loadRules, loadWindowMs, clients, tunedClients, phases, phasePlan, progressPath, tunedProgressPath,
   getStageDocuments, submissionPaths, assertCompletedWave} from './staging-upload-load-plan.mjs';
+import {loadCapacityPatch, normalizeLoadCapacity} from './staging-upload-load-capacity.mjs';
 
 const repository = 'Hanabo0930/Lip-Knots-Crew';
 const prefix = 'projects/' + project + '/locations/' + scope.region;
@@ -39,11 +40,15 @@ export function validateContext(env, action) {
     && /^[a-f0-9]{40}$/.test(env.GITHUB_SHA ?? '') && env.LKC_OPERATION === 'upload-acceptance-mode'
     && !env.LKC_UPLOAD_WRITE_CONFIRMATION && !env.LKC_UPLOAD_PRIVACY_CONFIRMATION
     && gasDisabled, 'UPLOAD_ACCEPTANCE_PROTECTED_CONTEXT_REQUIRED');
-  requireCheck(opening ? ['TEST_LKC_STAGING_ONE_SYNTHETIC_UPLOAD_CASE', loadConfirmation].includes(env.LKC_CONFIRMATION)
+  requireCheck(opening ? ['TEST_LKC_STAGING_ONE_SYNTHETIC_UPLOAD_CASE', loadConfirmation, tunedConfirmation].includes(env.LKC_CONFIRMATION)
     : env.LKC_TRANSFER_MODE_REQUESTED === 'paused' && !env.LKC_ACCEPTANCE_EXPIRY
-      && env.LKC_CONFIRMATION === 'RESTORE_LKC_STAGING_UPLOAD_PAUSED',
+      && ['RESTORE_LKC_STAGING_UPLOAD_PAUSED', tunedRestoreConfirmation].includes(env.LKC_CONFIRMATION),
     'UPLOAD_ACCEPTANCE_CONFIRMATION_REJECTED');
-  if (opening) (env.LKC_CONFIRMATION === loadConfirmation ? loadRules : rulesFor)(env.LKC_ACCEPTANCE_EXPIRY);
+  if (opening) {
+    if ([loadConfirmation, tunedConfirmation].includes(env.LKC_CONFIRMATION)) {
+      loadRules(env.LKC_ACCEPTANCE_EXPIRY, env.LKC_CONFIRMATION === tunedConfirmation);
+    } else rulesFor(env.LKC_ACCEPTANCE_EXPIRY);
+  }
   requireCheck(action === 'validate' || (env.GITHUB_JOB === 'upload-acceptance'
     && env.LKC_VERIFIED_SOURCE_SHA === env.GITHUB_SHA && ['run', 'recover'].includes(action)),
   'UPLOAD_ACCEPTANCE_EXECUTION_CONTEXT_REQUIRED');
@@ -56,7 +61,7 @@ const scalar = (doc, key) => {
 };
 const docId = doc => doc?.name?.split('/').at(-1);
 
-function cloud(token) {
+function cloud(token, tuned = false) {
   async function json(url, {method = 'GET', body, absent = false} = {}) {
     const response = await fetch(url, {method, signal: AbortSignal.timeout(15_000), redirect: 'error',
       headers: {Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', 'Cache-Control': 'no-cache',
@@ -111,11 +116,11 @@ function cloud(token) {
   async function update(name, before, next) {
     requireCheck(scope.functions.includes(name) && ['acceptance', 'paused'].includes(next), 'UPLOAD_ACCEPTANCE_PATCH_SCOPE_REJECTED');
     const target = functionRef(name);
-    // No source object, build config, trigger or IAM is included in this write.
-    const body = {name: target, serviceConfig: {environmentVariables: {
+    const profile = tuned ? loadCapacityPatch(before, name, next) : {mask: '', additions: {}};
+    const body = {name: target, serviceConfig: {...profile.additions, environmentVariables: {
       ...before.fn.serviceConfig.environmentVariables, [modeVariable]: next,
     }}};
-    let operation = await json(functionsAPI + target + '?updateMask=serviceConfig.environmentVariables', {method: 'PATCH', body});
+    let operation = await json(functionsAPI + target + '?updateMask=serviceConfig.environmentVariables' + profile.mask, {method: 'PATCH', body});
     const operationName = operation?.name;
     const pattern = new RegExp('^' + prefix + '/operations/[a-zA-Z0-9_-]+$');
     requireCheck(pattern.test(operationName ?? ''), 'UPLOAD_ACCEPTANCE_OPERATION_UNVERIFIED');
@@ -159,14 +164,17 @@ async function verifyRules(api, expiry, ruleTemplate = rulesFor) {
     'UPLOAD_ACCEPTANCE_RULE_SOURCE_MISMATCH');
 }
 
-async function verifyLoadFixture(api) {
+async function verifyLoadFixture(api, tuned) {
+  const expectedClients = tuned ? tunedClients : clients;
+  const run = tuned ? tunedLoadId : loadId;
+  const markerPath = tuned ? tunedProgressPath : progressPath;
   const activeFields = ['active', 'staffId', 'loadRun', 'revokedAt', 'submissionUploadGrants', 'deviceBoundAuthRequired'];
   const [identities, profiles, jobs, previous, drive, mapping, progress] = await Promise.all([
-    companyRows(api, 'authIdentities', 401, activeFields), companyRows(api, 'staffProfiles', 401, activeFields),
-    companyRows(api, 'jobs', 401, ['status', 'cancelled', 'assignedStaffId', 'dateKey', 'caseId', 'loadRun',
+    companyRows(api, 'authIdentities', 401, activeFields), companyRows(api, 'staffProfiles', 651, activeFields),
+    companyRows(api, 'jobs', 651, ['status', 'cancelled', 'assignedStaffId', 'dateKey', 'caseId', 'loadRun',
       'revision', 'mailIntake', 'sourceMissing', 'applicationUnconfirmed', 'assignmentUnresolved', 'clientName']),
-    companyRows(api, 'submissions', 501, ['status']), api.doc('companies/' + company + '/settings/drive'),
-    api.doc('companies/' + company + '/sheetMappings/shift'), api.doc(progressPath),
+    companyRows(api, 'submissions', 601, ['status', 'uid', 'staffId', 'jobId']), api.doc('companies/' + company + '/settings/drive'),
+    api.doc('companies/' + company + '/sheetMappings/shift'), api.doc(markerPath),
   ]);
   const active = rows => new Map(rows.filter(doc => scalar(doc, 'active') === true).map(doc => [docId(doc), doc]));
   const staff = active(profiles), linked = active(identities);
@@ -177,27 +185,43 @@ async function verifyLoadFixture(api) {
     requireCheck(!byJob.has(assignee), 'UPLOAD_ACCEPTANCE_LOAD_DUPLICATE_ASSIGNMENT');
     byJob.set(assignee, job);
   }
-  const ids = new Set(phases.flatMap(phase => phasePlan(phase).map(plan => plan.submissionId)));
-  requireCheck(staff.size === clients.length && linked.size === clients.length && byJob.size === clients.length
-    && previous.every(doc => scalar(doc, 'status') === 'completed' && !ids.has(docId(doc)))
+  const ids = new Set(phases.flatMap(phase => phasePlan(phase, tuned).map(plan => plan.submissionId)));
+  requireCheck(staff.size === expectedClients.length && linked.size === expectedClients.length && byJob.size === expectedClients.length
+    && previous.every(doc => !ids.has(docId(doc)))
     && scalar(drive, 'rootFolderId') === driveRoot
     && (!mapping || (scalar(mapping, 'enabled') === false && !scalar(mapping, 'spreadsheetId')))
-    && scalar(progress, 'loadRun') === loadId && scalar(progress, 'state') === 'ready',
+    && scalar(progress, 'loadRun') === run && scalar(progress, 'state') === 'ready',
   'UPLOAD_ACCEPTANCE_LOAD_FIXTURE_MISMATCH');
   const dateKey = scalar(progress, 'dateKey');
   requireCheck(/^\d{4}-\d\d-\d\d$/.test(dateKey ?? ''), 'UPLOAD_ACCEPTANCE_LOAD_FIXTURE_MISMATCH');
-  for (const client of clients) {
+  const incomplete = previous.filter(doc => scalar(doc, 'status') !== 'completed');
+  if (tuned) {
+    const oldPlans = phasePlan(50), byId = new Map(oldPlans.map(plan => [plan.submissionId, plan]));
+    requireCheck(incomplete.length === 50 && incomplete.every(doc => {
+      const plan = byId.get(docId(doc));
+      return plan && scalar(doc, 'staffId') === plan.staffId && scalar(doc, 'uid') === plan.uid
+        && scalar(doc, 'jobId') === plan.jobId && !staff.has(plan.staffId)
+        && scalar(linked.get(plan.uid), 'staffId') !== plan.staffId;
+    }), 'UPLOAD_ACCEPTANCE_LOAD_OLD_RECEIPT_SCOPE');
+    const saved = await getStageDocuments(api.json, submissionPaths(oldPlans, true));
+    for (const plan of oldPlans) {
+      const file = saved.get('submissions/' + plan.submissionId + '/files/' + plan.fileId);
+      requireCheck(file && !scalar(file, 'driveFileId') && scalar(file, 'completionCounted') !== true
+        && issuedNonce(plan, scalar(file, 'storagePath')), 'UPLOAD_ACCEPTANCE_LOAD_OLD_RECEIPT_SCOPE');
+    }
+  } else requireCheck(incomplete.length === 0, 'UPLOAD_ACCEPTANCE_LOAD_INCOMPLETE_RECEIPT');
+  for (const client of expectedClients) {
     const identity = linked.get(client.uid), profile = staff.get(client.staffId), job = byJob.get(client.staffId);
-    requireCheck([identity, profile, job].every(doc => scalar(doc, 'loadRun') === loadId)
+    requireCheck([identity, profile, job].every(doc => scalar(doc, 'loadRun') === run)
       && scalar(identity, 'staffId') === client.staffId && !identity.fields?.revokedAt && !identity.fields?.submissionUploadGrants
       && scalar(profile, 'deviceBoundAuthRequired') !== true && docId(job) === client.jobId
-      && scalar(job, 'caseId') === loadId + '-' + client.number && scalar(job, 'dateKey') === dateKey
-      && scalar(job, 'clientName') === loadId && scalar(job, 'revision') === 0 && !job.fields?.mailIntake
+      && scalar(job, 'caseId') === run + '-' + client.number && scalar(job, 'dateKey') === dateKey
+      && scalar(job, 'clientName') === run && scalar(job, 'revision') === 0 && !job.fields?.mailIntake
       && !['sourceMissing', 'applicationUnconfirmed', 'assignmentUnresolved'].some(key => scalar(job, key) === true),
     'UPLOAD_ACCEPTANCE_LOAD_FIXTURE_MISMATCH');
   }
   await Promise.all(Array.from({length: 3}, async (_, i) => {
-    const group = clients.slice(i * 100, (i + 1) * 100);
+    const group = expectedClients.slice(i * 100, (i + 1) * 100);
     const list = await api.json(authLookup, {method: 'POST', body: {localId: group.map(client => client.uid)}});
     const accounts = new Map((list.users ?? []).map(account => [account.localId, account]));
     requireCheck(accounts.size === group.length && group.every(client => {
@@ -220,15 +244,15 @@ async function verifySheetWorkers(api) {
   }
 }
 
-async function waitForLoad(api, expiry) {
+async function waitForLoad(api, expiry, tuned) {
   const deadline = Math.min(Date.now() + loadWindowMs, Date.parse(expiry) - 45_000);
   while (Date.now() < deadline) {
-    const marker = await api.doc(progressPath);
-    requireCheck(scalar(marker, 'loadRun') === loadId, 'UPLOAD_ACCEPTANCE_LOAD_PROGRESS_MISMATCH');
+    const marker = await api.doc(tuned ? tunedProgressPath : progressPath);
+    requireCheck(scalar(marker, 'loadRun') === (tuned ? tunedLoadId : loadId), 'UPLOAD_ACCEPTANCE_LOAD_PROGRESS_MISMATCH');
     const state = scalar(marker, 'state');
     if (state === 'done') {
       requireCheck(scalar(marker, 'completed') === 450, 'UPLOAD_ACCEPTANCE_LOAD_PROGRESS_MISMATCH');
-      const plan = phases.flatMap(phasePlan);
+      const plan = phases.flatMap(phase => phasePlan(phase, tuned));
       const docs = await getStageDocuments(api.json, submissionPaths(plan, true));
       requireCheck(assertCompletedWave(plan, docs).size === 450, 'UPLOAD_ACCEPTANCE_LOAD_COMPLETION_MISMATCH');
       return;
@@ -272,9 +296,14 @@ async function verifyFixture(api) {
   }
 }
 
+function checkedImage(record, name, expected, options) {
+  const image = uploadAcceptanceImage(record, name, expected, options);
+  return options?.tuned ? normalizeLoadCapacity(image, name, expected) : image;
+}
+
 function images(pair, requirePaused = false, options) {
   return Object.fromEntries(scope.functions.map(name => [
-    name, uploadAcceptanceImage(pair[name], name, requirePaused ? 'paused' : mode(pair[name]), options),
+    name, checkedImage(pair[name], name, requirePaused ? 'paused' : mode(pair[name]), options),
   ]));
 }
 
@@ -300,9 +329,9 @@ async function verifyCompleted(api) {
   return true;
 }
 
-export async function runWindow(api, {preflight, waitForReceipt, mark, report = console.log}) {
+export async function runWindow(api, {preflight, waitForReceipt, mark, report = console.log, tuned = false}) {
   const before = await api.readPair();
-  const baseline = images(before, true);
+  const baseline = images(before, true, {tuned});
   await preflight(before);
   mark();
   let verified = false;
@@ -310,37 +339,37 @@ export async function runWindow(api, {preflight, waitForReceipt, mark, report = 
     // Finalizer first. The callable can start a receipt only after it is ready.
     for (const name of [...scope.functions].reverse()) {
       const fresh = await api.readPair();
-      const observed = images(fresh);
+      const observed = images(fresh, false, {tuned});
       for (const peer of scope.functions) assertUploadAcceptanceChange(baseline[peer], observed[peer], peer);
       requireCheck(mode(fresh[name]) === 'paused', 'UPLOAD_ACCEPTANCE_UNEXPECTED_LIVE_MODE');
       await api.update(name, fresh[name], 'acceptance');
     }
     const current = await api.readPair();
     for (const name of scope.functions) {
-      assertUploadAcceptanceChange(baseline[name], uploadAcceptanceImage(current[name], name, 'acceptance'), name);
+      assertUploadAcceptanceChange(baseline[name], checkedImage(current[name], name, 'acceptance', {tuned}), name);
     }
     await waitForReceipt();
     verified = true;
   } finally {
-    await restorePaused(api, report);
-    const after = images(await api.readPair(), true);
+    await restorePaused(api, report, tuned);
+    const after = images(await api.readPair(), true, {tuned});
     for (const name of scope.functions) assertUploadAcceptanceChange(baseline[name], after[name], name);
   }
   return verified;
 }
 
-export async function restorePaused(api, report = console.log) {
+export async function restorePaused(api, report = console.log, tuned = false) {
   // Stop the callable first. Re-read after an ambiguous provider reply and
   // consider only an ACTIVE, fully routed Function for any recovery write.
-  const restoreImage = {requireHash: false};
+  const restoreImage = {requireHash: false, tuned};
   const readPair = () => api.readPair({verifyContent: false});
   for (const name of scope.functions) {
     try {
       const current = (await readPair())[name];
-      uploadAcceptanceImage(current, name, mode(current), restoreImage);
+      checkedImage(current, name, mode(current), restoreImage);
       if (mode(current) === 'paused') continue;
       await api.update(name, current, 'paused');
-      uploadAcceptanceImage((await readPair())[name], name, 'paused', restoreImage);
+      checkedImage((await readPair())[name], name, 'paused', restoreImage);
     } catch (error) {
       report('UPLOAD_ACCEPTANCE_RESTORE_RECHECK=' + name + ':' + safeError(error));
     }
@@ -364,27 +393,29 @@ async function main() {
   }
   token = token.trim();
   requireCheck(/^[a-zA-Z0-9_.-]{32,8192}$/.test(token), 'UPLOAD_ACCEPTANCE_AUTH_INVALID');
-  const api = cloud(token);
+  const tuned = [tunedConfirmation, tunedRestoreConfirmation].includes(env.LKC_CONFIRMATION);
+  const api = cloud(token, tuned);
   if (!opening || action === 'recover') {
-    await restorePaused(api);
+    await restorePaused(api, console.log, tuned);
     return;
   }
   const expiry = env.LKC_ACCEPTANCE_EXPIRY;
-  const isLoad = env.LKC_CONFIRMATION === loadConfirmation;
-  const ruleTemplate = isLoad ? loadRules : rulesFor;
+  const isLoad = [loadConfirmation, tunedConfirmation].includes(env.LKC_CONFIRMATION);
+  const ruleTemplate = isLoad ? deadline => loadRules(deadline, tuned) : rulesFor;
   await runWindow(api, {
+    tuned,
     async preflight(before) {
       assertUploadRefreshBeforeImages(before, await api.readBucket());
       requireCheck(uploadExactEventFilterValue(before.finalizeStagedUpload.fn.eventTrigger?.eventFilters, 'bucket') === bucket,
       'UPLOAD_ACCEPTANCE_SOURCE_OR_BUCKET_NOT_APPROVED');
       requireCheck(Date.parse(expiry) - Date.now() >= (isLoad ? 22 : 9) * 60_000, 'UPLOAD_ACCEPTANCE_EXPIRY_TOO_SOON');
-      await Promise.all([verifyRules(api, expiry, ruleTemplate), isLoad ? verifyLoadFixture(api) : verifyFixture(api)]);
+      await Promise.all([verifyRules(api, expiry, ruleTemplate), isLoad ? verifyLoadFixture(api, tuned) : verifyFixture(api)]);
     },
     async waitForReceipt() {
       await verifyRules(api, expiry, ruleTemplate);
       const deadline = Math.min(Date.now() + maxWindow, Date.parse(expiry) - 30_000);
       console.log('UPLOAD_ACCEPTANCE_WINDOW=READY');
-      if (isLoad) return waitForLoad(api, expiry);
+      if (isLoad) return waitForLoad(api, expiry, tuned);
       while (Date.now() < deadline) {
         if (await verifyCompleted(api)) return;
         await delay(3000);

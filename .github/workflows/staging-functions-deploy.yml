@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Deploy Functions, refresh the upload pair source, smoke one mail, or audit privacy
+        description: Deploy Functions, refresh the upload pair source, test a synthetic upload, smoke mail, or audit privacy
         required: true
         type: choice
         options:
           - deploy
           - upload-source-refresh
+          - upload-acceptance-mode
           - gmail-smoke
           - cancellation-privacy-audit
         default: deploy
@@ -55,6 +56,11 @@ on:
         required: false
         type: string
         default: ""
+      acceptance_expiry:
+        description: UTC expiry of the exact synthetic Storage Rules (YYYY-MM-DDTHH:mm:ss.000Z); empty for restore
+        required: false
+        type: string
+        default: ""
 
 permissions:
   actions: read
@@ -73,7 +79,7 @@ jobs:
   guard:
     outputs:
       source_sha: ${{ steps.source-identity.outputs.source_sha }}
-    if: inputs.operation == 'deploy' || inputs.operation == 'upload-source-refresh'
+    if: inputs.operation == 'deploy' || inputs.operation == 'upload-source-refresh' || inputs.operation == 'upload-acceptance-mode'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -98,8 +104,14 @@ jobs:
           LKC_TRANSFER_MODE_REQUESTED: ${{ inputs.transfer_mode }}
           LKC_UPLOAD_WRITE_CONFIRMATION: ${{ inputs.upload_write_confirmation }}
           LKC_UPLOAD_PRIVACY_CONFIRMATION: ${{ inputs.upload_privacy_confirmation }}
+          LKC_ACCEPTANCE_EXPIRY: ${{ inputs.acceptance_expiry }}
+          LKC_GAS_SYNC_MODE: ${{ inputs.gas_sync_mode }}
         run: |
           lkc_mode=functions-deploy
+          if [[ "$LKC_OPERATION" == "upload-acceptance-mode" ]]; then
+            node guardrails/scripts/automation/run-staging-upload-acceptance.mjs validate
+            exit
+          fi
           if [[ -n "$LKC_UPLOAD_PRIVACY_CONFIRMATION" && ( "$LKC_OPERATION" != "upload-source-refresh" || "$LKC_UPLOAD_PRIVACY_CONFIRMATION" != "ENFORCE_LKC_STAGING_UPLOAD_BACKUP_PUBLIC_ACCESS_PREVENTION" || -n "$LKC_UPLOAD_WRITE_CONFIRMATION" ) ]]; then
             echo UPLOAD_REFRESH_PRIVACY_CONFIRMATION_REJECTED >&2
             exit 1
@@ -146,8 +158,17 @@ jobs:
       - name: Require successful canonical CI
         env:
           GH_TOKEN: ${{ github.token }}
+          LKC_OPERATION: ${{ inputs.operation }}
         run: |
           source_sha="$(git -C source rev-parse HEAD)"
+          if [[ "$LKC_OPERATION" == "upload-acceptance-mode" ]]; then
+            [[ "$source_sha" == "$GITHUB_SHA" ]]
+            [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" == "$GITHUB_SHA" ]]
+            result=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release-candidate.yml/runs?head_sha=$GITHUB_SHA&event=push" \
+              --jq '.workflow_runs | max_by(.id) | .conclusion')
+            [[ "$result" == "success" ]]
+            exit
+          fi
           gh api \
             -H "Accept: application/vnd.github+json" \
             "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${source_sha}&status=completed&per_page=50" \
@@ -313,6 +334,54 @@ jobs:
           path: upload-source-refresh-result.json
           if-no-files-found: error
           retention-days: 14
+
+  upload-acceptance:
+    if: inputs.operation == 'upload-acceptance-mode'
+    needs: guard
+    environment: lkc-staging-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 42
+    env:
+      LKC_VERIFIED_SOURCE_SHA: ${{ needs.guard.outputs.source_sha }}
+      LKC_OPERATION: ${{ inputs.operation }}
+      LKC_SOURCE_REF: ${{ inputs.source_ref }}
+      LKC_FUNCTIONS: ${{ inputs.functions }}
+      LKC_CONFIRMATION: ${{ inputs.confirmation }}
+      LKC_TRANSFER_MODE_REQUESTED: ${{ inputs.transfer_mode }}
+      LKC_ACCEPTANCE_EXPIRY: ${{ inputs.acceptance_expiry }}
+      LKC_GAS_SYNC_MODE: ${{ inputs.gas_sync_mode }}
+      LKC_UPLOAD_WRITE_CONFIRMATION: ${{ inputs.upload_write_confirmation }}
+      LKC_UPLOAD_PRIVACY_CONFIRMATION: ${{ inputs.upload_privacy_confirmation }}
+    steps:
+      - name: Checkout reviewed workflow commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify current main and the request scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$LKC_VERIFIED_SOURCE_SHA" ]]
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')" == "$GITHUB_SHA" ]]
+          node scripts/automation/run-staging-upload-acceptance.mjs validate
+      - name: Authenticate with short-lived staging identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_DEPLOY_SERVICE_ACCOUNT }}
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+      - name: Run the bounded upload acceptance or standalone restore
+        shell: bash
+        run: gcloud auth print-access-token | node scripts/automation/run-staging-upload-acceptance.mjs run
+      - name: Verify paused or recover an interrupted transaction
+        if: always() && inputs.transfer_mode == 'acceptance'
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/lkc-upload-acceptance-started" ]]; then
+            gcloud auth print-access-token | node scripts/automation/run-staging-upload-acceptance.mjs recover
+          fi
 
   smoke-guard:
     if: inputs.operation == 'gmail-smoke'
@@ -543,4 +612,3 @@ jobs:
           path: ${{ runner.temp }}/cancellation-privacy-audit/privacy-audit.json
           if-no-files-found: warn
           retention-days: 7
-

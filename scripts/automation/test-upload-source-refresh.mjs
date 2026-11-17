@@ -16,6 +16,8 @@ import {validateUploadRefreshContext, authenticatedUploadRefreshAPI, writeUpload
   uploadRefreshCloudOwner, enforceUploadBackupPrivacy, UPLOAD_BACKUP_PRIVACY_CONFIRMATION,
   uploadRefreshStorageTriggerSummary, uploadRefreshPreflightSummary} from './run-upload-source-refresh.mjs';
 import {validatePlan} from './validate-staging-scope.mjs';
+import {validateContext as validateAcceptance, runWindow, restorePaused} from './run-staging-upload-acceptance.mjs';
+import {files as acceptanceFiles, modeVariable, rulesFor} from './staging-upload-acceptance-manifest.mjs';
 const copy = value => structuredClone(value), prefix = `projects/${S.project}/locations/${S.region}`;
 const privateValue = 'synthetic-private-value-do-not-publish';
 const emptyPolicy = () => ({etag: 'synthetic-policy-etag', version: 1, bindings: []});
@@ -66,6 +68,91 @@ function fixture() {
       policy: emptyPolicy(), project: {projectId: S.project, projectNumber: S.projectNumber, lifecycleState: 'ACTIVE'},
       projectPolicy: emptyPolicy()}};
 }
+
+const acceptanceEnv = {
+  GITHUB_REPOSITORY: 'Hanabo0930/Lip-Knots-Crew', GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'workflow_dispatch',
+  GITHUB_RUN_ATTEMPT: '1', GITHUB_JOB: 'upload-acceptance', GITHUB_SHA: 'a'.repeat(40),
+  GITHUB_WORKFLOW_REF: 'Hanabo0930/Lip-Knots-Crew/.github/workflows/staging-functions-deploy.yml@refs/heads/main',
+  LKC_VERIFIED_SOURCE_SHA: 'a'.repeat(40), LKC_PROJECT_ID: S.project, LKC_REGION: S.region, LKC_SOURCE_REF: 'main',
+  LKC_FUNCTIONS: S.functions.join(','), LKC_CONFIRMATION: 'TEST_LKC_STAGING_ONE_SYNTHETIC_UPLOAD_CASE',
+  LKC_OPERATION: 'upload-acceptance-mode', LKC_TRANSFER_MODE_REQUESTED: 'acceptance',
+  LKC_ACCEPTANCE_EXPIRY: '2026-11-17T00:50:00.000Z', LKC_GAS_SYNC_MODE: 'off',
+};
+test('upload acceptance scope is confined to the exact protected main workflow and explicit action', () => {
+  assert.equal(validateAcceptance(acceptanceEnv, 'run'), true);
+  for (const override of [
+    {GITHUB_REF: 'refs/heads/other'}, {GITHUB_RUN_ATTEMPT: '2'}, {GITHUB_JOB: 'deploy'},
+    {LKC_VERIFIED_SOURCE_SHA: 'b'.repeat(40)}, {LKC_SOURCE_REF: 'automation/other'},
+    {LKC_FUNCTIONS: S.functions[0]}, {LKC_FUNCTIONS: S.functions.join(',') + ',other'},
+    {LKC_PROJECT_ID: 'production'}, {LKC_REGION: 'us-central1'}, {LKC_TRANSFER_MODE_REQUESTED: 'active'},
+    {LKC_UPLOAD_WRITE_CONFIRMATION: 'any'}, {LKC_GAS_SYNC_MODE: 'read-only'}, {LKC_ACCEPTANCE_EXPIRY: '2026-02-30T00:50:00.000Z'},
+  ]) assert.throws(() => validateAcceptance({...acceptanceEnv, ...override}, 'run'));
+  assert.equal(validateAcceptance({...acceptanceEnv, LKC_TRANSFER_MODE_REQUESTED: 'paused', LKC_ACCEPTANCE_EXPIRY: '',
+    LKC_CONFIRMATION: 'RESTORE_LKC_STAGING_UPLOAD_PAUSED'}, 'run'), false);
+});
+
+test('upload acceptance Storage policy pins both paths, claims and content with an absolute expiry', () => {
+  const rules = rulesFor(acceptanceEnv.LKC_ACCEPTANCE_EXPIRY);
+  assert.equal(rules.match(/allow /g).length, 1);
+  assert.ok(rules.includes('allow create:'));
+  assert.ok(rules.includes('request.auth.token.crewStagingCase == "CREW-STAGING-20261116-01"'));
+  assert.ok(rules.includes('request.time < timestamp.value(' + Date.parse(acceptanceEnv.LKC_ACCEPTANCE_EXPIRY) + ')'));
+  for (const file of acceptanceFiles) {
+    assert.ok(rules.includes(JSON.stringify(file.storagePath)));
+    assert.ok(rules.includes(JSON.stringify(file.contentSha256)));
+    assert.equal(file.size, Buffer.from(file.data, 'base64').length);
+  }
+  assert.throws(() => rulesFor('2026-11-17T00:50:00.000Z; true'));
+});
+
+function acceptanceSimulation({failAfterOpen, drift} = {}) {
+  const pair = fixture().before;
+  const writes = [];
+  return {pair, writes, api: {
+    readPair: async () => copy(pair),
+    async update(name, record, next) {
+      assert.deepEqual(record, pair[name]);
+      writes.push([name, next]);
+      pair[name].fn.serviceConfig.environmentVariables[modeVariable] = next;
+      pair[name].service.spec.template.spec.containers[0].env.find(item => item.name === modeVariable).value = next;
+      if (drift && next === 'acceptance') pair[name].fn.serviceConfig.availableMemory = '1Gi';
+      if (failAfterOpen === name && next === 'acceptance') throw Error('UPLOAD_ACCEPTANCE_OPERATION_PENDING');
+    },
+  }};
+}
+const acceptanceCallbacks = {preflight: async () => {}, waitForReceipt: async () => {}, mark() {}, report() {}};
+test('opens finalizer first, closes callable first, verifies both paused, and preserves other settings', async () => {
+  const {api, pair, writes} = acceptanceSimulation(), baseline = copy(pair);
+  assert.equal(await runWindow(api, {...acceptanceCallbacks, async waitForReceipt() {
+    assert.ok(Object.values(pair).every(item => item.fn.serviceConfig.environmentVariables[modeVariable] === 'acceptance'));
+  }}), true);
+  assert.deepEqual(writes, [['finalizeStagedUpload', 'acceptance'], ['createUploadSession', 'acceptance'],
+    ['createUploadSession', 'paused'], ['finalizeStagedUpload', 'paused']]);
+  assert.deepEqual(pair, baseline);
+});
+test('failed preflight performs no writes, and a partial or ambiguous activation is closed', async () => {
+  const blocked = acceptanceSimulation();
+  await assert.rejects(runWindow(blocked.api, {...acceptanceCallbacks, async preflight() { throw Error('fixture'); }}), /fixture/);
+  assert.equal(blocked.writes.length, 0);
+  const interrupted = acceptanceSimulation({failAfterOpen: 'finalizeStagedUpload'});
+  await assert.rejects(runWindow(interrupted.api, acceptanceCallbacks), /OPERATION_PENDING/);
+  assert.deepEqual(interrupted.writes, [['finalizeStagedUpload', 'acceptance'], ['finalizeStagedUpload', 'paused']]);
+});
+test('a failed receipt or unrelated configuration drift closes the window and prevents success', async () => {
+  for (const drift of [false, true]) {
+    const stopped = acceptanceSimulation({drift});
+    await assert.rejects(runWindow(stopped.api, {...acceptanceCallbacks, async waitForReceipt() { throw Error('timeout'); }}),
+      drift ? /CONFIGURATION_CHANGED/ : /timeout/);
+    assert.ok(Object.values(stopped.pair).every(item => item.fn.serviceConfig.environmentVariables[modeVariable] === 'paused'));
+  }
+});
+test('standalone restore is idempotent with both services paused, and rejects mismatched live traffic', async () => {
+  const {api, pair, writes} = acceptanceSimulation();
+  await restorePaused(api, () => {});
+  assert.equal(writes.length, 0);
+  pair.createUploadSession.service.status.traffic[0].percent = 80;
+  await assert.rejects(restorePaused(api, () => {}), /SERVICE_NOT_VERIFIED/);
+});
 const triggerCheckNames = ['functionEventTypeMatches', 'functionTriggerInScope', 'singleFunctionBucketFilter',
   'functionBucketSeparateFromSource', 'triggerRecordPresent', 'triggerNameMatches', 'triggerUidPresent',
   'destinationServiceMatches', 'destinationRegionMatches', 'bucketFilterMatches', 'eventTypeFilterMatches',

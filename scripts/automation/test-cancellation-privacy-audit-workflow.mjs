@@ -11,7 +11,7 @@ assert.equal(fs.existsSync('.github/workflows/staging-cancellation-privacy-audit
 function validate(text){
  const w=yaml.load(text);
  assert.deepEqual(Object.keys(w.on),['workflow_dispatch']);
- assert.deepEqual(w.on.workflow_dispatch.inputs.operation.options,['deploy','upload-source-refresh','gmail-smoke','cancellation-privacy-audit']);
+ assert.deepEqual(w.on.workflow_dispatch.inputs.operation.options,['deploy','upload-source-refresh','upload-acceptance-mode','gmail-smoke','cancellation-privacy-audit']);
  assert.equal(w.on.workflow_dispatch.inputs.operation.default,'deploy');
  assert.equal(w.on.workflow_dispatch.inputs.upload_privacy_confirmation.default,'');
  for(const job of ['guard','deploy']) {
@@ -20,10 +20,19 @@ function validate(text){
  }
  assert(w.jobs.guard.steps.find(s=>s.name==='Validate requested scope').run.includes('UPLOAD_REFRESH_PRIVACY_CONFIRMATION_REJECTED'));
  const deployOnly="inputs.operation == 'deploy' || inputs.operation == 'upload-source-refresh'";
- assert.equal(w.jobs.guard.if,deployOnly);assert.equal(w.jobs.deploy.if,deployOnly);
+ const acceptanceOnly="inputs.operation == 'upload-acceptance-mode'";
+ assert.equal(w.jobs.guard.if,deployOnly+' || '+acceptanceOnly);assert.equal(w.jobs.deploy.if,deployOnly);
+ const acceptance=w.jobs['upload-acceptance'];
+ assert.equal(acceptance.if,acceptanceOnly);
+ assert.equal(acceptance.needs,'guard');
+ assert.equal(acceptance.environment,'lkc-staging-deploy');
+ const acceptanceCheckout=acceptance.steps.find(s=>s.uses?.startsWith('actions/checkout@'));
+ assert.equal(acceptanceCheckout.with.ref,'${{ github.sha }}');
+ assert.equal(acceptanceCheckout.with['persist-credentials'],false);
+ assert(acceptance.steps.some(s=>s.if?.startsWith('always()') && s.run?.includes('run-staging-upload-acceptance.mjs recover')));
  assert.equal(w.jobs['smoke-guard'].if,"inputs.operation == 'gmail-smoke'");assert(w.jobs['gmail-smoke'].if.includes("inputs.operation == 'gmail-smoke'"));
  assert.equal(w.concurrency['cancel-in-progress'],false);
- assert.deepEqual(Object.keys(w.jobs).sort(),['cancellation-audit','cancellation-audit-guard','deploy','gmail-smoke','guard','smoke-guard']);
+ assert.deepEqual(Object.keys(w.jobs).sort(),['cancellation-audit','cancellation-audit-guard','deploy','gmail-smoke','guard','smoke-guard','upload-acceptance']);
  const g=w.jobs['cancellation-audit-guard'],a=w.jobs['cancellation-audit'];
  assert.equal(g.if,"inputs.operation == 'cancellation-privacy-audit'");assert.equal(a.if,g.if);assert.equal(a.needs,'cancellation-audit-guard');
  assert.deepEqual(g.permissions,{actions:'read',contents:'read'});assert(!g.environment);

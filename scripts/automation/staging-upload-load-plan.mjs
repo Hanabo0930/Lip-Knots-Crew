@@ -2,28 +2,33 @@ import {createHash} from 'node:crypto';
 import {bucket, company, files, project, issuedNonce} from './staging-upload-acceptance-manifest.mjs';
 
 export const loadConfirmation = 'TEST_LKC_STAGING_UPLOAD_LOAD_50_100_300';
+export const tunedConfirmation = 'TEST_LKC_STAGING_UPLOAD_LOAD_TUNED_50_100_300';
+export const tunedRestoreConfirmation = 'RESTORE_LKC_STAGING_TUNED_UPLOAD_PAUSED';
 export const loadId = 'CREW-STAGING-LOAD-20261117';
+export const tunedLoadId = loadId + '-B';
 export const phases = Object.freeze([50, 100, 300]);
 export const loadWindowMs = 12 * 60_000;
 export const progressPath = 'companies/' + company + '/settings/' + loadId;
+export const tunedProgressPath = 'companies/' + company + '/settings/' + tunedLoadId;
 export const sample = files[0];
 export const database = 'projects/' + project + '/databases/(default)/documents';
 const hash = value => createHash('sha256').update(value).digest('hex');
-function requestId(index, phase) {
-  const value = hash(JSON.stringify([loadId, index, phase]));
+function requestId(run, index, phase) {
+  const value = hash(JSON.stringify([run, index, phase]));
   return value.slice(0, 8) + '-' + value.slice(8, 12) + '-4' + value.slice(13, 16)
     + '-8' + value.slice(17, 20) + '-' + value.slice(20, 32);
 }
-export const clients = Object.freeze(Array.from({length: phases.at(-1)}, (_, index) => {
+function createClients(run, suffix) {
+  return Object.freeze(Array.from({length: phases.at(-1)}, (_, index) => {
   const number = String(index + 1).padStart(3, '0');
   const uid = 'crew-staging-load-20261117-' + number;
-  const staffId = uid + '-profile';
-  const jobId = uid + '-job';
-  const claims = {companyId: company, staffId, role: 'staff', crewLoadRun: loadId};
+  const staffId = uid + suffix + '-profile';
+  const jobId = uid + suffix + '-job';
+  const claims = {companyId: company, staffId, role: 'staff', crewLoadRun: run};
   const plans = {};
   for (const [slot, count] of phases.entries()) {
     if (index >= count) continue;
-    const clientRequestId = requestId(index, count);
+    const clientRequestId = requestId(run, index, count);
     const submissionId = 'submission_' + hash(JSON.stringify([company, staffId, uid, clientRequestId]));
     const fileId = 'file_' + hash(submissionId + '|0').slice(0, 32);
     claims['crewLoadS' + slot] = submissionId;
@@ -34,14 +39,17 @@ export const clients = Object.freeze(Array.from({length: phases.at(-1)}, (_, ind
   }
   return Object.freeze({number, uid, staffId, jobId, email: uid + '@example.invalid',
     claims: Object.freeze(claims), plans: Object.freeze(plans)});
-}));
+  }));
+}
+export const clients = createClients(loadId, '');
+export const tunedClients = createClients(tunedLoadId, '-b');
 
-export function phasePlan(phase) {
+export function phasePlan(phase, tuned = false) {
   if (!phases.includes(phase)) throw Error('UPLOAD_ACCEPTANCE_LOAD_PHASE_INVALID');
-  return clients.slice(0, phase).map(client => client.plans[phase]);
+  return (tuned === true ? tunedClients : clients).slice(0, phase).map(client => client.plans[phase]);
 }
 
-export function loadRules(expiry) {
+export function loadRules(expiry, tuned = false) {
   const time = Date.parse(expiry);
   if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.000Z$/.test(expiry) || !Number.isFinite(time)
     || new Date(time).toISOString() !== expiry) throw Error('UPLOAD_ACCEPTANCE_EXPIRY_INVALID');
@@ -57,7 +65,8 @@ export function loadRules(expiry) {
     '        && request.time < timestamp.value(' + time + ') && request.auth != null && request.auth.uid == uid',
     '        && uid.matches("crew-staging-load-20261117-(00[1-9]|0[1-9][0-9]|[12][0-9]{2}|300)")',
     '        && request.auth.token.role == "staff" && request.auth.token.companyId == companyId',
-    '        && request.auth.token.staffId == uid + "-profile" && request.auth.token.crewLoadRun == ' + JSON.stringify(loadId),
+    '        && request.auth.token.staffId == uid + ' + JSON.stringify(tuned ? '-b-profile' : '-profile')
+      + ' && request.auth.token.crewLoadRun == ' + JSON.stringify(tuned ? tunedLoadId : loadId),
     '        && fileName.matches("[a-f0-9]{32}-synthetic-active-load[.]png") && (' + slots + ')',
     '        && request.resource.size == ' + sample.size + ' && request.resource.contentType == ' + JSON.stringify(sample.contentType),
     '        && request.resource.metadata.lkcContentSha256 == ' + JSON.stringify(sample.contentSha256) + ';',

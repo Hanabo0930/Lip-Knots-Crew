@@ -95,7 +95,9 @@ export function validatePlan(plan) {
     const functions = ["createUploadSession", "finalizeStagedUpload"];
     if (sourceRef !== "main" || !sameSet(parseCsv(plan.functions), functions))
       throw new Error("UPLOAD_ACCEPTANCE_MAIN_EXACT_PAIR_REQUIRED");
-    if (!["TEST_LKC_STAGING_ONE_SYNTHETIC_UPLOAD_CASE", "TEST_LKC_STAGING_UPLOAD_LOAD_50_100_300", "RESTORE_LKC_STAGING_UPLOAD_PAUSED"].includes(plan.confirmation))
+    if (!["TEST_LKC_STAGING_ONE_SYNTHETIC_UPLOAD_CASE", "TEST_LKC_STAGING_UPLOAD_LOAD_50_100_300",
+      "TEST_LKC_STAGING_UPLOAD_LOAD_TUNED_50_100_300", "RESTORE_LKC_STAGING_UPLOAD_PAUSED",
+      "RESTORE_LKC_STAGING_TUNED_UPLOAD_PAUSED"].includes(plan.confirmation))
       throw new Error("UPLOAD_ACCEPTANCE_CONFIRMATION_REJECTED");
     return {mode, project, region, sourceRef, functions};
   }

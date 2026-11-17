@@ -91,6 +91,15 @@ export function validatePlan(plan) {
     return {mode, project, region, sourceRef, functions: ["createUploadSession", "finalizeStagedUpload"]};
   }
 
+  if (mode === "functions-upload-acceptance") {
+    const functions = ["createUploadSession", "finalizeStagedUpload"];
+    if (sourceRef !== "main" || !sameSet(parseCsv(plan.functions), functions))
+      throw new Error("UPLOAD_ACCEPTANCE_MAIN_EXACT_PAIR_REQUIRED");
+    if (!["TEST_LKC_STAGING_ONE_SYNTHETIC_UPLOAD_CASE", "RESTORE_LKC_STAGING_UPLOAD_PAUSED"].includes(plan.confirmation))
+      throw new Error("UPLOAD_ACCEPTANCE_CONFIRMATION_REJECTED");
+    return {mode, project, region, sourceRef, functions};
+  }
+
   if (mode === "functions-deploy") {
     const functions = parseCsv(plan.functions);
     if (!functions.length) throw new Error("FUNCTION_LIST_EMPTY");

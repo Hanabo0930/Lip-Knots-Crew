@@ -337,6 +337,33 @@ export function assertUploadRefreshBeforeImages(before, bucket) {
   }
   requireValue(total <= S.totalSourceBytes, 'UPLOAD_REFRESH_SOURCE_LIMIT_EXCEEDED');
 }
+
+export function uploadAcceptanceImage(record, name, mode) {
+  const key = 'LKC_SUBMISSION_TRANSFER_MODE';
+  requireValue(S.functions.includes(name) && ['acceptance', 'paused'].includes(mode)
+    && record?.fn?.serviceConfig?.environmentVariables?.[key] === mode,
+  'UPLOAD_ACCEPTANCE_FUNCTION_MODE_MISMATCH');
+  const image = clone(record);
+  const env = image.service?.spec?.template?.spec?.containers?.[0]?.env;
+  const matches = Array.isArray(env) ? env.filter(item => item?.name === key) : [];
+  requireValue(matches.length === 1 && matches[0].value === mode && !matches[0].valueFrom,
+    'UPLOAD_ACCEPTANCE_SERVICE_MODE_MISMATCH');
+  matches[0].value = 'paused';
+  image.fn.serviceConfig.environmentVariables[key] = 'paused';
+  validateRecord(image, name);
+  objectMetadata(image.object, image.fn.buildConfig.sourceProvenance.resolvedStorageSource);
+  return image;
+}
+
+export function assertUploadAcceptanceChange(before, after, name) {
+  assertSameSettings(before, after, name);
+  requireValue(isDeepStrictEqual(before.fn.buildConfig.source, after.fn.buildConfig.source)
+    && isDeepStrictEqual(before.fn.buildConfig.sourceProvenance, after.fn.buildConfig.sourceProvenance)
+    && isDeepStrictEqual(before.object, after.object)
+    && before.service.spec.template.spec.containers[0].image === after.service.spec.template.spec.containers[0].image,
+  'UPLOAD_ACCEPTANCE_SOURCE_CHANGED');
+}
+
 export function prepareUploadSourceRefresh({sourceSha, runId, runAttempt, before, replacements, bucket, replacementHashes, replacementObjects}) {
   requireValue(/^[0-9a-f]{40}$/.test(sourceSha ?? '') && decimal(runId) && runAttempt === 1,
     'UPLOAD_REFRESH_RUN_IDENTITY_INVALID');

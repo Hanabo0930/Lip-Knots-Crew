@@ -1,4 +1,5 @@
 import {existsSync, writeFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
 import {isDeepStrictEqual} from 'node:util';
@@ -7,7 +8,7 @@ import {authenticatedUploadRefreshAPI, uploadRefreshReader} from './run-upload-s
 import {UPLOAD_REFRESH_SCOPE as scope, assertUploadRefreshBeforeImages, assertUploadAcceptanceChange,
   uploadAcceptanceImage, uploadExactEventFilterValue} from './upload-source-refresh-contract.mjs';
 import {project, bucket, company, caseId, uid, staffId, jobId, driveRoot, submissionId, files,
-  ruleFilename, rulesFor, modeVariable, sourceGenerations} from './staging-upload-acceptance-manifest.mjs';
+  ruleFilename, rulesFor, modeVariable, sourceArchiveSha256, sourceArchiveBytes} from './staging-upload-acceptance-manifest.mjs';
 
 const repository = 'Hanabo0930/Lip-Knots-Crew';
 const prefix = 'projects/' + project + '/locations/' + scope.region;
@@ -70,6 +71,41 @@ function cloud(token) {
     requireCheck(options === undefined || options.readOnlyPost === true, 'UPLOAD_ACCEPTANCE_READ_ONLY_API_REQUIRED');
     return base.request(url, options);
   }});
+  const verifiedGenerations = new Map();
+  async function readPair({verifyContent = true} = {}) {
+    const pair = await reader.readPair();
+    if (!verifyContent) return pair;
+    for (const name of scope.functions) {
+      const record = pair[name];
+      const ref = record.fn.buildConfig?.sourceProvenance?.resolvedStorageSource;
+      requireCheck(ref?.bucket === scope.bucket && ref.object === name + '/function-source.zip'
+        && /^[1-9][0-9]{0,19}$/.test(ref.generation ?? '') && +record.object.size === sourceArchiveBytes,
+      'UPLOAD_ACCEPTANCE_SOURCE_METADATA_MISMATCH');
+      const key = ref.object + '#' + ref.generation;
+      if (!verifiedGenerations.has(key)) {
+        requireCheck(verifiedGenerations.size < 8, 'UPLOAD_ACCEPTANCE_SOURCE_READ_LIMIT');
+        const url = 'https://storage.googleapis.com/storage/v1/b/' + scope.bucket + '/o/' + encodeURIComponent(ref.object)
+          + '?alt=media&generation=' + ref.generation + '&ifGenerationMatch=' + ref.generation;
+        const response = await fetch(url, {redirect: 'error', signal: AbortSignal.timeout(30_000),
+          headers: {Authorization: 'Bearer ' + token, 'Accept-Encoding': 'identity', 'Cache-Control': 'no-cache'}});
+        const length = response.headers.get('content-length');
+        requireCheck(response.ok && (length === null || Number(length) === sourceArchiveBytes)
+          && [null, 'identity'].includes(response.headers.get('content-encoding')), 'UPLOAD_ACCEPTANCE_SOURCE_CONTENT_UNVERIFIED');
+        const digest = createHash('sha256');
+        let bytes = 0;
+        for await (const chunk of response.body) {
+          bytes += chunk.length;
+          requireCheck(bytes <= sourceArchiveBytes, 'UPLOAD_ACCEPTANCE_SOURCE_CONTENT_UNVERIFIED');
+          digest.update(chunk);
+        }
+        requireCheck(bytes === sourceArchiveBytes && digest.digest('hex') === sourceArchiveSha256,
+          'UPLOAD_ACCEPTANCE_SOURCE_CONTENT_UNVERIFIED');
+        verifiedGenerations.set(key, sourceArchiveSha256);
+      }
+      record.sourceArchiveSha256 = verifiedGenerations.get(key);
+    }
+    return pair;
+  }
   async function update(name, before, next) {
     requireCheck(scope.functions.includes(name) && ['acceptance', 'paused'].includes(next), 'UPLOAD_ACCEPTANCE_PATCH_SCOPE_REJECTED');
     const target = functionRef(name);
@@ -94,7 +130,7 @@ function cloud(token) {
       operation = await json(functionsAPI + operationName);
     }
   }
-  return {...reader, json, update, doc: path => json(firestore + '/' + path, {absent: true})};
+  return {...reader, readPair, json, update, doc: path => json(firestore + '/' + path, {absent: true})};
 }
 
 async function companyRows(api, collection) {
@@ -153,9 +189,9 @@ async function verifyFixture(api) {
   }
 }
 
-function images(pair, requirePaused = false) {
+function images(pair, requirePaused = false, options) {
   return Object.fromEntries(scope.functions.map(name => [
-    name, uploadAcceptanceImage(pair[name], name, requirePaused ? 'paused' : mode(pair[name])),
+    name, uploadAcceptanceImage(pair[name], name, requirePaused ? 'paused' : mode(pair[name]), options),
   ]));
 }
 
@@ -203,7 +239,8 @@ export async function runWindow(api, {preflight, waitForReceipt, mark, report = 
     await waitForReceipt();
     verified = true;
   } finally {
-    const after = await restorePaused(api, report);
+    await restorePaused(api, report);
+    const after = images(await api.readPair(), true);
     for (const name of scope.functions) assertUploadAcceptanceChange(baseline[name], after[name], name);
   }
   return verified;
@@ -212,19 +249,20 @@ export async function runWindow(api, {preflight, waitForReceipt, mark, report = 
 export async function restorePaused(api, report = console.log) {
   // Stop the callable first. Re-read after an ambiguous provider reply and
   // consider only an ACTIVE, fully routed Function for any recovery write.
+  const restoreImage = {requireHash: false};
+  const readPair = () => api.readPair({verifyContent: false});
   for (const name of scope.functions) {
     try {
-      const current = (await api.readPair())[name];
-      const prior = uploadAcceptanceImage(current, name, mode(current));
+      const current = (await readPair())[name];
+      uploadAcceptanceImage(current, name, mode(current), restoreImage);
       if (mode(current) === 'paused') continue;
       await api.update(name, current, 'paused');
-      const observed = (await api.readPair())[name];
-      assertUploadAcceptanceChange(prior, uploadAcceptanceImage(observed, name, 'paused'), name);
+      uploadAcceptanceImage((await readPair())[name], name, 'paused', restoreImage);
     } catch (error) {
       report('UPLOAD_ACCEPTANCE_RESTORE_RECHECK=' + name + ':' + safeError(error));
     }
   }
-  const paused = images(await api.readPair(), true);
+  const paused = images(await readPair(), true, restoreImage);
   report('UPLOAD_ACCEPTANCE_BOTH_PAUSED=VERIFIED');
   return paused;
 }
@@ -252,8 +290,7 @@ async function main() {
   await runWindow(api, {
     async preflight(before) {
       assertUploadRefreshBeforeImages(before, await api.readBucket());
-      requireCheck(scope.functions.every(name => before[name].fn.buildConfig.sourceProvenance.resolvedStorageSource.generation
-        === sourceGenerations[name]) && uploadExactEventFilterValue(before.finalizeStagedUpload.fn.eventTrigger?.eventFilters, 'bucket') === bucket,
+      requireCheck(uploadExactEventFilterValue(before.finalizeStagedUpload.fn.eventTrigger?.eventFilters, 'bucket') === bucket,
       'UPLOAD_ACCEPTANCE_SOURCE_OR_BUCKET_NOT_APPROVED');
       requireCheck(Date.parse(expiry) - Date.now() >= 9 * 60_000, 'UPLOAD_ACCEPTANCE_EXPIRY_TOO_SOON');
       await Promise.all([verifyRules(api, expiry), verifyFixture(api)]);

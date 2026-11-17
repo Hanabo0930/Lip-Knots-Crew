@@ -11,10 +11,9 @@ export const driveRoot = '1UIrK62YaXUDtK8H2rvJcZV5nkej30vk0';
 export const clientRequestId = '3fe324a0-72d8-4468-914b-793661160001';
 export const ruleFilename = 'storage.rules';
 export const modeVariable = 'LKC_SUBMISSION_TRANSFER_MODE';
-export const sourceGenerations = Object.freeze({
-  createUploadSession: '1794872934071541',
-  finalizeStagedUpload: '1794873032748759',
-});
+// The protected source refresh verified this same ZIP for both functions.
+export const sourceArchiveSha256 = '770c19665eeeab2956176b73e7ff17cf8608458dd60d8603f68cbb60385089fa';
+export const sourceArchiveBytes = 1894962;
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j7YQAAAAASUVORK5CYII=';

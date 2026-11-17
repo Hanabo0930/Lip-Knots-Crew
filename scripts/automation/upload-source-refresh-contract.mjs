@@ -338,7 +338,7 @@ export function assertUploadRefreshBeforeImages(before, bucket) {
   requireValue(total <= S.totalSourceBytes, 'UPLOAD_REFRESH_SOURCE_LIMIT_EXCEEDED');
 }
 
-export function uploadAcceptanceImage(record, name, mode) {
+export function uploadAcceptanceImage(record, name, mode, {requireHash = true} = {}) {
   const key = 'LKC_SUBMISSION_TRANSFER_MODE';
   requireValue(S.functions.includes(name) && ['acceptance', 'paused'].includes(mode)
     && record?.fn?.serviceConfig?.environmentVariables?.[key] === mode,
@@ -351,15 +351,19 @@ export function uploadAcceptanceImage(record, name, mode) {
   matches[0].value = 'paused';
   image.fn.serviceConfig.environmentVariables[key] = 'paused';
   validateRecord(image, name);
-  objectMetadata(image.object, image.fn.buildConfig.sourceProvenance.resolvedStorageSource);
+  const ref = image.fn.buildConfig.sourceProvenance.resolvedStorageSource;
+  objectMetadata(image.object, ref);
+  requireValue(ref.object === name + '/function-source.zip'
+    && isDeepStrictEqual(image.fn.buildConfig.source, {storageSource: ref})
+    && (!requireHash || /^[a-f0-9]{64}$/.test(image.sourceArchiveSha256 ?? '')), 'UPLOAD_ACCEPTANCE_SOURCE_UNVERIFIED');
   return image;
 }
 
 export function assertUploadAcceptanceChange(before, after, name) {
   assertSameSettings(before, after, name);
-  requireValue(isDeepStrictEqual(before.fn.buildConfig.source, after.fn.buildConfig.source)
-    && isDeepStrictEqual(before.fn.buildConfig.sourceProvenance, after.fn.buildConfig.sourceProvenance)
-    && isDeepStrictEqual(before.object, after.object)
+  // Functions v2 can rebuild after a service-config PATCH, creating a new
+  // canonical GCS generation for the same independently hashed archive.
+  requireValue(before.sourceArchiveSha256 === after.sourceArchiveSha256
     && before.service.spec.template.spec.containers[0].image === after.service.spec.template.spec.containers[0].image,
   'UPLOAD_ACCEPTANCE_SOURCE_CHANGED');
 }

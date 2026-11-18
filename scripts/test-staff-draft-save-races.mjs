@@ -61,3 +61,104 @@ for(const mode of ['current','other-key','auth-change']){
  if(mode==='other-key')h.ctx.previewContextRef.current='other';if(mode==='auth-change')h.ctx.authLoadVersionRef.current++;reject(Error('synthetic disk failure'));for(let i=0;i<8;i++)await Promise.resolve();assert.equal(h.state.messages.length,mode==='current'?1:0);if(mode==='current')assert.match(h.state.messages[0],/画面を閉じず/);
 }
 console.log('Draft target-loss errors: current failure warns; changed target/account stays untouched.');
+
+async function testsForDraftOpen(openCode) {
+  function fixture() {
+    const requests = [];
+    const timers = new Map();
+    let nextTimer = 0;
+    const open = runInNewContext(openCode + '\nopenDb;', {
+      DB_NAME: 'lkc-submission-drafts',
+      STORE: 'drafts',
+      DOMException,
+      indexedDB: {
+        open(name, version) {
+          assert.equal(name, 'lkc-submission-drafts');
+          assert.equal(version, 1);
+          const request = {onblocked: null, onsuccess: null, onerror: null, onupgradeneeded: null};
+          requests.push(request);
+          return request;
+        },
+      },
+      setTimeout(callback, delay) {
+        assert.equal(delay, 10_000);
+        const id = ++nextTimer;
+        timers.set(id, callback);
+        return id;
+      },
+      clearTimeout(id) { timers.delete(id); },
+    });
+    return {open, requests, timers};
+  }
+
+  {
+    const {open, requests, timers} = fixture();
+    const pending = open();
+    const stores = [];
+    const db = {objectStoreNames: {contains: () => false}, createObjectStore: name => stores.push(name)};
+    requests[0].result = db;
+    requests[0].onupgradeneeded();
+    requests[0].onsuccess();
+    assert.equal(await pending, db);
+    assert.deepEqual(stores, ['drafts']);
+    assert.equal(timers.size, 0);
+  }
+
+  {
+    const {open, requests, timers} = fixture();
+    const pending = open();
+    const error = new DOMException('synthetic error', 'VersionError');
+    requests[0].error = error;
+    requests[0].onerror();
+    await assert.rejects(pending, result => result === error);
+    assert.equal(timers.size, 0);
+  }
+
+  for (const mode of ['blocked', 'timeout']) {
+    const {open, requests, timers} = fixture();
+    const abandoned = open();
+    if (mode === 'blocked') requests[0].onblocked();
+    else {
+      assert.equal(timers.size, 1);
+      [...timers.values()][0]();
+    }
+    await assert.rejects(abandoned, {name: mode === 'blocked' ? 'InvalidStateError' : 'TimeoutError'});
+    assert.equal(timers.size, 0);
+
+    let lateClosed = 0;
+    const fresh = open();
+    const freshDb = {close() { assert.fail('The retry connection must be left open'); }};
+    requests[1].result = freshDb;
+    requests[1].onsuccess();
+    requests[0].result = {close() { lateClosed++; }};
+    requests[0].onsuccess();
+    assert.equal(await fresh, freshDb);
+    assert.equal(lateClosed, 1);
+    assert.equal(timers.size, 0);
+  }
+
+  {
+    const {open, requests, timers} = fixture();
+    const abandoned = open();
+    [...timers.values()][0]();
+    await assert.rejects(abandoned, {name: 'TimeoutError'});
+    let aborted = 0;
+    requests[0].transaction = {abort() { aborted++; }};
+    requests[0].result = {objectStoreNames: {contains: () => false}, createObjectStore: () => assert.fail('Abandoned upgrade')};
+    requests[0].onupgradeneeded();
+    assert.equal(aborted, 1);
+  }
+
+  console.log('Draft IndexedDB open: successful upgrade, error, blocked retry, timeout retry and abandoned upgrade passed.');
+}
+
+{
+  const draftSource = fs.readFileSync('apps/staff/src/draft-store.ts', 'utf8');
+  const start = draftSource.indexOf('function openDb()');
+  const end = draftSource.indexOf('\n\nexport function saveDraft', start);
+  assert.ok(start >= 0 && end > start);
+  const openCode = ts.transpileModule(draftSource.slice(start, end), {
+    compilerOptions: {target: ts.ScriptTarget.ES2022},
+  }).outputText;
+  await testsForDraftOpen(openCode);
+}

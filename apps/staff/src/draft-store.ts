@@ -51,12 +51,37 @@ async function waitForDraftMutation(key: string): Promise<void> {
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 1);
+    let stopped = false;
+    const stopWaiting = (error: DOMException) => {
+      stopped = true;
+      clearTimeout(timer);
+      reject(error);
+    };
+    // An open can also wait behind another tab's IndexedDB request without emitting blocked.
+    const timer = setTimeout(() => {
+      stopWaiting(new DOMException("下書きの保存領域を開けませんでした。", "TimeoutError"));
+    }, 10_000);
+    request.onblocked = () => {
+      stopWaiting(new DOMException("別の画面が下書きの保存領域を使用しています。", "InvalidStateError"));
+    };
     request.onupgradeneeded = () => {
+      if (stopped) {
+        request.transaction?.abort();
+        return;
+      }
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      clearTimeout(timer);
+      const db = request.result;
+      if (stopped) db.close();
+      else resolve(db);
+    };
+    request.onerror = () => {
+      clearTimeout(timer);
+      reject(request.error);
+    };
   });
 }
 

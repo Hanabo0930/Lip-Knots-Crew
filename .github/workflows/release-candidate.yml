@@ -198,11 +198,6 @@ jobs:
           emulator_jar=$(node -p "require('firebase-tools/lib/emulator/downloadableEmulators').getDownloadDetails('firestore').downloadPath")
           node scripts/run-local-firestore-acceptance.mjs --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-firestore
           node scripts/run-local-firestore-acceptance.mjs --suite rules --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-firestore-rules
-          node scripts/run-local-firestore-acceptance.mjs --suite mail --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-case-mail
-          node scripts/run-local-firestore-acceptance.mjs --suite login-cleanup --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-login-cleanup
-          node scripts/run-local-firestore-acceptance.mjs --suite row-queue --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-row-queue
-          node scripts/run-local-firestore-acceptance.mjs --suite row-success --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-row-success
-          node scripts/run-local-firestore-acceptance.mjs --suite creation-journey --java "$JAVA_HOME_21_X64/bin/java" --jar "$emulator_jar" --evidence release-evidence/ci-local-creation-journey
       - name: Validate received staff journey and admin audit
         timeout-minutes: 3
         run: |

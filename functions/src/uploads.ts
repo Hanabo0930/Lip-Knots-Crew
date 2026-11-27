@@ -33,7 +33,7 @@ const CreateSchema = z.object({
   jobId: z.string().min(1),
   type: z.enum(["report", "sales_floor"]),
   purpose: z.enum(["initial", "additional", "replacement"]).default("initial"),
-  resubmissionRequestId: z.string().trim().min(1).optional(),
+  resubmissionRequestId: z.string().trim().min(1).nullish().transform(value => value ?? undefined),
   files: z.array(z.object({
     contentSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     originalName: z.string().min(1).max(250),
